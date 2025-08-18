@@ -1,12 +1,21 @@
 {
   "compilerOptions": {
-    // ...
+    "target": "ES2023",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "jsx": "react-jsx",
+    "moduleResolution": "bundler",
+    "skipLibCheck": true,
+    "noEmit": true,
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
     "baseUrl": ".",
     "paths": {
-      "@/*": [
-        "./src/*"
-      ]
+      "@/*": ["./src/*"]
     }
-    // ...
-  }
+  },
+  "include": ["src", "vite-env.d.ts"],
+  "exclude": ["node_modules", "dist"]
 }
