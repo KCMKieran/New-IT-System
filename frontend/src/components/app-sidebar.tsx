@@ -38,31 +38,13 @@ const data = {
     avatar: "/avatars/shadcn.jpg",
   },
   navMain: [
-    {
-      title: "Dashboard",
-      url: "#",
-      icon: IconDashboard,
-    },
-    {
-      title: "Lifecycle",
-      url: "#",
-      icon: IconListDetails,
-    },
-    {
-      title: "Analytics",
-      url: "#",
-      icon: IconChartBar,
-    },
-    {
-      title: "Projects",
-      url: "#",
-      icon: IconFolder,
-    },
-    {
-      title: "Team",
-      url: "#",
-      icon: IconUsers,
-    },
+    { title: "模板", url: "/template", icon: IconDashboard },
+    { title: "基差分析", url: "/basis", icon: IconDashboard },
+    { title: "数据下载", url: "/downloads", icon: IconListDetails },
+    { title: "报仓数据", url: "/warehouse", icon: IconChartBar },
+    { title: "实时全仓报表", url: "/positions", icon: IconFolder },
+    { title: "Login IP监测", url: "/login-ips", icon: IconUsers },
+    { title: "利润分析", url: "/profit", icon: IconReport },
   ],
   navClouds: [
     {
@@ -113,38 +95,17 @@ const data = {
     },
   ],
   navSecondary: [
-    {
-      title: "Settings",
-      url: "#",
-      icon: IconSettings,
-    },
-    {
-      title: "Get Help",
-      url: "#",
-      icon: IconHelp,
-    },
-    {
-      title: "Search",
-      url: "#",
-      icon: IconSearch,
-    },
+    { title: "Settings", url: "/settings", icon: IconSettings },
+    { title: "Get Help", url: "https://ui.shadcn.com/docs/installation", icon: IconHelp }, 
+    { title: "Search", url: "/search", icon: IconSearch },
   ],
   documents: [
-    {
-      name: "Data Library",
-      url: "#",
-      icon: IconDatabase,
-    },
-    {
-      name: "Reports",
-      url: "#",
-      icon: IconReport,
-    },
-    {
-      name: "Word Assistant",
-      url: "#",
-      icon: IconFileWord,
-    },
+    { name: "Managers", url: "/cfg/managers", icon: IconDatabase },
+    { name: "Reports", url: "/cfg/reports", icon: IconReport },
+    { name: "Financial", url: "/cfg/financial", icon: IconFileWord },
+    { name: "Clients", url: "/cfg/clients", icon: IconDatabase },
+    { name: "Tasks", url: "/cfg/tasks", icon: IconReport },
+    { name: "Marketing", url: "/cfg/marketing", icon: IconFileWord },
   ],
 }
 
@@ -152,19 +113,10 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   return (
     <Sidebar collapsible="offcanvas" {...props}>
       <SidebarHeader>
-        <SidebarMenu>
-          <SidebarMenuItem>
-            <SidebarMenuButton
-              asChild
-              className="data-[slot=sidebar-menu-button]:!p-1.5"
-            >
-              <a href="#">
-                <img src="/logo.svg" alt="Company" className="!size-40" />
-                {/* <span className="text-base font-semibold">KCM Trade</span> */}
-              </a>
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-        </SidebarMenu>
+        <div className="flex items-center gap-2 px-3 py-2">
+          <img src="/Logo.svg" alt="Company" className="h-24 w-auto block" />
+          {/* <span className="text-base font-semibold">KCM Trade</span> */}
+        </div>
       </SidebarHeader>
       <SidebarContent>
         <NavMain items={data.navMain} />
