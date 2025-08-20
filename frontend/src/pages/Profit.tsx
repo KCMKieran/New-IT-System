@@ -26,8 +26,9 @@ import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Calendar } from "@/components/ui/calendar"
-import { ChevronDown } from "lucide-react"
 import { DateRange } from "react-day-picker"
+import { Input } from "@/components/ui/input"
+import { Separator } from "@/components/ui/separator"
 
 type ProfitRow = {
   date: string // e.g. "2025-05-01"
@@ -43,20 +44,105 @@ function formatLabel(dt: Date) {
   const mm = String(dt.getUTCMonth() + 1).padStart(2, "0")
   const dd = String(dt.getUTCDate()).padStart(2, "0")
   const hh = String(dt.getUTCHours()).padStart(2, "0")
-  return `${mm}-${dd} ${hh}`
+  return `${mm}-${dd} ${hh}:00`
 }
 
 export default function ProfitPage() {
   const [rows, setRows] = useState<ProfitRow[]>([])
   const [loading, setLoading] = useState(true)
   // fresh grad: date range via Popover + Calendar
-  const [rangeOpen, setRangeOpen] = useState(false)
+  const [startOpen, setStartOpen] = useState(false)
+  const [endOpen, setEndOpen] = useState(false)
   const [range, setRange] = useState<DateRange | undefined>({
     from: new Date(2025, 4, 1), // 2025-05-01
     to: new Date(2025, 7, 18),  // 2025-08-18
   })
   const [agg, setAgg] = useState<AggKey>("timeline")
   const [tz, setTz] = useState<TzKey>("+8")
+
+  // fresh grad: state for custom range input
+  const [customRangeOpen, setCustomRangeOpen] = useState(false)
+  const [startDateStr, setStartDateStr] = useState("")
+  const [endDateStr, setEndDateStr] = useState("")
+  const [rangeHistory, setRangeHistory] = useState<{ from: string; to: string }[]>([])
+
+  // fresh grad: load history from localStorage on mount
+  useEffect(() => {
+    try {
+      const item = window.localStorage.getItem("profitPageRangeHistory")
+      if (item) {
+        const parsed = JSON.parse(item)
+        if (Array.isArray(parsed)) setRangeHistory(parsed)
+      }
+    } catch (error) {
+      console.error("Failed to load range history:", error)
+    }
+  }, [])
+
+  // fresh grad: sync range state to input strings and update history
+  useEffect(() => {
+    const formatDate = (date: Date) => {
+      const y = date.getFullYear()
+      const m = String(date.getMonth() + 1).padStart(2, "0")
+      const d = String(date.getDate()).padStart(2, "0")
+      return `${y}-${m}-${d}`
+    }
+
+    if (range?.from) setStartDateStr(formatDate(range.from))
+    if (range?.to) setEndDateStr(formatDate(range.to))
+
+    if (range?.from && range?.to) {
+      setRangeHistory((prev) => {
+        const newEntry = { from: formatDate(range.from!), to: formatDate(range.to!) }
+        // Avoid adding a duplicate of the most recent entry
+        if (prev.length > 0 && prev[0].from === newEntry.from && prev[0].to === newEntry.to) {
+          return prev
+        }
+        const updated = [newEntry, ...prev.filter((h) => h.from !== newEntry.from || h.to !== newEntry.to)].slice(
+          0,
+          5,
+        )
+        try {
+          window.localStorage.setItem("profitPageRangeHistory", JSON.stringify(updated))
+        } catch (error) {
+          console.error("Failed to save range history:", error)
+        }
+        return updated
+      })
+    }
+  }, [range])
+
+  // fresh grad: apply custom date range from inputs
+  const handleApplyCustomRange = () => {
+    const dateRegex = /^\d{4}-\d{2}-\d{2}$/
+    if (!dateRegex.test(startDateStr) || !dateRegex.test(endDateStr)) {
+      alert("日期格式不正确，请输入 YYYY-MM-DD 格式")
+      return
+    }
+
+    const [fromY, fromM, fromD] = startDateStr.split("-").map(Number)
+    const [toY, toM, toD] = endDateStr.split("-").map(Number)
+
+    // Create dates in local timezone to be consistent with calendar component
+    const fromDate = new Date(fromY, fromM - 1, fromD)
+    const toDate = new Date(toY, toM - 1, toD)
+
+    // Validate that the created date is the same as the input date
+    if (
+      fromDate.getFullYear() !== fromY ||
+      fromDate.getMonth() !== fromM - 1 ||
+      fromDate.getDate() !== fromD ||
+      toDate.getFullYear() !== toY ||
+      toDate.getMonth() !== toM - 1 ||
+      toDate.getDate() !== toD
+    ) {
+      alert("日期无效，请重新输入")
+      return
+    }
+
+    setRange({ from: fromDate, to: toDate })
+    setCustomRangeOpen(false)
+  }
 
   // fresh grad: source file is NDJSON (one JSON object per line), not a JSON array
   useEffect(() => {
@@ -91,38 +177,55 @@ export default function ProfitPage() {
     }
   }, [])
 
-  // Convert source (UTC+3) to UTC epoch ms, then label in chosen tz
-  const prepared = useMemo(() => {
-    // build utc epoch for each row based on date+hour in UTC+3
-    const withUtc = rows.map((r) => {
-      const [y, m, d] = r.date.split("-").map((v) => parseInt(v, 10))
-      const tsUtc = Date.UTC(y, m - 1, d, r.hour - 3, 0, 0) // shift from UTC+3 → UTC
-      return { ...r, tsUtc }
-    })
+  // fresh grad: memoized rows with UTC timestamp
+  const withUtc = useMemo(
+    () =>
+      rows.map((r) => {
+        const [y, m, d] = r.date.split("-").map((v) => parseInt(v, 10))
+        const tsUtc = Date.UTC(y, m - 1, d, r.hour - 3, 0, 0) // shift from UTC+3 → UTC
+        return { ...r, tsUtc }
+      }),
+    [rows],
+  )
 
+  // fresh grad: filter rows by selected date range and timezone
+  const inRangeRows = useMemo(() => {
+    if (!range?.from || !range?.to || withUtc.length === 0) {
+      return withUtc
+    }
     const tzOffsetHours = tz === "+8" ? 8 : 3
 
-    // fresh grad: compute inclusive UTC window for selected local dates in chosen tz
-    const toYmdInTz = (d: Date) => {
-      const shifted = new Date(d.getTime() + tzOffsetHours * 3600000)
-      const y = shifted.getUTCFullYear()
-      const m = shifted.getUTCMonth() + 1
-      const day = shifted.getUTCDate()
-      return { y, m, day }
+    // fresh grad: compute start/end UTC timestamp from local date range in chosen tz
+    const getTimestamp = (d: Date, atEndOfDay: boolean) => {
+      // 1. Get Y/M/D in browser's local timezone
+      const y = d.getFullYear()
+      const m = d.getMonth()
+      const day = d.getDate()
+      // 2. Construct UTC timestamp for start/end of that day in chosen timezone
+      if (atEndOfDay) {
+        return Date.UTC(y, m, day, 23, 59, 59, 999) - tzOffsetHours * 3600000
+      }
+      return Date.UTC(y, m, day, 0, 0, 0) - tzOffsetHours * 3600000
     }
-    let inRange = withUtc
-    if (range?.from && range?.to && withUtc.length > 0) {
-      const s = toYmdInTz(range.from)
-      const e = toYmdInTz(range.to)
-      let startUtc = Date.UTC(s.y, s.m - 1, s.day, 0, 0, 0) - tzOffsetHours * 3600000
-      let endUtc = Date.UTC(e.y, e.m - 1, e.day, 23, 59, 59, 999) - tzOffsetHours * 3600000
-      if (startUtc > endUtc) [startUtc, endUtc] = [endUtc, startUtc]
-      inRange = withUtc.filter((x) => x.tsUtc >= startUtc && x.tsUtc <= endUtc)
+
+    let startUtc = getTimestamp(range.from, false)
+    let endUtc = getTimestamp(range.to, true)
+
+    // fresh grad: handle case where user selects end date before start date
+    if (startUtc > endUtc) {
+      ;[startUtc, endUtc] = [endUtc, startUtc]
     }
+
+    return withUtc.filter((x) => x.tsUtc >= startUtc && x.tsUtc <= endUtc)
+  }, [withUtc, range, tz])
+
+  // Convert source (UTC+3) to UTC epoch ms, then label in chosen tz
+  const prepared = useMemo(() => {
+    const tzOffsetHours = tz === "+8" ? 8 : 3
 
     if (agg === "timeline") {
       // label by chosen tz within selected date range
-      const timeline = inRange
+      const timeline = inRangeRows
         .map((x) => {
           const dt = new Date(x.tsUtc + tzOffsetHours * 3600000)
           return {
@@ -143,107 +246,159 @@ export default function ProfitPage() {
 
     // hour-of-day aggregation in chosen tz (0-23) within selected date range
     const buckets = new Array(24).fill(0) as number[]
-    for (const x of inRange) {
+    for (const x of inRangeRows) {
       const local = new Date(x.tsUtc + tzOffsetHours * 3600000)
       const hour = local.getUTCHours()
       buckets[hour] += x.profit
     }
-    return buckets.map((profit, hour) => ({ label: String(hour).padStart(2, "0"), profit }))
-  }, [rows, range, agg, tz])
+    return buckets.map((profit, hour) => ({ label: `${String(hour).padStart(2, "0")}:00`, profit }))
+  }, [inRangeRows, agg, tz])
 
   // fresh grad: totals (within selected date range + chosen tz)
-  const { totalProfit, totalLoss } = useMemo(() => {
-    const withUtc = rows.map((r) => {
-      const [y, m, d] = r.date.split("-").map((v) => parseInt(v, 10))
-      const tsUtc = Date.UTC(y, m - 1, d, r.hour - 3, 0, 0)
-      return { ...r, tsUtc }
-    })
-    const tzOffsetHours = tz === "+8" ? 8 : 3
-    const toYmdInTz = (d: Date) => {
-      const shifted = new Date(d.getTime() + tzOffsetHours * 3600000)
-      return {
-        y: shifted.getUTCFullYear(),
-        m: shifted.getUTCMonth() + 1,
-        day: shifted.getUTCDate(),
-      }
-    }
-    let inRange = withUtc
-    if (range?.from && range?.to && withUtc.length > 0) {
-      const s = toYmdInTz(range.from)
-      const e = toYmdInTz(range.to)
-      let startUtc = Date.UTC(s.y, s.m - 1, s.day, 0, 0, 0) - tzOffsetHours * 3600000
-      let endUtc = Date.UTC(e.y, e.m - 1, e.day, 23, 59, 59, 999) - tzOffsetHours * 3600000
-      if (startUtc > endUtc) [startUtc, endUtc] = [endUtc, startUtc]
-      inRange = withUtc.filter((x) => x.tsUtc >= startUtc && x.tsUtc <= endUtc)
-    }
+  const { totalProfit, totalLoss, pnl } = useMemo(() => {
     let profit = 0
     let loss = 0
-    for (const x of inRange) {
+    for (const x of inRangeRows) {
       if (x.profit >= 0) profit += x.profit
       else loss += Math.abs(x.profit)
     }
-    return { totalProfit: profit, totalLoss: loss }
-  }, [rows, range, tz])
+    const pnl = profit - loss
+    return { totalProfit: profit, totalLoss: loss, pnl }
+  }, [inRangeRows])
 
   return (
     <div className="space-y-4 px-4 pb-6 lg:px-6">
       {/* Toolbar */}
       <Card>
         <CardHeader>
-          <CardTitle>筛选与视图</CardTitle>
+          <CardTitle className="text-2xl font-bold">筛选与视图</CardTitle>
         </CardHeader>
         <CardContent className="flex flex-col gap-3 md:flex-row md:items-center md:gap-6">
-          {/* 时间范围（Popover + Calendar 范围选择） */}
-          <div className="flex items-center gap-3">
+          {/* 时间范围 (separate start/end calendars) */}
+          <div className="flex flex-col items-start gap-2 sm:flex-row sm:items-center">
             <Label className="text-sm text-muted-foreground">时间范围</Label>
-            <Popover open={rangeOpen} onOpenChange={setRangeOpen}>
+            <Popover open={startOpen} onOpenChange={setStartOpen}>
               <PopoverTrigger asChild>
-                <Button variant="outline" className="w-[260px] justify-between font-normal">
-                  {range?.from && range?.to
-                    ? `${range.from.toLocaleDateString()} — ${range.to.toLocaleDateString()}`
-                    : "选择日期"}
-                  <ChevronDown className="h-4 w-4" />
+                <Button variant="outline" className="w-[130px] justify-start font-normal">
+                  {range?.from ? range.from.toLocaleDateString() : <span>选择开始</span>}
                 </Button>
               </PopoverTrigger>
               <PopoverContent className="w-auto overflow-hidden p-0" align="start">
                 <Calendar
-                  mode="range"
-                  selected={range}
-                  onSelect={(r) => {
-                    setRange(r)
-                    if (r?.from && r?.to) setRangeOpen(false)
+                  mode="single"
+                  selected={range?.from}
+                  onSelect={(d) => {
+                    setRange((prev) => ({ from: d, to: prev?.to }))
+                    setStartOpen(false)
                   }}
-                  numberOfMonths={2}
-                  captionLayout="dropdown"
                   initialFocus
                 />
               </PopoverContent>
             </Popover>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => {
-                // fresh grad: quick set to "today" in chosen tz (same day range)
-                const tzOffsetHours = tz === "+8" ? 8 : 3
-                const now = Date.now()
-                const local = new Date(now + tzOffsetHours * 3600000)
-                const y = local.getUTCFullYear()
-                const m = local.getUTCMonth()
-                const d = local.getUTCDate()
-                const today = new Date(Date.UTC(y, m, d))
-                setRange({ from: today, to: today })
-              }}
-            >
-              今天
-            </Button>
+            <span className="text-muted-foreground">-</span>
+            <Popover open={endOpen} onOpenChange={setEndOpen}>
+              <PopoverTrigger asChild>
+                <Button variant="outline" className="w-[130px] justify-start font-normal">
+                  {range?.to ? range.to.toLocaleDateString() : <span>选择结束</span>}
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent className="w-auto overflow-hidden p-0" align="start">
+                <Calendar
+                  mode="single"
+                  selected={range?.to}
+                  onSelect={(d) => {
+                    setRange((prev) => ({ from: prev?.from, to: d }))
+                    setEndOpen(false)
+                  }}
+                  initialFocus
+                />
+              </PopoverContent>
+            </Popover>
+            <Popover open={customRangeOpen} onOpenChange={setCustomRangeOpen}>
+              <PopoverTrigger asChild>
+                <Button variant="outline" size="default" className="w-[250px] justify-center font-normal">
+                  自定义范围
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent className="w-auto p-4" align="start">
+                <div className="grid gap-4">
+                  <div className="space-y-1">
+                    <p className="text-sm text-muted-foreground">请输入 YYYY-MM-DD 格式</p>
+                  </div>
+                  <div className="grid gap-2">
+                    <Label htmlFor="start-date">开始日期</Label>
+                    <Input
+                      id="start-date"
+                      value={startDateStr}
+                      onChange={(e) => setStartDateStr(e.target.value)}
+                    />
+                  </div>
+                  <div className="grid gap-2">
+                    <Label htmlFor="end-date">结束日期</Label>
+                    <Input
+                      id="end-date"
+                      value={endDateStr}
+                      onChange={(e) => setEndDateStr(e.target.value)}
+                    />
+                  </div>
+                  <Button onClick={handleApplyCustomRange}>应用</Button>
+                  {rangeHistory.length > 0 && (
+                    <>
+                      <Separator />
+                      <div className="space-y-2">
+                        <h4 className="font-medium leading-none text-sm">历史记录</h4>
+                        <div className="flex flex-col items-stretch gap-1">
+                          {rangeHistory.map((item, index) => (
+                            <Button
+                              key={index}
+                              variant="ghost"
+                              size="sm"
+                              className="justify-start text-xs"
+                              onClick={() => {
+                                // Parse as local time to be consistent with calendar
+                                const fromDate = new Date(`${item.from}T00:00:00`)
+                                const toDate = new Date(`${item.to}T00:00:00`)
+                                if (!isNaN(fromDate.getTime()) && !isNaN(toDate.getTime())) {
+                                  setRange({ from: fromDate, to: toDate })
+                                  setCustomRangeOpen(false)
+                                }
+                              }}
+                            >
+                              {item.from} → {item.to}
+                            </Button>
+                          ))}
+                        </div>
+                      </div>
+                    </>
+                  )}
+                </div>
+              </PopoverContent>
+            </Popover>
           </div>
 
           {/* 聚合维度 */}
           <div className="flex items-center gap-3">
             <span className="text-sm text-muted-foreground">聚合维度</span>
-            <ToggleGroup type="single" value={agg} onValueChange={(v) => v && setAgg(v as AggKey)}>
-              <ToggleGroupItem value="timeline">时间轴小时</ToggleGroupItem>
-              <ToggleGroupItem value="hourOfDay">小时段(0-23)</ToggleGroupItem>
+            <ToggleGroup
+              type="single"
+              value={agg}
+              onValueChange={(v) => v && setAgg(v as AggKey)}
+              className="inline-flex rounded-md border border-border overflow-hidden"
+            >
+              <ToggleGroupItem
+                value="timeline"
+                className="px-3 py-1 text-sm border-l border-border first:border-l-0
+                           data-[state=on]:bg-primary/10 data-[state=on]:text-primary"
+              >
+                时间轴（小时）
+              </ToggleGroupItem>
+              <ToggleGroupItem
+                value="hourOfDay"
+                className="px-3 py-1 text-sm border-l border-border first:border-l-0
+                           data-[state=on]:bg-primary/10 data-[state=on]:text-primary"
+              >
+                小时段(0-23)
+              </ToggleGroupItem>
             </ToggleGroup>
           </div>
 
@@ -251,12 +406,12 @@ export default function ProfitPage() {
           <div className="flex items-center gap-3">
             <span className="text-sm text-muted-foreground">时区</span>
             <Select value={tz} onValueChange={(v) => setTz(v as TzKey)}>
-              <SelectTrigger className="w-[120px]">
+              <SelectTrigger className="w-[240px] justify-center">
                 <SelectValue placeholder="选择时区" />
               </SelectTrigger>
               <SelectContent className="rounded-lg">
-                <SelectItem value="+3">UTC+3 (源数据)</SelectItem>
-                <SelectItem value="+8">UTC+8 (常用)</SelectItem>
+                <SelectItem value="+3">UTC+3 (MT Server Time)</SelectItem>
+                <SelectItem value="+8">UTC+8 (HKT)</SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -269,13 +424,13 @@ export default function ProfitPage() {
           {loading ? (
             <div className="text-sm text-muted-foreground px-2 py-8">Loading…</div>
           ) : (
-            <div className="flex gap-4">
-              <div className="w-4/5 h-[360px]">
+            <div className="flex flex-col gap-4 sm:flex-row">
+              <div className="w-full h-[360px] lg:w-4/5">
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={prepared}>
                     <CartesianGrid vertical={false} />
-                    <XAxis dataKey="label" tickMargin={8} minTickGap={24} />
-                    <YAxis tickFormatter={(v) => new Intl.NumberFormat().format(v)} />
+                    <XAxis dataKey="label" tickMargin={8} minTickGap={24} tick={{ fontSize: 10 }}/>
+                    <YAxis tickFormatter={(v) => new Intl.NumberFormat().format(v)} tick={{ fontSize: 10 }} />
                     <Tooltip
                       formatter={(value: number) => new Intl.NumberFormat().format(value)}
                       labelFormatter={(label: string) => label}
@@ -284,26 +439,34 @@ export default function ProfitPage() {
                   </BarChart>
                 </ResponsiveContainer>
               </div>
-              <div className="w-1/5">
-                <div className="grid grid-rows-2 gap-4 h-[360px]">
+              <div className="w-full lg:w-1/5">
+                <div className="grid grid-rows-3 gap-2 h-[360px]">
                   <Card className="h-full">
-                    <CardHeader className="py-3">
-                      <CardTitle className="text-sm">盈利</CardTitle>
-                    </CardHeader>
-                    <CardContent className="h-full flex items-center justify-center">
-                      <div className="text-3xl font-semibold text-green-600">
-                        {new Intl.NumberFormat().format(totalProfit)}
-                      </div>
+                    <CardContent className="h-full min-w-0 p-2 flex items-center justify-between">
+                      <span className="ps-2 sm:ps-3 md:ps-4 text-2xl font-bold text-muted-foreground">盈利</span>
+                      <span className="truncate text-right text-base lg:text-lg font-semibold text-green-600">
+                        {new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(totalProfit)}
+                      </span>
                     </CardContent>
                   </Card>
                   <Card className="h-full">
-                    <CardHeader className="py-3">
-                      <CardTitle className="text-sm">亏损</CardTitle>
-                    </CardHeader>
-                    <CardContent className="h-full flex items-center justify-center">
-                      <div className="text-3xl font-semibold text-red-600">
-                        {new Intl.NumberFormat().format(totalLoss)}
-                      </div>
+                    <CardContent className="h-full min-w-0 p-2 flex items-center justify-between">
+                      <span className="ps-2 sm:ps-3 md:ps-4 text-2xl font-bold text-muted-foreground">亏损</span>
+                      <span className="truncate text-right text-base lg:text-lg font-semibold text-red-600">
+                        {new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(totalLoss)}
+                      </span>
+                    </CardContent>
+                  </Card>
+                  <Card className="h-full">
+                    <CardContent className="h-full min-w-0 p-2 flex items-center justify-between">
+                      <span className="ps-2 sm:ps-3 md:ps-4 text-2xl font-bold text-muted-foreground">净利润</span>
+                      <span
+                        className={`truncate text-right text-base lg:text-lg font-semibold ${
+                          pnl >= 0 ? "text-green-600" : "text-red-600"
+                        }`}
+                      >
+                        {new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(pnl)}
+                      </span>
                     </CardContent>
                   </Card>
                 </div>

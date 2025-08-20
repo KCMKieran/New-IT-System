@@ -114,7 +114,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
     <Sidebar collapsible="offcanvas" {...props}>
       <SidebarHeader>
         <div className="flex items-center gap-2 px-3 py-2">
-          <img src="/Logo.svg" alt="Company" className="h-24 w-auto block" />
+          <img src="/logo.svg" alt="Company" className="h-24 w-auto block" />
           {/* <span className="text-base font-semibold">KCM Trade</span> */}
         </div>
       </SidebarHeader>
