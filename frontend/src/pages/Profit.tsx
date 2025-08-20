@@ -38,6 +38,7 @@ type ProfitRow = {
 
 type AggKey = "timeline" | "hourOfDay"
 type TzKey = "+3" | "+8"
+type AggTypeKey = "open" | "close"
 
 // fresh grad: simple date formatting helper
 function formatLabel(dt: Date) {
@@ -59,6 +60,16 @@ export default function ProfitPage() {
   })
   const [agg, setAgg] = useState<AggKey>("timeline")
   const [tz, setTz] = useState<TzKey>("+8")
+  const [aggType, setAggType] = useState<AggTypeKey>("open")
+  // fresh grad: detect mobile to adjust layout/Chart
+  const [isMobile, setIsMobile] = useState(false)
+
+  useEffect(() => {
+    const onResize = () => setIsMobile(window.innerWidth < 640) // 640px ~ tailwind sm breakpoint
+    onResize()
+    window.addEventListener("resize", onResize)
+    return () => window.removeEventListener("resize", onResize)
+  }, [])
 
   // fresh grad: state for custom range input
   const [customRangeOpen, setCustomRangeOpen] = useState(false)
@@ -149,7 +160,8 @@ export default function ProfitPage() {
     let cancelled = false
     async function load() {
       setLoading(true)
-      const res = await fetch("/profit_xauusd_hourly.json")
+      const url = aggType === "open" ? "/profit_xauusd_hourly.json" : "/profit_xauusd_hourly_close.json"
+      const res = await fetch(url)
       const text = await res.text()
       if (cancelled) return
       const lines = text.split(/\r?\n/).filter(Boolean)
@@ -175,7 +187,7 @@ export default function ProfitPage() {
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [aggType])
 
   // fresh grad: memoized rows with UTC timestamp
   const withUtc = useMemo(
@@ -274,6 +286,31 @@ export default function ProfitPage() {
           <CardTitle className="text-2xl font-bold">筛选与视图</CardTitle>
         </CardHeader>
         <CardContent className="flex flex-col gap-3 md:flex-row md:items-center md:gap-6">
+          {/* 聚合类型 */}
+          <div className="flex items-center gap-3">
+            <span className="text-sm text-muted-foreground">聚合类型</span>
+            <ToggleGroup
+              type="single"
+              value={aggType}
+              onValueChange={(v) => v && setAggType(v as AggTypeKey)}
+              className="inline-flex rounded-md border border-border overflow-hidden"
+            >
+              <ToggleGroupItem
+                value="open"
+                className="px-3 py-1 text-sm border-l border-border first:border-l-0
+                           data-[state=on]:bg-primary/10 data-[state=on]:text-primary"
+              >
+                Open Time
+              </ToggleGroupItem>
+              <ToggleGroupItem
+                value="close"
+                className="px-3 py-1 text-sm border-l border-border first:border-l-0
+                           data-[state=on]:bg-primary/10 data-[state=on]:text-primary"
+              >
+                Close Time
+              </ToggleGroupItem>
+            </ToggleGroup>
+          </div>
           {/* 时间范围 (separate start/end calendars) */}
           <div className="flex flex-col items-start gap-2 sm:flex-row sm:items-center">
             <Label className="text-sm text-muted-foreground">时间范围</Label>
@@ -425,12 +462,14 @@ export default function ProfitPage() {
             <div className="text-sm text-muted-foreground px-2 py-8">Loading…</div>
           ) : (
             <div className="flex flex-col gap-4 sm:flex-row">
-              <div className="w-full h-[360px] lg:w-4/5">
+              <div className="w-full h-[200px] sm:h-[360px] lg:w-4/5">
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={prepared}>
                     <CartesianGrid vertical={false} />
                     <XAxis dataKey="label" tickMargin={8} minTickGap={24} tick={{ fontSize: 10 }}/>
-                    <YAxis tickFormatter={(v) => new Intl.NumberFormat().format(v)} tick={{ fontSize: 10 }} />
+                    {!isMobile && (
+                      <YAxis tickFormatter={(v) => new Intl.NumberFormat().format(v)} tick={{ fontSize: 10 }} />
+                    )}
                     <Tooltip
                       formatter={(value: number) => new Intl.NumberFormat().format(value)}
                       labelFormatter={(label: string) => label}
@@ -440,26 +479,26 @@ export default function ProfitPage() {
                 </ResponsiveContainer>
               </div>
               <div className="w-full lg:w-1/5">
-                <div className="grid grid-rows-3 gap-2 h-[360px]">
-                  <Card className="h-full">
-                    <CardContent className="h-full min-w-0 p-2 flex items-center justify-between">
-                      <span className="ps-2 sm:ps-3 md:ps-4 text-2xl font-bold text-muted-foreground">盈利</span>
+                <div className="flex flex-col gap-1 lg:gap-3 lg:h-[360px] justify-between">
+                  <Card>
+                    <CardContent className="min-w-0 px-2 py-1 lg:px-2 lg:py-2 flex items-center justify-between">
+                      <span className="ps-2 sm:ps-3 md:ps-4 text-sm lg:text-base text-muted-foreground">盈利</span>
                       <span className="truncate text-right text-base lg:text-lg font-semibold text-green-600">
                         {new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(totalProfit)}
                       </span>
                     </CardContent>
                   </Card>
-                  <Card className="h-full">
-                    <CardContent className="h-full min-w-0 p-2 flex items-center justify-between">
-                      <span className="ps-2 sm:ps-3 md:ps-4 text-2xl font-bold text-muted-foreground">亏损</span>
+                  <Card>
+                    <CardContent className="min-w-0 px-2 py-1 lg:px-2 lg:py-2 flex items-center justify-between">
+                      <span className="ps-2 sm:ps-3 md:ps-4 text-sm lg:text-base text-muted-foreground">亏损</span>
                       <span className="truncate text-right text-base lg:text-lg font-semibold text-red-600">
                         {new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(totalLoss)}
                       </span>
                     </CardContent>
                   </Card>
-                  <Card className="h-full">
-                    <CardContent className="h-full min-w-0 p-2 flex items-center justify-between">
-                      <span className="ps-2 sm:ps-3 md:ps-4 text-2xl font-bold text-muted-foreground">净利润</span>
+                  <Card>
+                    <CardContent className="min-w-0 px-2 py-1 lg:px-2 lg:py-2 flex items-center justify-between">
+                      <span className="ps-2 sm:ps-3 md:ps-4 text-sm lg:text-base text-muted-foreground">净利润</span>
                       <span
                         className={`truncate text-right text-base lg:text-lg font-semibold ${
                           pnl >= 0 ? "text-green-600" : "text-red-600"
