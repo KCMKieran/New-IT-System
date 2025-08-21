@@ -6,6 +6,7 @@ import { useEffect } from "react"
 
 const titleMap: Record<string, string> = {
   "/template": "模板",
+  "/gold": "黄金报价",
   "/basis": "基差分析",
   "/downloads": "数据下载",
   "/warehouse": "报仓数据",

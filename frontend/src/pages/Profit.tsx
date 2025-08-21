@@ -365,43 +365,39 @@ export default function ProfitPage() {
                 </ResponsiveContainer>
               </div>
               <div className="w-full lg:w-1/6">
-                <div className="flex flex-col gap-2 lg:gap-2 justify-between">
-                  {/* Card 1: 盈利 */}
-                  <Card>
-                    <CardContent className="min-w-0 px-4 py-2">
-                      <div className="flex items-start justify-between">
-                        <div className="text-sm font-medium text-muted-foreground">盈利</div>
-                      </div>
-                      <div className="mt-1 text-xl lg:text-2xl font-extrabold text-foreground" aria-live="polite">
-                        {`${animatedProfit >= 0 ? "+" : "-"}${new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(Math.abs(animatedProfit))}`}
-                      </div>
+                <div className="flex flex-col gap-0 lg:gap-15 justify-between">
+                  {/* 盈利（纯文本） */}
+                  <div className="min-w-0 px-4 py-2">
+                    <div className="text-sm font-medium text-muted-foreground">盈利</div>
+                    <div
+                      className="mt-1 text-xl lg:text-2xl font-extrabold text-red-500"
+                      aria-live="polite"
+                    >
+                      {`${animatedProfit >= 0 ? "+" : "-"}${new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(Math.abs(animatedProfit))}`}
+                    </div>
+                  </div>
 
-                    </CardContent>
-                  </Card>
+                  {/* 亏损（纯文本） */}
+                  <div className="min-w-0 px-4 py-2">
+                    <div className="text-sm font-medium text-muted-foreground">亏损</div>
+                    <div
+                      className="mt-1 text-xl lg:text-2xl font-extrabold text-green-500"
+                      aria-live="polite"
+                    >
+                      {`${animatedLoss <= 0 ? "+" : "-"}${new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(Math.abs(animatedLoss))}`}
+                    </div>
+                  </div>
 
-                  {/* Card 2: 亏损 */}
-                  <Card>
-                    <CardContent className="min-w-0 px-4 py-2">
-                      <div className="flex items-start justify-between">
-                        <div className="text-sm font-medium text-muted-foreground">亏损</div>
-                      </div>
-                      <div className="mt-1 text-xl lg:text-2xl font-extrabold text-foreground" aria-live="polite">
-                        {`${animatedLoss <= 0 ? "+" : "-"}${new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(Math.abs(animatedLoss))}`}
-                      </div>
-                    </CardContent>
-                  </Card>
-
-                  {/* Card 3: 净利润 */}
-                  <Card>
-                    <CardContent className="min-w-0 px-4 py-2">
-                      <div className="flex items-start justify-between">
-                        <div className="text-sm font-medium text-muted-foreground">净利润</div>
-                      </div>
-                      <div className="mt-1 text-xl lg:text-2xl font-extrabold text-foreground" aria-live="polite">
-                        {`${animatedPnl >= 0 ? "+" : "-"}${new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(Math.abs(animatedPnl))}`}
-                      </div>
-                    </CardContent>
-                  </Card>
+                  {/* 净利润（纯文本） */}
+                  <div className="min-w-0 px-4 py-2">
+                    <div className="text-sm font-medium text-muted-foreground">净利润</div>
+                    <div
+                      className={`mt-1 text-xl lg:text-2xl font-extrabold ${pnl >= 0 ? "text-red-500" : "text-green-500"}`}
+                      aria-live="polite"
+                    >
+                      {`${animatedPnl >= 0 ? "+" : "-"}${new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(Math.abs(animatedPnl))}`}
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>

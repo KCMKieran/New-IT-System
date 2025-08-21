@@ -6,6 +6,7 @@ const DashboardLayout = lazy(() => import("@/layouts/DashboardLayout"))
 const LoginPage = lazy(() => import("@/pages/Login"))
 const DashboardTemplatePage = lazy(() => import("@/pages/Dashboard"))
 const BasisPage = lazy(() => import("@/pages/Basis"))
+const GoldQuotePage = lazy(() => import("@/pages/GoldQuote"))
 const DownloadsPage = lazy(() => import("@/pages/Downloads"))
 const WarehousePage = lazy(() => import("@/pages/Warehouse"))
 const PositionsPage = lazy(() => import("@/pages/Positions"))
@@ -37,6 +38,7 @@ function App() {
             >
               <Route index element={<BasisPage />} />
               <Route path="template" element={<DashboardTemplatePage />} />
+              <Route path="gold" element={<GoldQuotePage />} />
               <Route path="basis" element={<BasisPage />} />
               <Route path="downloads" element={<DownloadsPage />} />
               <Route path="warehouse" element={<WarehousePage />} />
