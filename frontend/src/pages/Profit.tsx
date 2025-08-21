@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import {
   Card,
   CardContent,
@@ -6,13 +6,7 @@ import {
   CardTitle,
 } from "@/components/ui/card"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select"
+// removed Select in favor of capsule toggle for timezone
 import {
   Bar,
   BarChart,
@@ -23,12 +17,11 @@ import {
   ResponsiveContainer,
 } from "recharts"
 import { Button } from "@/components/ui/button"
-import { Label } from "@/components/ui/label"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Calendar } from "@/components/ui/calendar"
+import { Calendar as CalendarIcon } from "lucide-react"
 import { DateRange } from "react-day-picker"
-import { Input } from "@/components/ui/input"
-import { Separator } from "@/components/ui/separator"
+// removed Input/Separator from old custom range UI
 
 type ProfitRow = {
   date: string // e.g. "2025-05-01"
@@ -48,12 +41,45 @@ function formatLabel(dt: Date) {
   return `${mm}-${dd} ${hh}:00`
 }
 
+// fresh grad: simple animated number hook for smooth value changes
+function useAnimatedNumber(target: number, durationMs = 600) {
+  const [displayValue, setDisplayValue] = useState(target)
+  const previousRef = useRef(target)
+  const rafRef = useRef<number | null>(null)
+
+  useEffect(() => {
+    const startValue = previousRef.current
+    const delta = target - startValue
+    if (delta === 0) return
+
+    const startTime = performance.now()
+
+    const tick = (now: number) => {
+      const elapsed = now - startTime
+      const t = Math.min(1, elapsed / durationMs)
+      // ease-out cubic
+      const eased = 1 - Math.pow(1 - t, 3)
+      setDisplayValue(startValue + delta * eased)
+      if (t < 1) {
+        rafRef.current = requestAnimationFrame(tick)
+      }
+    }
+
+    rafRef.current = requestAnimationFrame(tick)
+    previousRef.current = target
+
+    return () => {
+      if (rafRef.current) cancelAnimationFrame(rafRef.current)
+    }
+  }, [target, durationMs])
+
+  return displayValue
+}
+
 export default function ProfitPage() {
   const [rows, setRows] = useState<ProfitRow[]>([])
   const [loading, setLoading] = useState(true)
-  // fresh grad: date range via Popover + Calendar
-  const [startOpen, setStartOpen] = useState(false)
-  const [endOpen, setEndOpen] = useState(false)
+  // fresh grad: date range via single Popover + range Calendar
   const [range, setRange] = useState<DateRange | undefined>({
     from: new Date(2025, 4, 1), // 2025-05-01
     to: new Date(2025, 7, 18),  // 2025-08-18
@@ -71,89 +97,11 @@ export default function ProfitPage() {
     return () => window.removeEventListener("resize", onResize)
   }, [])
 
-  // fresh grad: state for custom range input
-  const [customRangeOpen, setCustomRangeOpen] = useState(false)
-  const [startDateStr, setStartDateStr] = useState("")
-  const [endDateStr, setEndDateStr] = useState("")
-  const [rangeHistory, setRangeHistory] = useState<{ from: string; to: string }[]>([])
+  // removed: custom range text inputs and history
 
-  // fresh grad: load history from localStorage on mount
-  useEffect(() => {
-    try {
-      const item = window.localStorage.getItem("profitPageRangeHistory")
-      if (item) {
-        const parsed = JSON.parse(item)
-        if (Array.isArray(parsed)) setRangeHistory(parsed)
-      }
-    } catch (error) {
-      console.error("Failed to load range history:", error)
-    }
-  }, [])
+  // removed: history persistence and input sync
 
-  // fresh grad: sync range state to input strings and update history
-  useEffect(() => {
-    const formatDate = (date: Date) => {
-      const y = date.getFullYear()
-      const m = String(date.getMonth() + 1).padStart(2, "0")
-      const d = String(date.getDate()).padStart(2, "0")
-      return `${y}-${m}-${d}`
-    }
-
-    if (range?.from) setStartDateStr(formatDate(range.from))
-    if (range?.to) setEndDateStr(formatDate(range.to))
-
-    if (range?.from && range?.to) {
-      setRangeHistory((prev) => {
-        const newEntry = { from: formatDate(range.from!), to: formatDate(range.to!) }
-        // Avoid adding a duplicate of the most recent entry
-        if (prev.length > 0 && prev[0].from === newEntry.from && prev[0].to === newEntry.to) {
-          return prev
-        }
-        const updated = [newEntry, ...prev.filter((h) => h.from !== newEntry.from || h.to !== newEntry.to)].slice(
-          0,
-          5,
-        )
-        try {
-          window.localStorage.setItem("profitPageRangeHistory", JSON.stringify(updated))
-        } catch (error) {
-          console.error("Failed to save range history:", error)
-        }
-        return updated
-      })
-    }
-  }, [range])
-
-  // fresh grad: apply custom date range from inputs
-  const handleApplyCustomRange = () => {
-    const dateRegex = /^\d{4}-\d{2}-\d{2}$/
-    if (!dateRegex.test(startDateStr) || !dateRegex.test(endDateStr)) {
-      alert("日期格式不正确，请输入 YYYY-MM-DD 格式")
-      return
-    }
-
-    const [fromY, fromM, fromD] = startDateStr.split("-").map(Number)
-    const [toY, toM, toD] = endDateStr.split("-").map(Number)
-
-    // Create dates in local timezone to be consistent with calendar component
-    const fromDate = new Date(fromY, fromM - 1, fromD)
-    const toDate = new Date(toY, toM - 1, toD)
-
-    // Validate that the created date is the same as the input date
-    if (
-      fromDate.getFullYear() !== fromY ||
-      fromDate.getMonth() !== fromM - 1 ||
-      fromDate.getDate() !== fromD ||
-      toDate.getFullYear() !== toY ||
-      toDate.getMonth() !== toM - 1 ||
-      toDate.getDate() !== toD
-    ) {
-      alert("日期无效，请重新输入")
-      return
-    }
-
-    setRange({ from: fromDate, to: toDate })
-    setCustomRangeOpen(false)
-  }
+  // removed: custom input apply handler
 
   // fresh grad: source file is NDJSON (one JSON object per line), not a JSON array
   useEffect(() => {
@@ -201,35 +149,27 @@ export default function ProfitPage() {
   )
 
   // fresh grad: filter rows by selected date range and timezone
-  const inRangeRows = useMemo(() => {
-    if (!range?.from || !range?.to || withUtc.length === 0) {
-      return withUtc
-    }
+  const selectedRangeUtc = useMemo(() => {
+    if (!range?.from || !range?.to) return null
     const tzOffsetHours = tz === "+8" ? 8 : 3
-
-    // fresh grad: compute start/end UTC timestamp from local date range in chosen tz
     const getTimestamp = (d: Date, atEndOfDay: boolean) => {
-      // 1. Get Y/M/D in browser's local timezone
       const y = d.getFullYear()
       const m = d.getMonth()
       const day = d.getDate()
-      // 2. Construct UTC timestamp for start/end of that day in chosen timezone
-      if (atEndOfDay) {
-        return Date.UTC(y, m, day, 23, 59, 59, 999) - tzOffsetHours * 3600000
-      }
+      if (atEndOfDay) return Date.UTC(y, m, day, 23, 59, 59, 999) - tzOffsetHours * 3600000
       return Date.UTC(y, m, day, 0, 0, 0) - tzOffsetHours * 3600000
     }
-
     let startUtc = getTimestamp(range.from, false)
     let endUtc = getTimestamp(range.to, true)
+    if (startUtc > endUtc) [startUtc, endUtc] = [endUtc, startUtc]
+    return { startUtc, endUtc }
+  }, [range, tz])
 
-    // fresh grad: handle case where user selects end date before start date
-    if (startUtc > endUtc) {
-      ;[startUtc, endUtc] = [endUtc, startUtc]
-    }
-
+  const inRangeRows = useMemo(() => {
+    if (!selectedRangeUtc || withUtc.length === 0) return withUtc
+    const { startUtc, endUtc } = selectedRangeUtc
     return withUtc.filter((x) => x.tsUtc >= startUtc && x.tsUtc <= endUtc)
-  }, [withUtc, range, tz])
+  }, [withUtc, selectedRangeUtc])
 
   // Convert source (UTC+3) to UTC epoch ms, then label in chosen tz
   const prepared = useMemo(() => {
@@ -278,6 +218,20 @@ export default function ProfitPage() {
     return { totalProfit: profit, totalLoss: loss, pnl }
   }, [inRangeRows])
 
+  // fresh grad: previous period comparison removed per latest design; keep layout concise
+
+  // fresh grad: animated numbers for better UX feedback on changes
+  const animatedProfit = useAnimatedNumber(totalProfit)
+  const animatedLoss = useAnimatedNumber(totalLoss)
+  const animatedPnl = useAnimatedNumber(pnl)
+
+  // fresh grad: format date range like "Jan 20, 2023 - Feb 09, 2023"
+  const rangeLabel = useMemo(() => {
+    if (!range?.from || !range?.to) return "选择日期范围"
+    const opts: Intl.DateTimeFormatOptions = { month: "short", day: "2-digit", year: "numeric" }
+    return `${range.from.toLocaleDateString("en-US", opts)} - ${range.to.toLocaleDateString("en-US", opts)}`
+  }, [range])
+
   return (
     <div className="space-y-4 px-4 pb-6 lg:px-6">
       {/* Toolbar */}
@@ -286,171 +240,103 @@ export default function ProfitPage() {
           <CardTitle className="text-2xl font-bold">筛选与视图</CardTitle>
         </CardHeader>
         <CardContent className="flex flex-col gap-3 md:flex-row md:items-center md:gap-6">
-          {/* 聚合类型 */}
+          {/* 时间范围（单按钮 + Range 日历） */}
+          <div className="flex items-center gap-3">
+            <span className="text-sm text-muted-foreground">时间范围</span>
+            <Popover>
+              <PopoverTrigger asChild>
+                <Button variant="outline" className="justify-start gap-2 font-normal">
+                  <CalendarIcon className="h-4 w-4" />
+                  <span>{rangeLabel}</span>
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent className="w-auto p-0" align="start">
+                <Calendar
+                  mode="range"
+                  selected={range}
+                  onSelect={(v) => setRange(v)}
+                  numberOfMonths={2}
+                  initialFocus
+                />
+              </PopoverContent>
+            </Popover>
+          </div>
+          {/* 聚合类型（与聚合维度采用一致风格与宽度） */}
           <div className="flex items-center gap-3">
             <span className="text-sm text-muted-foreground">聚合类型</span>
             <ToggleGroup
               type="single"
               value={aggType}
               onValueChange={(v) => v && setAggType(v as AggTypeKey)}
-              className="inline-flex rounded-md border border-border overflow-hidden"
+              className="inline-flex w-[240px] items-center rounded-full bg-muted p-1"
             >
               <ToggleGroupItem
                 value="open"
-                className="px-3 py-1 text-sm border-l border-border first:border-l-0
-                           data-[state=on]:bg-primary/10 data-[state=on]:text-primary"
+                className="flex-1 rounded-full first:rounded-l-full last:rounded-r-full px-3 py-1 text-center text-sm text-muted-foreground
+                           data-[state=on]:bg-background data-[state=on]:text-foreground data-[state=on]:shadow"
               >
                 Open Time
               </ToggleGroupItem>
               <ToggleGroupItem
                 value="close"
-                className="px-3 py-1 text-sm border-l border-border first:border-l-0
-                           data-[state=on]:bg-primary/10 data-[state=on]:text-primary"
+                className="flex-1 rounded-full first:rounded-l-full last:rounded-r-full px-3 py-1 text-center text-sm text-muted-foreground
+                           data-[state=on]:bg-background data-[state=on]:text-foreground data-[state=on]:shadow"
               >
                 Close Time
               </ToggleGroupItem>
             </ToggleGroup>
           </div>
-          {/* 时间范围 (separate start/end calendars) */}
-          <div className="flex flex-col items-start gap-2 sm:flex-row sm:items-center">
-            <Label className="text-sm text-muted-foreground">时间范围</Label>
-            <Popover open={startOpen} onOpenChange={setStartOpen}>
-              <PopoverTrigger asChild>
-                <Button variant="outline" className="w-[130px] justify-start font-normal">
-                  {range?.from ? range.from.toLocaleDateString() : <span>选择开始</span>}
-                </Button>
-              </PopoverTrigger>
-              <PopoverContent className="w-auto overflow-hidden p-0" align="start">
-                <Calendar
-                  mode="single"
-                  selected={range?.from}
-                  onSelect={(d) => {
-                    setRange((prev) => ({ from: d, to: prev?.to }))
-                    setStartOpen(false)
-                  }}
-                  initialFocus
-                />
-              </PopoverContent>
-            </Popover>
-            <span className="text-muted-foreground">-</span>
-            <Popover open={endOpen} onOpenChange={setEndOpen}>
-              <PopoverTrigger asChild>
-                <Button variant="outline" className="w-[130px] justify-start font-normal">
-                  {range?.to ? range.to.toLocaleDateString() : <span>选择结束</span>}
-                </Button>
-              </PopoverTrigger>
-              <PopoverContent className="w-auto overflow-hidden p-0" align="start">
-                <Calendar
-                  mode="single"
-                  selected={range?.to}
-                  onSelect={(d) => {
-                    setRange((prev) => ({ from: prev?.from, to: d }))
-                    setEndOpen(false)
-                  }}
-                  initialFocus
-                />
-              </PopoverContent>
-            </Popover>
-            <Popover open={customRangeOpen} onOpenChange={setCustomRangeOpen}>
-              <PopoverTrigger asChild>
-                <Button variant="outline" size="default" className="w-[250px] justify-center font-normal">
-                  自定义范围
-                </Button>
-              </PopoverTrigger>
-              <PopoverContent className="w-auto p-4" align="start">
-                <div className="grid gap-4">
-                  <div className="space-y-1">
-                    <p className="text-sm text-muted-foreground">请输入 YYYY-MM-DD 格式</p>
-                  </div>
-                  <div className="grid gap-2">
-                    <Label htmlFor="start-date">开始日期</Label>
-                    <Input
-                      id="start-date"
-                      value={startDateStr}
-                      onChange={(e) => setStartDateStr(e.target.value)}
-                    />
-                  </div>
-                  <div className="grid gap-2">
-                    <Label htmlFor="end-date">结束日期</Label>
-                    <Input
-                      id="end-date"
-                      value={endDateStr}
-                      onChange={(e) => setEndDateStr(e.target.value)}
-                    />
-                  </div>
-                  <Button onClick={handleApplyCustomRange}>应用</Button>
-                  {rangeHistory.length > 0 && (
-                    <>
-                      <Separator />
-                      <div className="space-y-2">
-                        <h4 className="font-medium leading-none text-sm">历史记录</h4>
-                        <div className="flex flex-col items-stretch gap-1">
-                          {rangeHistory.map((item, index) => (
-                            <Button
-                              key={index}
-                              variant="ghost"
-                              size="sm"
-                              className="justify-start text-xs"
-                              onClick={() => {
-                                // Parse as local time to be consistent with calendar
-                                const fromDate = new Date(`${item.from}T00:00:00`)
-                                const toDate = new Date(`${item.to}T00:00:00`)
-                                if (!isNaN(fromDate.getTime()) && !isNaN(toDate.getTime())) {
-                                  setRange({ from: fromDate, to: toDate })
-                                  setCustomRangeOpen(false)
-                                }
-                              }}
-                            >
-                              {item.from} → {item.to}
-                            </Button>
-                          ))}
-                        </div>
-                      </div>
-                    </>
-                  )}
-                </div>
-              </PopoverContent>
-            </Popover>
-          </div>
 
-          {/* 聚合维度 */}
+          {/* 聚合维度（与聚合类型保持一致宽度与风格） */}
           <div className="flex items-center gap-3">
             <span className="text-sm text-muted-foreground">聚合维度</span>
             <ToggleGroup
               type="single"
               value={agg}
               onValueChange={(v) => v && setAgg(v as AggKey)}
-              className="inline-flex rounded-md border border-border overflow-hidden"
+              className="inline-flex w-[240px] items-center rounded-full bg-muted p-1"
             >
               <ToggleGroupItem
                 value="timeline"
-                className="px-3 py-1 text-sm border-l border-border first:border-l-0
-                           data-[state=on]:bg-primary/10 data-[state=on]:text-primary"
+                className="flex-1 rounded-full first:rounded-l-full last:rounded-r-full px-3 py-1 text-center text-sm text-muted-foreground
+                           data-[state=on]:bg-background data-[state=on]:text-foreground data-[state=on]:shadow"
               >
                 时间轴（小时）
               </ToggleGroupItem>
               <ToggleGroupItem
                 value="hourOfDay"
-                className="px-3 py-1 text-sm border-l border-border first:border-l-0
-                           data-[state=on]:bg-primary/10 data-[state=on]:text-primary"
+                className="flex-1 rounded-full first:rounded-l-full last:rounded-r-full px-3 py-1 text-center text-sm text-muted-foreground
+                           data-[state=on]:bg-background data-[state=on]:text-foreground data-[state=on]:shadow"
               >
                 小时段(0-23)
               </ToggleGroupItem>
             </ToggleGroup>
           </div>
 
-          {/* 时区 */}
+          {/* 时区（胶囊式等宽切换） */}
           <div className="flex items-center gap-3">
             <span className="text-sm text-muted-foreground">时区</span>
-            <Select value={tz} onValueChange={(v) => setTz(v as TzKey)}>
-              <SelectTrigger className="w-[240px] justify-center">
-                <SelectValue placeholder="选择时区" />
-              </SelectTrigger>
-              <SelectContent className="rounded-lg">
-                <SelectItem value="+3">UTC+3 (MT Server Time)</SelectItem>
-                <SelectItem value="+8">UTC+8 (HKT)</SelectItem>
-              </SelectContent>
-            </Select>
+            <ToggleGroup
+              type="single"
+              value={tz}
+              onValueChange={(v) => v && setTz(v as TzKey)}
+              className="inline-flex w-[240px] items-center rounded-full bg-muted p-1"
+            >
+              <ToggleGroupItem
+                value="+3"
+                className="flex-1 rounded-full first:rounded-l-full last:rounded-r-full px-3 py-1 text-center text-sm text-muted-foreground
+                           data-[state=on]:bg-background data-[state=on]:text-foreground data-[state=on]:shadow"
+              >
+                UTC+3
+              </ToggleGroupItem>
+              <ToggleGroupItem
+                value="+8"
+                className="flex-1 rounded-full first:rounded-l-full last:rounded-r-full px-3 py-1 text-center text-sm text-muted-foreground
+                           data-[state=on]:bg-background data-[state=on]:text-foreground data-[state=on]:shadow"
+              >
+                UTC+8
+              </ToggleGroupItem>
+            </ToggleGroup>
           </div>
         </CardContent>
       </Card>
@@ -462,7 +348,7 @@ export default function ProfitPage() {
             <div className="text-sm text-muted-foreground px-2 py-8">Loading…</div>
           ) : (
             <div className="flex flex-col gap-4 sm:flex-row">
-              <div className="w-full h-[200px] sm:h-[360px] lg:w-4/5">
+              <div className="w-full h-[200px] sm:h-[400px] lg:w-4/5">
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={prepared}>
                     <CartesianGrid vertical={false} />
@@ -478,34 +364,42 @@ export default function ProfitPage() {
                   </BarChart>
                 </ResponsiveContainer>
               </div>
-              <div className="w-full lg:w-1/5">
-                <div className="flex flex-col gap-1 lg:gap-3 lg:h-[360px] justify-between">
+              <div className="w-full lg:w-1/6">
+                <div className="flex flex-col gap-2 lg:gap-2 justify-between">
+                  {/* Card 1: 盈利 */}
                   <Card>
-                    <CardContent className="min-w-0 px-2 py-1 lg:px-2 lg:py-2 flex items-center justify-between">
-                      <span className="ps-2 sm:ps-3 md:ps-4 text-sm lg:text-base text-muted-foreground">盈利</span>
-                      <span className="truncate text-right text-base lg:text-lg font-semibold text-green-600">
-                        {new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(totalProfit)}
-                      </span>
+                    <CardContent className="min-w-0 px-4 py-2">
+                      <div className="flex items-start justify-between">
+                        <div className="text-sm font-medium text-muted-foreground">盈利</div>
+                      </div>
+                      <div className="mt-1 text-xl lg:text-2xl font-extrabold text-foreground" aria-live="polite">
+                        {`${animatedProfit >= 0 ? "+" : "-"}${new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(Math.abs(animatedProfit))}`}
+                      </div>
+
                     </CardContent>
                   </Card>
+
+                  {/* Card 2: 亏损 */}
                   <Card>
-                    <CardContent className="min-w-0 px-2 py-1 lg:px-2 lg:py-2 flex items-center justify-between">
-                      <span className="ps-2 sm:ps-3 md:ps-4 text-sm lg:text-base text-muted-foreground">亏损</span>
-                      <span className="truncate text-right text-base lg:text-lg font-semibold text-red-600">
-                        {new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(totalLoss)}
-                      </span>
+                    <CardContent className="min-w-0 px-4 py-2">
+                      <div className="flex items-start justify-between">
+                        <div className="text-sm font-medium text-muted-foreground">亏损</div>
+                      </div>
+                      <div className="mt-1 text-xl lg:text-2xl font-extrabold text-foreground" aria-live="polite">
+                        {`${animatedLoss <= 0 ? "+" : "-"}${new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(Math.abs(animatedLoss))}`}
+                      </div>
                     </CardContent>
                   </Card>
+
+                  {/* Card 3: 净利润 */}
                   <Card>
-                    <CardContent className="min-w-0 px-2 py-1 lg:px-2 lg:py-2 flex items-center justify-between">
-                      <span className="ps-2 sm:ps-3 md:ps-4 text-sm lg:text-base text-muted-foreground">净利润</span>
-                      <span
-                        className={`truncate text-right text-base lg:text-lg font-semibold ${
-                          pnl >= 0 ? "text-green-600" : "text-red-600"
-                        }`}
-                      >
-                        {new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(pnl)}
-                      </span>
+                    <CardContent className="min-w-0 px-4 py-2">
+                      <div className="flex items-start justify-between">
+                        <div className="text-sm font-medium text-muted-foreground">净利润</div>
+                      </div>
+                      <div className="mt-1 text-xl lg:text-2xl font-extrabold text-foreground" aria-live="polite">
+                        {`${animatedPnl >= 0 ? "+" : "-"}${new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(Math.abs(animatedPnl))}`}
+                      </div>
                     </CardContent>
                   </Card>
                 </div>
