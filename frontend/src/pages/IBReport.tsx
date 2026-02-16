@@ -17,7 +17,7 @@ import {
 } from "lucide-react";
 import { AgGridReact } from "ag-grid-react";
 import { ColDef, GridApi, ICellRendererParams } from "ag-grid-community";
-import { format } from "date-fns";
+import { format, subDays, subMonths, startOfMonth, endOfMonth } from "date-fns";
 import { cn } from "@/lib/utils";
 import { Calendar } from "@/components/ui/calendar";
 import {
@@ -27,6 +27,13 @@ import {
 } from "@/components/ui/popover";
 import { DateRange } from "react-day-picker";
 import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import {
   DropdownMenu,
   DropdownMenuCheckboxItem,
@@ -182,6 +189,8 @@ export default function IBReport() {
     from: new Date(2026, 0, 4),
     to: new Date(2026, 0, 8),
   });
+  // Quick range selector: same UI as client-return-rate page (Select dropdown)
+  const [quickRange, setQuickRange] = useState<string>("");
   const [selectedGroups, setSelectedGroups] = useState<string[]>(() => {
     // 默认加载常用组别 (从 localStorage 或 PREDEFINED_GROUPS)
     const saved = localStorage.getItem(FAV_GROUPS_STORAGE_KEY);
@@ -189,6 +198,7 @@ export default function IBReport() {
   });
   const [includeMonthly, setIncludeMonthly] = useState(true);
   const [loading, setLoading] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
   const [rows, setRows] = useState<IBReportRow[]>([]);
   const [gridApi, setGridApi] = useState<GridApi | null>(null);
   const [columnState, setColumnState] = useState<any[]>([]);
@@ -318,38 +328,85 @@ export default function IBReport() {
   }, [saveGridState]);
 
   // --- Data Fetching ---
-  // AbortSignal allows cancelling the request on unmount (React 18 StrictMode cleanup)
-  const handleSearch = useCallback(async (signal?: AbortSignal) => {
-    if (!date?.from || !date?.to) return;
-
-    setLoading(true);
-    try {
-      const response = await fetch("/api/v1/ib-report/search", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          start_date: format(date.from, "yyyy-MM-dd"),
-          end_date: format(date.to, "yyyy-MM-dd"),
-          groups: selectedGroups,
-        }),
-        signal,
-      });
-
-      if (!response.ok) {
-        throw new Error("Failed to fetch IB report data");
+  // Optional dateOverride: when using quick presets, pass range so request uses it and calendar updates.
+  const handleSearch = useCallback(
+    async (signal?: AbortSignal, dateOverride?: DateRange | undefined) => {
+      const range = dateOverride ?? date;
+      if (!range?.from || !range?.to) {
+        setSearchError("请先选择日期范围");
+        return;
       }
+      if (dateOverride) setDate(dateOverride);
 
-      const data: IBReportRow[] = await response.json();
-      setRows(data);
-    } catch (error) {
-      if (error instanceof DOMException && error.name === "AbortError") return;
-      console.error("Error loading IB report data:", error);
-    } finally {
-      setLoading(false);
-    }
-  }, [date, selectedGroups]);
+      setLoading(true);
+      setSearchError(null);
+      try {
+        const response = await fetch("/api/v1/ib-report/search", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            start_date: format(range.from, "yyyy-MM-dd"),
+            end_date: format(range.to, "yyyy-MM-dd"),
+            groups: selectedGroups,
+          }),
+          signal,
+        });
+
+        if (!response.ok) {
+          const msg = await response.text();
+          throw new Error(msg || `请求失败 (${response.status})`);
+        }
+
+        const data: IBReportRow[] = await response.json();
+        setRows(data);
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+        console.error("Error loading IB report data:", error);
+        const message =
+          error instanceof Error ? error.message : "网络或服务器错误，请稍后重试";
+        setSearchError(message);
+      } finally {
+        setLoading(false);
+      }
+    },
+    [date, selectedGroups]
+  );
+
+  // Apply quick preset: set date range and run search (same behavior as client-return-rate)
+  const applyQuickRange = useCallback(
+    (preset: string) => {
+      const today = new Date();
+      let from: Date;
+      let to: Date;
+      switch (preset) {
+        case "1w":
+          to = today;
+          from = subDays(today, 6);
+          break;
+        case "1m":
+          to = today;
+          from = subDays(today, 29);
+          break;
+        case "thisMonth":
+          from = startOfMonth(today);
+          to = endOfMonth(today);
+          break;
+        case "lastMonth": {
+          const last = subMonths(today, 1);
+          from = startOfMonth(last);
+          to = endOfMonth(last);
+          break;
+        }
+        default:
+          return;
+      }
+      setDate({ from, to });
+      handleSearch(undefined, { from, to });
+    },
+    [handleSearch]
+  );
 
   useEffect(() => {
     const controller = new AbortController();
@@ -558,6 +615,22 @@ export default function IBReport() {
         当前数据截止至 <span className="font-semibold">2026-01-08</span>。
       </div>
 
+      {/* Search error feedback (e.g. network/CORS/403) */}
+      {searchError && (
+        <div className="bg-destructive/10 border border-destructive/30 rounded px-4 py-2 text-destructive text-sm flex items-center justify-between gap-2">
+          <span>{searchError}</span>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-7 px-2 text-destructive hover:bg-destructive/20"
+            onClick={() => setSearchError(null)}
+          >
+            关闭
+          </Button>
+        </div>
+      )}
+
       <Card>
         <CardContent className="py-3">
           <div className="flex flex-col sm:flex-row gap-3 items-center justify-between">
@@ -567,7 +640,7 @@ export default function IBReport() {
                   <Button
                     variant="outline"
                     className={cn(
-                      "w-full sm:w-[260px] justify-start text-left font-normal h-10",
+                      "w-full sm:w-[260px] justify-start text-left font-normal h-9",
                       !date && "text-muted-foreground"
                     )}
                   >
@@ -575,11 +648,10 @@ export default function IBReport() {
                     {date?.from ? (
                       date.to ? (
                         <>
-                          {format(date.from, "LLL dd, y")} -{" "}
-                          {format(date.to, "LLL dd, y")}
+                          {format(date.from, "yyyy-MM-dd")} - {format(date.to, "yyyy-MM-dd")}
                         </>
                       ) : (
-                        format(date.from, "LLL dd, y")
+                        format(date.from, "yyyy-MM-dd")
                       )
                     ) : (
                       <span>选择日期范围</span>
@@ -592,17 +664,39 @@ export default function IBReport() {
                     mode="range"
                     defaultMonth={date?.from}
                     selected={date}
-                    onSelect={setDate}
+                    onSelect={(newDate) => {
+                      setDate(newDate);
+                      if (newDate?.from) setQuickRange("");
+                    }}
                     numberOfMonths={2}
                   />
                 </PopoverContent>
               </Popover>
 
+              {/* Quick range selector: same UI as client-return-rate (Select dropdown, responsive) */}
+              <Select
+                value={quickRange}
+                onValueChange={(val) => {
+                  setQuickRange(val);
+                  applyQuickRange(val);
+                }}
+              >
+                <SelectTrigger className="w-full sm:w-[130px] h-9">
+                  <SelectValue placeholder="快捷选项" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="1w">过去 1 周</SelectItem>
+                  <SelectItem value="1m">过去 1 个月</SelectItem>
+                  <SelectItem value="thisMonth">本月</SelectItem>
+                  <SelectItem value="lastMonth">上月</SelectItem>
+                </SelectContent>
+              </Select>
+
               <Popover>
                 <PopoverTrigger asChild>
                   <Button
                     variant="outline"
-                    className="w-full sm:w-[260px] justify-between h-10 text-foreground"
+                    className="w-full sm:w-[260px] justify-between h-9 text-foreground"
                   >
                     <div className="flex items-center gap-2 overflow-hidden">
                       <Filter className="h-4 w-4 shrink-0" />
@@ -731,7 +825,8 @@ export default function IBReport() {
 
             <div className="flex flex-col sm:flex-row gap-2 w-full sm:w-auto">
               <Button
-                onClick={handleSearch}
+                type="button"
+                onClick={() => handleSearch()}
                 disabled={loading}
                 className="w-full sm:w-[140px]"
               >

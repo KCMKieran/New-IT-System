@@ -96,7 +96,7 @@ export default function ClientPnLAnalysis() {
         return fallback;
       }
     },
-    [t]
+    [t],
   );
 
   const isZh = useMemo(() => {
@@ -116,7 +116,7 @@ export default function ClientPnLAnalysis() {
       } catch {}
       return isZh ? zhFallback : enFallback;
     },
-    [t, isZh]
+    [t, isZh],
   );
 
   // State
@@ -139,16 +139,16 @@ export default function ClientPnLAnalysis() {
   const [rows, setRows] = useState<ClientPnLAnalysisRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [searchInput, setSearchInput] = useState(
-    initialSettings?.searchInput ?? ""
+    initialSettings?.searchInput ?? "",
   );
   const [timeRange, setTimeRange] = useState<string>(
-    initialSettings?.timeRange ?? "1m"
+    initialSettings?.timeRange ?? "1m",
   ); // Default to 1 month
   // Always start as false — user must click "Search" to load data.
   // This prevents expensive auto-queries when the user just navigates through pages.
   const [hasSearched, setHasSearched] = useState(false);
   const [date, setDate] = useState<DateRange | undefined>(
-    initialSettings?.date
+    initialSettings?.date,
   );
   const [stats, setStats] = useState<{
     elapsed?: number;
@@ -158,12 +158,12 @@ export default function ClientPnLAnalysis() {
   // Filter state (local filtering based on backend result set)
   const [filterBuilderOpen, setFilterBuilderOpen] = useState(false);
   const [appliedFilters, setAppliedFilters] = useState<FilterGroup | null>(
-    initialSettings?.filters ?? null
+    initialSettings?.filters ?? null,
   );
   // Server filter state - default to all servers selected
   // Fresh grad note: sid values are 1=MT4, 5=MT5, 6=MT4Live2
   const [selectedServers, setSelectedServers] = useState<number[]>(
-    initialSettings?.selectedServers ?? [1, 5, 6]
+    initialSettings?.selectedServers ?? [1, 5, 6],
   );
 
   // Persist settings
@@ -178,7 +178,7 @@ export default function ClientPnLAnalysis() {
           hasSearched,
           filters: appliedFilters,
           selectedServers,
-        })
+        }),
       );
     } catch (e) {
       console.error("Failed to save settings", e);
@@ -252,94 +252,98 @@ export default function ClientPnLAnalysis() {
 
   // Fetch Data
   // AbortSignal allows cancelling the request when component unmounts (React 18 StrictMode cleanup)
-  const handleSearch = useCallback(async (signal?: AbortSignal) => {
-    setLoading(true);
-    setHasSearched(true);
-    setStats(null);
-    try {
-      let start_date, end_date;
+  const handleSearch = useCallback(
+    async (signal?: AbortSignal) => {
+      setLoading(true);
+      setHasSearched(true);
+      setStats(null);
+      try {
+        let start_date, end_date;
 
-      if (date?.from && date?.to) {
-        // 安全检查：如果选择范围超过 6 个月，给出提示（因为后端 ClickHouse 未做分区优化）
-        const diffTime = Math.abs(date.to.getTime() - date.from.getTime());
-        const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-        if (diffDays > 185) {
-          if (
-            !confirm(
-              tz(
-                "clientPnl.longRangeWarning",
-                "查询范围超过 6 个月，由于数据量大且未分区，查询可能较慢，是否继续？",
-                "Range exceeds 6 months. Query might be slow due to large data and no partitioning. Continue?"
+        if (date?.from && date?.to) {
+          // 安全检查：如果选择范围超过 6 个月，给出提示（因为后端 ClickHouse 未做分区优化）
+          const diffTime = Math.abs(date.to.getTime() - date.from.getTime());
+          const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+          if (diffDays > 185) {
+            if (
+              !confirm(
+                tz(
+                  "clientPnl.longRangeWarning",
+                  "查询范围超过 6 个月，由于数据量大且未分区，查询可能较慢，是否继续？",
+                  "Range exceeds 6 months. Query might be slow due to large data and no partitioning. Continue?",
+                ),
               )
-            )
-          ) {
-            setLoading(false);
-            return;
+            ) {
+              setLoading(false);
+              return;
+            }
           }
-        }
-        start_date = format(date.from, "yyyy-MM-dd");
-        end_date = format(date.to, "yyyy-MM-dd");
-      } else {
-        // Fallback to timeRange if date not fully selected
-        const range = getDateRange(timeRange || "1m");
-        start_date = range.start_date;
-        end_date = range.end_date;
-      }
-
-      const params = new URLSearchParams({
-        start_date,
-        end_date,
-      });
-
-      if (searchInput.trim()) {
-        params.append("search", searchInput.trim());
-      }
-
-      const response = await fetch(
-        `/api/v1/client-pnl-analysis/query?${params}`,
-        { signal }
-      );
-
-      if (!response.ok) {
-        // Handle HTTP errors
-        const errorData = await response.json().catch(() => ({}));
-        const errorMessage =
-          errorData.detail || `Server error: ${response.status}`;
-
-        // Check for specific 503 Service Unavailable (likely ClickHouse waking up)
-        if (response.status === 503) {
-          alert(
-            "⚠️ 数据库服务正在唤醒中，请耐心等待 30-60 秒后再次点击查询。\n\nDatabase is waking up, please retry in 30-60 seconds."
-          );
+          start_date = format(date.from, "yyyy-MM-dd");
+          end_date = format(date.to, "yyyy-MM-dd");
         } else {
-          console.error("Query failed:", errorMessage);
-          alert(`查询失败 (Query Failed): ${errorMessage}`);
+          // Fallback to timeRange if date not fully selected
+          const range = getDateRange(timeRange || "1m");
+          start_date = range.start_date;
+          end_date = range.end_date;
         }
-        setRows([]);
-        setStats(null);
-        return;
-      }
 
-      const result = await response.json();
+        const params = new URLSearchParams({
+          start_date,
+          end_date,
+        });
 
-      if (result.ok) {
-        setRows(result.data || []);
-        if (result.statistics) {
-          setStats(result.statistics);
+        if (searchInput.trim()) {
+          params.append("search", searchInput.trim());
         }
-      } else {
-        console.error("Fetch failed:", result.error);
+
+        const response = await fetch(
+          `/api/v1/client-pnl-analysis/query?${params}`,
+          { signal },
+        );
+
+        if (!response.ok) {
+          // Handle HTTP errors
+          const errorData = await response.json().catch(() => ({}));
+          const errorMessage =
+            errorData.detail || `Server error: ${response.status}`;
+
+          // Check for specific 503 Service Unavailable (likely ClickHouse waking up)
+          if (response.status === 503) {
+            alert(
+              "⚠️ 数据库服务正在唤醒中，请耐心等待 30-60 秒后再次点击查询。\n\nDatabase is waking up, please retry in 30-60 seconds.",
+            );
+          } else {
+            console.error("Query failed:", errorMessage);
+            alert(`查询失败 (Query Failed): ${errorMessage}`);
+          }
+          setRows([]);
+          setStats(null);
+          return;
+        }
+
+        const result = await response.json();
+
+        if (result.ok) {
+          setRows(result.data || []);
+          if (result.statistics) {
+            setStats(result.statistics);
+          }
+        } else {
+          console.error("Fetch failed:", result.error);
+          setRows([]);
+        }
+      } catch (error) {
+        // Ignore AbortError — request was cancelled by cleanup (e.g. StrictMode remount)
+        if (error instanceof DOMException && error.name === "AbortError")
+          return;
+        console.error("Fetch error:", error);
         setRows([]);
+      } finally {
+        setLoading(false);
       }
-    } catch (error) {
-      // Ignore AbortError — request was cancelled by cleanup (e.g. StrictMode remount)
-      if (error instanceof DOMException && error.name === "AbortError") return;
-      console.error("Fetch error:", error);
-      setRows([]);
-    } finally {
-      setLoading(false);
-    }
-  }, [timeRange, date, searchInput, getDateRange]);
+    },
+    [timeRange, date, searchInput, getDateRange],
+  );
 
   // Removed: auto-search on mount.
   // Previously this useEffect would call handleSearch() if the user had searched before,
@@ -351,7 +355,7 @@ export default function ClientPnLAnalysis() {
     (e: React.KeyboardEvent) => {
       if (e.key === "Enter") handleSearch();
     },
-    [handleSearch]
+    [handleSearch],
   );
 
   const isDarkMode = useMemo(() => {
@@ -468,7 +472,7 @@ export default function ClientPnLAnalysis() {
         label: tz(
           "clientPnl.columns.directPartner",
           "直属上级IB",
-          "Direct Parent IB"
+          "Direct Parent IB",
         ),
         type: "text",
         filterable: true,
@@ -479,7 +483,7 @@ export default function ClientPnLAnalysis() {
         label: tz(
           "clientPnl.columns.ibNetDeposit",
           "IB 旗下总净入金 (USD)",
-          "IB Team Net Deposit (USD)"
+          "IB Team Net Deposit (USD)",
         ),
         type: "number",
         filterable: true,
@@ -504,7 +508,7 @@ export default function ClientPnLAnalysis() {
         label: tz(
           "clientPnl.columns.tradeProfit",
           "交易盈亏 (USD)",
-          "Trade Profit (USD)"
+          "Trade Profit (USD)",
         ),
         type: "number",
         filterable: true,
@@ -515,7 +519,7 @@ export default function ClientPnLAnalysis() {
         label: tz(
           "clientPnl.columns.ibCommission",
           "IB 佣金 (USD)",
-          "IB Commission (USD)"
+          "IB Commission (USD)",
         ),
         type: "number",
         filterable: true,
@@ -526,7 +530,7 @@ export default function ClientPnLAnalysis() {
         label: tz(
           "clientPnl.columns.commission",
           "佣金 (USD)",
-          "Commission (USD)"
+          "Commission (USD)",
         ),
         type: "number",
         filterable: true,
@@ -544,7 +548,7 @@ export default function ClientPnLAnalysis() {
         label: tz(
           "clientPnl.columns.netPnLWithComm",
           "净盈亏(含佣金) (USD)",
-          "Net PnL (w/ Comm) (USD)"
+          "Net PnL (w/ Comm) (USD)",
         ),
         type: "number",
         filterable: true,
@@ -583,7 +587,7 @@ export default function ClientPnLAnalysis() {
       if (typeof getter === "function") return getter(row);
       return (row as any)?.[field];
     },
-    [computedGetters]
+    [computedGetters],
   );
 
   const matchText = useCallback(
@@ -610,7 +614,7 @@ export default function ClientPnLAnalysis() {
           return true;
       }
     },
-    []
+    [],
   );
 
   const matchNumber = useCallback(
@@ -642,7 +646,7 @@ export default function ClientPnLAnalysis() {
           return true;
       }
     },
-    []
+    [],
   );
 
   const applyLocalFilters = useCallback(
@@ -650,7 +654,7 @@ export default function ClientPnLAnalysis() {
       if (!fg || !Array.isArray(fg.rules) || fg.rules.length === 0)
         return inputRows;
       const rules = fg.rules.filter(
-        (r) => r && typeof r.field === "string" && r.field.trim().length > 0
+        (r) => r && typeof r.field === "string" && r.field.trim().length > 0,
       );
       if (rules.length === 0) return inputRows;
       const join = fg.join === "OR" ? "OR" : "AND";
@@ -671,7 +675,7 @@ export default function ClientPnLAnalysis() {
         return rules.every(evalRule);
       });
     },
-    [filterMetaById, getValueForField, matchNumber, matchText]
+    [filterMetaById, getValueForField, matchNumber, matchText],
   );
 
   const viewRows = useMemo(() => {
@@ -696,7 +700,7 @@ export default function ClientPnLAnalysis() {
         if (Array.isArray(state)) setColumnState(state);
       } catch {}
     },
-    [gridApi]
+    [gridApi],
   );
 
   const saveGridState = useCallback(() => {
@@ -758,7 +762,7 @@ export default function ClientPnLAnalysis() {
         headerName: tz(
           "clientPnl.columns.clientName",
           "客户名称",
-          "Client Name"
+          "Client Name",
         ),
         width: 180,
         sortable: true,
@@ -863,7 +867,7 @@ export default function ClientPnLAnalysis() {
         headerName: tz(
           "clientPnl.columns.directPartner",
           "直属上级IB",
-          "Direct Parent IB"
+          "Direct Parent IB",
         ),
         width: 120,
         sortable: true,
@@ -893,7 +897,7 @@ export default function ClientPnLAnalysis() {
         headerName: tz(
           "clientPnl.columns.ibNetDeposit",
           "IB 旗下总净入金 (USD)",
-          "IB Team Net Deposit (USD)"
+          "IB Team Net Deposit (USD)",
         ),
         width: 140,
         sortable: true,
@@ -924,7 +928,7 @@ export default function ClientPnLAnalysis() {
         headerName: tz(
           "clientPnl.columns.totalTrades",
           "总交易数",
-          "Total Trades"
+          "Total Trades",
         ),
         width: 110,
         sortable: true,
@@ -936,7 +940,7 @@ export default function ClientPnLAnalysis() {
         headerName: tz(
           "clientPnl.columns.totalVolume",
           "总手数",
-          "Total Volume"
+          "Total Volume",
         ),
         width: 120,
         sortable: true,
@@ -950,7 +954,7 @@ export default function ClientPnLAnalysis() {
         headerName: tz(
           "clientPnl.columns.tradeProfit",
           "交易盈亏 (USD)",
-          "Trade Profit (USD)"
+          "Trade Profit (USD)",
         ),
         width: 150,
         sortable: true,
@@ -981,7 +985,7 @@ export default function ClientPnLAnalysis() {
         headerName: tz(
           "clientPnl.columns.ibCommission",
           "IB 佣金 (USD)",
-          "IB Commission (USD)"
+          "IB Commission (USD)",
         ),
         width: 150,
         sortable: true,
@@ -1000,7 +1004,7 @@ export default function ClientPnLAnalysis() {
         headerName: tz(
           "clientPnl.columns.netPnLWithComm",
           "净盈亏(含佣金) (USD)",
-          "Net PnL (w/ Comm) (USD)"
+          "Net PnL (w/ Comm) (USD)",
         ),
         width: 170,
         sortable: true,
@@ -1031,7 +1035,7 @@ export default function ClientPnLAnalysis() {
         headerName: tz(
           "clientPnl.columns.commission",
           "佣金 (USD)",
-          "Commission (USD)"
+          "Commission (USD)",
         ),
         width: 130,
         sortable: true,
@@ -1047,7 +1051,7 @@ export default function ClientPnLAnalysis() {
         valueFormatter: (params: any) => formatCurrency(toNumber(params.value)),
       },
     ],
-    [tz]
+    [tz],
   );
 
   // Build a deterministic list of toggleable columns from columnDefs.
@@ -1082,7 +1086,7 @@ export default function ClientPnLAnalysis() {
       const label = tz(`pnlMonitor.timeRange${range}`, labelZh, labelEn);
       return `${label} (${start_date} ~ ${end_date})`;
     },
-    [getDateRange, tz]
+    [getDateRange, tz],
   );
 
   const onPaginationChanged = useCallback(() => {
@@ -1130,7 +1134,7 @@ export default function ClientPnLAnalysis() {
                     variant={"outline"}
                     className={cn(
                       "w-full sm:w-[260px] justify-start text-left font-normal",
-                      !date && "text-muted-foreground"
+                      !date && "text-muted-foreground",
                     )}
                   >
                     <CalendarIcon className="mr-2 h-4 w-4" />
@@ -1207,19 +1211,19 @@ export default function ClientPnLAnalysis() {
                         ? tz(
                             "clientPnl.allServers",
                             "全部服务器",
-                            "All Servers"
+                            "All Servers",
                           )
                         : selectedServers.length === 0
-                        ? tz(
-                            "clientPnl.selectServer",
-                            "选择服务器",
-                            "Select Server"
-                          )
-                        : selectedServers
-                            .map((s) =>
-                              s === 1 ? "MT4" : s === 5 ? "MT5" : "MT4Live2"
+                          ? tz(
+                              "clientPnl.selectServer",
+                              "选择服务器",
+                              "Select Server",
                             )
-                            .join(", ")}
+                          : selectedServers
+                              .map((s) =>
+                                s === 1 ? "MT4" : s === 5 ? "MT5" : "MT4Live2",
+                              )
+                              .join(", ")}
                     </span>
                   </Button>
                 </DropdownMenuTrigger>
@@ -1228,7 +1232,7 @@ export default function ClientPnLAnalysis() {
                     {tz(
                       "clientPnl.serverFilter",
                       "服务器筛选",
-                      "Server Filter"
+                      "Server Filter",
                     )}
                   </DropdownMenuLabel>
                   <DropdownMenuSeparator />
@@ -1236,7 +1240,7 @@ export default function ClientPnLAnalysis() {
                     checked={selectedServers.includes(1)}
                     onCheckedChange={(checked) => {
                       setSelectedServers((prev) =>
-                        checked ? [...prev, 1] : prev.filter((s) => s !== 1)
+                        checked ? [...prev, 1] : prev.filter((s) => s !== 1),
                       );
                     }}
                   >
@@ -1246,7 +1250,7 @@ export default function ClientPnLAnalysis() {
                     checked={selectedServers.includes(5)}
                     onCheckedChange={(checked) => {
                       setSelectedServers((prev) =>
-                        checked ? [...prev, 5] : prev.filter((s) => s !== 5)
+                        checked ? [...prev, 5] : prev.filter((s) => s !== 5),
                       );
                     }}
                   >
@@ -1256,7 +1260,7 @@ export default function ClientPnLAnalysis() {
                     checked={selectedServers.includes(6)}
                     onCheckedChange={(checked) => {
                       setSelectedServers((prev) =>
-                        checked ? [...prev, 6] : prev.filter((s) => s !== 6)
+                        checked ? [...prev, 6] : prev.filter((s) => s !== 6),
                       );
                     }}
                   >
@@ -1290,7 +1294,7 @@ export default function ClientPnLAnalysis() {
                   placeholder={tz(
                     "clientPnl.searchPlaceholder",
                     "搜索 ClientID / AccountID",
-                    "Search ClientID / AccountID"
+                    "Search ClientID / AccountID",
                   )}
                   value={searchInput}
                   onChange={(e) => setSearchInput(e.target.value)}
@@ -1397,7 +1401,7 @@ export default function ClientPnLAnalysis() {
                               // Fresh grad note: update the Grid first, then persist the state.
                               (gridApi as any).setColumnsVisible?.(
                                 [colId],
-                                !!value
+                                !!value,
                               );
                               throttledSaveGridState();
                               setTimeout(() => refreshColumnState(gridApi), 0);
@@ -1556,7 +1560,11 @@ export default function ClientPnLAnalysis() {
               <div className="text-center flex flex-col items-center gap-3">
                 <RefreshCw className="h-10 w-10 animate-spin text-primary opacity-70" />
                 <p className="text-sm text-muted-foreground font-medium">
-                  {tz("clientPnl.loading", "正在查询，请稍候...", "Loading, please wait...")}
+                  {tz(
+                    "clientPnl.loading",
+                    "正在查询，请稍候...",
+                    "Loading, please wait...",
+                  )}
                 </p>
               </div>
             </div>

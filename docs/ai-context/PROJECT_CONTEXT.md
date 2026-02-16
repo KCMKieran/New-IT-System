@@ -237,6 +237,10 @@ New-IT-System/
 | `stats_balances` | KCM_fxbackoffice | Daily balance/equity snapshots |
 | `fxbackoffice_stats_ib_commissions_by_login_sid` | KCM_fxbackoffice | Pre-aggregated IB commissions |
 
+### ClickHouse connections (clickhouse_service.py)
+- **Default** (`get_client()`): `CLICKHOUSE_HOST` + `CLICKHOUSE_DB` (default `Fxbo_Trades`). Used by client_return_rate etc.
+- **Prod** (`get_client(use_prod=True)`): `CLICKHOUSE_prod_*` + database `KCM_fxbackoffice`. Used by IB Report (groups, search) and Client PnL Analysis (query). Deploy must set prod credentials to the CDC cluster.
+
 ### Important Conventions
 
 1. **Cent Account Handling**: Currency = 'CEN' means amounts must be divided by 100

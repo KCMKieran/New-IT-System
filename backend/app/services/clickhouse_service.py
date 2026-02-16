@@ -44,10 +44,11 @@ class ClickHouseService:
         raw_password = os.getenv("CLICKHOUSE_PASSWORD")
         self.password = raw_password.strip() if raw_password else None
         
-        self.database = os.getenv("CLICKHOUSE_DB", "Fxbo_Trades") 
-        self.secure = True # 强制开启 TLS
+        # Default connection: used when use_prod=False (e.g. client_return). KCM_fxbackoffice lives on prod cluster.
+        self.database = os.getenv("CLICKHOUSE_DB", "Fxbo_Trades")
+        self.secure = True  # Force TLS
 
-        # --- 生产环境连接配置 (用于 IB 报表组别等敏感数据查询) ---
+        # Prod connection: CDC target cluster where KCM_fxbackoffice exists. Used by IB Report & Client PnL.
         self.prod_host = os.getenv("CLICKHOUSE_prod_HOST")
         self.prod_user = os.getenv("CLICKHOUSE_prod_USER")
         self.prod_pass = os.getenv("CLICKHOUSE_prod_PASSWORD")
@@ -128,7 +129,7 @@ class ClickHouseService:
                 logger.info("Returning IB groups from memory cache (inside singleflight)")
                 return self._group_cache
 
-            logger.info("Fetching IB groups from ClickHouse Prod")
+            logger.info("Fetching IB groups from ClickHouse (prod)")
             with self.get_client(use_prod=True) as client:
                 # Step 1: get group basic info (categoryId=6 is the group category)
                 tags_sql = 'SELECT id AS tag_id, tag AS tag_name FROM "fxbackoffice_tags" WHERE categoryId = 6'
@@ -224,74 +225,82 @@ class ClickHouseService:
             except Exception:
                 pass
 
-            client = self.get_client()
-            
+            # Use prod connection: KCM_fxbackoffice lives there (CDC target).
+            client = self.get_client(use_prod=True)
+
+            # Optional: IB net deposit agg table. Not in KCM_fxbackoffice list; set env to table name or empty to skip (ib_net_deposit=0).
+            raw_agg = (os.getenv("CLICKHOUSE_IB_NET_DEPOSIT_AGG_TABLE") or "ib_downline_net_deposit_agg").strip()
+            agg_table = raw_agg if raw_agg and all(c.isalnum() or c == "_" for c in raw_agg) else ""
+
             # Format date strings
             start_str = start_date.strftime('%Y-%m-%d %H:%M:%S')
             end_str = end_date.strftime('%Y-%m-%d %H:%M:%S')
-            
+
+            if agg_table:
+                ib_net_join = f"""
+            LEFT JOIN (
+                SELECT
+                    ibId,
+                    sumMerge(net_deposit) AS net_deposit_usd
+                FROM {agg_table}
+                GROUP BY ibId
+            ) AS ib_sum ON toString(u.partnerId) = toString(ib_sum.ibId)"""
+            else:
+                # Dummy join so ib_net_deposit is 0 when table is not present in DB
+                ib_net_join = """
+            LEFT JOIN (SELECT NULL AS ibId, 0 AS net_deposit_usd) AS ib_sum ON 1 = 0"""
+
             sql = f"""
-            WITH 
+            WITH
                 ib_costs AS (
-                    SELECT 
-                        ticketSid, 
+                    SELECT
+                        ticketSid,
                         sum(commission) AS total_ib_cost
                     FROM fxbackoffice_ib_processed_tickets
-                    WHERE close_time >= %(start_date)s 
+                    WHERE close_time >= %(start_date)s
                       AND close_time <= %(end_date)s
                     GROUP BY ticketSid
                 )
             SELECT
                 t.LOGIN AS account,
-                m.userId AS client_id,     
+                m.userId AS client_id,
                 any(m.NAME) AS client_name,
                 any(m.GROUP) AS group,
-                -- Fresh grad note:
-                -- `country` comes from fxbackoffice_users (CRM/BackOffice user profile).
-                -- We convert empty string to NULL to keep "missing country" truly empty.
                 any(NULLIF(u.country, '')) AS country,
                 any(m.ZIPCODE) AS zipcode,
                 any(m.CURRENCY) AS currency,
                 any(m.sid) AS sid,
                 any(u.partnerId) AS partner_id,
                 any(ib_sum.net_deposit_usd) AS ib_net_deposit,
-                'MT4' AS server,            
-                
+                'MT4' AS server,
+
                 countIf(t.CMD IN (0, 1)) AS total_trades,
-                
+
                 sumIf(t.lots, t.CMD IN (0, 1)) / if(any(m.CURRENCY) = 'CEN', 100, 1) AS total_volume_lots,
-                
+
                 sumIf(t.PROFIT, t.CMD IN (0, 1)) / if(any(m.CURRENCY) = 'CEN', 100, 1) AS trade_profit_usd,
-                
+
                 sumIf(t.SWAPS, t.CMD IN (0, 1)) / if(any(m.CURRENCY) = 'CEN', 100, 1) AS swap_usd,
                 sumIf(t.COMMISSION, t.CMD IN (0, 1)) / if(any(m.CURRENCY) = 'CEN', 100, 1) AS commission_usd,
-                
+
                 COALESCE(sum(ib.total_ib_cost), 0) AS ib_commission_usd,
-                
+
                 ((sumIf(t.PROFIT + t.SWAPS + t.COMMISSION, t.CMD IN (0, 1)) * -1) / if(any(m.CURRENCY) = 'CEN', 100, 1)) - COALESCE(sum(ib.total_ib_cost), 0) AS broker_net_revenue,
 
                 sumIf(t.PROFIT, t.CMD = 6) / if(any(m.CURRENCY) = 'CEN', 100, 1) AS period_net_deposit
 
             FROM fxbackoffice_mt4_trades AS t
-            -- 使用 INNER JOIN 确保只显示关联到有效用户的交易
             INNER JOIN fxbackoffice_mt4_users AS m ON t.LOGIN = m.LOGIN
             LEFT JOIN fxbackoffice_users AS u ON m.userId = u.id
             LEFT JOIN ib_costs AS ib ON t.ticketSid = ib.ticketSid
-            -- 修改：使用新的 IB 旗下全量净入金汇总表 (sumMerge 还原聚合状态)
-            LEFT JOIN (
-                SELECT 
-                    ibId, 
-                    sumMerge(net_deposit) AS net_deposit_usd
-                FROM ib_downline_net_deposit_agg
-                GROUP BY ibId
-            ) AS ib_sum ON toString(u.partnerId) = toString(ib_sum.ibId)
-            WHERE 
-                t.CLOSE_TIME >= %(start_date)s 
+            {ib_net_join}
+            WHERE
+                t.CLOSE_TIME >= %(start_date)s
                 AND t.CLOSE_TIME <= %(end_date)s
                 AND t.CMD IN (0, 1, 6)
-                
-                AND m.userId > 0                   
-                AND COALESCE(u.isEmployee, 0) != 1 
+
+                AND m.userId > 0
+                AND COALESCE(u.isEmployee, 0) != 1
             """
             
             parameters = {

@@ -70,6 +70,7 @@ docs/
 │   └── filter-backend-integration.md
 ├── operations/                  # Deployment & operations
 │   ├── clickhouse-connection.md # ClickHouse production setup
+│   ├── create-ib_downline_net_deposit_agg.md # Create ib_downline_net_deposit_agg in KCM_fxbackoffice
 │   └── clientid-based-page.md
 └── ai-context/                  # AI assistant context
     └── PROJECT_CONTEXT.md      # Detailed project context for AI
