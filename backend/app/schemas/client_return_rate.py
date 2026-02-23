@@ -30,6 +30,10 @@ class ClientReturnRateRow(BaseModel):
     # Non-adjusted return rate (for clients with positive net deposit)
     return_non_adjusted: Optional[float] = Field(None, description="Standard return rate %")
 
+    deposits_90d: float = Field(0, description="Total deposits in last 90 days")
+    # Negative net deposit return: (equity - A) / A where A = MAX(deposits_90d, |net_deposit_hist|)
+    return_neg_adjusted: Optional[float] = Field(None, description="Negative net deposit return rate %")
+
 
 class ClientReturnRateRequest(BaseModel):
     """

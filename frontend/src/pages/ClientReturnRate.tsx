@@ -2,7 +2,13 @@ import { useState, useCallback, useMemo, useRef } from "react";
 import { useTheme } from "@/components/theme-provider";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Card, CardContent } from "@/components/ui/card";
 import { Search, RefreshCw, Calendar as CalendarIcon, X } from "lucide-react";
 import { AgGridReact } from "ag-grid-react";
@@ -10,7 +16,11 @@ import { ColDef, GridReadyEvent } from "ag-grid-community";
 import { format } from "date-fns";
 import { cn } from "@/lib/utils";
 import { Calendar } from "@/components/ui/calendar";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import { DateRange } from "react-day-picker";
 
 interface ClientReturnRateRow {
@@ -25,6 +35,8 @@ interface ClientReturnRateRow {
   adj_5000_50000: number | null;
   adj_50000_plus: number | null;
   return_non_adjusted: number | null;
+  deposits_90d: number;
+  return_neg_adjusted: number | null;
 }
 
 interface CachedState {
@@ -40,7 +52,7 @@ interface CachedState {
 }
 
 const SESSION_KEY = "client_return_rate_cache";
-const CACHE_MAX_AGE_MS = 30 * 60 * 1000; // 30 minutes, matches Redis TTL
+const CACHE_MAX_AGE_MS = 3 * 60 * 60 * 1000; // 3 hours, matches Redis TTL
 
 function formatCurrency(value: number | null | undefined): string {
   if (value === null || value === undefined) return "";
@@ -55,7 +67,9 @@ function formatPercent(value: number | null | undefined): string {
 
 function getProfitColor(value: number | null | undefined): string {
   if (value === null || value === undefined || value === 0) return "";
-  return value > 0 ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400";
+  return value > 0
+    ? "text-green-600 dark:text-green-400"
+    : "text-red-600 dark:text-red-400";
 }
 
 function loadCachedState(): CachedState | null {
@@ -92,33 +106,51 @@ export default function ClientReturnRate() {
   // Try to restore from sessionStorage on first render
   const cached = useRef(loadCachedState());
 
-  const [rows, setRows] = useState<ClientReturnRateRow[]>(cached.current?.rows ?? []);
+  const [rows, setRows] = useState<ClientReturnRateRow[]>(
+    cached.current?.rows ?? [],
+  );
   const [loading, setLoading] = useState(false);
-  const [searchInput, setSearchInput] = useState(cached.current?.searchValue ?? "");
-  const [searchValue, setSearchValue] = useState(cached.current?.searchValue ?? "");
-  const [timeRange, setTimeRange] = useState<string>(cached.current?.timeRange ?? "1w");
+  const [searchInput, setSearchInput] = useState(
+    cached.current?.searchValue ?? "",
+  );
+  const [searchValue, setSearchValue] = useState(
+    cached.current?.searchValue ?? "",
+  );
+  const [timeRange, setTimeRange] = useState<string>(
+    cached.current?.timeRange ?? "1w",
+  );
   const [total, setTotal] = useState(cached.current?.total ?? 0);
-  const [queryTime, setQueryTime] = useState<number | null>(cached.current?.queryTime ?? null);
-  const [fromCache, setFromCache] = useState(cached.current?.fromCache ?? false);
-  const [queriedAt, setQueriedAt] = useState<string | null>(cached.current?.queriedAt ?? null);
+  const [queryTime, setQueryTime] = useState<number | null>(
+    cached.current?.queryTime ?? null,
+  );
+  const [fromCache, setFromCache] = useState(
+    cached.current?.fromCache ?? false,
+  );
+  const [queriedAt, setQueriedAt] = useState<string | null>(
+    cached.current?.queriedAt ?? null,
+  );
   const [date, setDate] = useState<DateRange | undefined>(cached.current?.date);
 
   const getDateRange = useCallback(() => {
     const now = new Date();
     if (date?.from) return date;
     if (timeRange === "1w") {
-      const d = new Date(now); d.setDate(now.getDate() - 7);
+      const d = new Date(now);
+      d.setDate(now.getDate() - 7);
       return { from: d, to: now };
     }
     if (timeRange === "2w") {
-      const d = new Date(now); d.setDate(now.getDate() - 14);
+      const d = new Date(now);
+      d.setDate(now.getDate() - 14);
       return { from: d, to: now };
     }
     if (timeRange === "1m") {
-      const d = new Date(now); d.setMonth(now.getMonth() - 1);
+      const d = new Date(now);
+      d.setMonth(now.getMonth() - 1);
       return { from: d, to: now };
     }
-    const d = new Date(now); d.setDate(now.getDate() - 7);
+    const d = new Date(now);
+    d.setDate(now.getDate() - 7);
     return { from: d, to: now };
   }, [timeRange, date]);
 
@@ -128,7 +160,12 @@ export default function ClientReturnRate() {
 
     try {
       const dr = getDateRange();
-      const p = new URLSearchParams({ page: "1", page_size: "5000", sort_by: "month_trade_profit", sort_order: "desc" });
+      const p = new URLSearchParams({
+        page: "1",
+        page_size: "5000",
+        sort_by: "month_trade_profit",
+        sort_order: "desc",
+      });
       if (searchInput.trim()) p.set("search", searchInput.trim());
       if (dr?.from) p.set("month_start", format(dr.from, "yyyy-MM-dd"));
       if (dr?.to) p.set("month_end", format(dr.to, "yyyy-MM-dd"));
@@ -173,8 +210,10 @@ export default function ClientReturnRate() {
   }, [searchInput, timeRange, date, getDateRange]);
 
   const handleSearchKeyDown = useCallback(
-    (e: React.KeyboardEvent) => { if (e.key === "Enter") fetchData(); },
-    [fetchData]
+    (e: React.KeyboardEvent) => {
+      if (e.key === "Enter") fetchData();
+    },
+    [fetchData],
   );
 
   const handleClearSearch = useCallback(() => {
@@ -182,21 +221,114 @@ export default function ClientReturnRate() {
     setSearchValue("");
   }, []);
 
-  const columnDefs: ColDef<ClientReturnRateRow>[] = useMemo(() => [
-    { field: "client_id", headerName: "客户ID", width: 120, pinned: "left", cellRenderer: (p: {value:number}) => <a href={`https://mt4.kohleglobal.com/crm/users/${p.value}`} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline dark:text-blue-400">{p.value}</a> },
-    { field: "net_deposit_hist", headerName: "历史净入金", width: 140, valueFormatter: p => formatCurrency(p.value), cellClass: p => getProfitColor(p.value) },
-    { field: "net_deposit_month", headerName: "当月净入金", width: 130, valueFormatter: p => formatCurrency(p.value), cellClass: p => getProfitColor(p.value) },
-    { field: "equity", headerName: "现时账户余额", width: 140, valueFormatter: p => formatCurrency(p.value) },
-    { field: "profit_hist", headerName: "历史利润", width: 130, valueFormatter: p => formatCurrency(p.value), cellClass: p => getProfitColor(p.value) },
-    { field: "month_trade_profit", headerName: "本月利润", width: 130, valueFormatter: p => formatCurrency(p.value), cellClass: p => getProfitColor(p.value) },
-    { field: "adj_0_2000", headerName: "调整后收益率(2K以下)%", width: 180, valueFormatter: p => formatPercent(p.value), cellClass: p => getProfitColor(p.value) },
-    { field: "adj_2000_5000", headerName: "调整后收益率(2K-5K)%", width: 180, valueFormatter: p => formatPercent(p.value), cellClass: p => getProfitColor(p.value) },
-    { field: "adj_5000_50000", headerName: "调整后收益率(5K-50K)%", width: 190, valueFormatter: p => formatPercent(p.value), cellClass: p => getProfitColor(p.value) },
-    { field: "adj_50000_plus", headerName: "调整后收益率(50K以上)%", width: 190, valueFormatter: p => formatPercent(p.value), cellClass: p => getProfitColor(p.value) },
-    { field: "return_non_adjusted", headerName: "负数入金收益率%", width: 160, valueFormatter: p => formatPercent(p.value), cellClass: p => getProfitColor(p.value) },
-  ], []);
+  const columnDefs: ColDef<ClientReturnRateRow>[] = useMemo(
+    () => [
+      {
+        field: "client_id",
+        headerName: "客户ID",
+        width: 120,
+        pinned: "left",
+        cellRenderer: (p: { value: number }) => (
+          <a
+            href={`https://mt4.kohleglobal.com/crm/users/${p.value}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-blue-600 hover:underline dark:text-blue-400"
+          >
+            {p.value}
+          </a>
+        ),
+      },
+      {
+        field: "net_deposit_hist",
+        headerName: "历史净入金",
+        width: 140,
+        valueFormatter: (p) => formatCurrency(p.value),
+        cellClass: (p) => getProfitColor(p.value),
+      },
+      {
+        field: "net_deposit_month",
+        headerName: "当月净入金",
+        width: 130,
+        valueFormatter: (p) => formatCurrency(p.value),
+        cellClass: (p) => getProfitColor(p.value),
+      },
+      {
+        field: "equity",
+        headerName: "现时账户余额",
+        width: 140,
+        valueFormatter: (p) => formatCurrency(p.value),
+      },
+      {
+        field: "profit_hist",
+        headerName: "历史利润",
+        width: 130,
+        valueFormatter: (p) => formatCurrency(p.value),
+        cellClass: (p) => getProfitColor(p.value),
+      },
+      {
+        field: "month_trade_profit",
+        headerName: "本月利润",
+        width: 130,
+        valueFormatter: (p) => formatCurrency(p.value),
+        cellClass: (p) => getProfitColor(p.value),
+      },
+      {
+        field: "adj_0_2000",
+        headerName: "调整后收益率(2K以下)%",
+        width: 180,
+        valueFormatter: (p) => formatPercent(p.value),
+        cellClass: (p) => getProfitColor(p.value),
+      },
+      {
+        field: "adj_2000_5000",
+        headerName: "调整后收益率(2K-5K)%",
+        width: 180,
+        valueFormatter: (p) => formatPercent(p.value),
+        cellClass: (p) => getProfitColor(p.value),
+      },
+      {
+        field: "adj_5000_50000",
+        headerName: "调整后收益率(5K-50K)%",
+        width: 190,
+        valueFormatter: (p) => formatPercent(p.value),
+        cellClass: (p) => getProfitColor(p.value),
+      },
+      {
+        field: "adj_50000_plus",
+        headerName: "调整后收益率(50K以上)%",
+        width: 190,
+        valueFormatter: (p) => formatPercent(p.value),
+        cellClass: (p) => getProfitColor(p.value),
+      },
+      {
+        field: "return_non_adjusted",
+        headerName: "正数入金收益率%",
+        width: 160,
+        valueFormatter: (p) => formatPercent(p.value),
+        cellClass: (p) => getProfitColor(p.value),
+      },
+      {
+        field: "deposits_90d",
+        headerName: "最近90天入金",
+        width: 150,
+        valueFormatter: (p) => formatCurrency(p.value),
+      },
+      {
+        field: "return_neg_adjusted",
+        headerName: "负净入金回报率%",
+        width: 170,
+        valueFormatter: (p) => formatPercent(p.value),
+        cellClass: (p) => getProfitColor(p.value),
+      },
+    ],
+    [],
+  );
 
-  const defaultColDef = useMemo(() => ({ resizable: true, sortable: true }), []);
+  const defaultColDef = useMemo(
+    () => ({ resizable: true, sortable: true }),
+    [],
+  );
   const onGridReady = useCallback((_e: GridReadyEvent) => {}, []);
 
   return (
@@ -213,14 +345,15 @@ export default function ClientReturnRate() {
                     variant="outline"
                     className={cn(
                       "w-full sm:w-[260px] justify-start text-left font-normal h-9",
-                      !date && "text-muted-foreground"
+                      !date && "text-muted-foreground",
                     )}
                   >
                     <CalendarIcon className="mr-2 h-4 w-4" />
                     {date?.from ? (
                       date.to ? (
                         <>
-                          {format(date.from, "yyyy-MM-dd")} - {format(date.to, "yyyy-MM-dd")}
+                          {format(date.from, "yyyy-MM-dd")} -{" "}
+                          {format(date.to, "yyyy-MM-dd")}
                         </>
                       ) : (
                         format(date.from, "yyyy-MM-dd")
@@ -276,7 +409,12 @@ export default function ClientReturnRate() {
                   />
                 </div>
                 {searchValue && (
-                  <Button variant="ghost" size="sm" onClick={handleClearSearch} className="h-9 px-2">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={handleClearSearch}
+                    className="h-9 px-2"
+                  >
                     <X className="h-4 w-4" />
                   </Button>
                 )}
@@ -307,13 +445,16 @@ export default function ClientReturnRate() {
                 共 {total.toLocaleString()} 位客户有交易记录
               </span>
               {queryTime !== null && (
-                <span className={cn(
-                  "px-2 py-1 rounded",
-                  fromCache
-                    ? "bg-green-100 dark:bg-green-900/20 text-green-700 dark:text-green-300"
-                    : "bg-blue-100 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300"
-                )}>
-                  {fromCache ? "缓存 " : ""}耗时: {(queryTime / 1000).toFixed(3)}s
+                <span
+                  className={cn(
+                    "px-2 py-1 rounded",
+                    fromCache
+                      ? "bg-green-100 dark:bg-green-900/20 text-green-700 dark:text-green-300"
+                      : "bg-blue-100 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300",
+                  )}
+                >
+                  {fromCache ? "缓存 " : ""}耗时:{" "}
+                  {(queryTime / 1000).toFixed(3)}s
                 </span>
               )}
               {queriedAt && (
@@ -331,21 +472,28 @@ export default function ClientReturnRate() {
         <div
           className={cn(
             "h-[calc(100vh-280px)] min-h-[400px] w-full",
-            isDarkMode ? "ag-theme-quartz-dark" : "ag-theme-quartz"
+            isDarkMode ? "ag-theme-quartz-dark" : "ag-theme-quartz",
           )}
           style={{
-            ['--primary' as any]: '243 75% 59%',
-            ['--primary-foreground' as any]: '0 0% 100%',
-            ['--accent' as any]: '243 75% 65%',
-            ['--accent-foreground' as any]: '0 0% 14%',
-            ['--ag-header-background-color' as any]: isDarkMode ? 'hsl(0 0% 100% / 1)' : 'hsl(0 0% 8% / 1)',
-            ['--ag-header-foreground-color' as any]: isDarkMode ? 'hsl(0 0% 0% / 1)' : 'hsl(0 0% 100% / 1)',
-            ['--ag-header-column-separator-color' as any]: isDarkMode ? 'hsl(0 0% 0% / 1)' : 'hsl(0 0% 100% / 1)',
-            ['--ag-header-column-separator-width' as any]: '1px',
-            ['--ag-background-color' as any]: 'hsl(var(--card))',
-            ['--ag-foreground-color' as any]: 'hsl(var(--foreground))',
-            ['--ag-row-border-color' as any]: 'hsl(var(--border))',
-            ['--ag-odd-row-background-color' as any]: 'hsl(var(--primary) / 0.04)',
+            ["--primary" as any]: "243 75% 59%",
+            ["--primary-foreground" as any]: "0 0% 100%",
+            ["--accent" as any]: "243 75% 65%",
+            ["--accent-foreground" as any]: "0 0% 14%",
+            ["--ag-header-background-color" as any]: isDarkMode
+              ? "hsl(0 0% 100% / 1)"
+              : "hsl(0 0% 8% / 1)",
+            ["--ag-header-foreground-color" as any]: isDarkMode
+              ? "hsl(0 0% 0% / 1)"
+              : "hsl(0 0% 100% / 1)",
+            ["--ag-header-column-separator-color" as any]: isDarkMode
+              ? "hsl(0 0% 0% / 1)"
+              : "hsl(0 0% 100% / 1)",
+            ["--ag-header-column-separator-width" as any]: "1px",
+            ["--ag-background-color" as any]: "hsl(var(--card))",
+            ["--ag-foreground-color" as any]: "hsl(var(--foreground))",
+            ["--ag-row-border-color" as any]: "hsl(var(--border))",
+            ["--ag-odd-row-background-color" as any]:
+              "hsl(var(--primary) / 0.04)",
           }}
         >
           <AgGridReact
@@ -361,7 +509,7 @@ export default function ClientReturnRate() {
             paginationPageSizeSelector={[20, 50, 100, 200]}
             suppressCellFocus
             enableCellTextSelection
-            getRowId={p => String(p.data.client_id)}
+            getRowId={(p) => String(p.data.client_id)}
           />
         </div>
       </div>

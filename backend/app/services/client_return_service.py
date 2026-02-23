@@ -127,7 +127,18 @@ SELECT
             (COALESCE(eq.equity, 0) - (COALESCE(th.deposits_hist, 0) + COALESCE(th.withdrawals_hist, 0)))
             / (COALESCE(th.deposits_hist, 0) + COALESCE(th.withdrawals_hist, 0)) * 100, 2),
         NULL
-    ) AS return_non_adjusted
+    ) AS return_non_adjusted,
+
+    ROUND(COALESCE(dep90.deposits_90d, 0), 2) AS deposits_90d,
+
+    IF(
+        (COALESCE(th.deposits_hist, 0) + COALESCE(th.withdrawals_hist, 0)) <= 0
+        AND GREATEST(COALESCE(dep90.deposits_90d, 0), ABS(COALESCE(th.deposits_hist, 0) + COALESCE(th.withdrawals_hist, 0))) > 0,
+        ROUND(
+            (COALESCE(eq.equity, 0) - GREATEST(COALESCE(dep90.deposits_90d, 0), ABS(COALESCE(th.deposits_hist, 0) + COALESCE(th.withdrawals_hist, 0))))
+            / GREATEST(COALESCE(dep90.deposits_90d, 0), ABS(COALESCE(th.deposits_hist, 0) + COALESCE(th.withdrawals_hist, 0))) * 100, 2),
+        NULL
+    ) AS return_neg_adjusted
 
 FROM ({tm_inline}) AS tm
 
@@ -169,6 +180,19 @@ LEFT JOIN (
     GROUP BY st.userId
 ) AS txm ON tm.client_id = txm.client_id
 
+LEFT JOIN (
+    SELECT st.userId AS client_id,
+           SUM(IF(st.currency='CEN', st.amount/100.0, st.amount)) AS deposits_90d
+    FROM stats_transactions st
+    INNER JOIN mt4_users mu ON st.loginSid = mu.loginSid
+    WHERE st.type = 'deposit'
+      AND st.date >= DATE_SUB(CURDATE(), INTERVAL 90 DAY)
+      AND st.userId IN ({id_list_str})
+      AND mu.sid IN (1, 5, 6)
+      AND mu.`GROUP` NOT LIKE '%demo%'
+    GROUP BY st.userId
+) AS dep90 ON tm.client_id = dep90.client_id
+
 ORDER BY tm.month_trade_profit IS NULL, tm.month_trade_profit DESC
 """
 
@@ -199,6 +223,7 @@ def get_client_return_rate_data(
         "profit_hist", "month_trade_profit", "deposit_avg", "deposit_bucket",
         "return_non_adjusted", "return_adjusted",
         "adj_0_2000", "adj_2000_5000", "adj_5000_50000", "adj_50000_plus",
+        "deposits_90d", "return_neg_adjusted",
     }
     if sort_by not in allowed_sort_columns:
         sort_by = "month_trade_profit"
@@ -307,7 +332,7 @@ def get_client_return_rate_data(
         try:
             if clickhouse_service.redis_client:
                 clickhouse_service.redis_client.setex(
-                    cache_key, 1800, json.dumps(response, default=_json_default)
+                    cache_key, 10800, json.dumps(response, default=_json_default)
                 )
                 logger.info(f"Redis cache saved for client return rate: {cache_key[:50]}...")
         except Exception as e:
