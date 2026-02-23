@@ -160,7 +160,7 @@ SELECT name FROM system.tables WHERE database = 'KCM_fxbackoffice' ORDER BY name
 | 查看 KCM_fxbackoffice 所有表 | 使用 `SHOW TABLES FROM KCM_fxbackoffice` 或 `system.tables WHERE database = 'KCM_fxbackoffice'`，建议导出表名+engine 做对照 |
 | 当前库使用 | IB Report、Client PnL 使用 **prod**（KCM_fxbackoffice）；client_return 等使用默认（Fxbo_Trades） |
 | 统一后端 | `ib_downline_net_deposit_agg` 可通过 `CLICKHOUSE_IB_NET_DEPOSIT_AGG_TABLE` 指定表名或置空跳过 |
-| 前端一致 | IB Report 快捷日期与 client-return-rate 一致：Select 下拉「快捷选项」（过去 1 周/1 个月/本月/上月），响应式布局 |
+| 前端一致 | IB Report 快捷日期与 client-return-rate 一致：Select 下拉「时间快选」（过去 1 周/1 个月/本月/上月），响应式布局 |
 
 ---
 

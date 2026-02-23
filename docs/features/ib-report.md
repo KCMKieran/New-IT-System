@@ -10,7 +10,7 @@ IB 报表主要用于展示各业务组别（Group）及其下属用户的资金
 ### 2.1 顶部筛选卡片 (Filter Card)
 - **简洁布局**: 移除冗余标签，参考 `ClientPnLAnalysis.tsx` 与 client-return-rate 页保持单行对齐，响应式（小屏纵向、大屏横向）。
 - **时间范围筛选 (Date Range)**: 宽度 260px（sm 及以上），高度 h-9，支持选择起始和结束日期；日期格式为 `yyyy-MM-dd`。
-- **快捷选项 (Quick Range)**: Select 下拉，占位「快捷选项」，选项：过去 1 周、过去 1 个月、本月、上月；与 client-return-rate 页面 UI 一致，宽度 `w-full sm:w-[130px]`，选择后自动更新日期并触发查询；若用户从日历选自定义范围则清空快捷选项。
+- **时间快选 (Quick Range)**: Select 下拉，占位「时间快选」，选项：过去 1 周、过去 1 个月、本月、上月；与 client-return-rate 页面 UI 一致，宽度 `w-full sm:w-[130px]`，选择后自动更新日期并触发查询；若用户从日历选自定义范围则清空时间快选。
 - **组别筛选 (Group Filter)**: 宽度 260px，支持从数据库动态加载的组别多选。
 - **展示当月数据开关 (Monthly Data Checkbox)**: 
     - 勾选后，表格在展示指定时间段数据的基础上，额外展示该时间段所属月份的全月数据。

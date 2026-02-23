@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Card, CardContent } from "@/components/ui/card";
-import { Search, RefreshCw, Download, Calendar as CalendarIcon, X } from "lucide-react";
+import { Search, RefreshCw, Calendar as CalendarIcon, X } from "lucide-react";
 import { AgGridReact } from "ag-grid-react";
 import { ColDef, GridReadyEvent } from "ag-grid-community";
 import { format } from "date-fns";
@@ -149,21 +149,6 @@ export default function ClientReturnRate() {
     // fetchData will be called with empty searchInput
   }, []);
 
-  const handleExport = useCallback(async () => {
-    const dr = getDateRange();
-    const p = new URLSearchParams();
-    if (searchValue.trim()) p.set("search", searchValue.trim());
-    if (dr?.from) p.set("month_start", format(dr.from, "yyyy-MM-dd"));
-    if (dr?.to) p.set("month_end", format(dr.to, "yyyy-MM-dd"));
-    const res = await fetch(`/api/v1/client-return-rate/export?${p}`);
-    const blob = await res.blob();
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = `client_return_rate_${format(new Date(), "yyyyMMdd_HHmmss")}.csv`;
-    a.click();
-    URL.revokeObjectURL(a.href);
-  }, [searchValue, getDateRange]);
-
   const columnDefs: ColDef<ClientReturnRateRow>[] = useMemo(() => [
     { field: "client_id", headerName: "客户ID", width: 120, pinned: "left", cellRenderer: (p: {value:number}) => <a href={`https://mt4.kohleglobal.com/crm/users/${p.value}`} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline dark:text-blue-400">{p.value}</a> },
     { field: "net_deposit_hist", headerName: "历史净入金", width: 140, valueFormatter: p => formatCurrency(p.value), cellClass: p => getProfitColor(p.value) },
@@ -240,7 +225,7 @@ export default function ClientReturnRate() {
                 }}
               >
                 <SelectTrigger className="w-full sm:w-[130px] h-9">
-                  <SelectValue placeholder="快捷选项" />
+                  <SelectValue placeholder="时间快选" />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="1w">过去 1 周</SelectItem>
@@ -287,15 +272,6 @@ export default function ClientReturnRate() {
                   <Search className="h-4 w-4" />
                 )}
                 查询
-              </Button>
-              <Button
-                variant="outline"
-                onClick={handleExport}
-                disabled={loading || !rows.length}
-                className="w-full sm:w-[120px] h-9 gap-2"
-              >
-                <Download className="h-4 w-4" />
-                导出
               </Button>
             </div>
           </div>
