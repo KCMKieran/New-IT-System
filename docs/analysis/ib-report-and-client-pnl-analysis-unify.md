@@ -55,7 +55,7 @@ SELECT name FROM system.tables WHERE database = 'KCM_fxbackoffice' ORDER BY name
 | `GET /api/v1/ib-report/groups` | `get_ib_groups()` | `get_client(use_prod=True)` | **KCM_fxbackoffice** |
 | `POST /api/v1/ib-report/search` | `get_ib_report_data()` | `get_client(use_prod=True)` | **KCM_fxbackoffice** |
 | `GET /api/v1/client-pnl-analysis/query` | `get_pnl_analysis()` | `get_client(use_prod=True)` | **KCM_fxbackoffice** |
-| client_return_rate 等 | — | `get_client()` 默认 | **Fxbo_Trades** |
+| client_return_rate | — | **已迁移至 MySQL** (`fxbackoffice` slave via pymysql) | **fxbackoffice** (MySQL) |
 
 结论：**IB Report 与 Client PnL Analysis 使用 prod 连接（KCM_fxbackoffice）。** 部署时需配置 `CLICKHOUSE_prod_*` 指向 CDC 所在集群。
 
@@ -92,7 +92,7 @@ SELECT name FROM system.tables WHERE database = 'KCM_fxbackoffice' ORDER BY name
 
 ## 5. 其他使用 ClickHouse 的模块（统一 DB 时需一并考虑）
 
-- **client_return_service.py**：`get_client(use_prod=False)`，当前也是 **Fxbo_Trades**。若该功能也希望用最新数据，应一并改为使用 KCM_fxbackoffice（或统一「默认连接」的 database）。
+- **client_return_service.py**：**已迁移至 MySQL**（`fxbackoffice` slave），不再使用 ClickHouse。采用两阶段查询：Phase 1 从 `mt4_trades` 获取活跃客户，Phase 2 用 `stats_transactions` 查净入金。
 
 ---
 
@@ -107,13 +107,13 @@ SELECT name FROM system.tables WHERE database = 'KCM_fxbackoffice' ORDER BY name
 - 在 `get_pnl_analysis()` 中改为使用 `get_client(use_prod=True)`，与 IB Report 一致。
 - **前提**：第 4.2 节所列 5 张表在 KCM_fxbackoffice 中均存在且结构兼容（尤其 `ib_downline_net_deposit_agg` 的 sumMerge 用法）。
 - **优点**：改点少，风险集中在一处。  
-- **注意**：client_return 等仍用 Fxbo_Trades，若也要最新数据需单独再改。
+- **注意**：client_return 已迁移至 MySQL slave，不再使用 Fxbo_Trades。
 
 ### 6.3 方案 B：默认连接即指向 KCM_fxbackoffice（推荐中长期）
 
 - 环境变量：设置 `CLICKHOUSE_DB=KCM_fxbackoffice`，或让默认连接使用的 host 直接指向 CDC 所在集群（与 prod 同库或同实例均可）。
 - 代码：逐步把 `get_client(use_prod=True)` 改为 `get_client()`，最终只保留一套连接配置，避免「默认 / prod 两套库」长期并存。
-- **前提**：所有当前读 Fxbo_Trades 的 SQL（Client PnL、client_return 等）在 KCM_fxbackoffice 中都有对应表且数据正确。
+- **前提**：所有当前读 Fxbo_Trades 的 SQL（Client PnL 等）在 KCM_fxbackoffice 中都有对应表且数据正确。（client_return 已迁移至 MySQL，不受影响。）
 
 ### 6.4 实施前必做
 
@@ -158,7 +158,7 @@ SELECT name FROM system.tables WHERE database = 'KCM_fxbackoffice' ORDER BY name
 | 项目 | 结论 |
 |------|------|
 | 查看 KCM_fxbackoffice 所有表 | 使用 `SHOW TABLES FROM KCM_fxbackoffice` 或 `system.tables WHERE database = 'KCM_fxbackoffice'`，建议导出表名+engine 做对照 |
-| 当前库使用 | IB Report、Client PnL 使用 **prod**（KCM_fxbackoffice）；client_return 等使用默认（Fxbo_Trades） |
+| 当前库使用 | IB Report、Client PnL 使用 **prod**（KCM_fxbackoffice）；client_return 已迁移至 **MySQL** slave（fxbackoffice） |
 | 统一后端 | `ib_downline_net_deposit_agg` 可通过 `CLICKHOUSE_IB_NET_DEPOSIT_AGG_TABLE` 指定表名或置空跳过 |
 | 前端一致 | IB Report 快捷日期与 client-return-rate 一致：Select 下拉「时间快选」（过去 1 周/1 个月/本月/上月），响应式布局 |
 
@@ -174,10 +174,10 @@ SELECT name FROM system.tables WHERE database = 'KCM_fxbackoffice' ORDER BY name
 |----------|------|----------|-----|
 | `app:pnl:cache:{md5}` | Client PnL Analysis 查询结果 | `pnl_v1_{start_date}_{end_date}_{search}` 的 MD5 | **1800s (30min)** |
 | `app:ib_report:cache:{md5}` | IB Report 报表数据 | `ib_report_v1_{r_start}_{r_end}_{m_start}_{m_end}_{sorted_groups}` 的 MD5 | **600s (10min)** |
-| `app:client_return:cache:{md5}` | 客户回报率查询 | `client_return_v1_{month_start}_{month_end}_{search}_{deposit_bucket}_{sort_by}_{sort_order}_{page}_{page_size}` 的 MD5 | **1800s (30min)** |
+| `app:client_return:cache:{md5}` | 客户回报率查询（MySQL） | `client_return_v2_{month_start}_{month_end}_{search}_{deposit_bucket}_{sort_by}_{sort_order}_{page}_{page_size}` 的 MD5 | **1800s (30min)** |
 
-- 命中时：接口直接返回缓存 JSON，并在 `statistics.from_cache`（或等价字段）中标记为 `true`（PnL / client_return）。
-- 未命中：执行 ClickHouse 查询，结果序列化后 `setex(key, ttl, json)` 写入 Redis。
+- 命中时：接口直接返回缓存 JSON，并在 `statistics.from_cache` 中标记为 `true`（PnL / client_return）。
+- 未命中：执行数据库查询（PnL 用 ClickHouse，client_return 用 MySQL），结果序列化后 `setex(key, ttl, json)` 写入 Redis。
 
 ### 9.2 非 Redis 缓存（内存）
 

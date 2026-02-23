@@ -27,6 +27,21 @@ interface ClientReturnRateRow {
   return_non_adjusted: number | null;
 }
 
+interface CachedState {
+  rows: ClientReturnRateRow[];
+  total: number;
+  queryTime: number | null;
+  fromCache: boolean;
+  queriedAt: string | null;
+  searchValue: string;
+  timeRange: string;
+  date: DateRange | undefined;
+  timestamp: number;
+}
+
+const SESSION_KEY = "client_return_rate_cache";
+const CACHE_MAX_AGE_MS = 30 * 60 * 1000; // 30 minutes, matches Redis TTL
+
 function formatCurrency(value: number | null | undefined): string {
   if (value === null || value === undefined) return "";
   const sign = value >= 0 ? "" : "-";
@@ -43,59 +58,74 @@ function getProfitColor(value: number | null | undefined): string {
   return value > 0 ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400";
 }
 
+function loadCachedState(): CachedState | null {
+  try {
+    const raw = sessionStorage.getItem(SESSION_KEY);
+    if (!raw) return null;
+    const cached: CachedState = JSON.parse(raw);
+    if (Date.now() - cached.timestamp > CACHE_MAX_AGE_MS) {
+      sessionStorage.removeItem(SESSION_KEY);
+      return null;
+    }
+    // Restore Date objects from ISO strings
+    if (cached.date?.from) cached.date.from = new Date(cached.date.from);
+    if (cached.date?.to) cached.date.to = new Date(cached.date.to);
+    return cached;
+  } catch {
+    return null;
+  }
+}
+
+function saveCachedState(state: CachedState) {
+  try {
+    sessionStorage.setItem(SESSION_KEY, JSON.stringify(state));
+  } catch {
+    // sessionStorage full or unavailable
+  }
+}
+
 export default function ClientReturnRate() {
   const { theme } = useTheme();
   const isDarkMode = theme === "dark";
   const gridRef = useRef<AgGridReact>(null);
-  const [rows, setRows] = useState<ClientReturnRateRow[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [searchInput, setSearchInput] = useState("");
-  const [searchValue, setSearchValue] = useState(""); // Actual search value being used
-  const [timeRange, setTimeRange] = useState<string>("1m"); // Default to 1 month
-  const [total, setTotal] = useState(0);
-  const [queryTime, setQueryTime] = useState<number | null>(null);
-  const [fromCache, setFromCache] = useState(false);
-  const [rowsRead, setRowsRead] = useState<number | null>(null);
-  const [bytesRead, setBytesRead] = useState<number | null>(null);
-  const [date, setDate] = useState<DateRange | undefined>();
 
-  // Calculate date range based on timeRange quick select or custom date
+  // Try to restore from sessionStorage on first render
+  const cached = useRef(loadCachedState());
+
+  const [rows, setRows] = useState<ClientReturnRateRow[]>(cached.current?.rows ?? []);
+  const [loading, setLoading] = useState(false);
+  const [searchInput, setSearchInput] = useState(cached.current?.searchValue ?? "");
+  const [searchValue, setSearchValue] = useState(cached.current?.searchValue ?? "");
+  const [timeRange, setTimeRange] = useState<string>(cached.current?.timeRange ?? "1w");
+  const [total, setTotal] = useState(cached.current?.total ?? 0);
+  const [queryTime, setQueryTime] = useState<number | null>(cached.current?.queryTime ?? null);
+  const [fromCache, setFromCache] = useState(cached.current?.fromCache ?? false);
+  const [queriedAt, setQueriedAt] = useState<string | null>(cached.current?.queriedAt ?? null);
+  const [date, setDate] = useState<DateRange | undefined>(cached.current?.date);
+
   const getDateRange = useCallback(() => {
     const now = new Date();
-    
-    // If custom date range is selected, use it
-    if (date?.from) {
-      return date;
-    }
-    
-    // Otherwise, use quick range options
+    if (date?.from) return date;
     if (timeRange === "1w") {
-      const weekAgo = new Date(now);
-      weekAgo.setDate(now.getDate() - 7);
-      return { from: weekAgo, to: now };
+      const d = new Date(now); d.setDate(now.getDate() - 7);
+      return { from: d, to: now };
     }
     if (timeRange === "2w") {
-      const twoWeeksAgo = new Date(now);
-      twoWeeksAgo.setDate(now.getDate() - 14);
-      return { from: twoWeeksAgo, to: now };
+      const d = new Date(now); d.setDate(now.getDate() - 14);
+      return { from: d, to: now };
     }
     if (timeRange === "1m") {
-      const monthAgo = new Date(now);
-      monthAgo.setMonth(now.getMonth() - 1);
-      return { from: monthAgo, to: now };
+      const d = new Date(now); d.setMonth(now.getMonth() - 1);
+      return { from: d, to: now };
     }
-    
-    // Default: past 1 month
-    const monthAgo = new Date(now);
-    monthAgo.setMonth(now.getMonth() - 1);
-    return { from: monthAgo, to: now };
+    const d = new Date(now); d.setDate(now.getDate() - 7);
+    return { from: d, to: now };
   }, [timeRange, date]);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
-    // Update actual search value
     setSearchValue(searchInput.trim());
-    
+
     try {
       const dr = getDateRange();
       const p = new URLSearchParams({ page: "1", page_size: "5000", sort_by: "month_trade_profit", sort_order: "desc" });
@@ -105,48 +135,51 @@ export default function ClientReturnRate() {
       const res = await fetch(`/api/v1/client-return-rate/query?${p}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const r = await res.json();
-      
-      // Update data and statistics
-      setRows(r.data || []);
-      setTotal(r.total || 0);
-      setQueryTime(r.statistics?.query_time_ms || null);
-      setFromCache(r.statistics?.from_cache || false);
-      setRowsRead(r.statistics?.rows_read || null);
-      setBytesRead(r.statistics?.bytes_read || null);
+
+      const newRows = r.data || [];
+      const newTotal = r.total || 0;
+      const newQueryTime = r.statistics?.query_time_ms || null;
+      const newFromCache = r.statistics?.from_cache || false;
+      const newQueriedAt = r.statistics?.queried_at || null;
+
+      setRows(newRows);
+      setTotal(newTotal);
+      setQueryTime(newQueryTime);
+      setFromCache(newFromCache);
+      setQueriedAt(newQueriedAt);
+
+      // Persist to sessionStorage for page navigation restore
+      saveCachedState({
+        rows: newRows,
+        total: newTotal,
+        queryTime: newQueryTime,
+        fromCache: newFromCache,
+        queriedAt: newQueriedAt,
+        searchValue: searchInput.trim(),
+        timeRange,
+        date,
+        timestamp: Date.now(),
+      });
     } catch (e) {
       console.error(e);
       setRows([]);
       setTotal(0);
       setQueryTime(null);
       setFromCache(false);
-      setRowsRead(null);
-      setBytesRead(null);
+      setQueriedAt(null);
     } finally {
       setLoading(false);
     }
-  }, [searchInput, getDateRange]);
+  }, [searchInput, timeRange, date, getDateRange]);
 
-  // Handle search button click
-  const handleSearch = useCallback(() => {
-    fetchData();
-  }, [fetchData]);
-
-  // Handle search input key press
   const handleSearchKeyDown = useCallback(
-    (e: React.KeyboardEvent) => {
-      if (e.key === "Enter") {
-        handleSearch();
-      }
-    },
-    [handleSearch]
+    (e: React.KeyboardEvent) => { if (e.key === "Enter") fetchData(); },
+    [fetchData]
   );
 
-  // Clear search
   const handleClearSearch = useCallback(() => {
     setSearchInput("");
     setSearchValue("");
-    // Optionally trigger a new search
-    // fetchData will be called with empty searchInput
   }, []);
 
   const columnDefs: ColDef<ClientReturnRateRow>[] = useMemo(() => [
@@ -160,7 +193,7 @@ export default function ClientReturnRate() {
     { field: "adj_2000_5000", headerName: "调整后收益率(2K-5K)%", width: 180, valueFormatter: p => formatPercent(p.value), cellClass: p => getProfitColor(p.value) },
     { field: "adj_5000_50000", headerName: "调整后收益率(5K-50K)%", width: 190, valueFormatter: p => formatPercent(p.value), cellClass: p => getProfitColor(p.value) },
     { field: "adj_50000_plus", headerName: "调整后收益率(50K以上)%", width: 190, valueFormatter: p => formatPercent(p.value), cellClass: p => getProfitColor(p.value) },
-    { field: "return_non_adjusted", headerName: "非调整收益率%", width: 150, valueFormatter: p => formatPercent(p.value), cellClass: p => getProfitColor(p.value) },
+    { field: "return_non_adjusted", headerName: "负数入金收益率%", width: 160, valueFormatter: p => formatPercent(p.value), cellClass: p => getProfitColor(p.value) },
   ], []);
 
   const defaultColDef = useMemo(() => ({ resizable: true, sortable: true }), []);
@@ -205,10 +238,7 @@ export default function ClientReturnRate() {
                     selected={date}
                     onSelect={(newDate) => {
                       setDate(newDate);
-                      // Clear time range when custom date is selected
-                      if (newDate?.from) {
-                        setTimeRange("");
-                      }
+                      if (newDate?.from) setTimeRange("");
                     }}
                     numberOfMonths={2}
                   />
@@ -220,7 +250,6 @@ export default function ClientReturnRate() {
                 value={timeRange}
                 onValueChange={(val) => {
                   setTimeRange(val);
-                  // Clear custom date when quick range is selected
                   setDate(undefined);
                 }}
               >
@@ -234,7 +263,7 @@ export default function ClientReturnRate() {
                 </SelectContent>
               </Select>
 
-              {/* Search Input with icon */}
+              {/* Search Input */}
               <div className="flex items-center gap-1">
                 <div className="relative w-full sm:w-[200px]">
                   <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
@@ -247,12 +276,7 @@ export default function ClientReturnRate() {
                   />
                 </div>
                 {searchValue && (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={handleClearSearch}
-                    className="h-9 px-2"
-                  >
+                  <Button variant="ghost" size="sm" onClick={handleClearSearch} className="h-9 px-2">
                     <X className="h-4 w-4" />
                   </Button>
                 )}
@@ -280,26 +304,21 @@ export default function ClientReturnRate() {
           {total > 0 && (
             <div className="mt-3 flex flex-wrap items-center gap-2 text-xs sm:text-sm text-muted-foreground">
               <span className="px-2 py-1 bg-slate-100 dark:bg-slate-800/40 rounded">
-                共 {total.toLocaleString()} 条记录
+                共 {total.toLocaleString()} 位客户有交易记录
               </span>
               {queryTime !== null && (
                 <span className={cn(
                   "px-2 py-1 rounded",
-                  fromCache 
-                    ? "bg-green-100 dark:bg-green-900/20 text-green-700 dark:text-green-300" 
+                  fromCache
+                    ? "bg-green-100 dark:bg-green-900/20 text-green-700 dark:text-green-300"
                     : "bg-blue-100 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300"
                 )}>
-                  {fromCache ? "已缓存" : ""} 耗时: {(queryTime / 1000).toFixed(3)}s
+                  {fromCache ? "缓存 " : ""}耗时: {(queryTime / 1000).toFixed(3)}s
                 </span>
               )}
-              {rowsRead !== null && (
-                <span className="px-2 py-1 bg-purple-100 dark:bg-purple-900/20 rounded text-purple-700 dark:text-purple-300">
-                  读取: {rowsRead.toLocaleString()} rows
-                </span>
-              )}
-              {bytesRead !== null && (
-                <span className="px-2 py-1 bg-orange-100 dark:bg-orange-900/20 rounded text-orange-700 dark:text-orange-300">
-                  数据: {(bytesRead / 1024 / 1024).toFixed(2)} MB
+              {queriedAt && (
+                <span className="px-2 py-1 bg-gray-100 dark:bg-gray-800/40 rounded">
+                  查询时间: {queriedAt}
                 </span>
               )}
             </div>
@@ -315,24 +334,18 @@ export default function ClientReturnRate() {
             isDarkMode ? "ag-theme-quartz-dark" : "ag-theme-quartz"
           )}
           style={{
-            // Indigo theme colors (shadcn HSL format)
             ['--primary' as any]: '243 75% 59%',
             ['--primary-foreground' as any]: '0 0% 100%',
             ['--accent' as any]: '243 75% 65%',
             ['--accent-foreground' as any]: '0 0% 14%',
-            
-            // Table header: dark bg with white text (light mode), white bg with black text (dark mode)
             ['--ag-header-background-color' as any]: isDarkMode ? 'hsl(0 0% 100% / 1)' : 'hsl(0 0% 8% / 1)',
             ['--ag-header-foreground-color' as any]: isDarkMode ? 'hsl(0 0% 0% / 1)' : 'hsl(0 0% 100% / 1)',
             ['--ag-header-column-separator-color' as any]: isDarkMode ? 'hsl(0 0% 0% / 1)' : 'hsl(0 0% 100% / 1)',
             ['--ag-header-column-separator-width' as any]: '1px',
-            
-            // Table body colors using shadcn semantic colors
             ['--ag-background-color' as any]: 'hsl(var(--card))',
             ['--ag-foreground-color' as any]: 'hsl(var(--foreground))',
             ['--ag-row-border-color' as any]: 'hsl(var(--border))',
-            // Zebra striping for odd rows
-            ['--ag-odd-row-background-color' as any]: 'hsl(var(--primary) / 0.04)'
+            ['--ag-odd-row-background-color' as any]: 'hsl(var(--primary) / 0.04)',
           }}
         >
           <AgGridReact

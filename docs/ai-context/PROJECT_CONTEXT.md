@@ -216,7 +216,22 @@ New-IT-System/
 - `POST /api/v1/ib-data/region-query` - Query by region (Company)
 - `GET /api/v1/ib-data/last-run` - Get last query timestamp
 
-### 4.5 Equity Monitor
+### 4.5 Client Return Rate (`ClientReturnRate.tsx`)
+**Purpose**: Analyze client return rates based on trading profit, deposits, and equity.
+
+**Key Features**:
+- Two-phase MySQL query (mt4_trades + stats_transactions)
+- Date range filtering (default: past 1 week)
+- Client ID search (pushed down to all subqueries for fast lookup)
+- Adjusted return rates by deposit bucket (0-2K, 2K-5K, 5K-50K, 50K+)
+- Demo account exclusion
+- sessionStorage caching for page navigation restore
+- Redis 30min server-side cache
+
+**API**: `GET /api/v1/client-return-rate/query`
+**Tables**: `fxbackoffice.mt4_trades`, `fxbackoffice.mt4_users`, `fxbackoffice.stats_transactions`
+
+### 4.6 Equity Monitor
 **Purpose**: Track account balances and equity changes.
 
 **API**: `GET /api/v1/equity/monitor`
@@ -238,8 +253,14 @@ New-IT-System/
 | `fxbackoffice_stats_ib_commissions_by_login_sid` | KCM_fxbackoffice | Pre-aggregated IB commissions |
 
 ### ClickHouse connections (clickhouse_service.py)
-- **Default** (`get_client()`): `CLICKHOUSE_HOST` + `CLICKHOUSE_DB` (default `Fxbo_Trades`). Used by client_return_rate etc.
+- **Default** (`get_client()`): `CLICKHOUSE_HOST` + `CLICKHOUSE_DB` (default `Fxbo_Trades`).
 - **Prod** (`get_client(use_prod=True)`): `CLICKHOUSE_prod_*` + database `KCM_fxbackoffice`. Used by IB Report (groups, search) and Client PnL Analysis (query). Deploy must set prod credentials to the CDC cluster.
+
+### MySQL connections (client_return_service.py)
+- **Client Return Rate** uses MySQL slave (`MYSQL_HOST` + `MYSQL_DATABASE_FXBACKOFFICE=fxbackoffice`) via pymysql.
+  - Two-phase query: Phase 1 gets active client_ids from `mt4_trades`, Phase 2 uses `stats_transactions` for deposit data.
+  - Demo accounts excluded via `GROUP NOT LIKE '%demo%'`.
+  - Redis cache (30min TTL) + sessionStorage for frontend state persistence.
 
 ### Important Conventions
 

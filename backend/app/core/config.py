@@ -53,6 +53,7 @@ class Settings:
         self.DB_NAME = os.environ.get("DB_NAME")
         self.DB_PORT = int(os.environ.get("DB_PORT", "3306"))
         self.DB_CHARSET = os.environ.get("DB_CHARSET", "utf8mb4")
+        
         self.FXBACK_DB_NAME = os.environ.get("FXBACK_DB_NAME")
 
         # MySQL (ETL 源库)
@@ -62,6 +63,7 @@ class Settings:
         self.MYSQL_DATABASE = os.environ.get("MYSQL_DATABASE")
         self.MYSQL_PORT = int(os.environ.get("MYSQL_PORT", "3306"))
         self.MYSQL_SSL_CA = os.environ.get("MYSQL_SSL_CA")
+        self.MYSQL_DATABASE_FXBACKOFFICE = os.environ.get("MYSQL_DATABASE_FXBACKOFFICE", "fxbackoffice")
 
         # PostgreSQL (报表库)
         self.POSTGRES_HOST = os.environ.get("POSTGRES_HOST")
