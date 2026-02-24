@@ -64,6 +64,8 @@ class Settings:
         self.MYSQL_PORT = int(os.environ.get("MYSQL_PORT", "3306"))
         self.MYSQL_SSL_CA = os.environ.get("MYSQL_SSL_CA")
         self.MYSQL_DATABASE_FXBACKOFFICE = os.environ.get("MYSQL_DATABASE_FXBACKOFFICE", "fxbackoffice")
+        # Dedicated host for client-return-rate page; falls back to MYSQL_HOST
+        self.MYSQL_HOST_PRIMARY = os.environ.get("MYSQL_HOST_PRIMARY") or self.MYSQL_HOST
 
         # PostgreSQL (报表库)
         self.POSTGRES_HOST = os.environ.get("POSTGRES_HOST")

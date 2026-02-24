@@ -9,8 +9,14 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Card, CardContent } from "@/components/ui/card";
-import { Search, RefreshCw, Calendar as CalendarIcon, X } from "lucide-react";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Search,
+  RefreshCw,
+  Calendar as CalendarIcon,
+  X,
+  Trash2,
+} from "lucide-react";
 import { AgGridReact } from "ag-grid-react";
 import { ColDef, GridReadyEvent } from "ag-grid-community";
 import { format } from "date-fns";
@@ -134,6 +140,11 @@ export default function ClientReturnRate() {
   const getDateRange = useCallback(() => {
     const now = new Date();
     if (date?.from) return date;
+    if (timeRange === "6h") {
+      const d = new Date(now);
+      d.setHours(now.getHours() - 6);
+      return { from: d, to: now };
+    }
     if (timeRange === "1w") {
       const d = new Date(now);
       d.setDate(now.getDate() - 7);
@@ -169,6 +180,9 @@ export default function ClientReturnRate() {
       if (searchInput.trim()) p.set("search", searchInput.trim());
       if (dr?.from) p.set("month_start", format(dr.from, "yyyy-MM-dd"));
       if (dr?.to) p.set("month_end", format(dr.to, "yyyy-MM-dd"));
+      if (timeRange === "6h" && dr?.from) {
+        p.set("close_time_start", format(dr.from, "yyyy-MM-dd HH:mm:ss"));
+      }
       const res = await fetch(`/api/v1/client-return-rate/query?${p}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const r = await res.json();
@@ -221,6 +235,16 @@ export default function ClientReturnRate() {
     setSearchValue("");
   }, []);
 
+  const handleClearCache = useCallback(async () => {
+    try {
+      await fetch("/api/v1/client-return-rate/cache", { method: "DELETE" });
+      sessionStorage.removeItem(SESSION_KEY);
+      await fetchData();
+    } catch (e) {
+      console.error("Failed to clear cache", e);
+    }
+  }, [fetchData]);
+
   const columnDefs: ColDef<ClientReturnRateRow>[] = useMemo(
     () => [
       {
@@ -248,7 +272,7 @@ export default function ClientReturnRate() {
       },
       {
         field: "net_deposit_month",
-        headerName: "当月净入金",
+        headerName: "区间净入金",
         width: 130,
         valueFormatter: (p) => formatCurrency(p.value),
         cellClass: (p) => getProfitColor(p.value),
@@ -268,7 +292,7 @@ export default function ClientReturnRate() {
       },
       {
         field: "month_trade_profit",
-        headerName: "本月利润",
+        headerName: "区间交易利润",
         width: 130,
         valueFormatter: (p) => formatCurrency(p.value),
         cellClass: (p) => getProfitColor(p.value),
@@ -316,7 +340,7 @@ export default function ClientReturnRate() {
       },
       {
         field: "return_neg_adjusted",
-        headerName: "负净入金回报率%",
+        headerName: "负数入金收益率%",
         width: 170,
         valueFormatter: (p) => formatPercent(p.value),
         cellClass: (p) => getProfitColor(p.value),
@@ -334,7 +358,13 @@ export default function ClientReturnRate() {
   return (
     <div className="flex h-full w-full flex-col gap-2 p-1 sm:p-4">
       <Card>
-        <CardContent className="py-3">
+        <CardHeader>
+          <CardTitle className="text-2xl font-bold">客户收益率查询</CardTitle>
+          <p className="text-sm text-muted-foreground">
+            展示所选时间范围内有平仓记录的客户
+          </p>
+        </CardHeader>
+        <CardContent>
           <div className="flex flex-col sm:flex-row gap-3 items-center justify-between">
             {/* Filter controls */}
             <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 w-full sm:w-auto">
@@ -390,6 +420,7 @@ export default function ClientReturnRate() {
                   <SelectValue placeholder="时间快选" />
                 </SelectTrigger>
                 <SelectContent>
+                  <SelectItem value="6h">过去 6 小时</SelectItem>
                   <SelectItem value="1w">过去 1 周</SelectItem>
                   <SelectItem value="2w">过去 2 周</SelectItem>
                   <SelectItem value="1m">过去 1 个月</SelectItem>
@@ -461,6 +492,28 @@ export default function ClientReturnRate() {
                 <span className="px-2 py-1 bg-gray-100 dark:bg-gray-800/40 rounded">
                   查询时间: {queriedAt}
                 </span>
+              )}
+              <span
+                className={cn(
+                  "px-2 py-1 rounded font-medium",
+                  fromCache
+                    ? "bg-amber-100 dark:bg-amber-900/20 text-amber-700 dark:text-amber-300"
+                    : "bg-emerald-100 dark:bg-emerald-900/20 text-emerald-700 dark:text-emerald-300",
+                )}
+              >
+                {fromCache ? "缓存数据" : "实时查询"}
+              </span>
+              {fromCache && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={handleClearCache}
+                  disabled={loading}
+                  className="h-6 px-2 gap-1 text-xs text-muted-foreground hover:text-destructive"
+                >
+                  <Trash2 className="h-3 w-3" />
+                  清除缓存
+                </Button>
               )}
             </div>
           )}

@@ -8,12 +8,19 @@ Queries MySQL (fxbackoffice slave) using a two-phase approach:
 Net deposit = deposit + withdrawal + ib withdrawal (latter two are negative).
 CEN currency amounts are divided by 100.
 Demo accounts (GROUP LIKE '%demo%') are excluded.
+
+CLOSE_TIME timezone: MT4 server time = UTC+2 (winter) / UTC+3 (summer DST).
+When converting from HK time (UTC+8), subtract 6 hours (winter) or 5 hours (summer).
+TODO: Update MT4_TZ_OFFSET_HOURS when switching to summer time (UTC+3 → offset = -5).
 """
+
+# MT4 CLOSE_TIME is UTC+2 (winter). HK is UTC+8. Offset = 8 - 2 = 6 hours.
+MT4_TZ_OFFSET_HOURS = 6
 
 import hashlib
 import json
 import math
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Dict, Optional
 
@@ -38,7 +45,7 @@ def _get_mysql_connection():
     """Create a MySQL connection to fxbackoffice slave DB."""
     settings = get_settings()
     return pymysql.connect(
-        host=settings.MYSQL_HOST,
+        host=settings.MYSQL_HOST_PRIMARY,
         user=settings.MYSQL_USER,
         password=settings.MYSQL_PASSWORD,
         database=settings.MYSQL_DATABASE_FXBACKOFFICE,
@@ -206,6 +213,7 @@ def get_client_return_rate_data(
     deposit_bucket: Optional[str] = None,
     month_start: Optional[str] = None,
     month_end: Optional[str] = None,
+    close_time_start: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Two-phase MySQL query for client return rate data.
@@ -229,8 +237,17 @@ def get_client_return_rate_data(
         sort_by = "month_trade_profit"
     sort_order_sql = "DESC" if sort_order.lower() == "desc" else "ASC"
 
+    # Convert HK close_time_start to MT4 server time (UTC+2 winter / UTC+3 summer)
+    close_time_mt4 = None
+    if close_time_start:
+        try:
+            hk_dt = datetime.strptime(close_time_start, "%Y-%m-%d %H:%M:%S")
+            close_time_mt4 = (hk_dt - timedelta(hours=MT4_TZ_OFFSET_HOURS)).strftime("%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            logger.warning(f"Invalid close_time_start format: {close_time_start}")
+
     # Redis cache
-    cache_params = f"client_return_v2_{month_start}_{month_end}_{search}_{deposit_bucket}_{sort_by}_{sort_order}_{page}_{page_size}"
+    cache_params = f"client_return_v2_{month_start}_{month_end}_{search}_{deposit_bucket}_{sort_by}_{sort_order}_{page}_{page_size}_{close_time_start}"
     cache_key = f"app:client_return:cache:{hashlib.md5(cache_params.encode()).hexdigest()}"
 
     try:
@@ -253,11 +270,21 @@ def get_client_return_rate_data(
                 params = {"month_start": month_start, "month_end": month_end}
 
                 # --- Phase 1: get active client_ids ---
+                close_time_clause = ""
+                if close_time_mt4:
+                    params["close_time_mt4"] = close_time_mt4
+                    close_time_clause = "  AND t.CLOSE_TIME >= %(close_time_mt4)s\n"
+
                 if search and search.strip().isdigit():
                     params["search_id"] = int(search.strip())
-                    cur.execute(SQL_PHASE1_SEARCH, params)
+                    sql = SQL_PHASE1_SEARCH
                 else:
-                    cur.execute(SQL_PHASE1, params)
+                    sql = SQL_PHASE1
+
+                if close_time_clause:
+                    sql = sql.replace("GROUP BY mu.userId", close_time_clause + "GROUP BY mu.userId")
+
+                cur.execute(sql, params)
 
                 active_rows = cur.fetchall()
 
@@ -273,7 +300,7 @@ def get_client_return_rate_data(
                             "query_time_ms": round(elapsed_ms, 2),
                             "from_cache": False,
                             "month_range": f"{month_start} ~ {month_end}",
-                            "queried_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            "queried_at": datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %I:%M:%S %p"),
                         },
                     }
 
@@ -324,11 +351,11 @@ def get_client_return_rate_data(
                 "query_time_ms": round(elapsed_ms, 2),
                 "from_cache": False,
                 "month_range": f"{month_start} ~ {month_end}",
-                "queried_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "queried_at": datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %I:%M:%S %p"),
             },
         }
 
-        # Save to Redis (TTL 30 min)
+        # Save to Redis (TTL 3 hours)
         try:
             if clickhouse_service.redis_client:
                 clickhouse_service.redis_client.setex(
