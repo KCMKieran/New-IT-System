@@ -38,6 +38,10 @@ class ClientReturnRateRow(BaseModel):
     # Negative net deposit return: (equity - A) / A where A = MAX(deposits_90d, |net_deposit_hist|)
     return_neg_adjusted: Optional[float] = Field(None, description="Negative net deposit return rate %")
 
+    # Frontend local-filter fields (not used for backend sorting/filtering)
+    country: str = Field("Unknown", description="Client country: CN (cid=0) or Global (cid=1)")
+    is_akcm: bool = Field(False, description="Whether client has AKCM tag (tagid=30154)")
+
 
 class ClientReturnRateRequest(BaseModel):
     """

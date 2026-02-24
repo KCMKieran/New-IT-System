@@ -107,6 +107,8 @@ SELECT
     ROUND(COALESCE(txm.deposits_month, 0) + COALESCE(txm.withdrawals_month, 0), 2) AS net_deposit_month,
     ROUND(COALESCE(eq.equity, 0), 2) AS equity,
     ROUND(COALESCE(eq.equity, 0) - (COALESCE(th.deposits_hist, 0) + COALESCE(th.withdrawals_hist, 0)), 2) AS profit_hist,
+    COALESCE(uc.country, 'Unknown') AS country,
+    COALESCE(akcm.is_akcm, 0) AS is_akcm,
 
     CASE
         WHEN COALESCE(th.deposits_hist, 0) / GREATEST(COALESCE(th.deposit_count, 1), 1) < 2000 THEN '0-2000'
@@ -208,6 +210,20 @@ LEFT JOIN (
       AND mu.`GROUP` NOT LIKE '%demo%'
     GROUP BY st.userId
 ) AS dep90 ON tm.client_id = dep90.client_id
+
+LEFT JOIN (
+    SELECT id AS client_id,
+           IF(cid = 0, 'CN', 'Global') AS country
+    FROM users
+    WHERE id IN ({id_list_str})
+) AS uc ON tm.client_id = uc.client_id
+
+LEFT JOIN (
+    SELECT DISTINCT userid AS client_id, 1 AS is_akcm
+    FROM user_tags
+    WHERE tagid = 30154
+      AND userid IN ({id_list_str})
+) AS akcm ON tm.client_id = akcm.client_id
 
 ORDER BY tm.month_trade_profit IS NULL, tm.month_trade_profit DESC
 """
@@ -329,11 +345,12 @@ def get_client_return_rate_data(
         finally:
             conn.close()
 
-        # Convert Decimal to float for JSON serialization
+        # Convert Decimal to float; cast is_akcm from int (0/1) to bool
         for row in all_data:
             for k, v in row.items():
                 if isinstance(v, Decimal):
                     row[k] = float(v)
+            row["is_akcm"] = bool(row.get("is_akcm", 0))
 
         # In-memory deposit_bucket filter
         if deposit_bucket:

@@ -44,6 +44,7 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { DateRange } from "react-day-picker";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 
 interface ClientReturnRateRow {
   client_id: number;
@@ -59,6 +60,8 @@ interface ClientReturnRateRow {
   return_non_adjusted: number | null;
   deposits_90d: number;
   return_neg_adjusted: number | null;
+  country: string;
+  is_akcm: boolean;
 }
 
 interface CachedState {
@@ -152,6 +155,22 @@ export default function ClientReturnRate() {
     cached.current?.queriedAt ?? null,
   );
   const [date, setDate] = useState<DateRange | undefined>(cached.current?.date);
+  const [countryFilter, setCountryFilter] = useState<string>("all");
+  const [akcmFilter, setAkcmFilter] = useState<string>("all");
+
+  // Local filtering on already-fetched data (no backend round-trip)
+  const filteredRows = useMemo(() => {
+    let result = rows;
+    if (countryFilter !== "all") {
+      result = result.filter((r) => r.country === countryFilter);
+    }
+    if (akcmFilter === "exclude") {
+      result = result.filter((r) => !r.is_akcm);
+    } else if (akcmFilter === "only") {
+      result = result.filter((r) => r.is_akcm);
+    }
+    return result;
+  }, [rows, countryFilter, akcmFilter]);
 
   const getDateRange = useCallback(() => {
     const now = new Date();
@@ -466,6 +485,66 @@ export default function ClientReturnRate() {
                   </Button>
                 )}
               </div>
+
+              {/* Country Filter (CN / Global) */}
+              <ToggleGroup
+                type="single"
+                value={countryFilter}
+                onValueChange={(v) => v && setCountryFilter(v)}
+                className="flex w-full sm:w-[300px] items-center rounded-full bg-muted p-1"
+              >
+                <ToggleGroupItem
+                  value="all"
+                  className="flex-1 rounded-full first:rounded-l-full last:rounded-r-full py-1 text-center text-sm text-muted-foreground
+                             data-[state=on]:bg-background data-[state=on]:text-foreground data-[state=on]:shadow"
+                >
+                  全部
+                </ToggleGroupItem>
+                <ToggleGroupItem
+                  value="CN"
+                  className="flex-1 rounded-full first:rounded-l-full last:rounded-r-full py-1 text-center text-sm text-muted-foreground
+                             data-[state=on]:bg-background data-[state=on]:text-foreground data-[state=on]:shadow"
+                >
+                  CN
+                </ToggleGroupItem>
+                <ToggleGroupItem
+                  value="Global"
+                  className="flex-1 rounded-full first:rounded-l-full last:rounded-r-full py-1 text-center text-sm text-muted-foreground
+                             data-[state=on]:bg-background data-[state=on]:text-foreground data-[state=on]:shadow"
+                >
+                  Global
+                </ToggleGroupItem>
+              </ToggleGroup>
+
+              {/* AKCM Tag Filter */}
+              <ToggleGroup
+                type="single"
+                value={akcmFilter}
+                onValueChange={(v) => v && setAkcmFilter(v)}
+                className="flex w-full sm:w-[300px] items-center rounded-full bg-muted p-1"
+              >
+                <ToggleGroupItem
+                  value="all"
+                  className="flex-1 rounded-full first:rounded-l-full last:rounded-r-full py-1 text-center text-sm text-muted-foreground
+                             data-[state=on]:bg-background data-[state=on]:text-foreground data-[state=on]:shadow"
+                >
+                  全部
+                </ToggleGroupItem>
+                <ToggleGroupItem
+                  value="exclude"
+                  className="flex-1 rounded-full first:rounded-l-full last:rounded-r-full py-1 text-center text-sm text-muted-foreground
+                             data-[state=on]:bg-background data-[state=on]:text-foreground data-[state=on]:shadow"
+                >
+                  排除AKCM
+                </ToggleGroupItem>
+                <ToggleGroupItem
+                  value="only"
+                  className="flex-1 rounded-full first:rounded-l-full last:rounded-r-full py-1 text-center text-sm text-muted-foreground
+                             data-[state=on]:bg-background data-[state=on]:text-foreground data-[state=on]:shadow"
+                >
+                  仅AKCM
+                </ToggleGroupItem>
+              </ToggleGroup>
             </div>
 
             {/* Action buttons */}
@@ -489,7 +568,9 @@ export default function ClientReturnRate() {
           {total > 0 && (
             <div className="mt-3 flex flex-wrap items-center gap-2 text-xs sm:text-sm text-muted-foreground">
               <span className="px-2 py-1 bg-slate-100 dark:bg-slate-800/40 rounded">
-                共 {total.toLocaleString()} 位客户有交易记录
+                {filteredRows.length < total
+                  ? `共 ${filteredRows.length.toLocaleString()} / ${total.toLocaleString()} 位客户`
+                  : `共 ${total.toLocaleString()} 位客户有交易记录`}
               </span>
               {queryTime !== null && (
                 <span
@@ -567,7 +648,7 @@ export default function ClientReturnRate() {
         >
           <AgGridReact
             ref={gridRef}
-            rowData={rows}
+            rowData={filteredRows}
             columnDefs={columnDefs}
             defaultColDef={defaultColDef}
             gridOptions={{ theme: "legacy" }}
