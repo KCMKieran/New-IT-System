@@ -1,3 +1,19 @@
+/**
+ * Client Return Rate page - "客户回报率查询"
+ *
+ * Shows clients who had closed trades in a selected time range,
+ * with their equity, deposit history, and various return rate metrics.
+ *
+ * Key columns:
+ *   - 区间交易利润: trading profit within selected date range
+ *   - 区间净入金: net deposits within selected date range
+ *   - 负净入金回报率: (equity - A) / A, where A = MAX(deposits_90d, |net_deposit_hist|)
+ *
+ * Time range "过去6小时" uses precise CLOSE_TIME filtering (MT4 server time UTC+2/+3).
+ * Other ranges use date-level closeDate filtering.
+ *
+ * Docs: docs/features/client-return-rate.md
+ */
 import { useState, useCallback, useMemo, useRef } from "react";
 import { useTheme } from "@/components/theme-provider";
 import { Button } from "@/components/ui/button";

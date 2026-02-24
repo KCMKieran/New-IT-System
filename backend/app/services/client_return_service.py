@@ -1,21 +1,27 @@
 """
 Service layer for Client Return Rate analysis.
+Docs: docs/features/client-return-rate.md
 
-Queries MySQL (fxbackoffice slave) using a two-phase approach:
+Two-phase MySQL query against fxbackoffice (via MYSQL_HOST_PRIMARY):
   Phase 1 – Get active client_ids from mt4_trades in the date range.
-  Phase 2 – Use stats_transactions for deposit/withdrawal data, mt4_users for equity.
+             Uses closeDate index for fast filtering; optionally CLOSE_TIME for 6h precision.
+  Phase 2 – LEFT JOIN subqueries for:
+             eq:    mt4_users EQUITY (current account value)
+             th:    stats_transactions all-time deposits/withdrawals
+             txm:   stats_transactions deposits/withdrawals in selected range
+             dep90: stats_transactions deposits in last 90 days
 
-Net deposit = deposit + withdrawal + ib withdrawal (latter two are negative).
-CEN currency amounts are divided by 100.
-Demo accounts (GROUP LIKE '%demo%') are excluded.
+Return rate columns:
+  - adj_xxx:              equity / bucket_base × 100 (when net_deposit ≤ 0, by deposit bucket)
+  - return_non_adjusted:  (equity - net_deposit) / net_deposit × 100 (when net_deposit > 0)
+  - return_neg_adjusted:  (equity - A) / A × 100, A = MAX(deposits_90d, |net_deposit|) (when net_deposit ≤ 0)
 
-CLOSE_TIME timezone: MT4 server time = UTC+2 (winter) / UTC+3 (summer DST).
-When converting from HK time (UTC+8), subtract 6 hours (winter) or 5 hours (summer).
-TODO: Update MT4_TZ_OFFSET_HOURS when switching to summer time (UTC+3 → offset = -5).
+CLOSE_TIME timezone: MT4 server = UTC+2 (winter) / UTC+3 (summer DST).
+Frontend sends HK time (UTC+8), converted here using MT4_TZ_OFFSET_HOURS.
+TODO: Update MT4_TZ_OFFSET_HOURS from 6 to 5 when switching to summer time (UTC+3).
+
+Redis cache TTL: 3 hours. Clear via DELETE /api/v1/client-return-rate/cache.
 """
-
-# MT4 CLOSE_TIME is UTC+2 (winter). HK is UTC+8. Offset = 8 - 2 = 6 hours.
-MT4_TZ_OFFSET_HOURS = 6
 
 import hashlib
 import json
@@ -31,6 +37,9 @@ from app.core.logging_config import get_logger
 from app.services.clickhouse_service import clickhouse_service
 
 logger = get_logger(__name__)
+
+# MT4 CLOSE_TIME is UTC+2 (winter). HK is UTC+8. Offset = 8 - 2 = 6 hours.
+MT4_TZ_OFFSET_HOURS = 6
 
 
 def _json_default(obj: Any) -> Any:

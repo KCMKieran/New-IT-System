@@ -1,7 +1,12 @@
 """
 API routes for Client Return Rate analysis.
 
-Provides endpoints for querying client return rate data from ClickHouse.
+Endpoints:
+  GET  /query  - Query clients with trades in date range, returns return rate metrics
+  DELETE /cache - Clear all Redis cache entries for this page
+
+Data flow: Frontend → this route → client_return_service.py → MySQL (fxbackoffice)
+Docs: docs/features/client-return-rate.md
 """
 
 from typing import Optional
@@ -33,15 +38,12 @@ async def query_client_return_rate(
 ):
     """
     Query client return rate data with pagination and filtering.
-    
-    - **page**: Page number (1-indexed)
-    - **page_size**: Number of items per page (max 500)
-    - **sort_by**: Column to sort by
-    - **sort_order**: 'asc' or 'desc'
-    - **search**: Filter by client_id (exact match)
-    - **deposit_bucket**: Filter by deposit bucket ('0-2000', '2000-5000', '5000-50000', '50000+')
-    - **month_start**: Start date for current month calculation
-    - **month_end**: End date for current month calculation
+
+    Finds clients who had closed trades (CMD 0/1) in the given date range,
+    then enriches with equity, deposit history, and return rate calculations.
+
+    - **close_time_start**: Optional precise filter using CLOSE_TIME (HK time),
+      converted to MT4 server time (UTC+2/+3) in the service layer.
     """
     try:
         result = get_client_return_rate_data(

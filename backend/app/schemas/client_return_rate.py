@@ -1,7 +1,11 @@
 """
 Pydantic schemas for Client Return Rate API.
+Docs: docs/features/client-return-rate.md
 
-This module defines request/response models for the client return rate analysis feature.
+Defines request/response models. Key business rules:
+  - adj_xxx columns are mutually exclusive (one per client, by deposit bucket)
+  - return_non_adjusted only populated when net_deposit > 0
+  - return_neg_adjusted only populated when net_deposit ≤ 0 and A > 0
 """
 
 from typing import Optional, List, Any, Dict

@@ -45,7 +45,7 @@
 ┌───────────────┐ ┌───────────────┐ ┌───────────────┐
 │  ClickHouse   │ │    MySQL      │ │    Redis      │
 │  (Analytics)  │ │  (MT4/MT5)    │ │   (Cache)     │
-│  - Reports    │ │  - Trades     │ │  - TTL: 30min │
+│  - Reports    │ │  - Trades     │ │  - TTL: varies│
 │  - Stats      │ │  - Users      │ │               │
 └───────────────┘ └───────────────┘ └───────────────┘
 ```
@@ -221,14 +221,21 @@ New-IT-System/
 
 **Key Features**:
 - Two-phase MySQL query (mt4_trades + stats_transactions)
-- Date range filtering (default: past 1 week)
+- Date range filtering (default: past 1 week, supports 6h/1w/2w/1m/custom)
+- 6-hour precise filtering via CLOSE_TIME (MT4 server time UTC+2 winter / UTC+3 summer)
 - Client ID search (pushed down to all subqueries for fast lookup)
 - Adjusted return rates by deposit bucket (0-2K, 2K-5K, 5K-50K, 50K+)
+- Negative net deposit return rate: `(equity - A) / A` where `A = MAX(deposits_90d, |net_deposit_hist|)`
+- Last 90 days deposit column
 - Demo account exclusion
 - sessionStorage caching for page navigation restore
-- Redis 30min server-side cache
+- Redis 3-hour server-side cache with frontend clear cache button
+- Dedicated `MYSQL_HOST_PRIMARY` config (can override independently from global MYSQL_HOST)
 
-**API**: `GET /api/v1/client-return-rate/query`
+**APIs**:
+- `GET /api/v1/client-return-rate/query` - Query with optional `close_time_start` for precise filtering
+- `DELETE /api/v1/client-return-rate/cache` - Clear all Redis cache for this page
+
 **Tables**: `fxbackoffice.mt4_trades`, `fxbackoffice.mt4_users`, `fxbackoffice.stats_transactions`
 
 ### 4.6 Equity Monitor
@@ -257,10 +264,11 @@ New-IT-System/
 - **Prod** (`get_client(use_prod=True)`): `CLICKHOUSE_prod_*` + database `KCM_fxbackoffice`. Used by IB Report (groups, search) and Client PnL Analysis (query). Deploy must set prod credentials to the CDC cluster.
 
 ### MySQL connections (client_return_service.py)
-- **Client Return Rate** uses MySQL slave (`MYSQL_HOST` + `MYSQL_DATABASE_FXBACKOFFICE=fxbackoffice`) via pymysql.
+- **Client Return Rate** uses `MYSQL_HOST_PRIMARY` (falls back to `MYSQL_HOST` if not set) + `MYSQL_DATABASE_FXBACKOFFICE=fxbackoffice` via pymysql.
   - Two-phase query: Phase 1 gets active client_ids from `mt4_trades`, Phase 2 uses `stats_transactions` for deposit data.
+  - Optional precise filtering via `CLOSE_TIME` (MT4 server time UTC+2 winter / UTC+3 summer, offset constant `MT4_TZ_OFFSET_HOURS`).
   - Demo accounts excluded via `GROUP NOT LIKE '%demo%'`.
-  - Redis cache (30min TTL) + sessionStorage for frontend state persistence.
+  - Redis cache (3h TTL) with `DELETE /cache` endpoint + sessionStorage for frontend state persistence.
 
 ### Important Conventions
 
@@ -374,7 +382,7 @@ When 4 identical requests arrive before Redis cache is populated, only 1 hits Cl
 | CORS errors | Set CORS_ORIGINS in backend .env |
 | ClickHouse connection | Check VPN, verify credentials |
 | CEN account wrong amounts | Ensure dividing by 100 |
-| Cache not updating | Wait 30min TTL or clear Redis |
+| Cache not updating | Wait for TTL expiry (PnL: 30min, IB: 10min, Return Rate: 3h) or use clear cache button |
 
 ---
 
