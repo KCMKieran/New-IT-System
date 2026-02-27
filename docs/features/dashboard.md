@@ -1,17 +1,15 @@
 # Dashboard (Home Page)
 
-> Project document for the Dashboard feature — the landing page of KCM Analytics System.
+> Landing page of the KCM Analytics System — aggregates key widgets from other pages.
 
 ## 1. Overview
 
-The Dashboard serves as the **home page** of the KCM Analytics System. When users visit the root URL (`/`) or click the sidebar logo, they land on this page. It provides a high-level summary of key business metrics and quick navigation to core modules.
-
-**Current Status**: Placeholder (skeleton page created, awaiting data integration)
+The Dashboard (`/` or `/home`) is the first page users see after login. It displays a summary of critical business data by embedding compact widgets from existing feature pages, avoiding the need to navigate between multiple pages for quick situational awareness.
 
 ### Route & Entry Points
 
 | Entry Point | Behavior |
-|-------------|----------|
+|---|---|
 | URL `/` | Renders Dashboard (index route) |
 | URL `/home` | Alias route, same page |
 | Sidebar "Dashboard" item | Direct link to `/` |
@@ -19,144 +17,212 @@ The Dashboard serves as the **home page** of the KCM Analytics System. When user
 
 ---
 
-## 2. Development Plan
-
-### Phase 1 — Frontend Skeleton (DONE)
-
-- [x] Create `Home.tsx` placeholder component
-- [x] Configure route (`/` and `/home`) in `App.tsx`
-- [x] Add sidebar "Dashboard" entry with `IconHome`
-- [x] Make sidebar logo clickable (links to `/`)
-- [x] Add i18n translations (`nav.home`, `pages.home`, `pages.homeWelcome`)
-- [x] Update header title mapping for `/` route
-
-### Phase 2 — Define Dashboard Metrics
-
-Determine which KPIs / summary data to display. Potential candidates:
-
-| Metric | Source | API (existing?) |
-|--------|--------|-----------------|
-| Total open positions (by server) | MySQL (MT4/MT5) | `GET /api/v1/open-positions/summary` |
-| Today's deposit / withdrawal | ClickHouse | `POST /api/v1/ib-data/region-query` |
-| Active clients count | ClickHouse | New API needed |
-| Top symbols by volume | ClickHouse | New API needed |
-| System health / server status | Backend health check | `GET /api/v1/health` |
-
-> **Action**: Confirm with stakeholders which metrics are needed.
-
-### Phase 3 — Backend API
-
-1. Create `backend/app/api/v1/routes/dashboard.py`
-2. Create `backend/app/schemas/dashboard.py` — response models
-3. Create `backend/app/services/dashboard_service.py` — query logic
-4. Register in `backend/app/api/v1/routers.py`
-
-Suggested endpoint:
+## 2. Layout
 
 ```
-GET /api/v1/dashboard/summary
-Response:
-{
-  "open_positions": { "mt4": 1234, "mt5": 5678, "mt4_live2": 910 },
-  "today_deposit": 123456.78,
-  "today_withdrawal": 45678.90,
-  "active_clients_7d": 2345,
-  "top_symbols": [
-    { "symbol": "XAUUSD", "volume": 12345.6 },
-    ...
-  ],
-  "generated_at": "2026-02-09T12:00:00Z"
-}
+┌──────────────────────────────────────────────────────────┐
+│  grid-cols-4 (lg), grid-cols-1 (mobile)                  │
+│                                                          │
+│  ┌──────────┐  ┌────────────────────────────────────┐    │
+│  │ Left 1/4 │  │ Right 3/4                          │    │
+│  │          │  │                                    │    │
+│  │ CN渠道   │  │ ┌────────────────────────────────┐ │    │
+│  │ 支付成功率│  │ │ 实时持仓 (PositionSummary)    │ │    │
+│  │          │  │ │ - 跨服务器品种汇总表           │ │    │
+│  │ (sticky) │  │ │ - Auto-load on mount           │ │    │
+│  │          │  │ └────────────────────────────────┘ │    │
+│  │ Coming   │  │                                    │    │
+│  │ Soon     │  │ ┌────────────────────────────────┐ │    │
+│  │          │  │ │ 客户收益率 (ReturnRateSummary) │ │    │
+│  │          │  │ │ - AG Grid (6h data)            │ │    │
+│  │          │  │ │ - CN/Global + AKCM filters     │ │    │
+│  │          │  │ │ - Auto-load on mount           │ │    │
+│  │          │  │ └────────────────────────────────┘ │    │
+│  └──────────┘  └────────────────────────────────────┘    │
+└──────────────────────────────────────────────────────────┘
 ```
 
-### Phase 4 — Frontend Integration
-
-1. Add API call in `Home.tsx` (use `fetch` + `useEffect`, consistent with other pages)
-2. Build UI cards for each metric (shadcn/ui `Card` component)
-3. Optional: Add a chart (e.g., 7-day deposit trend using Recharts)
-4. Handle loading / error states
-
-### Phase 5 — Testing & Polish
-
-- Verify data accuracy against existing pages
-- Test dark/light theme
-- Test responsive layout (mobile sidebar collapsed)
-- Performance: Ensure dashboard loads within 2s
+- **Left column**: `self-start lg:sticky lg:top-4` — stays at natural height, sticky on scroll
+- **Right column**: `flex flex-col gap-4` — widgets stack vertically
+- **Responsive**: Single column on mobile, 1:3 split on `lg+`
 
 ---
 
-## 3. Technical Architecture
+## 3. Widgets
 
-```
-Frontend (Home.tsx)
-  │
-  │  GET /api/v1/dashboard/summary
-  ▼
-Backend (dashboard.py route)
-  │
-  │  Calls dashboard_service.py
-  ▼
-dashboard_service.py
-  ├── ClickHouse: deposit/withdrawal, client stats, top symbols
-  ├── MySQL (MT4/MT5): open positions (reuse open_positions_service)
-  └── Redis: cache result (TTL 5min recommended)
-```
+### 3.1 实时持仓 (PositionSummary)
+
+**File**: `frontend/src/components/dashboard/PositionSummary.tsx`
+
+**What it shows**:
+- Cross-server symbol summary table (MT4, MT5, MT4Live2)
+- XAUUSD/XAGUSD selection with fuzzy matching option
+- Data fetch timestamp (精确到秒)
+
+**API**: `GET /api/v1/open-positions/symbol-summary?symbol=XAUUSD`
+
+**Data source**: MySQL `fxbackoffice` — direct query, **no Redis cache**
+
+**Behavior**:
+- Auto-fetches XAUUSD summary on page mount
+- User can switch symbol and click "查询" for manual refresh
+- "查看全部" links to `/position` for full details
+
+### 3.2 客户收益率 (ReturnRateSummary)
+
+**File**: `frontend/src/components/dashboard/ReturnRateSummary.tsx`
+
+**What it shows**:
+- AG Grid table of clients with closed trades in the past 6 hours
+- Columns: 客户ID, 净值, 历史净入金, 历史总利润, 过去6小时内利润, 收益率%, 负净入金收益率%
+- CN/Global and AKCM toggle filters (frontend filtering)
+- Data fetch timestamp (精确到秒)
+
+**API**: `GET /api/v1/client-return-rate/query?...&close_time_start=...`
+
+**Data source**: MySQL `fxbackoffice` → **Redis cache (TTL 3h)**
+
+**Behavior**:
+- Auto-fetches on page mount (fixed 6-hour window)
+- User can click "刷新" for manual refresh
+- AG Grid features: sortable columns, column filters, pagination (100/page)
+- "查看全部" links to `/client-return-rate` for full date range queries
+
+### 3.3 CN渠道支付成功率 (Placeholder)
+
+**Status**: Coming Soon — left column placeholder card
+
+**Planned**: Real-time payment channel success rate monitoring
 
 ---
 
-## 4. File Inventory
+## 4. Auto-load & Data Freshness
 
-### Existing Files (Phase 1 — already created)
+Both widgets auto-fetch data when the Dashboard mounts (including browser refresh). Each widget displays a timestamp showing when data was last retrieved.
+
+| Widget | Auto-load | Cache | Typical Latency |
+|---|---|---|---|
+| PositionSummary | On mount (XAUUSD) | None | 1-3s |
+| ReturnRateSummary | On mount (6h window) | Redis 3h TTL | <100ms (cached) / 5-15s (fresh) |
+
+---
+
+## 5. Concurrency & Scaling Notes
+
+### Current State (≤10 concurrent users)
+
+Works fine as-is. MySQL handles the load without issues.
+
+### When to Add Optimization
+
+| Symptom | Solution | Effort |
+|---|---|---|
+| Position queries slow under load | Add Redis cache (TTL 30-60s) to `open_positions_service.py` | Low |
+| Cache stampede on return rate (many users hit expired cache simultaneously) | Add singleflight/lock in `client_return_service.py` (project already has `core/singleflight.py`) | Low |
+| MySQL connection errors | Replace `pymysql` short connections with connection pool (`SQLAlchemy` or `DBUtils.PooledDB`) | Medium |
+| >50 concurrent users | Add `GET /api/v1/dashboard/summary` endpoint that batches all dashboard queries server-side, cached with short TTL | Medium |
+
+### Connection Pool Migration Guide
+
+Current pattern (short connection per request):
+```python
+conn = pymysql.connect(host=..., user=..., password=...)
+with conn:
+    with conn.cursor() as cur:
+        cur.execute(sql)
+# connection closed after `with` block
+```
+
+Recommended pool pattern:
+```python
+# In core/database.py (new file)
+from dbutils.pooled_db import PooledDB
+import pymysql
+
+pool = PooledDB(
+    creator=pymysql,
+    maxconnections=20,      # max concurrent connections
+    mincached=2,            # idle connections to keep
+    maxcached=5,            # max idle connections
+    blocking=True,          # block when pool exhausted
+    host=settings.DB_HOST,
+    user=settings.DB_USER,
+    password=settings.DB_PASSWORD,
+    database=settings.FXBACK_DB_NAME,
+    port=int(settings.DB_PORT),
+    charset=settings.DB_CHARSET,
+    cursorclass=pymysql.cursors.DictCursor,
+)
+
+# Usage in services:
+conn = pool.connection()
+try:
+    with conn.cursor() as cur:
+        cur.execute(sql)
+finally:
+    conn.close()  # returns to pool, not actually closed
+```
+
+### Singleflight Pattern
+
+The project already has `backend/app/core/singleflight.py`. To prevent cache stampede:
+
+```python
+from app.core.singleflight import singleflight
+
+@singleflight(key_fn=lambda **kw: f"client_return:{kw['month_start']}_{kw['close_time_start']}")
+def get_client_return_rate_data(**kwargs):
+    # existing logic...
+```
+
+This ensures only one request queries MySQL when multiple users trigger the same query simultaneously.
+
+---
+
+## 6. File Inventory
 
 | File | Purpose |
-|------|---------|
-| `frontend/src/pages/Home.tsx` | Dashboard page component |
-| `frontend/src/App.tsx` | Route: `/` → HomePage, `/home` → HomePage |
-| `frontend/src/components/app-sidebar.tsx` | Sidebar "Dashboard" entry + logo link |
-| `frontend/src/components/site-header.tsx` | Header title mapping for `/` |
-| `frontend/src/i18n/locales/zh-CN.ts` | Chinese translations |
-| `frontend/src/i18n/locales/en-US.ts` | English translations |
-
-### Files to Create (Phase 3-4)
-
-| File | Purpose |
-|------|---------|
-| `backend/app/api/v1/routes/dashboard.py` | API route handler |
-| `backend/app/schemas/dashboard.py` | Pydantic response models |
-| `backend/app/services/dashboard_service.py` | Business logic & queries |
+|---|---|
+| `frontend/src/pages/Home.tsx` | Dashboard page — grid layout with lazy-loaded widgets |
+| `frontend/src/components/dashboard/PositionSummary.tsx` | Position summary widget |
+| `frontend/src/components/dashboard/ReturnRateSummary.tsx` | Client return rate widget (AG Grid) |
+| `backend/app/api/v1/routes/open_positions.py` | API: `/api/v1/open-positions/symbol-summary` |
+| `backend/app/api/v1/routes/client_return_rate.py` | API: `/api/v1/client-return-rate/query` |
+| `backend/app/services/open_positions_service.py` | Position query logic (MySQL, no cache) |
+| `backend/app/services/client_return_service.py` | Return rate query logic (MySQL + Redis cache) |
 
 ---
 
-## 5. Recommended Development Workflow
+## 7. Known Pitfalls
 
-For a full-stack developer working on this feature:
+### AG Grid Zebra Striping
 
-```
-1. Define API contract (request/response shape)
-      ↓
-2. Backend: schema → service → route → register
-      ↓
-3. Backend: test with Swagger UI (localhost:8001/docs)
-      ↓
-4. Frontend: build UI with mock/hardcoded data first
-      ↓
-5. Frontend: integrate real API calls
-      ↓
-6. End-to-end testing
-      ↓
-7. Polish: loading states, error handling, responsive
+The project's CSS variables (e.g., `--primary`) use **oklch** format. AG Grid's `--ag-odd-row-background-color` expects a valid CSS color value. Do NOT write:
+
+```css
+/* WRONG — oklch nested inside hsl() is invalid */
+--ag-odd-row-background-color: hsl(var(--primary) / 0.04);
 ```
 
-**Why backend first?**
-- The API contract defines what data is available
-- You can test backend independently via Swagger UI
-- Frontend can be developed with confidence once API is confirmed working
+Use direct `rgba()` instead:
+
+```css
+/* CORRECT */
+--ag-odd-row-background-color: isDarkMode ? "rgba(255,255,255,0.04)" : "rgba(0,0,0,0.03)";
+```
+
+### ToggleGroup Pill Shape
+
+The base `ToggleGroupItem` component (`toggle-group.tsx`) no longer sets `rounded-none first:rounded-l-md last:rounded-r-md`. This was removed to prevent overriding custom `rounded-*` classes. Always set the desired border-radius on both the `ToggleGroup` (container) and each `ToggleGroupItem`.
 
 ---
 
-## 6. Notes
+## 8. Future Enhancements
 
-- Dashboard should reuse existing services where possible (e.g., `open_positions_service`)
-- Consider Redis caching with short TTL (5min) since dashboard is frequently visited
-- Keep the page lightweight — avoid heavy queries that block initial load
-- All comments in English, UI text via i18n
+- [ ] CN渠道支付成功率 — integrate payment channel API
+- [ ] Connection pool for MySQL (`DBUtils.PooledDB`)
+- [ ] Short-TTL Redis cache for position summary (30-60s)
+- [ ] Singleflight for return rate queries
+- [ ] Dedicated `GET /api/v1/dashboard/summary` batch endpoint (when >50 users)
+- [ ] Auto-refresh with configurable interval (e.g., every 5 minutes)
+- [ ] Fix `hsl(var(--primary))` in other AG Grid pages (ClientPnLAnalysis, IBReport, ClientPnLMonitor)

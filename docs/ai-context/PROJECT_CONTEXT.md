@@ -90,6 +90,9 @@ New-IT-System/
 │   │   │   # - Basis.tsx (hidden, 2026-02, 10.6.20.138:8050 service disabled)
 │   │   ├── components/         # Reusable components
 │   │   │   ├── ui/             # shadcn/ui components
+│   │   │   ├── dashboard/      # Dashboard widgets
+│   │   │   │   ├── PositionSummary.tsx    # Position summary widget
+│   │   │   │   └── ReturnRateSummary.tsx  # Client return rate widget
 │   │   │   ├── site-header.tsx # Page titles
 │   │   │   └── app-sidebar.tsx # Navigation
 │   │   ├── providers/
@@ -143,15 +146,24 @@ New-IT-System/
 ## 4. Core Business Modules
 
 ### 4.0 Dashboard (`Home.tsx`)
-**Purpose**: Landing page showing system overview and key metrics summary.
+**Purpose**: Landing page aggregating key widgets from other pages for quick situational awareness.
 
 **Key Features**:
-- Default route (`/`) and alias (`/home`)
-- Sidebar "Dashboard" entry with home icon
-- Sidebar logo click navigates to home
-- Placeholder page (awaiting backend API integration)
+- Grid layout: left 1/4 (CN payment placeholder, sticky) + right 3/4 (widgets stacked)
+- **实时持仓** widget — cross-server XAUUSD/XAGUSD summary (auto-loads on mount)
+- **客户收益率 (6h)** widget — AG Grid with CN/Global + AKCM filters (auto-loads on mount)
+- Data fetch timestamps displayed on each widget
+- Lazy-loaded widgets with Skeleton fallback
 
-**API** (planned): `GET /api/v1/dashboard/summary`
+**API** (reuses existing):
+- `GET /api/v1/open-positions/symbol-summary` (no cache)
+- `GET /api/v1/client-return-rate/query` (Redis cache 3h)
+
+**Key Files**:
+- `frontend/src/pages/Home.tsx`
+- `frontend/src/components/dashboard/PositionSummary.tsx`
+- `frontend/src/components/dashboard/ReturnRateSummary.tsx`
+
 **Docs**: [dashboard.md](../features/dashboard.md)
 
 ### 4.1 Position Monitor (`Position.tsx`)

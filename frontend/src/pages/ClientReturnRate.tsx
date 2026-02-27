@@ -661,8 +661,9 @@ export default function ClientReturnRate() {
             ["--ag-background-color" as any]: "hsl(var(--card))",
             ["--ag-foreground-color" as any]: "hsl(var(--foreground))",
             ["--ag-row-border-color" as any]: "hsl(var(--border))",
-            ["--ag-odd-row-background-color" as any]:
-              "hsl(var(--primary) / 0.04)",
+            ["--ag-odd-row-background-color" as any]: isDarkMode
+              ? "rgba(255,255,255,0.04)"
+              : "rgba(0,0,0,0.03)",
           }}
         >
           <AgGridReact
