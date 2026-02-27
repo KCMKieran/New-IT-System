@@ -175,9 +175,19 @@ export default function ClientReturnRate() {
   const getDateRange = useCallback(() => {
     const now = new Date();
     if (date?.from) return date;
+    if (timeRange === "1h") {
+      const d = new Date(now);
+      d.setHours(now.getHours() - 1);
+      return { from: d, to: now };
+    }
     if (timeRange === "6h") {
       const d = new Date(now);
       d.setHours(now.getHours() - 6);
+      return { from: d, to: now };
+    }
+    if (timeRange === "today") {
+      const d = new Date(now);
+      d.setHours(0, 0, 0, 0);
       return { from: d, to: now };
     }
     if (timeRange === "1w") {
@@ -185,9 +195,15 @@ export default function ClientReturnRate() {
       d.setDate(now.getDate() - 7);
       return { from: d, to: now };
     }
-    if (timeRange === "2w") {
+    if (timeRange === "this_week") {
       const d = new Date(now);
-      d.setDate(now.getDate() - 14);
+      const day = d.getDay();
+      d.setDate(d.getDate() - (day === 0 ? 6 : day - 1));
+      d.setHours(0, 0, 0, 0);
+      return { from: d, to: now };
+    }
+    if (timeRange === "this_month") {
+      const d = new Date(now.getFullYear(), now.getMonth(), 1);
       return { from: d, to: now };
     }
     if (timeRange === "1m") {
@@ -215,7 +231,7 @@ export default function ClientReturnRate() {
       if (searchInput.trim()) p.set("search", searchInput.trim());
       if (dr?.from) p.set("month_start", format(dr.from, "yyyy-MM-dd"));
       if (dr?.to) p.set("month_end", format(dr.to, "yyyy-MM-dd"));
-      if (timeRange === "6h" && dr?.from) {
+      if ((timeRange === "1h" || timeRange === "6h") && dr?.from) {
         p.set("close_time_start", format(dr.from, "yyyy-MM-dd HH:mm:ss"));
       }
       const res = await fetch(`/api/v1/client-return-rate/query?${p}`);
@@ -451,14 +467,17 @@ export default function ClientReturnRate() {
                   setDate(undefined);
                 }}
               >
-                <SelectTrigger className="w-full sm:w-[130px] h-9">
+                <SelectTrigger className="w-full sm:w-[140px] h-9">
                   <SelectValue placeholder="时间快选" />
                 </SelectTrigger>
                 <SelectContent>
+                  <SelectItem value="1h">过去 1 小时</SelectItem>
                   <SelectItem value="6h">过去 6 小时</SelectItem>
-                  <SelectItem value="1w">过去 1 周</SelectItem>
-                  <SelectItem value="2w">过去 2 周</SelectItem>
-                  <SelectItem value="1m">过去 1 个月</SelectItem>
+                  <SelectItem value="today">今日</SelectItem>
+                  <SelectItem value="this_week">本周</SelectItem>
+                  <SelectItem value="1w">过去 7 天</SelectItem>
+                  <SelectItem value="this_month">本月</SelectItem>
+                  <SelectItem value="1m">过去 30 天</SelectItem>
                 </SelectContent>
               </Select>
 

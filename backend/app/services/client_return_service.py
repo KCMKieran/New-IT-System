@@ -3,8 +3,9 @@ Service layer for Client Return Rate analysis.
 Docs: docs/features/client-return-rate.md
 
 Two-phase MySQL query against fxbackoffice (via MYSQL_HOST_PRIMARY):
-  Phase 1 – Get active client_ids from mt4_trades in the date range.
-             Uses closeDate index for fast filtering; optionally CLOSE_TIME for 6h precision.
+  Phase 1 – Get active client_ids with trading profit in the date range.
+             Default path: stats_trading pre-aggregated table (fast, <1s).
+             Fallback path: mt4_trades raw table for sub-day precision (6h/2h/1h).
   Phase 2 – LEFT JOIN subqueries for:
              eq:    mt4_users EQUITY (current account value)
              th:    stats_transactions all-time deposits/withdrawals
@@ -66,11 +67,48 @@ def _get_mysql_connection():
     )
 
 
-# Phase 1: active clients with trading profit in the date range
-SQL_PHASE1 = """
+# ---------------------------------------------------------------------------
+# Phase 1 — Fast path: stats_trading pre-aggregated table
+# One row per (date, loginSid). Uses (userId, date) index for fast lookup.
+# Demo / sid filtering is handled by Phase 2 JOINs (mt4_users).
+#
+# Field mapping (verified against mt4_trades):
+#   totalPlClosed = SUM(PROFIT + SWAPS + COMMISSION)  ← net P&L, what we want
+#   totalProfit   = SUM(PROFIT) only, without swap/commission
+#   totalSwaps    = SUM(SWAPS)
+#   totalCommission = SUM(COMMISSION)
+# ---------------------------------------------------------------------------
+SQL_PHASE1_STATS = """
+SELECT
+    userId AS client_id,
+    SUM(IF(currency = 'CEN', totalPlClosed / 100.0, totalPlClosed)) AS month_trade_profit
+FROM stats_trading
+WHERE date BETWEEN %(month_start)s AND %(month_end)s
+  AND userId > 0
+  AND tradeCnt > 0
+GROUP BY userId
+"""
+
+SQL_PHASE1_STATS_SEARCH = """
+SELECT
+    userId AS client_id,
+    SUM(IF(currency = 'CEN', totalPlClosed / 100.0, totalPlClosed)) AS month_trade_profit
+FROM stats_trading
+WHERE date BETWEEN %(month_start)s AND %(month_end)s
+  AND userId = %(search_id)s
+  AND tradeCnt > 0
+GROUP BY userId
+"""
+
+# ---------------------------------------------------------------------------
+# Phase 1 — Slow fallback: mt4_trades raw table
+# Used only for sub-day precision (6h / 2h / 1h) where CLOSE_TIME filtering
+# is needed. stats_trading is daily granularity and cannot support this.
+# ---------------------------------------------------------------------------
+SQL_PHASE1_TRADES = """
 SELECT
     mu.userId AS client_id,
-    SUM(IF(mu.CURRENCY = 'CEN', t.PROFIT / 100.0, t.PROFIT)) AS month_trade_profit
+    SUM(IF(mu.CURRENCY = 'CEN', t.totalProfit / 100.0, t.totalProfit)) AS month_trade_profit
 FROM mt4_trades t
 INNER JOIN mt4_users mu ON t.loginSid = mu.loginSid
 WHERE t.closeDate BETWEEN %(month_start)s AND %(month_end)s
@@ -81,11 +119,10 @@ WHERE t.closeDate BETWEEN %(month_start)s AND %(month_end)s
 GROUP BY mu.userId
 """
 
-# Phase 1 variant: single client_id search
-SQL_PHASE1_SEARCH = """
+SQL_PHASE1_TRADES_SEARCH = """
 SELECT
     mu.userId AS client_id,
-    SUM(IF(mu.CURRENCY = 'CEN', t.PROFIT / 100.0, t.PROFIT)) AS month_trade_profit
+    SUM(IF(mu.CURRENCY = 'CEN', t.totalProfit / 100.0, t.totalProfit)) AS month_trade_profit
 FROM mt4_trades t
 INNER JOIN mt4_users mu ON t.loginSid = mu.loginSid
 WHERE t.closeDate BETWEEN %(month_start)s AND %(month_end)s
@@ -179,7 +216,7 @@ LEFT JOIN (
     INNER JOIN mt4_users mu ON st.loginSid = mu.loginSid
     WHERE st.type IN ('deposit', 'withdrawal', 'ib withdrawal')
       AND st.userId IN ({id_list_str})
-      AND mu.sid IN (1, 5, 6)
+      AND mu.sid IN (1, 2, 5, 6)
       AND mu.`GROUP` NOT LIKE '%demo%'
     GROUP BY st.userId
 ) AS th ON tm.client_id = th.client_id
@@ -193,7 +230,7 @@ LEFT JOIN (
     WHERE st.type IN ('deposit', 'withdrawal', 'ib withdrawal')
       AND st.date BETWEEN '{month_start}' AND '{month_end}'
       AND st.userId IN ({id_list_str})
-      AND mu.sid IN (1, 5, 6)
+      AND mu.sid IN (1, 2, 5, 6)
       AND mu.`GROUP` NOT LIKE '%demo%'
     GROUP BY st.userId
 ) AS txm ON tm.client_id = txm.client_id
@@ -206,7 +243,7 @@ LEFT JOIN (
     WHERE st.type = 'deposit'
       AND st.date >= DATE_SUB(CURDATE(), INTERVAL 90 DAY)
       AND st.userId IN ({id_list_str})
-      AND mu.sid IN (1, 5, 6)
+      AND mu.sid IN (1, 2, 5, 6)
       AND mu.`GROUP` NOT LIKE '%demo%'
     GROUP BY st.userId
 ) AS dep90 ON tm.client_id = dep90.client_id
@@ -295,19 +332,27 @@ def get_client_return_rate_data(
                 params = {"month_start": month_start, "month_end": month_end}
 
                 # --- Phase 1: get active client_ids ---
-                close_time_clause = ""
-                if close_time_mt4:
+                # Sub-day modes (6h/2h/1h) need CLOSE_TIME precision → fallback to mt4_trades.
+                # Day-level modes (1w/2w/1m/custom) → use stats_trading for speed.
+                use_stats = close_time_mt4 is None
+
+                if use_stats:
+                    if search and search.strip().isdigit():
+                        params["search_id"] = int(search.strip())
+                        sql = SQL_PHASE1_STATS_SEARCH
+                    else:
+                        sql = SQL_PHASE1_STATS
+                    logger.info("Phase 1: using stats_trading (fast path)")
+                else:
                     params["close_time_mt4"] = close_time_mt4
                     close_time_clause = "  AND t.CLOSE_TIME >= %(close_time_mt4)s\n"
-
-                if search and search.strip().isdigit():
-                    params["search_id"] = int(search.strip())
-                    sql = SQL_PHASE1_SEARCH
-                else:
-                    sql = SQL_PHASE1
-
-                if close_time_clause:
+                    if search and search.strip().isdigit():
+                        params["search_id"] = int(search.strip())
+                        sql = SQL_PHASE1_TRADES_SEARCH
+                    else:
+                        sql = SQL_PHASE1_TRADES
                     sql = sql.replace("GROUP BY mu.userId", close_time_clause + "GROUP BY mu.userId")
+                    logger.info("Phase 1: using mt4_trades (sub-day fallback)")
 
                 cur.execute(sql, params)
 

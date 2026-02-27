@@ -16,7 +16,7 @@
 ### 2.1 顶部筛选卡片
 - **标题**: "客户回报率查询"，副标题说明筛选逻辑
 - **日期范围选择器**: 支持自定义日期范围
-- **快速时间选择**: 过去 6 小时 / 1 周 / 2 周 / 1 个月
+- **快速时间选择**: 过去 1 小时 / 过去 6 小时 / 今日 / 本周 / 过去 7 天 / 本月 / 过去 30 天
 - **客户 ID 搜索**: 精确匹配 client_id
 - **查询按钮**: 触发后端查询
 
@@ -41,7 +41,7 @@
 | 区间净入金 | `net_deposit_month` | `stats_transactions` | 是 | 同上，限定时间范围 |
 | 现时账户余额 | `equity` | `mt4_users.EQUITY` | 否（实时） | `SUM(EQUITY)`，CEN 账户除以 100 |
 | 历史利润 | `profit_hist` | 计算字段 | 否 | `equity - net_deposit_hist` |
-| 区间交易利润 | `month_trade_profit` | `mt4_trades.PROFIT` | 是 | `SUM(PROFIT)`，CEN 账户除以 100 |
+| 区间交易利润 | `month_trade_profit` | `stats_trading` / `mt4_trades` | 是 | `SUM(PROFIT + SWAPS + COMMISSION)`，CEN 账户除以 100 |
 | 调整后收益率(2K以下)% | `adj_0_2000` | 计算字段 | 否 | 净入金≤0 且平均入金<2K 时：`equity / 2000 × 100` |
 | 调整后收益率(2K-5K)% | `adj_2000_5000` | 计算字段 | 否 | 净入金≤0 且 2K≤平均入金<5K 时：`equity / 5000 × 100` |
 | 调整后收益率(5K-50K)% | `adj_5000_50000` | 计算字段 | 否 | 净入金≤0 且 5K≤平均入金<50K 时：`equity / 50000 × 100` |
@@ -58,15 +58,16 @@
 
 ### 4.1 两阶段查询 (Two-Phase Query)
 
-**Phase 1**: 从 `mt4_trades` 获取在时间范围内有平仓交易的 client_id 列表及区间交易利润。
-- 使用 `closeDate`（DATE 索引列）做日期级过滤
-- 6 小时选项额外使用 `CLOSE_TIME`（DATETIME）做精确过滤
+**Phase 1**: 获取在时间范围内有平仓交易的 client_id 列表及区间交易利润。
+- **快速路径（默认）**: 使用 `stats_trading` 预聚合表，字段 `totalPlClosed`（= PROFIT + SWAPS + COMMISSION），按 `(userId, date)` 索引查询，<1s 完成
+- **慢速回退（sub-day）**: 选择"过去 1/6 小时"等 sub-day 模式时，回退到 `mt4_trades` 原始表，使用 VIRTUAL 列 `totalProfit`（需要 `CLOSE_TIME` 精确过滤）
+- `stats_trading` 字段映射：`totalPlClosed` = SUM(PROFIT+SWAPS+COMMISSION)，`totalProfit` = 仅 SUM(PROFIT)
 
 **Phase 2**: 对 Phase 1 筛出的 client_id，通过 LEFT JOIN 获取：
-- `eq`: `mt4_users` 表的 EQUITY 汇总
-- `th`: `stats_transactions` 全历史入金/出金
-- `txm`: `stats_transactions` 所选时间范围内入金/出金
-- `dep90`: `stats_transactions` 近 90 天入金
+- `eq`: `mt4_users` 表的 EQUITY 汇总（sid IN 1,5,6）
+- `th`: `stats_transactions` 全历史入金/出金（sid IN 1,2,5,6，含 IB Wallet）
+- `txm`: `stats_transactions` 所选时间范围内入金/出金（sid IN 1,2,5,6）
+- `dep90`: `stats_transactions` 近 90 天入金（sid IN 1,2,5,6）
 
 ### 4.2 时区处理
 
@@ -116,7 +117,9 @@
 ## 6. 数据过滤规则
 
 - 排除 demo 账户: `GROUP NOT LIKE '%demo%'`
-- 仅限指定服务器: `sid IN (1, 5, 6)`
-- 仅限已平仓买卖单: `CMD IN (0, 1)`
+- Phase 1 交易利润: `sid IN (1, 5, 6)`（stats_trading 无 sid 列，依赖 Phase 2 过滤）
+- Phase 2 equity: `sid IN (1, 5, 6)`
+- Phase 2 入金/出金: `sid IN (1, 2, 5, 6)`（含 sid=2 IB Wallet，用于计入 `ib withdrawal`）
+- 仅限已平仓买卖单: `CMD IN (0, 1)`（仅 mt4_trades fallback 路径使用）
 - 仅限有效客户: `userId > 0`
 - CEN（美分）账户金额自动除以 100
