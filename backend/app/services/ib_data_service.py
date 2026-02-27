@@ -30,24 +30,23 @@ tx_referrals AS (
 ),
 tx_totals AS (
     SELECT
-        SUM(CASE WHEN t.type = 'deposit'       THEN normalized_amount ELSE 0 END) AS deposit_usd,
-        SUM(CASE WHEN t.type = 'withdrawal'    THEN normalized_amount ELSE 0 END) AS withdrawal_usd,
-        SUM(CASE WHEN t.type = 'ib withdrawal' THEN normalized_amount ELSE 0 END) AS ib_withdrawal_usd
+        SUM(CASE WHEN st.type = 'deposit'       THEN normalized_amount ELSE 0 END) AS deposit_usd,
+        SUM(CASE WHEN st.type = 'withdrawal'    THEN normalized_amount ELSE 0 END) AS withdrawal_usd,
+        SUM(CASE WHEN st.type = 'ib withdrawal' THEN normalized_amount ELSE 0 END) AS ib_withdrawal_usd
     FROM (
         SELECT
-            t.type,
+            st.type,
             CASE
-                WHEN UPPER(t.processedCurrency) = 'CEN' THEN t.processedAmount / 100.0
-                ELSE t.processedAmount
+                WHEN UPPER(st.currency) = 'CEN' THEN st.amount / 100.0
+                ELSE st.amount
             END AS normalized_amount
-        FROM fxbackoffice.transactions t
+        FROM fxbackoffice.stats_transactions st
         JOIN params p
-        WHERE t.status = 'approved'
-          AND t.type IN ('deposit', 'withdrawal', 'ib withdrawal')
-          AND t.processedAt >= p.start_time
-          AND t.processedAt <= p.end_time
-          AND t.fromUserId IN (SELECT referralId FROM tx_referrals)
-    ) t
+        WHERE st.type IN ('deposit', 'withdrawal', 'ib withdrawal')
+          AND st.date >= DATE(p.start_time)
+          AND st.date <= DATE(p.end_time)
+          AND st.userId IN (SELECT referralId FROM tx_referrals)
+    ) st
 ),
 wallet_referrals AS (
     SELECT it.referralId
@@ -247,24 +246,23 @@ def aggregate_ib_data(
 # ============ Region Analytics (地区出入金查询) ============
 
 REGION_QUERY = """
-SELECT 
+SELECT
     u.cid,
-    t.type,
-    COUNT(*) AS tx_count,
+    st.type,
+    SUM(st.countTransactions) AS tx_count,
     SUM(
-        CASE 
-            WHEN UPPER(t.processedCurrency) = 'CEN' THEN t.processedAmount / 100.0 
-            ELSE t.processedAmount 
+        CASE
+            WHEN UPPER(st.currency) = 'CEN' THEN st.amount / 100.0
+            ELSE st.amount
         END
     ) AS amount_usd
-FROM fxbackoffice.transactions t
-INNER JOIN fxbackoffice.users u ON t.fromUserId = u.id
-WHERE t.status = 'approved'
-  AND t.type IN ('deposit', 'withdrawal', 'ib withdrawal')
-  AND t.processedAt >= %s
-  AND t.processedAt < %s
-GROUP BY u.cid, t.type
-ORDER BY u.cid, t.type
+FROM fxbackoffice.stats_transactions st
+INNER JOIN fxbackoffice.users u ON st.userId = u.id
+WHERE st.type IN ('deposit', 'withdrawal', 'ib withdrawal')
+  AND st.date >= DATE(%s)
+  AND st.date < DATE(%s)
+GROUP BY u.cid, st.type
+ORDER BY u.cid, st.type
 """
 
 

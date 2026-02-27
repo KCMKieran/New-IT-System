@@ -18,7 +18,7 @@ This page (`/warehouse/ib-data`) provides two query modules:
 | Input | Comma-separated IB IDs (e.g., `107779,129860`) |
 | Date Range | Week, Month, Custom |
 | Output | Per-IB breakdown with totals |
-| Data Source | MySQL `fxbackoffice.transactions` + `fxbackoffice.ib_tree_with_self` |
+| Data Source | MySQL `fxbackoffice.stats_transactions` + `fxbackoffice.ib_tree_with_self` (wallet: `fxbackoffice.mt4_users`) |
 
 **Metrics**:
 - Deposit (USD)
@@ -34,7 +34,7 @@ This page (`/warehouse/ib-data`) provides two query modules:
 | Input | Date range only (no IB ID needed) |
 | Date Range | Past week, This month, Last month, Custom |
 | Output | Aggregated by region (CN/Global) |
-| Data Source | MySQL `fxbackoffice.transactions` JOIN `fxbackoffice.users` |
+| Data Source | MySQL `fxbackoffice.stats_transactions` JOIN `fxbackoffice.users` |
 
 **Region Logic**:
 - `cid = 0` → CN (China)
@@ -135,48 +135,40 @@ GET /api/v1/ib-data/last-run
 
 ## SQL Logic
 
+Both queries use the pre-aggregated table `fxbackoffice.stats_transactions` (by date, type, loginSid) for better performance; currency is USD or CEN (CEN amounts are normalized with `/100`).
+
 ### IB Query (ib_data_service.py)
 
-Uses CTE to traverse IB tree and aggregate transactions:
+CTE: IB tree → aggregate from `stats_transactions` by date range and referral user IDs; wallet balance still from `mt4_users`.
 
 ```sql
-WITH tx_referrals AS (
-    SELECT it.referralId
-    FROM fxbackoffice.ib_tree_with_self it
-    WHERE it.ibid = ?
-),
 tx_totals AS (
-    SELECT
-        SUM(CASE WHEN type = 'deposit' THEN amount ELSE 0 END) AS deposit_usd,
-        SUM(CASE WHEN type = 'withdrawal' THEN amount ELSE 0 END) AS withdrawal_usd,
-        SUM(CASE WHEN type = 'ib withdrawal' THEN amount ELSE 0 END) AS ib_withdrawal_usd
-    FROM fxbackoffice.transactions
-    WHERE status = 'approved'
-      AND fromUserId IN (SELECT referralId FROM tx_referrals)
-      AND processedAt BETWEEN ? AND ?
-)
-...
+    SELECT ... (deposit_usd, withdrawal_usd, ib_withdrawal_usd)
+    FROM (
+        SELECT st.type,
+               CASE WHEN UPPER(st.currency) = 'CEN' THEN st.amount / 100.0 ELSE st.amount END AS normalized_amount
+        FROM fxbackoffice.stats_transactions st
+        WHERE st.type IN ('deposit', 'withdrawal', 'ib withdrawal')
+          AND st.date >= DATE(start_time) AND st.date <= DATE(end_time)
+          AND st.userId IN (SELECT referralId FROM tx_referrals)
+    ) st
+),
+wallet_total AS ( ... FROM fxbackoffice.mt4_users ... )
 ```
 
 ### Region Query (Company)
 
-Uses JOIN + GROUP BY for efficient aggregation:
+JOIN `stats_transactions` with `users` on `userId`, group by `cid` and `type`; use `SUM(countTransactions)` for tx_count.
 
 ```sql
-SELECT 
-    u.cid,
-    t.type,
-    COUNT(*) AS tx_count,
-    SUM(CASE 
-        WHEN UPPER(t.processedCurrency) = 'CEN' THEN t.processedAmount / 100.0 
-        ELSE t.processedAmount 
-    END) AS amount_usd
-FROM fxbackoffice.transactions t
-INNER JOIN fxbackoffice.users u ON t.fromUserId = u.id
-WHERE t.status = 'approved'
-  AND t.type IN ('deposit', 'withdrawal', 'ib withdrawal')
-  AND t.processedAt >= ? AND t.processedAt < ?
-GROUP BY u.cid, t.type
+SELECT u.cid, st.type,
+       SUM(st.countTransactions) AS tx_count,
+       SUM(CASE WHEN UPPER(st.currency) = 'CEN' THEN st.amount / 100.0 ELSE st.amount END) AS amount_usd
+FROM fxbackoffice.stats_transactions st
+INNER JOIN fxbackoffice.users u ON st.userId = u.id
+WHERE st.type IN ('deposit', 'withdrawal', 'ib withdrawal')
+  AND st.date >= DATE(%s) AND st.date < DATE(%s)
+GROUP BY u.cid, st.type
 ```
 
 ## UI Design
@@ -216,3 +208,4 @@ GROUP BY u.cid, t.type
 | 2026-02-02 | Renamed page title from "IB 出入金查询" to "出入金查询" |
 | 2026-02-02 | Added summary row in tables with highlighted background |
 | 2026-02-02 | Unified color scheme (green for deposits, red for withdrawals) |
+| 2026-02-27 | IB & Company queries switched to `fxbackoffice.stats_transactions` for performance (CEN/USD only) |

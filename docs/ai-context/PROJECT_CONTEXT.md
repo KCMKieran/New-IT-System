@@ -223,6 +223,8 @@ New-IT-System/
 - Summary row with highlighted totals
 - Color-coded values (green for deposits, red for withdrawals)
 
+**Data source**: MySQL `fxbackoffice.stats_transactions` (pre-aggregated by date/type/loginSid) + `ib_tree_with_self` for IB tree; wallet from `mt4_users`. Currency: USD and CEN (CEN normalized with /100).
+
 **APIs**: 
 - `POST /api/v1/ib-data/query` - Query by IB IDs
 - `POST /api/v1/ib-data/region-query` - Query by region (Company)
