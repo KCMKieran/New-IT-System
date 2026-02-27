@@ -14,34 +14,30 @@ export default function ConfigPlaceholder() {
 
   const sections = [
     {
-      title: t("nav.cnCsDepartment"),
+      title: t("nav.csDepartment"),
       icon: IconUsers,
       items: [
-        { title: t("nav.clientTrading"), url: "/client-trading" },
         { title: t("nav.loginIPs"), url: "/login-ips" },
         { title: t("nav.ibidLots"), url: "/ibid-lots" },
-        { title: t("nav.warehouseProducts"), url: "/warehouse/products" },
       ],
     },
     {
-      title: t("nav.globalCsDepartment"),
+      title: t("nav.dataQuery"),
       icon: IconChartBar,
       items: [
-        // [HIDDEN] ClientPnLMonitor page hidden
-        // { title: t("nav.clientPnLMonitor"), url: "/client-pnl-monitor" },
-        { title: t("nav.ibData"), url: "/warehouse/ib-data" },
+        { title: t("nav.warehouseProducts"), url: "/warehouse/products" },
         { title: t("nav.position"), url: "/position" },
+        { title: t("nav.ibData"), url: "/warehouse/ib-data" },
+        { title: t("nav.ibReport"), url: "/ib-report" },
       ],
     },
     {
       title: t("nav.riskControlDepartment"),
       icon: IconDashboard,
       items: [
-        { title: t("nav.ibReport"), url: "/ib-report" },
+        { title: t("nav.clientReturnRate"), url: "/client-return-rate" },
         { title: "盈亏监控 (Preview)", url: "/client-pnl-analysis" },
         { title: t("nav.swapFreeControl"), url: "/swap-free-control" },
-        // [HIDDEN] Basis page - 10.6.20.138:8050 service disabled
-        // { title: t("nav.basisAnalysis"), url: "/basis" },
         { title: t("nav.profitAnalysis"), url: "/profit" },
       ],
     },
@@ -49,11 +45,7 @@ export default function ConfigPlaceholder() {
       title: t("nav.otherSection"),
       icon: IconListDetails,
       items: [
-        { title: t("nav.downloads"), url: "/downloads" },
         { title: t("nav.template"), url: "/template" },
-        { title: t("nav.agentGlobal"), url: "/warehouse/agent-global" },
-        { title: t("nav.customerPnLMonitor"), url: "/customer-pnl-monitor" },
-        // { title: t("nav.equityMonitor"), url: "/equity-monitor" }, // [REMOVED]
       ],
     },
   ]
