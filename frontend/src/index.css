@@ -128,3 +128,7 @@
     @apply bg-background text-foreground;
   }
 }
+
+.ag-paging-panel {
+  border-top: none !important;
+}
