@@ -86,6 +86,17 @@ frontend/
    }
    ```
 
+### Adding shadcn/ui components (Docker 环境)
+
+当使用 Docker 跑前端时，**不要在容器内**执行 `npx shadcn@latest add xxx`。应在**宿主机**上执行，使新组件文件写入源码目录：
+
+```bash
+cd frontend
+npx shadcn@latest add <component-name>   # 例如: collapsible
+```
+
+开发时 `docker-compose.dev.yml` 通过 volume 挂载 `.:/app`，宿主机新增的 UI 组件会同步到容器；构建生产镜像时这些文件会随源码一起 COPY 进镜像。详见 [Dashboard 近两日净盈亏](docs/features/dashboard-pnl24h-by-country-sql.md) 文档 §8。
+
 ### Using AG-Grid
 
 See [AG-Grid Integration Guide](../docs/frontend/ag-grid-integration.md) for:

@@ -18,6 +18,7 @@ from .routes.ib_data import router as ib_data_router
 from .routes.client_pnl_analysis import router as client_pnl_analysis_router
 from .routes.ib_report import router as ib_report_router
 from .routes.client_return_rate import router as client_return_rate_router
+from .routes.dashboard import router as dashboard_router
 
 
 api_v1_router = APIRouter()
@@ -39,3 +40,4 @@ api_v1_router.include_router(zipcode_router, tags=["zipcode"])
 api_v1_router.include_router(ib_data_router, tags=["ib-data"]) 
 api_v1_router.include_router(ib_report_router, tags=["ib-report"])
 api_v1_router.include_router(client_return_rate_router, tags=["client-return-rate"])
+api_v1_router.include_router(dashboard_router, tags=["dashboard"])

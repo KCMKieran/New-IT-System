@@ -38,8 +38,8 @@ The Dashboard (`/` or `/home`) is the first page users see after login. It displ
 │  │          │  │ │ - CN/Global + AKCM filters     │ │    │
 │  │          │  │ └────────────────────────────────┘ │    │
 │  │          │  │ ┌──────────────┐ ┌──────────────┐   │    │
-│  │          │  │ │过去24h客户   │ │ 可疑客户     │   │    │
-│  │          │  │ │净盈亏(按国家)│ │ (table)      │   │    │
+│  │          │  │ │近两日客户   │ │ 可疑客户     │   │    │
+│  │          │  │ │平仓净盈亏   │ │ (table)      │   │    │
 │  │          │  │ └──────────────┘ └──────────────┘   │    │
 │  └──────────┘  └────────────────────────────────────┘    │
 └──────────────────────────────────────────────────────────┘
@@ -91,15 +91,19 @@ The Dashboard (`/` or `/home`) is the first page users see after login. It displ
 - AG Grid features: sortable columns, column filters, pagination (100/page)
 - "查看全部" links to `/client-return-rate` for full date range queries
 
-### 3.3 过去24h客户净盈亏 (Past24hClientPnlByCountry)
+### 3.3 近两日客户平仓净盈亏 (Past24hClientPnlByCountry)
 
 **File**: `frontend/src/components/dashboard/Past24hClientPnlByCountry.tsx`
 
 **What it shows**:
-- Table: past 24h client net P&L by country (framework only; data/API TBD)
+- Card title "近两日客户平仓净盈亏" with subtitle "时间口径：MT Server 时间" (CardDescription, smaller text)
+- Table: **今日** / **昨日** columns only (no 合计); time scope: MT Server natural day
+- Rows grouped by country, default sort by **昨日** PnL ascending (min to max); click a country row to expand and see per–sales-team rows (same columns, same sort); zebra striping on country and team rows; value columns left-aligned
 - Fixed-height card, table scrolls when needed
 
-**API**: TBD
+**API**: `GET /api/v1/dashboard/pnl-by-sales-team`
+
+**Data source**: MySQL `fxbackoffice` — `stats_trading` + sales team tags (categoryId=6); country from backend mapping (see `docs/features/dashboard-pnl24h-by-country-sql.md`)
 
 ### 3.4 可疑客户 (SuspiciousClients)
 
@@ -127,7 +131,7 @@ Both widgets auto-fetch data when the Dashboard mounts (including browser refres
 |---|---|---|---|
 | PositionSummary | On mount (XAUUSD) | None | 1-3s |
 | ReturnRateSummary | On mount (6h window) | Redis 3h TTL | <100ms (cached) / 5-15s (fresh) |
-| Past24hClientPnlByCountry | — | — | Framework only |
+| Past24hClientPnlByCountry | On mount | None | 1–3s |
 | SuspiciousClients | — | — | Framework only |
 
 ---
@@ -211,12 +215,14 @@ This ensures only one request queries MySQL when multiple users trigger the same
 | `frontend/src/pages/Home.tsx` | Dashboard page — grid layout with lazy-loaded widgets |
 | `frontend/src/components/dashboard/PositionSummary.tsx` | Position summary widget |
 | `frontend/src/components/dashboard/ReturnRateSummary.tsx` | Client return rate widget (AG Grid) |
-| `frontend/src/components/dashboard/Past24hClientPnlByCountry.tsx` | Past 24h client P&L by country (table framework) |
+| `frontend/src/components/dashboard/Past24hClientPnlByCountry.tsx` | 近两日客户平仓净盈亏（按国家/团队，可展开） |
 | `frontend/src/components/dashboard/SuspiciousClients.tsx` | Suspicious clients list (table framework) |
 | `backend/app/api/v1/routes/open_positions.py` | API: `/api/v1/open-positions/symbol-summary` |
 | `backend/app/api/v1/routes/client_return_rate.py` | API: `/api/v1/client-return-rate/query` |
+| `backend/app/api/v1/routes/dashboard.py` | API: `/api/v1/dashboard/pnl-by-sales-team` |
 | `backend/app/services/open_positions_service.py` | Position query logic (MySQL, no cache) |
 | `backend/app/services/client_return_service.py` | Return rate query logic (MySQL + Redis cache) |
+| `backend/app/services/dashboard_pnl_service.py` | Dashboard PnL by sales team (MySQL stats_trading + country mapping) |
 
 ---
 

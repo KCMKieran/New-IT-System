@@ -152,14 +152,15 @@ New-IT-System/
 - Grid layout: left 1/4 (CN payment placeholder, sticky) + right 3/4 (widgets stacked)
 - **实时持仓** widget — cross-server XAUUSD/XAGUSD summary (auto-loads on mount)
 - **客户收益率 (6h)** widget — AG Grid with CN/Global + AKCM filters (auto-loads on mount)
-- **过去24h客户净盈亏** widget — table by country (framework; data TBD)
+- **近两日客户平仓净盈亏** widget — table by country/sales team (today + yesterday, MT Server; expandable rows)
 - **可疑客户** widget — table list (framework; data TBD)
 - Data fetch timestamps displayed on each widget
 - Lazy-loaded widgets with Skeleton fallback
 
-**API** (reuses existing):
+**API** (reuses existing + dashboard):
 - `GET /api/v1/open-positions/symbol-summary` (no cache)
 - `GET /api/v1/client-return-rate/query` (Redis cache 3h)
+- `GET /api/v1/dashboard/pnl-by-sales-team` (no cache; today/yesterday PnL by sales team + country)
 
 **Key Files**:
 - `frontend/src/pages/Home.tsx`
