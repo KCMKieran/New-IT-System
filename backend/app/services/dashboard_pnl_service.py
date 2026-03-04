@@ -77,6 +77,7 @@ SALES_TEAM_TO_COUNTRY: dict[str, str] = {
 
 # SQL: today/yesterday closed PnL by sales team (tags.categoryId=6). DB: fxbackoffice.
 # totalPlClosed = PROFIT + SWAPS + COMMISSION. Time scope: MT Server natural day.
+# Excludes employee accounts via users.isEmployee (COALESCE(isEmployee,0)=0).
 SQL_PNL_BY_SALES_TEAM = """
 SELECT
     COALESCE(tt.team_tag, 'Unknown') AS sales_team,
@@ -90,6 +91,7 @@ FROM (
         SUM(IF(st.currency = 'CEN', st.totalPlClosed / 100.0, st.totalPlClosed)) AS pl_usd
     FROM stats_trading st
     INNER JOIN mt4_users mu ON st.loginSid = mu.loginSid AND mu.userId = st.userId
+    INNER JOIN users u ON u.id = st.userId AND COALESCE(u.isEmployee, 0) = 0
     WHERE st.date IN (CURDATE(), CURDATE() - INTERVAL 1 DAY)
       AND st.userId > 0
       AND st.tradeCnt > 0

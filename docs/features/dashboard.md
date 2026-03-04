@@ -83,7 +83,7 @@ The Dashboard (`/` or `/home`) is the first page users see after login. It displ
 
 **API**: `GET /api/v1/client-return-rate/query?...&close_time_start=...`
 
-**Data source**: MySQL `fxbackoffice` → **Redis cache (TTL 3h)**
+**Data source**: MySQL `fxbackoffice` → **Redis cache (TTL 3h)**. Excludes demo and employee accounts (see `docs/features/client-return-rate.md` §6).
 
 **Behavior**:
 - Auto-fetches on page mount (fixed 6-hour window)
@@ -103,7 +103,7 @@ The Dashboard (`/` or `/home`) is the first page users see after login. It displ
 
 **API**: `GET /api/v1/dashboard/pnl-by-sales-team`
 
-**Data source**: MySQL `fxbackoffice` — `stats_trading` + sales team tags (categoryId=6); country from backend mapping (see `docs/features/dashboard-pnl24h-by-country-sql.md`)
+**Data source**: MySQL `fxbackoffice` — `stats_trading` + sales team tags (categoryId=6); country from backend mapping (see `docs/features/dashboard-pnl24h-by-country-sql.md`). Excludes demo and employee accounts (see §9.1 of that doc).
 
 ### 3.4 可疑客户 (SuspiciousClients)
 

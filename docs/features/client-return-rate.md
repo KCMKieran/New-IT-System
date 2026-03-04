@@ -117,8 +117,9 @@
 
 ## 6. 数据过滤规则
 
-- 排除 demo 账户: `GROUP NOT LIKE '%demo%'`
-- Phase 1 交易利润: `sid IN (1, 5, 6)`（stats_trading 无 sid 列，依赖 Phase 2 过滤）
+- **排除 demo 账户**: `mt4_users.GROUP NOT LIKE '%demo%'`（Phase 1 mt4_trades 路径及 Phase 2 各子查询）
+- **排除 employee 账户**: Phase 1 两条路径均 `INNER JOIN users u ON u.id = <userId> AND COALESCE(u.isEmployee, 0) = 0`，仅保留非员工客户（`users.isEmployee = 0` 或 `NULL`）
+- Phase 1 交易利润: `sid IN (1, 5, 6)`（stats_trading 路径无 sid 列，依赖 Phase 2 过滤；mt4_trades 路径在 JOIN 时已过滤 demo）
 - Phase 2 equity: `sid IN (1, 5, 6)`
 - Phase 2 入金/出金: `sid IN (1, 2, 5, 6)`（含 sid=2 IB Wallet，用于计入 `ib withdrawal`）
 - 仅限已平仓买卖单: `CMD IN (0, 1)`（仅 mt4_trades fallback 路径使用）

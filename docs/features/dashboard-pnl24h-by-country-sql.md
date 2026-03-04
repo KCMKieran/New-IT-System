@@ -182,3 +182,8 @@ ORDER BY net_pnl_total DESC;
 - **后端**：`backend/app/api/v1/routes/dashboard.py`（GET /pnl-by-sales-team）、`backend/app/services/dashboard_pnl_service.py`（SQL + 映射表）、`backend/app/schemas/dashboard_pnl.py`。
 - **前端**：`frontend/src/components/dashboard/Past24hClientPnlByCountry.tsx`（请求接口、按国家分组、可展开查看各 sales team 明细）。
 - **展示**：卡片标题「近两日客户平仓净盈亏」，副标题「时间口径：MT Server 时间」；表格列：国家/地区、今日、昨日（无合计）；默认按昨日盈亏升序；点击国家行展开/收起该国家下各 sales team 的今日/昨日；斑马纹；数值左对齐。
+
+### 9.1 数据过滤（与客户类报表统一）
+
+- **排除 demo 账户**：`mt4_users.GROUP NOT LIKE '%demo%'`，且 `sid IN (1, 5, 6)`。
+- **排除 employee 账户**：`INNER JOIN users u ON u.id = st.userId AND COALESCE(u.isEmployee, 0) = 0`（仅保留非员工）。后续新增客户/交易类报表时，应同样排除 demo 与 employee，参见 database-context skill 的 Business Conventions。

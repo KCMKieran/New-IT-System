@@ -348,6 +348,8 @@ New-IT-System/
 - **Services** (`services/`): Implement business logic, database queries
 - **Config** (`core/`): Centralized settings from .env
 
+**Client report filtering (fxbackoffice)**: For any report that shows client/trading data (e.g. Client Return Rate, Dashboard PnL by country), exclude **demo accounts** (`GROUP NOT LIKE '%demo%'`, `sid IN (1,5,6)`) and **employee accounts** (`INNER JOIN users u ON u.id = <userId> AND COALESCE(u.isEmployee, 0) = 0`). See database-context skill “Client / report filtering” and `docs/features/client-return-rate.md` §6.
+
 ### Request Deduplication
 
 **Frontend - AbortController in useEffect** (standard React 18 pattern):

@@ -71,7 +71,8 @@ def _get_mysql_connection():
 # ---------------------------------------------------------------------------
 # Phase 1 — Fast path: stats_trading pre-aggregated table
 # One row per (date, loginSid). Uses (userId, date) index for fast lookup.
-# Demo / sid filtering is handled by Phase 2 JOINs (mt4_users).
+# Excludes employee accounts via INNER JOIN users (COALESCE(isEmployee,0)=0).
+# Demo / sid filtering is handled by Phase 2 JOINs (mt4_users) or mt4_trades path.
 #
 # Field mapping (verified against mt4_trades):
 #   totalPlClosed = SUM(PROFIT + SWAPS + COMMISSION)  ← net P&L, what we want
@@ -81,24 +82,26 @@ def _get_mysql_connection():
 # ---------------------------------------------------------------------------
 SQL_PHASE1_STATS = """
 SELECT
-    userId AS client_id,
-    SUM(IF(currency = 'CEN', totalPlClosed / 100.0, totalPlClosed)) AS month_trade_profit
-FROM stats_trading
-WHERE date BETWEEN %(month_start)s AND %(month_end)s
-  AND userId > 0
-  AND tradeCnt > 0
-GROUP BY userId
+    st.userId AS client_id,
+    SUM(IF(st.currency = 'CEN', st.totalPlClosed / 100.0, st.totalPlClosed)) AS month_trade_profit
+FROM stats_trading st
+INNER JOIN users u ON u.id = st.userId AND COALESCE(u.isEmployee, 0) = 0
+WHERE st.date BETWEEN %(month_start)s AND %(month_end)s
+  AND st.userId > 0
+  AND st.tradeCnt > 0
+GROUP BY st.userId
 """
 
 SQL_PHASE1_STATS_SEARCH = """
 SELECT
-    userId AS client_id,
-    SUM(IF(currency = 'CEN', totalPlClosed / 100.0, totalPlClosed)) AS month_trade_profit
-FROM stats_trading
-WHERE date BETWEEN %(month_start)s AND %(month_end)s
-  AND userId = %(search_id)s
-  AND tradeCnt > 0
-GROUP BY userId
+    st.userId AS client_id,
+    SUM(IF(st.currency = 'CEN', st.totalPlClosed / 100.0, st.totalPlClosed)) AS month_trade_profit
+FROM stats_trading st
+INNER JOIN users u ON u.id = st.userId AND COALESCE(u.isEmployee, 0) = 0
+WHERE st.date BETWEEN %(month_start)s AND %(month_end)s
+  AND st.userId = %(search_id)s
+  AND st.tradeCnt > 0
+GROUP BY st.userId
 """
 
 # ---------------------------------------------------------------------------
@@ -112,6 +115,7 @@ SELECT
     SUM(IF(mu.CURRENCY = 'CEN', t.totalProfit / 100.0, t.totalProfit)) AS month_trade_profit
 FROM mt4_trades t
 INNER JOIN mt4_users mu ON t.loginSid = mu.loginSid
+INNER JOIN users u ON u.id = mu.userId AND COALESCE(u.isEmployee, 0) = 0
 WHERE t.closeDate BETWEEN %(month_start)s AND %(month_end)s
   AND t.CMD IN (0, 1)
   AND mu.userId > 0
@@ -126,6 +130,7 @@ SELECT
     SUM(IF(mu.CURRENCY = 'CEN', t.totalProfit / 100.0, t.totalProfit)) AS month_trade_profit
 FROM mt4_trades t
 INNER JOIN mt4_users mu ON t.loginSid = mu.loginSid
+INNER JOIN users u ON u.id = mu.userId AND COALESCE(u.isEmployee, 0) = 0
 WHERE t.closeDate BETWEEN %(month_start)s AND %(month_end)s
   AND t.CMD IN (0, 1)
   AND mu.userId = %(search_id)s
