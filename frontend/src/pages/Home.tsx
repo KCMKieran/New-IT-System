@@ -5,6 +5,8 @@ import { CreditCard } from "lucide-react";
 
 const PositionSummary = lazy(() => import("@/components/dashboard/PositionSummary"));
 const ReturnRateSummary = lazy(() => import("@/components/dashboard/ReturnRateSummary"));
+const Past24hClientPnlByCountry = lazy(() => import("@/components/dashboard/Past24hClientPnlByCountry"));
+const SuspiciousClients = lazy(() => import("@/components/dashboard/SuspiciousClients"));
 
 function WidgetSkeleton() {
   return (
@@ -54,10 +56,20 @@ export default function HomePage() {
           <PositionSummary />
         </Suspense>
 
-        {/* Bottom: Client return rate summary */}
+        {/* Client return rate summary (full width) */}
         <Suspense fallback={<WidgetSkeleton />}>
           <ReturnRateSummary />
         </Suspense>
+
+        {/* Two modules side-by-side on desktop, stacked on mobile; each ~half width of return rate block */}
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+          <Suspense fallback={<WidgetSkeleton />}>
+            <Past24hClientPnlByCountry />
+          </Suspense>
+          <Suspense fallback={<WidgetSkeleton />}>
+            <SuspiciousClients />
+          </Suspense>
+        </div>
       </div>
     </div>
   );

@@ -36,14 +36,17 @@ The Dashboard (`/` or `/home`) is the first page users see after login. It displ
 │  │          │  │ │ 客户收益率 (ReturnRateSummary) │ │    │
 │  │          │  │ │ - AG Grid (6h data)            │ │    │
 │  │          │  │ │ - CN/Global + AKCM filters     │ │    │
-│  │          │  │ │ - Auto-load on mount           │ │    │
 │  │          │  │ └────────────────────────────────┘ │    │
+│  │          │  │ ┌──────────────┐ ┌──────────────┐   │    │
+│  │          │  │ │过去24h客户   │ │ 可疑客户     │   │    │
+│  │          │  │ │净盈亏(按国家)│ │ (table)      │   │    │
+│  │          │  │ └──────────────┘ └──────────────┘   │    │
 │  └──────────┘  └────────────────────────────────────┘    │
 └──────────────────────────────────────────────────────────┘
 ```
 
 - **Left column**: `self-start lg:sticky lg:top-4` — stays at natural height, sticky on scroll
-- **Right column**: `flex flex-col gap-4` — widgets stack vertically
+- **Right column**: `flex flex-col gap-4` — widgets stack vertically; last row is two cards side-by-side (`lg:grid-cols-2`), stacked on mobile
 - **Responsive**: Single column on mobile, 1:3 split on `lg+`
 
 ---
@@ -88,7 +91,27 @@ The Dashboard (`/` or `/home`) is the first page users see after login. It displ
 - AG Grid features: sortable columns, column filters, pagination (100/page)
 - "查看全部" links to `/client-return-rate` for full date range queries
 
-### 3.3 CN渠道支付成功率 (Placeholder)
+### 3.3 过去24h客户净盈亏 (Past24hClientPnlByCountry)
+
+**File**: `frontend/src/components/dashboard/Past24hClientPnlByCountry.tsx`
+
+**What it shows**:
+- Table: past 24h client net P&L by country (framework only; data/API TBD)
+- Fixed-height card, table scrolls when needed
+
+**API**: TBD
+
+### 3.4 可疑客户 (SuspiciousClients)
+
+**File**: `frontend/src/components/dashboard/SuspiciousClients.tsx`
+
+**What it shows**:
+- Table: suspicious clients list (framework only; data/API TBD)
+- Fixed-height card, table scrolls when needed
+
+**API**: TBD
+
+### 3.5 CN渠道支付成功率 (Placeholder)
 
 **Status**: Coming Soon — left column placeholder card
 
@@ -104,6 +127,8 @@ Both widgets auto-fetch data when the Dashboard mounts (including browser refres
 |---|---|---|---|
 | PositionSummary | On mount (XAUUSD) | None | 1-3s |
 | ReturnRateSummary | On mount (6h window) | Redis 3h TTL | <100ms (cached) / 5-15s (fresh) |
+| Past24hClientPnlByCountry | — | — | Framework only |
+| SuspiciousClients | — | — | Framework only |
 
 ---
 
@@ -186,6 +211,8 @@ This ensures only one request queries MySQL when multiple users trigger the same
 | `frontend/src/pages/Home.tsx` | Dashboard page — grid layout with lazy-loaded widgets |
 | `frontend/src/components/dashboard/PositionSummary.tsx` | Position summary widget |
 | `frontend/src/components/dashboard/ReturnRateSummary.tsx` | Client return rate widget (AG Grid) |
+| `frontend/src/components/dashboard/Past24hClientPnlByCountry.tsx` | Past 24h client P&L by country (table framework) |
+| `frontend/src/components/dashboard/SuspiciousClients.tsx` | Suspicious clients list (table framework) |
 | `backend/app/api/v1/routes/open_positions.py` | API: `/api/v1/open-positions/symbol-summary` |
 | `backend/app/api/v1/routes/client_return_rate.py` | API: `/api/v1/client-return-rate/query` |
 | `backend/app/services/open_positions_service.py` | Position query logic (MySQL, no cache) |

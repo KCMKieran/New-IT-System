@@ -152,6 +152,8 @@ New-IT-System/
 - Grid layout: left 1/4 (CN payment placeholder, sticky) + right 3/4 (widgets stacked)
 - **实时持仓** widget — cross-server XAUUSD/XAGUSD summary (auto-loads on mount)
 - **客户收益率 (6h)** widget — AG Grid with CN/Global + AKCM filters (auto-loads on mount)
+- **过去24h客户净盈亏** widget — table by country (framework; data TBD)
+- **可疑客户** widget — table list (framework; data TBD)
 - Data fetch timestamps displayed on each widget
 - Lazy-loaded widgets with Skeleton fallback
 
@@ -163,6 +165,8 @@ New-IT-System/
 - `frontend/src/pages/Home.tsx`
 - `frontend/src/components/dashboard/PositionSummary.tsx`
 - `frontend/src/components/dashboard/ReturnRateSummary.tsx`
+- `frontend/src/components/dashboard/Past24hClientPnlByCountry.tsx`
+- `frontend/src/components/dashboard/SuspiciousClients.tsx`
 
 **Docs**: [dashboard.md](../features/dashboard.md)
 
