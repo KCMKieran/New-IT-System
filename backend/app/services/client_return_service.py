@@ -13,6 +13,7 @@ Two-phase MySQL query against fxbackoffice (via MYSQL_HOST_PRIMARY):
              dep90: stats_transactions deposits in last 90 days
 
 Return rate columns:
+  - profit_hist:          realized trade P&L from stats_trading_running_totals (excludes IB commissions, bonuses)
   - adj_xxx:              equity / bucket_base × 100 (when net_deposit ≤ 0, by deposit bucket)
   - return_non_adjusted:  (equity - net_deposit) / net_deposit × 100 (when net_deposit > 0)
   - return_neg_adjusted:  (equity - A) / A × 100, A = MAX(deposits_90d, |net_deposit|) (when net_deposit ≤ 0)
@@ -135,7 +136,7 @@ GROUP BY mu.userId
 
 
 def _build_phase2_sql(id_list_str: str, tm_inline: str, month_start: str, month_end: str) -> str:
-    """Build Phase 2 SQL: equity from mt4_users + deposits from stats_transactions."""
+    """Build Phase 2 SQL: equity, deposits, and realized trade profit (from stats_trading_running_totals)."""
     return f"""
 SELECT
     tm.client_id,
@@ -143,7 +144,7 @@ SELECT
     ROUND(COALESCE(th.deposits_hist, 0) + COALESCE(th.withdrawals_hist, 0), 2) AS net_deposit_hist,
     ROUND(COALESCE(txm.deposits_month, 0) + COALESCE(txm.withdrawals_month, 0), 2) AS net_deposit_month,
     ROUND(COALESCE(eq.equity, 0), 2) AS equity,
-    ROUND(COALESCE(eq.equity, 0) - (COALESCE(th.deposits_hist, 0) + COALESCE(th.withdrawals_hist, 0)), 2) AS profit_hist,
+    ROUND(COALESCE(rt.profit_hist_trades, 0), 2) AS profit_hist,
     COALESCE(uc.country, 'Unknown') AS country,
     COALESCE(akcm.is_akcm, 0) AS is_akcm,
 
@@ -247,6 +248,16 @@ LEFT JOIN (
       AND mu.`GROUP` NOT LIKE '%demo%'
     GROUP BY st.userId
 ) AS dep90 ON tm.client_id = dep90.client_id
+
+LEFT JOIN (
+    SELECT userId AS client_id,
+           SUM(IF(currency = 'CEN',
+               plClosedHavingActivityRunningTotal / 100.0,
+               plClosedHavingActivityRunningTotal)) AS profit_hist_trades
+    FROM stats_trading_running_totals
+    WHERE userId IN ({id_list_str})
+    GROUP BY userId
+) AS rt ON tm.client_id = rt.client_id
 
 LEFT JOIN (
     SELECT id AS client_id,

@@ -22,7 +22,7 @@ class ClientReturnRateRow(BaseModel):
     net_deposit_hist: float = Field(0, description="Historical net deposit (deposit - withdrawal)")
     net_deposit_month: float = Field(0, description="Current month net deposit")
     equity: float = Field(0, description="Current account balance/equity")
-    profit_hist: float = Field(0, description="Historical profit (equity - net_deposit_hist)")
+    profit_hist: float = Field(0, description="Historical realized trade profit from stats_trading_running_totals (excludes IB commissions, bonuses)")
     month_trade_profit: float = Field(0, description="Current month trading profit")
     
     # Adjusted return rates by deposit bucket (only one will have value per client)
