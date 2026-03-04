@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, Fragment } from "react";
+import { useState, useEffect, useMemo, Fragment, useCallback } from "react";
 import {
   Card,
   CardContent,
@@ -14,7 +14,8 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { ChevronRight } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { ChevronRight, Clock, RefreshCw } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 /** One row from API: sales_team + today/yesterday/total PnL + country */
@@ -56,9 +57,9 @@ export default function Past24hClientPnlByCountry() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [expandedCountry, setExpandedCountry] = useState<string | null>(null);
+  const [fetchedAt, setFetchedAt] = useState<Date | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
+  const fetchData = useCallback(() => {
     setLoading(true);
     setError(null);
     fetch("/api/v1/dashboard/pnl-by-sales-team")
@@ -67,18 +68,18 @@ export default function Past24hClientPnlByCountry() {
         return res.json();
       })
       .then((data: { items: SalesTeamPnlRow[] }) => {
-        if (!cancelled) setItems(data.items ?? []);
+        setItems(data.items ?? []);
+        setFetchedAt(new Date());
       })
       .catch((e) => {
-        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+        setError(e instanceof Error ? e.message : String(e));
       })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
+      .finally(() => setLoading(false));
   }, []);
+
+  useEffect(() => {
+    fetchData();
+  }, [fetchData]);
 
   // Group by country and sum; sort by net_pnl_yesterday ascending (min to max)
   const countryGroups = useMemo(() => {
@@ -109,9 +110,33 @@ export default function Past24hClientPnlByCountry() {
 
   return (
     <Card className="flex h-full min-h-[320px] flex-col gap-2">
-      <CardHeader className="shrink-0 pb-0">
-        <CardTitle className="text-lg">近两日客户平仓净盈亏</CardTitle>
-        <CardDescription className="text-xs">时间口径：MT Server 时间</CardDescription>
+      <CardHeader className="shrink-0 flex flex-row flex-wrap items-start justify-between gap-x-2 gap-y-1 pb-0">
+        <div className="min-w-0">
+          <CardTitle className="text-lg">近两日客户平仓净盈亏</CardTitle>
+          <CardDescription className="text-xs">时间口径：MT Server 时间</CardDescription>
+        </div>
+        <div className="flex flex-shrink-0 flex-wrap items-center gap-2">
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-7 gap-1 text-xs"
+            onClick={fetchData}
+            disabled={loading}
+          >
+            {loading ? (
+              <RefreshCw className="h-3 w-3 animate-spin" />
+            ) : (
+              <RefreshCw className="h-3 w-3" />
+            )}
+            刷新
+          </Button>
+          {fetchedAt && (
+            <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <Clock className="h-3 w-3" />
+              数据获取时间: {fetchedAt.toLocaleString("zh-CN", { hour12: false })}
+            </span>
+          )}
+        </div>
       </CardHeader>
       <CardContent className="min-h-0 flex-1 overflow-hidden">
         <div className="h-[260px] overflow-auto rounded-md border">
