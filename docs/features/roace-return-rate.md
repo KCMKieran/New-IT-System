@@ -22,7 +22,7 @@
 
 | 指标 | 字段名 | 含义 |
 |------|--------|------|
-| **日均净值** | `avg_daily_equity` | 客户全历史每日日终净值的平均值，代表"平均在用资本" |
+| **日均净值** | `avg_daily_equity` | 客户全历史**活跃天**（有交易或资金变动）日终净值的平均值，代表"平均在用资本" |
 | **长期收益率 ROACE** | `return_on_avg_equity` | 每投入 $1 平均资本，累计赚了多少 |
 
 > **ROACE** = Return on Average Capital Employed，金融行业通用的资本回报率指标。
@@ -34,13 +34,14 @@
 ### 日均净值
 
 ```
-avg_daily_equity = SUM(每日 endingEquity) / 有资金天数
+avg_daily_equity = SUM(每日 endingEquity) / 活跃资金天数
 ```
 
-- 数据来源：`fxbackoffice.stats_balances`（每日日终快照）
+- 数据来源：`fxbackoffice.stats_balances`（每日日终快照）× `stats_trading`（活跃天过滤）
 - 通过 `mt4_users` JOIN，取 `sid IN (1, 5, 6)` 的交易账户
+- **INNER JOIN `stats_trading`**：只计算有交易活动或资金变动的天数（`stats_trading` 仅在有事件的日期产生记录），自动排除长期休眠的"尘埃余额"天
 - 排除 IB Wallet（sid=2），避免佣金钱包金额扭曲
-- 排除 `endingEquity = 0` 的天数（空仓期不计入分母）
+- 排除 `endingEquity = 0` 的天数
 - 排除 demo 账户（`GROUP NOT LIKE '%demo%'`）
 - CEN（美分）账户自动除以 100
 - 全历史无日期限制，每个客户用自己完整的数据
@@ -98,6 +99,7 @@ return_on_avg_equity = profit_hist / avg_daily_equity × 100%
 | 数据源 | `stats_balances` 每日快照 | 系统已有日终 equity 记录，无需额外采集 |
 | 时间范围 | 全历史 | 每个客户用自己完整历史，自动归一化，无需统一时段 |
 | 排除 equity=0 天 | 是 | 避免空仓期拉低分母，只衡量有资金时的效率 |
+| JOIN stats_trading 过滤 | 是 | 排除长期休眠"尘埃余额"天（如账户留 $2.83 数月无交易），只计有交易/资金变动的活跃天 |
 | 排除 IB Wallet (sid=2) | 是 | IB 佣金钱包金额大，会扭曲真实交易资本 |
 | 利润口径 | `profit_hist`（已实现交易盈亏） | 不含 IB 佣金、奖金、浮动盈亏，纯交易利润 |
 | 按需启用 | `include_avg_equity=true` | Dashboard 高频刷新不需要此指标，全量页按需开启 |
@@ -115,8 +117,9 @@ return_on_avg_equity = profit_hist / avg_daily_equity × 100%
 
 ### 缺点/局限
 - **新客户数据少**：刚开户 1-2 天的客户，日均净值样本少，收益率波动大（会随时间趋稳）
-- **查询较重**：需扫描全历史每日快照，首次查询较慢（后续命中 Redis 缓存则无感）
+- **查询较重**：需扫描全历史快照并 JOIN stats_trading，首次查询较慢（后续命中 Redis 缓存则无感）
 - **不含浮动盈亏**：分子 `profit_hist` 只算已平仓利润，未含当前持仓浮盈浮亏
+- **依赖 stats_trading 完整性**：若 stats_trading 某天漏记录，该天的 equity 不计入平均值
 
 ---
 
@@ -142,7 +145,7 @@ ROACE 不替代现有指标，而是**补充**：
 | 层 | 文件 | 改动 |
 |---|---|---|
 | Schema | `backend/app/schemas/client_return_rate.py` | 新增 `avg_daily_equity`、`return_on_avg_equity` 字段 |
-| Service | `backend/app/services/client_return_service.py` | `_build_phase2_sql` 条件构建 stats_balances JOIN |
+| Service | `backend/app/services/client_return_service.py` | `_build_phase2_sql` 条件构建 stats_balances + stats_trading INNER JOIN |
 | Route | `backend/app/api/v1/routes/client_return_rate.py` | 新增 `include_avg_equity` query 参数 |
 | Frontend | `frontend/src/pages/ClientReturnRate.tsx` | 新增两列（淡蓝/淡紫背景），位于"区间交易利润"右侧 |
 
@@ -164,6 +167,7 @@ SELECT
         / COUNT(DISTINCT sb.date) AS avg_daily_equity
 FROM mt4_users mu2
 INNER JOIN stats_balances sb ON sb.loginsid = mu2.loginsid
+INNER JOIN stats_trading st2 ON st2.loginSid = mu2.loginsid AND st2.date = sb.date
 WHERE mu2.userId IN ({client_id_list})
   AND mu2.sid IN (1, 5, 6)
   AND mu2.`GROUP` NOT LIKE '%demo%'
@@ -171,42 +175,106 @@ WHERE mu2.userId IN ({client_id_list})
 GROUP BY mu2.userId
 ```
 
+> **为什么 JOIN stats_trading？** `stats_trading` 仅在有交易活动或资金变动的日期产生记录。
+> 通过 INNER JOIN，长期休眠期（如账户残留 $2.83 长达数月无任何操作）自动被排除，
+> 避免大量低余额天拉低 avg_daily_equity 导致 ROACE 虚高。
+
 ### 索引依赖
 
 - `stats_balances.IDX_ACCOUNT (loginSid)` — 已存在，通过 mt4_users JOIN 间接查询
+- `stats_trading.IDX_ACCDATE (loginSid, date)` — 已存在，用于 INNER JOIN 匹配活跃天
 - 无需新增索引
 
 ---
 
 ## 9. 单客户验证 SQL
 
-以客户 ID `149302` 为例：
+修改第一行 `@client_id` 即可验证任意客户：
 
 ```sql
--- Step 1: 查看日均净值
+-- ========== 只需改这一行 ==========
+SET @client_id = 130130;
+
+-- 1) 该客户的 MT4 账号
+SELECT loginsid, LOGIN, CURRENCY, sid, `GROUP`
+FROM mt4_users
+WHERE userId = @client_id
+  AND sid IN (1, 5, 6)
+  AND `GROUP` NOT LIKE '%demo%';
+
+-- 2) 每日 ending equity（仅活跃天，JOIN stats_trading 过滤休眠期）
+SELECT sb.date, sb.loginsid, sb.currency, sb.endingEquity
+FROM mt4_users mu
+INNER JOIN stats_balances sb ON sb.loginsid = mu.loginsid
+INNER JOIN stats_trading st ON st.loginSid = mu.loginsid AND st.date = sb.date
+WHERE mu.userId = @client_id
+  AND mu.sid IN (1, 5, 6)
+  AND mu.`GROUP` NOT LIKE '%demo%'
+  AND sb.endingEquity > 0
+ORDER BY sb.date DESC;
+
+-- 3) 平均每日 equity（仅活跃天）
 SELECT
     mu.userId AS client_id,
     COUNT(DISTINCT sb.date) AS equity_days,
     ROUND(SUM(IF(sb.currency = 'CEN', sb.endingEquity / 100.0, sb.endingEquity)), 2) AS total_equity_sum,
     ROUND(
         SUM(IF(sb.currency = 'CEN', sb.endingEquity / 100.0, sb.endingEquity))
-        / COUNT(DISTINCT sb.date), 2
+        / COUNT(DISTINCT sb.date),
+        2
     ) AS avg_daily_equity
 FROM mt4_users mu
 INNER JOIN stats_balances sb ON sb.loginsid = mu.loginsid
-WHERE mu.userId = 149302
+INNER JOIN stats_trading st ON st.loginSid = mu.loginsid AND st.date = sb.date
+WHERE mu.userId = @client_id
   AND mu.sid IN (1, 5, 6)
   AND mu.`GROUP` NOT LIKE '%demo%'
   AND sb.endingEquity > 0
 GROUP BY mu.userId;
 
--- Step 2: 查看历史总利润
-SELECT userId, ROUND(SUM(IF(currency = 'CEN',
-    plClosedHavingActivityRunningTotal / 100.0,
-    plClosedHavingActivityRunningTotal)), 2) AS profit_hist
+-- 4) 历史盈亏
+SELECT
+    userId AS client_id,
+    ROUND(
+        SUM(IF(currency = 'CEN',
+            plClosedHavingActivityRunningTotal / 100.0,
+            plClosedHavingActivityRunningTotal)),
+        2
+    ) AS profit_hist
 FROM stats_trading_running_totals
-WHERE userId = 149302
+WHERE userId = @client_id
 GROUP BY userId;
 
--- Step 3: ROACE = profit_hist / avg_daily_equity × 100
+-- 5) 最终: 平均权益回报率
+SELECT
+    ade.client_id,
+    ade.equity_days,
+    ade.avg_daily_equity,
+    rt.profit_hist,
+    ROUND(rt.profit_hist / ade.avg_daily_equity * 100, 2) AS return_on_avg_equity
+FROM (
+    SELECT
+        mu.userId AS client_id,
+        COUNT(DISTINCT sb.date) AS equity_days,
+        SUM(IF(sb.currency = 'CEN', sb.endingEquity / 100.0, sb.endingEquity))
+            / COUNT(DISTINCT sb.date) AS avg_daily_equity
+    FROM mt4_users mu
+    INNER JOIN stats_balances sb ON sb.loginsid = mu.loginsid
+    INNER JOIN stats_trading st ON st.loginSid = mu.loginsid AND st.date = sb.date
+    WHERE mu.userId = @client_id
+      AND mu.sid IN (1, 5, 6)
+      AND mu.`GROUP` NOT LIKE '%demo%'
+      AND sb.endingEquity > 0
+    GROUP BY mu.userId
+) ade
+JOIN (
+    SELECT
+        userId AS client_id,
+        SUM(IF(currency = 'CEN',
+            plClosedHavingActivityRunningTotal / 100.0,
+            plClosedHavingActivityRunningTotal)) AS profit_hist
+    FROM stats_trading_running_totals
+    WHERE userId = @client_id
+    GROUP BY userId
+) rt ON ade.client_id = rt.client_id;
 ```

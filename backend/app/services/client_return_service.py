@@ -163,6 +163,7 @@ LEFT JOIN (
             / COUNT(DISTINCT sb.date) AS avg_daily_equity
     FROM mt4_users mu2
     INNER JOIN stats_balances sb ON sb.loginsid = mu2.loginsid
+    INNER JOIN stats_trading st2 ON st2.loginSid = mu2.loginsid AND st2.date = sb.date
     WHERE mu2.userId IN ({id_list_str})
       AND mu2.sid IN (1, 5, 6)
       AND mu2.`GROUP` NOT LIKE '%demo%'
