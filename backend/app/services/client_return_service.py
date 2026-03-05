@@ -63,8 +63,8 @@ def _get_mysql_connection():
         port=settings.MYSQL_PORT,
         charset="utf8mb4",
         cursorclass=pymysql.cursors.DictCursor,
-        connect_timeout=30,
-        read_timeout=120,
+        connect_timeout=10,
+        read_timeout=30,
     )
 
 

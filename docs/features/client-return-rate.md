@@ -49,7 +49,7 @@
 | 正数入金收益率% | `return_non_adjusted` | 计算字段 | 否 | 净入金>0 时：`(equity - net_deposit) / net_deposit × 100` |
 | 最近90天入金 | `deposits_90d` | `stats_transactions` | 否（固定90天窗口） | `SUM(deposit)` where `date >= CURDATE() - 90` |
 | 负净入金回报率% | `return_neg_adjusted` | 计算字段 | 否 | 净入金≤0 时：`(equity - A) / A × 100`，其中 `A = MAX(deposits_90d, |net_deposit_hist|)` |
-| 日均净值 | `avg_daily_equity` | `stats_balances` | 否（全历史） | 全历史每日 endingEquity 之和 / 有资金天数。排除 equity=0 的天数、IB Wallet (sid=2)、demo 账户。仅 `include_avg_equity=true` 时返回 |
+| 日均净值 | `avg_daily_equity` | `stats_balances` × `stats_trading` | 否（全历史） | 全历史**活跃天** endingEquity 之和 / 活跃天数。INNER JOIN `stats_trading` 排除休眠尘埃天，排除 equity=0、IB Wallet (sid=2)、demo 账户。仅 `include_avg_equity=true` 时返回 |
 | 长期收益率(ROACE)% | `return_on_avg_equity` | 计算字段 | 否 | `profit_hist / avg_daily_equity × 100`。ROACE = Return on Average Capital Employed，衡量每 $1 平均在用资本的累计回报 |
 
 > **注意**: 每个客户只会有"调整后收益率"四列之一有值（按存款区间），或"正数入金收益率"有值，两类互斥。
@@ -73,7 +73,7 @@
 - `txm`: `stats_transactions` 所选时间范围内入金/出金（sid IN 1,2,5,6）
 - `dep90`: `stats_transactions` 近 90 天入金（sid IN 1,2,5,6）
 - `rt`: `stats_trading_running_totals` 全历史累计已实现交易利润（按 userId 聚合，CEN 除以 100）
-- `ade`（可选）: `stats_balances` 全历史日均 equity，通过 `mt4_users` JOIN 排除 IB Wallet (sid=2) 和 demo 账户。仅当 `include_avg_equity=true` 时加入查询
+- `ade`（可选）: `stats_balances` INNER JOIN `stats_trading` 全历史活跃天日均 equity，排除休眠尘埃天、IB Wallet (sid=2)、demo 账户。仅当 `include_avg_equity=true` 时加入查询
 
 ### 4.2 时区处理
 
@@ -131,4 +131,15 @@
 - 仅限已平仓买卖单: `CMD IN (0, 1)`（仅 mt4_trades fallback 路径使用）
 - 仅限有效客户: `userId > 0`
 - CEN（美分）账户金额自动除以 100
-- **ROACE 日均净值**: `stats_balances` 通过 `mt4_users` JOIN，`sid IN (1, 5, 6)` 排除 IB Wallet，`endingEquity > 0` 排除空仓天数，全历史无日期限制
+- **ROACE 日均净值**: `stats_balances` INNER JOIN `stats_trading`（仅活跃天），通过 `mt4_users` JOIN，`sid IN (1, 5, 6)` 排除 IB Wallet，`endingEquity > 0` 排除空仓天数，全历史无日期限制
+
+---
+
+## 7. 超时保护
+
+| 配置 | 值 | 说明 |
+|------|---|------|
+| MySQL `read_timeout` | 30s | 单次 SQL 执行超过 30s 自动断开 |
+| MySQL `connect_timeout` | 10s | 连接建立超时 |
+| 后端异常处理 | HTTP 504 | 捕获 `OperationalError(2013)` 返回 504 + 中文提示 |
+| 前端 UI | 红色 banner | 显示"查询超时，请缩小时间范围后重试"，可关闭 |

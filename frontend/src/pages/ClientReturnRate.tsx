@@ -157,6 +157,7 @@ export default function ClientReturnRate() {
     cached.current?.queriedAt ?? null,
   );
   const [date, setDate] = useState<DateRange | undefined>(cached.current?.date);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [countryFilter, setCountryFilter] = useState<string>("all");
   const [akcmFilter, setAkcmFilter] = useState<string>("all");
 
@@ -220,6 +221,7 @@ export default function ClientReturnRate() {
 
   const fetchData = useCallback(async () => {
     setLoading(true);
+    setErrorMsg(null);
     setSearchValue(searchInput.trim());
 
     try {
@@ -238,6 +240,10 @@ export default function ClientReturnRate() {
         p.set("close_time_start", format(dr.from, "yyyy-MM-dd HH:mm:ss"));
       }
       const res = await fetch(`/api/v1/client-return-rate/query?${p}`);
+      if (res.status === 504) {
+        const body = await res.json().catch(() => null);
+        throw new Error(body?.detail || "查询超时，请缩小时间范围后重试");
+      }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const r = await res.json();
 
@@ -266,7 +272,9 @@ export default function ClientReturnRate() {
         timestamp: Date.now(),
       });
     } catch (e) {
+      const msg = e instanceof Error ? e.message : "查询失败";
       console.error(e);
+      setErrorMsg(msg);
       setRows([]);
       setTotal(0);
       setQueryTime(null);
@@ -653,6 +661,16 @@ export default function ClientReturnRate() {
           )}
         </CardContent>
       </Card>
+
+      {/* Timeout / error banner */}
+      {errorMsg && (
+        <div className="mx-0 mb-3 flex items-center justify-between rounded-md border border-destructive/50 bg-destructive/10 px-4 py-2.5 text-sm text-destructive">
+          <span>{errorMsg}</span>
+          <button onClick={() => setErrorMsg(null)} className="ml-4 hover:opacity-70">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+      )}
 
       {/* AG Grid Table */}
       <div className="flex-1 relative">

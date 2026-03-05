@@ -11,6 +11,7 @@ Docs: docs/features/client-return-rate.md
 
 from typing import Optional
 from fastapi import APIRouter, HTTPException, Query
+from pymysql.err import OperationalError
 
 from app.schemas.client_return_rate import (
     ClientReturnRateResponse,
@@ -60,6 +61,14 @@ async def query_client_return_rate(
             include_avg_equity=include_avg_equity,
         )
         return result
+    except OperationalError as e:
+        # MySQL error 2013 = Lost connection (read timeout), 1028 = Sort aborted
+        err_code = e.args[0] if e.args else 0
+        if err_code in (2013, 1028):
+            logger.warning(f"Query timeout for client return rate: {e}")
+            raise HTTPException(status_code=504, detail="查询超时，请缩小时间范围后重试")
+        logger.exception("MySQL error querying client return rate")
+        raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
         logger.exception("Error querying client return rate")
         raise HTTPException(status_code=500, detail=str(e))
