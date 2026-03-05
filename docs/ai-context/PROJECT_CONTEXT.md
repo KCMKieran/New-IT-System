@@ -245,6 +245,7 @@ New-IT-System/
 - Client ID search (pushed down to all subqueries for fast lookup)
 - Adjusted return rates by deposit bucket (0-2K, 2K-5K, 5K-50K, 50K+)
 - Negative net deposit return rate: `(equity - A) / A` where `A = MAX(deposits_90d, |net_deposit_hist|)`
+- **ROACE long-term return**: `profit_hist / avg_daily_equity × 100`, using full-history daily equity snapshots from `stats_balances`. Opt-in via `include_avg_equity=true` (full page only, Dashboard skips for performance)
 - Last 90 days deposit column
 - Demo account exclusion
 - sessionStorage caching for page navigation restore
@@ -252,10 +253,10 @@ New-IT-System/
 - Dedicated `MYSQL_HOST_PRIMARY` config (can override independently from global MYSQL_HOST)
 
 **APIs**:
-- `GET /api/v1/client-return-rate/query` - Query with optional `close_time_start` for precise filtering
+- `GET /api/v1/client-return-rate/query` - Query with optional `close_time_start` for precise filtering, optional `include_avg_equity` for ROACE calculation
 - `DELETE /api/v1/client-return-rate/cache` - Clear all Redis cache for this page
 
-**Tables**: `fxbackoffice.mt4_trades`, `fxbackoffice.mt4_users`, `fxbackoffice.stats_transactions`
+**Tables**: `fxbackoffice.mt4_trades`, `fxbackoffice.mt4_users`, `fxbackoffice.stats_transactions`, `fxbackoffice.stats_balances` (ROACE)
 
 ### 4.6 Equity Monitor
 **Purpose**: Track account balances and equity changes.

@@ -140,8 +140,36 @@ GROUP BY mu.userId
 """
 
 
-def _build_phase2_sql(id_list_str: str, tm_inline: str, month_start: str, month_end: str) -> str:
+def _build_phase2_sql(id_list_str: str, tm_inline: str, month_start: str, month_end: str, include_avg_equity: bool = False) -> str:
     """Build Phase 2 SQL: equity, deposits, and realized trade profit (from stats_trading_running_totals)."""
+
+    # Conditionally add ROACE columns (avg_daily_equity + return_on_avg_equity)
+    avg_equity_select = ""
+    avg_equity_join = ""
+    if include_avg_equity:
+        avg_equity_select = """,
+    ROUND(COALESCE(ade.avg_daily_equity, 0), 2) AS avg_daily_equity,
+    IF(
+        COALESCE(ade.avg_daily_equity, 0) > 0,
+        ROUND(COALESCE(rt.profit_hist_trades, 0) / ade.avg_daily_equity * 100, 2),
+        NULL
+    ) AS return_on_avg_equity"""
+
+        avg_equity_join = f"""
+LEFT JOIN (
+    SELECT
+        mu2.userId AS client_id,
+        SUM(IF(sb.currency = 'CEN', sb.endingEquity / 100.0, sb.endingEquity))
+            / COUNT(DISTINCT sb.date) AS avg_daily_equity
+    FROM mt4_users mu2
+    INNER JOIN stats_balances sb ON sb.loginsid = mu2.loginsid
+    WHERE mu2.userId IN ({id_list_str})
+      AND mu2.sid IN (1, 5, 6)
+      AND mu2.`GROUP` NOT LIKE '%demo%'
+      AND sb.endingEquity > 0
+    GROUP BY mu2.userId
+) AS ade ON tm.client_id = ade.client_id"""
+
     return f"""
 SELECT
     tm.client_id,
@@ -199,7 +227,7 @@ SELECT
             (COALESCE(eq.equity, 0) - GREATEST(COALESCE(dep90.deposits_90d, 0), ABS(COALESCE(th.deposits_hist, 0) + COALESCE(th.withdrawals_hist, 0))))
             / GREATEST(COALESCE(dep90.deposits_90d, 0), ABS(COALESCE(th.deposits_hist, 0) + COALESCE(th.withdrawals_hist, 0))) * 100, 2),
         NULL
-    ) AS return_neg_adjusted
+    ) AS return_neg_adjusted{avg_equity_select}
 
 FROM ({tm_inline}) AS tm
 
@@ -277,7 +305,7 @@ LEFT JOIN (
     WHERE tagid = 30154
       AND userid IN ({id_list_str})
 ) AS akcm ON tm.client_id = akcm.client_id
-
+{avg_equity_join}
 ORDER BY tm.month_trade_profit IS NULL, tm.month_trade_profit DESC
 """
 
@@ -292,6 +320,7 @@ def get_client_return_rate_data(
     month_start: Optional[str] = None,
     month_end: Optional[str] = None,
     close_time_start: Optional[str] = None,
+    include_avg_equity: bool = False,
 ) -> Dict[str, Any]:
     """
     Two-phase MySQL query for client return rate data.
@@ -310,6 +339,7 @@ def get_client_return_rate_data(
         "return_non_adjusted", "return_adjusted",
         "adj_0_2000", "adj_2000_5000", "adj_5000_50000", "adj_50000_plus",
         "deposits_90d", "return_neg_adjusted",
+        "avg_daily_equity", "return_on_avg_equity",
     }
     if sort_by not in allowed_sort_columns:
         sort_by = "month_trade_profit"
@@ -325,7 +355,7 @@ def get_client_return_rate_data(
             logger.warning(f"Invalid close_time_start format: {close_time_start}")
 
     # Redis cache
-    cache_params = f"client_return_v2_{month_start}_{month_end}_{search}_{deposit_bucket}_{sort_by}_{sort_order}_{page}_{page_size}_{close_time_start}"
+    cache_params = f"client_return_v2_{month_start}_{month_end}_{search}_{deposit_bucket}_{sort_by}_{sort_order}_{page}_{page_size}_{close_time_start}_{include_avg_equity}"
     cache_key = f"app:client_return:cache:{hashlib.md5(cache_params.encode()).hexdigest()}"
 
     try:
@@ -399,7 +429,7 @@ def get_client_return_rate_data(
                     f"SELECT {int(cid)} AS client_id, {float(profit_map[cid])} AS month_trade_profit"
                     for cid in client_ids
                 )
-                phase2_sql = _build_phase2_sql(id_list_str, tm_inline, month_start, month_end)
+                phase2_sql = _build_phase2_sql(id_list_str, tm_inline, month_start, month_end, include_avg_equity)
                 cur.execute(phase2_sql)
                 all_data = cur.fetchall()
 

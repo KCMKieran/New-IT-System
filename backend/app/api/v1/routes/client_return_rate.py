@@ -35,6 +35,7 @@ async def query_client_return_rate(
     month_start: Optional[str] = Query(None, description="Month start date (YYYY-MM-DD)"),
     month_end: Optional[str] = Query(None, description="Month end date (YYYY-MM-DD)"),
     close_time_start: Optional[str] = Query(None, description="Precise CLOSE_TIME filter (YYYY-MM-DD HH:MM:SS in HK time)"),
+    include_avg_equity: bool = Query(False, description="Include avg_daily_equity and return_on_avg_equity (heavier query)"),
 ):
     """
     Query client return rate data with pagination and filtering.
@@ -56,6 +57,7 @@ async def query_client_return_rate(
             month_start=month_start,
             month_end=month_end,
             close_time_start=close_time_start,
+            include_avg_equity=include_avg_equity,
         )
         return result
     except Exception as e:

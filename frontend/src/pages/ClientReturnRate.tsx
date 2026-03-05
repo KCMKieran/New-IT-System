@@ -60,6 +60,8 @@ interface ClientReturnRateRow {
   return_non_adjusted: number | null;
   deposits_90d: number;
   return_neg_adjusted: number | null;
+  avg_daily_equity: number | null;
+  return_on_avg_equity: number | null;
   country: string;
   is_akcm: boolean;
 }
@@ -227,6 +229,7 @@ export default function ClientReturnRate() {
         page_size: "5000",
         sort_by: "month_trade_profit",
         sort_order: "desc",
+        include_avg_equity: "true",
       });
       if (searchInput.trim()) p.set("search", searchInput.trim());
       if (dr?.from) p.set("month_start", format(dr.from, "yyyy-MM-dd"));
@@ -347,6 +350,21 @@ export default function ClientReturnRate() {
         width: 130,
         valueFormatter: (p) => formatCurrency(p.value),
         cellClass: (p) => getProfitColor(p.value),
+      },
+      {
+        field: "avg_daily_equity",
+        headerName: "日均净值",
+        width: 140,
+        valueFormatter: (p) => formatCurrency(p.value),
+        cellStyle: { backgroundColor: "rgba(59, 130, 246, 0.08)" },
+      },
+      {
+        field: "return_on_avg_equity",
+        headerName: "长期收益率(ROACE)%",
+        width: 180,
+        valueFormatter: (p) => formatPercent(p.value),
+        cellClass: (p) => getProfitColor(p.value),
+        cellStyle: { backgroundColor: "rgba(168, 85, 247, 0.08)" },
       },
       {
         field: "adj_0_2000",
