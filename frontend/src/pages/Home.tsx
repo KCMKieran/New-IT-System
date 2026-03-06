@@ -6,6 +6,7 @@ import { CreditCard } from "lucide-react";
 const PositionSummary = lazy(() => import("@/components/dashboard/PositionSummary"));
 const ReturnRateSummary = lazy(() => import("@/components/dashboard/ReturnRateSummary"));
 const Past24hClientPnlByCountry = lazy(() => import("@/components/dashboard/Past24hClientPnlByCountry"));
+const Past24hClientPnlByGroup = lazy(() => import("@/components/dashboard/Past24hClientPnlByGroup"));
 const SuspiciousClients = lazy(() => import("@/components/dashboard/SuspiciousClients"));
 
 function WidgetSkeleton() {
@@ -61,7 +62,7 @@ export default function HomePage() {
           <ReturnRateSummary />
         </Suspense>
 
-        {/* Two modules side-by-side on desktop, stacked on mobile; each ~half width of return rate block */}
+        {/* PnL by country + Suspicious clients side-by-side */}
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
           <Suspense fallback={<WidgetSkeleton />}>
             <Past24hClientPnlByCountry />
@@ -70,6 +71,11 @@ export default function HomePage() {
             <SuspiciousClients />
           </Suspense>
         </div>
+
+        {/* PnL by account group: full width below */}
+        <Suspense fallback={<WidgetSkeleton />}>
+          <Past24hClientPnlByGroup />
+        </Suspense>
       </div>
     </div>
   );

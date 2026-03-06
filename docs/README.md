@@ -63,6 +63,7 @@ docs/
 │   ├── ib-net-deposit-reform.md
 │   ├── ib-net-deposit-summary.md
 │   ├── open-positions-reform.md
+│   ├── dashboard-pnl-by-group.md
 │   ├── client-pnl-local-filtering.md
 │   ├── client-pnl-column-toggle.md
 │   ├── profit-deep-analysis.md

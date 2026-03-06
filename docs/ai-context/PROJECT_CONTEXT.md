@@ -92,7 +92,8 @@ New-IT-System/
 │   │   │   ├── ui/             # shadcn/ui components
 │   │   │   ├── dashboard/      # Dashboard widgets
 │   │   │   │   ├── PositionSummary.tsx    # Position summary widget
-│   │   │   │   └── ReturnRateSummary.tsx  # Client return rate widget
+│   │   │   │   ├── ReturnRateSummary.tsx  # Client return rate widget
+│   │   │   │   └── Past24hClientPnlByGroup.tsx  # PnL by account group widget
 │   │   │   ├── site-header.tsx # Page titles
 │   │   │   └── app-sidebar.tsx # Navigation
 │   │   ├── providers/
@@ -153,6 +154,7 @@ New-IT-System/
 - **实时持仓** widget — cross-server XAUUSD/XAGUSD summary (auto-loads on mount)
 - **客户收益率 (6h)** widget — AG Grid with CN/Global + AKCM filters (auto-loads on mount)
 - **近两日客户平仓净盈亏** widget — table by country/sales team (today + yesterday, MT Server; expandable rows)
+- **近两日客户平仓净盈亏 (Group)** widget — PnL + IB commission grouped by mt4_users.GROUP with expandable sales_team detail; click-to-sort on all 4 data columns
 - **可疑客户** widget — table list (framework; data TBD)
 - Data fetch timestamps displayed on each widget
 - Lazy-loaded widgets with Skeleton fallback
@@ -161,12 +163,14 @@ New-IT-System/
 - `GET /api/v1/open-positions/symbol-summary` (no cache)
 - `GET /api/v1/client-return-rate/query` (Redis cache 3h)
 - `GET /api/v1/dashboard/pnl-by-sales-team` (no cache; today/yesterday PnL by sales team + country)
+- `GET /api/v1/dashboard/pnl-by-group` (no cache; PnL by account group + sales team)
 
 **Key Files**:
 - `frontend/src/pages/Home.tsx`
 - `frontend/src/components/dashboard/PositionSummary.tsx`
 - `frontend/src/components/dashboard/ReturnRateSummary.tsx`
 - `frontend/src/components/dashboard/Past24hClientPnlByCountry.tsx`
+- `frontend/src/components/dashboard/Past24hClientPnlByGroup.tsx`
 - `frontend/src/components/dashboard/SuspiciousClients.tsx`
 
 **Docs**: [dashboard.md](../features/dashboard.md)

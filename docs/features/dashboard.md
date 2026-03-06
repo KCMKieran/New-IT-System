@@ -41,12 +41,17 @@ The Dashboard (`/` or `/home`) is the first page users see after login. It displ
 │  │          │  │ │近两日客户   │ │ 可疑客户     │   │    │
 │  │          │  │ │平仓净盈亏   │ │ (table)      │   │    │
 │  │          │  │ └──────────────┘ └──────────────┘   │    │
+│  │          │  │                                      │    │
+│  │          │  │ ┌────────────────────────────────┐   │    │
+│  │          │  │ │近两日客户平仓净盈亏 (Group)   │   │    │
+│  │          │  │ │ 行: 按账户组(GROUP)分组      │   │    │
+│  │          │  │ └────────────────────────────────┘   │    │
 │  └──────────┘  └────────────────────────────────────┘    │
 └──────────────────────────────────────────────────────────┘
 ```
 
 - **Left column**: `self-start lg:sticky lg:top-4` — stays at natural height, sticky on scroll
-- **Right column**: `flex flex-col gap-4` — widgets stack vertically; last row is two cards side-by-side (`lg:grid-cols-2`), stacked on mobile
+- **Right column**: `flex flex-col gap-4` — widgets stack vertically; PnL by Country + Suspicious Clients side-by-side (`lg:grid-cols-2`), PnL by Group full width below; stacked on mobile
 - **Responsive**: Single column on mobile, 1:3 split on `lg+`
 
 ---
@@ -107,7 +112,25 @@ The Dashboard (`/` or `/home`) is the first page users see after login. It displ
 
 **Data source**: MySQL `fxbackoffice` — `stats_trading` (PnL) + `stats_ib_commissions` (IB rebate) + sales team tags (categoryId=6); country from backend mapping (see `docs/features/dashboard-pnl24h-by-country-sql.md`). Excludes demo and employee accounts (see §9.1 of that doc).
 
-### 3.4 可疑客户 (SuspiciousClients)
+### 3.4 近两日客户平仓净盈亏 - Group (Past24hClientPnlByGroup)
+
+**File**: `frontend/src/components/dashboard/Past24hClientPnlByGroup.tsx`
+
+**What it shows**:
+- Card title "近两日客户平仓净盈亏 (Group)" with subtitle "时间口径：MT Server 时间 · 按账户组分组"
+- Table columns: **今日Profit** / **今日IB佣金** / **昨日Profit** / **昨日IB佣金** (same 4 columns as PnL by Country)
+- PnL from `stats_trading`; IB佣金 from `stats_ib_commissions_by_login_sid` (account-level, JOINs mt4_users for GROUP)
+- Rows grouped by mt4_users.GROUP (expandable to per-sales-team breakdown)
+- All 4 data columns support **click-to-sort**: click once ascending, click again descending; default sort by 昨日Profit ascending
+- IB commission columns in muted gray; overall font size `text-xs`
+
+**API**: `GET /api/v1/dashboard/pnl-by-group`
+
+**Data source**: MySQL `fxbackoffice` — same `stats_trading` data as PnL by Country, but grouped by `mu.GROUP` additionally. No IB commission query. Excludes demo and employee accounts.
+
+**Docs**: [dashboard-pnl-by-group.md](dashboard-pnl-by-group.md)
+
+### 3.5 可疑客户 (SuspiciousClients)
 
 **File**: `frontend/src/components/dashboard/SuspiciousClients.tsx`
 
@@ -117,7 +140,7 @@ The Dashboard (`/` or `/home`) is the first page users see after login. It displ
 
 **API**: TBD
 
-### 3.5 CN渠道支付成功率 (Placeholder)
+### 3.6 CN渠道支付成功率 (Placeholder)
 
 **Status**: Coming Soon — left column placeholder card
 
@@ -134,6 +157,7 @@ Both widgets auto-fetch data when the Dashboard mounts (including browser refres
 | PositionSummary | On mount (XAUUSD) | None | 1-3s |
 | ReturnRateSummary | On mount (6h window) | Redis 3h TTL | <100ms (cached) / 5-15s (fresh) |
 | Past24hClientPnlByCountry | On mount | None | 1–3s |
+| Past24hClientPnlByGroup | On mount | None | 1–3s |
 | SuspiciousClients | — | — | Framework only |
 
 ---
@@ -218,13 +242,15 @@ This ensures only one request queries MySQL when multiple users trigger the same
 | `frontend/src/components/dashboard/PositionSummary.tsx` | Position summary widget |
 | `frontend/src/components/dashboard/ReturnRateSummary.tsx` | Client return rate widget (AG Grid) |
 | `frontend/src/components/dashboard/Past24hClientPnlByCountry.tsx` | 近两日客户平仓净盈亏（按国家/团队，可展开） |
+| `frontend/src/components/dashboard/Past24hClientPnlByGroup.tsx` | 近两日客户平仓净盈亏（按账户组(GROUP)分组） |
 | `frontend/src/components/dashboard/SuspiciousClients.tsx` | Suspicious clients list (table framework) |
 | `backend/app/api/v1/routes/open_positions.py` | API: `/api/v1/open-positions/symbol-summary` |
 | `backend/app/api/v1/routes/client_return_rate.py` | API: `/api/v1/client-return-rate/query` |
-| `backend/app/api/v1/routes/dashboard.py` | API: `/api/v1/dashboard/pnl-by-sales-team` |
+| `backend/app/api/v1/routes/dashboard.py` | API: `/api/v1/dashboard/pnl-by-sales-team`, `/api/v1/dashboard/pnl-by-group` |
 | `backend/app/services/open_positions_service.py` | Position query logic (MySQL, no cache) |
 | `backend/app/services/client_return_service.py` | Return rate query logic (MySQL + Redis cache) |
 | `backend/app/services/dashboard_pnl_service.py` | Dashboard PnL by sales team (MySQL stats_trading + country mapping) |
+| `backend/app/services/dashboard_pnl_group_service.py` | Dashboard PnL by account group (MySQL stats_trading + GROUP grouping) |
 
 ---
 
