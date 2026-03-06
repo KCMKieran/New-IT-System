@@ -3,8 +3,9 @@
 ## 产品与展示约定
 
 - **卡片标题**：近两日客户平仓净盈亏；副标题「时间口径：MT Server 时间」（小号字）。
-- **表格展示**：仅 **今日**、**昨日** 两列（无合计列）；默认按昨日盈亏升序；斑马纹；数值左对齐。
-- **前端**：不做 i18n，文案固定中文；国家汇总采用方案 A（前端按 `country` 分组并 SUM）。
+- **表格展示**：**今日Profit**、**今日IB佣金**、**昨日Profit**、**昨日IB佣金** 四列（无合计列）；默认按昨日盈亏升序；斑马纹；数值左对齐；整体字体 `text-xs`。
+- **IB 佣金**：从 `stats_ib_commissions` 按客户（refId）所属 sales team 聚合，汇总所有层级 IB 的 rebate 成本；灰色展示（`text-muted-foreground`）。
+- **前端**：不做 i18n，文案固定中文；国家汇总采用方案 A（前端按 `country` 分组并 SUM，PnL 和 IB 佣金各自汇总）。
 - **未映射国家**：后端映射表缺失或 country 为空时，返回 `Unknown`。
 
 ---
@@ -73,12 +74,45 @@ ORDER BY net_pnl_total DESC;
 - **数据量**：`stats_trading` 按天、按账户汇总，两天的行数 ≈ 有交易账户数（万级），远小于原始订单表按 24h 扫描的行数（十万～百万级）。
 - **索引**：`(userId, date)` 等索引适合「按日期 + 按用户」过滤和聚合，无需扫大表。
 
+## 4.1 IB 佣金 SQL：按客户所属 Sales Team 聚合
+
+第二条 SQL 查询 `stats_ib_commissions`，按客户（`refId`）的 sales team 聚合所有层级 IB 的佣金成本。与 §3 的 PnL SQL 维度对齐（都以客户的 `categoryId=6` tag 分组），结果在后端按 `sales_team` key 合并。
+
+```sql
+-- IB 佣金成本 by sales team (today + yesterday). DB: fxbackoffice
+-- commission = 公司支付给 IB 的 rebate (所有层级合计)
+-- 按 refId (产生交易的客户) 关联 sales team, 与 PnL 维度对齐
+
+SELECT
+    COALESCE(tt.team_tag, 'Unknown') AS sales_team,
+    ROUND(SUM(CASE WHEN sic.date = CURDATE()
+              THEN IF(sic.currency = 'CEN', sic.commission / 100.0, sic.commission)
+              ELSE 0 END), 2) AS ib_commission_today,
+    ROUND(SUM(CASE WHEN sic.date = CURDATE() - INTERVAL 1 DAY
+              THEN IF(sic.currency = 'CEN', sic.commission / 100.0, sic.commission)
+              ELSE 0 END), 2) AS ib_commission_yesterday
+FROM stats_ib_commissions sic
+LEFT JOIN (
+    SELECT ut.userid, MIN(t.tag) AS team_tag
+    FROM user_tags ut
+    INNER JOIN tags t ON ut.tagid = t.id AND t.categoryId = 6
+    GROUP BY ut.userid
+) tt ON sic.refId = tt.userid
+WHERE sic.date IN (CURDATE(), CURDATE() - INTERVAL 1 DAY)
+GROUP BY tt.team_tag
+```
+
+- **`stats_ib_commissions`**：PK 为 `(date, ibId, refId, currency)`，一行 = 一个 IB 从一个客户在某日某币种赚取的佣金。
+- **合并逻辑**：后端在同一连接中顺序执行两条 SQL（PnL + IB Commission），按 `sales_team` key 合并到同一行。若某 team 只有 IB 佣金无 PnL，PnL 字段为 0（反之亦然）。
+- **CEN 处理**：与 PnL 一致，`currency='CEN'` 时 `/100`。
+
 ## 5. 接口输出与前端使用
 
-- **接口返回**：每行包含 **sales_team**（tag 名）、**net_pnl_today**、**net_pnl_yesterday**、**net_pnl_total**，以及后端根据 §6 映射表填充的 **country**（未映射或为空时返回 `Unknown`）。
+- **接口返回**：每行包含 **sales_team**（tag 名）、**net_pnl_today**、**net_pnl_yesterday**、**net_pnl_total**、**ib_commission_today**、**ib_commission_yesterday**，以及后端根据 §6 映射表填充的 **country**（未映射或为空时返回 `Unknown`）。
 - **前端**：
   - 卡片标题「近两日客户平仓净盈亏」，副标题「时间口径：MT Server 时间」（CardDescription，小号字）。
-  - 表格列仅 **今日**、**昨日**（无合计列）；先按 **country** 展示，默认按 **昨日** 盈亏升序排序；每行 country 可点击展开，下方展示该国家下各 **sales_team** 的今日/昨日（方案 A：前端按 `country` 分组并 SUM；子行按昨日升序；斑马纹；数值左对齐）。
+  - 表格四列：**今日Profit**、**今日IB佣金**、**昨日Profit**、**昨日IB佣金**（无合计列）；先按 **country** 展示，默认按 **昨日** 盈亏升序排序；每行 country 可点击展开，下方展示该国家下各 **sales_team** 的同四列（方案 A：前端按 `country` 分组并 SUM；子行按昨日升序；斑马纹；数值左对齐）。
+  - IB 佣金列使用灰色（`text-muted-foreground`），与 Profit 的红绿色区分。整体字体缩至 `text-xs` 以容纳更多列。
 
 ---
 
@@ -179,9 +213,9 @@ ORDER BY net_pnl_total DESC;
 
 ## 9. 实现说明（已落地）
 
-- **后端**：`backend/app/api/v1/routes/dashboard.py`（GET /pnl-by-sales-team）、`backend/app/services/dashboard_pnl_service.py`（SQL + 映射表）、`backend/app/schemas/dashboard_pnl.py`。
+- **后端**：`backend/app/api/v1/routes/dashboard.py`（GET /pnl-by-sales-team）、`backend/app/services/dashboard_pnl_service.py`（两条 SQL：PnL from `stats_trading` + IB commission from `stats_ib_commissions`，按 sales_team 合并）、`backend/app/schemas/dashboard_pnl.py`（`SalesTeamPnlRow` 含 `ib_commission_today/yesterday`）。
 - **前端**：`frontend/src/components/dashboard/Past24hClientPnlByCountry.tsx`（请求接口、按国家分组、可展开查看各 sales team 明细）。
-- **展示**：卡片标题「近两日客户平仓净盈亏」，副标题「时间口径：MT Server 时间」；表格列：国家/地区、今日、昨日（无合计）；默认按昨日盈亏升序；点击国家行展开/收起该国家下各 sales team 的今日/昨日；斑马纹；数值左对齐。
+- **展示**：卡片标题「近两日客户平仓净盈亏」，副标题「时间口径：MT Server 时间」；表格列：国家/地区、今日Profit、今日IB佣金、昨日Profit、昨日IB佣金（无合计）；默认按昨日盈亏升序；点击国家行展开/收起该国家下各 sales team 的同四列；IB 佣金灰色展示；整体字体 `text-xs`；斑马纹；数值左对齐。
 
 ### 9.1 数据过滤（与客户类报表统一）
 

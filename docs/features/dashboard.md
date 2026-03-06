@@ -97,13 +97,15 @@ The Dashboard (`/` or `/home`) is the first page users see after login. It displ
 
 **What it shows**:
 - Card title "近两日客户平仓净盈亏" with subtitle "时间口径：MT Server 时间" (CardDescription, smaller text)
-- Table: **今日** / **昨日** columns only (no 合计); time scope: MT Server natural day
-- Rows grouped by country, default sort by **昨日** PnL ascending (min to max); click a country row to expand and see per–sales-team rows (same columns, same sort); zebra striping on country and team rows; value columns left-aligned
+- Table: **今日Profit** / **今日IB佣金** / **昨日Profit** / **昨日IB佣金** four columns (no 合计); time scope: MT Server natural day
+- Profit = client PnL (totalPlClosed from `stats_trading`); IB佣金 = IB rebate cost (commission from `stats_ib_commissions`, all IB levels summed, grouped by client's sales team)
+- Rows grouped by country, default sort by **昨日** PnL ascending (min to max); click a country row to expand and see per–sales-team rows (same columns, same sort); zebra striping; value columns left-aligned
+- IB commission columns in muted gray color; overall font size `text-xs` for compact layout
 - Fixed-height card, table scrolls when needed
 
 **API**: `GET /api/v1/dashboard/pnl-by-sales-team`
 
-**Data source**: MySQL `fxbackoffice` — `stats_trading` + sales team tags (categoryId=6); country from backend mapping (see `docs/features/dashboard-pnl24h-by-country-sql.md`). Excludes demo and employee accounts (see §9.1 of that doc).
+**Data source**: MySQL `fxbackoffice` — `stats_trading` (PnL) + `stats_ib_commissions` (IB rebate) + sales team tags (categoryId=6); country from backend mapping (see `docs/features/dashboard-pnl24h-by-country-sql.md`). Excludes demo and employee accounts (see §9.1 of that doc).
 
 ### 3.4 可疑客户 (SuspiciousClients)
 

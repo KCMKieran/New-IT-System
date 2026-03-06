@@ -110,6 +110,29 @@ ORDER BY net_pnl_total DESC
 """
 
 
+# IB commission by sales team (today + yesterday). Grouped by client's (refId) sales team
+# to align with PnL dimension. Sums all IB levels for total rebate cost.
+SQL_IB_COMMISSION_BY_SALES_TEAM = """
+SELECT
+    COALESCE(tt.team_tag, 'Unknown') AS sales_team,
+    ROUND(SUM(CASE WHEN sic.date = CURDATE()
+              THEN IF(sic.currency = 'CEN', sic.commission / 100.0, sic.commission)
+              ELSE 0 END), 2) AS ib_commission_today,
+    ROUND(SUM(CASE WHEN sic.date = CURDATE() - INTERVAL 1 DAY
+              THEN IF(sic.currency = 'CEN', sic.commission / 100.0, sic.commission)
+              ELSE 0 END), 2) AS ib_commission_yesterday
+FROM stats_ib_commissions sic
+LEFT JOIN (
+    SELECT ut.userid, MIN(t.tag) AS team_tag
+    FROM user_tags ut
+    INNER JOIN tags t ON ut.tagid = t.id AND t.categoryId = 6
+    GROUP BY ut.userid
+) tt ON sic.refId = tt.userid
+WHERE sic.date IN (CURDATE(), CURDATE() - INTERVAL 1 DAY)
+GROUP BY tt.team_tag
+"""
+
+
 def _get_mysql_connection():
     """Connect to fxbackoffice (same as client_return_service for consistency)."""
     settings = get_settings()
@@ -128,25 +151,60 @@ def _get_mysql_connection():
 
 def get_pnl_by_sales_team() -> list[SalesTeamPnlRow]:
     """
-    Return per-sales-team PnL (today, yesterday, total) with country.
-    Time scope: MT Server natural day. Unmapped team -> country "Unknown".
+    Return per-sales-team PnL + IB commission (today, yesterday) with country.
+    Two sequential queries on the same connection: PnL from stats_trading,
+    IB commission from stats_ib_commissions, merged by sales_team key.
     """
     with _get_mysql_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(SQL_PNL_BY_SALES_TEAM)
-            rows = cur.fetchall()
-    out: list[SalesTeamPnlRow] = []
-    for r in rows:
+            pnl_rows = cur.fetchall()
+            cur.execute(SQL_IB_COMMISSION_BY_SALES_TEAM)
+            ib_rows = cur.fetchall()
+
+    # Build IB commission lookup keyed by sales_team
+    ib_map: dict[str, dict] = {}
+    for r in ib_rows:
         team = (r.get("sales_team") or "").strip() or "Unknown"
+        ib_map[team] = r
+
+    out: list[SalesTeamPnlRow] = []
+    seen_teams: set[str] = set()
+    for r in pnl_rows:
+        team = (r.get("sales_team") or "").strip() or "Unknown"
+        seen_teams.add(team)
         country = SALES_TEAM_TO_COUNTRY.get(team)
         if country is None or country == "" or country == "—":
             country = "Unknown"
+        ib = ib_map.get(team, {})
         out.append(
             SalesTeamPnlRow(
                 sales_team=team,
                 net_pnl_today=float(r.get("net_pnl_today") or 0),
                 net_pnl_yesterday=float(r.get("net_pnl_yesterday") or 0),
                 net_pnl_total=float(r.get("net_pnl_total") or 0),
+                ib_commission_today=float(ib.get("ib_commission_today") or 0),
+                ib_commission_yesterday=float(ib.get("ib_commission_yesterday") or 0),
+                country=country,
+            )
+        )
+
+    # Teams that have IB commission but no PnL (rare but possible)
+    for r in ib_rows:
+        team = (r.get("sales_team") or "").strip() or "Unknown"
+        if team in seen_teams:
+            continue
+        country = SALES_TEAM_TO_COUNTRY.get(team)
+        if country is None or country == "" or country == "—":
+            country = "Unknown"
+        out.append(
+            SalesTeamPnlRow(
+                sales_team=team,
+                net_pnl_today=0,
+                net_pnl_yesterday=0,
+                net_pnl_total=0,
+                ib_commission_today=float(r.get("ib_commission_today") or 0),
+                ib_commission_yesterday=float(r.get("ib_commission_yesterday") or 0),
                 country=country,
             )
         )

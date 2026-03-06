@@ -10,12 +10,14 @@ from pydantic import BaseModel, Field
 
 
 class SalesTeamPnlRow(BaseModel):
-    """One row: sales team with today/yesterday/total net PnL and country (for frontend grouping)."""
+    """One row: sales team with today/yesterday/total net PnL, IB commission, and country."""
 
     sales_team: str = Field(..., description="Sales team tag name from tags.categoryId=6")
     net_pnl_today: float = Field(0, description="Today's closed PnL (MT Server date = CURDATE())")
     net_pnl_yesterday: float = Field(0, description="Yesterday's closed PnL (MT Server date)")
     net_pnl_total: float = Field(0, description="Sum of today + yesterday")
+    ib_commission_today: float = Field(0, description="Today's IB commission cost (rebate paid to IBs)")
+    ib_commission_yesterday: float = Field(0, description="Yesterday's IB commission cost")
     country: str = Field("Unknown", description="Country from backend mapping; Unknown if unmapped")
 
 

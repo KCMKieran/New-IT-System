@@ -18,21 +18,25 @@ import { Button } from "@/components/ui/button";
 import { ChevronRight, Clock, RefreshCw } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-/** One row from API: sales_team + today/yesterday/total PnL + country */
+/** One row from API: sales_team + today/yesterday PnL & IB commission + country */
 interface SalesTeamPnlRow {
   sales_team: string;
   net_pnl_today: number;
   net_pnl_yesterday: number;
   net_pnl_total: number;
+  ib_commission_today: number;
+  ib_commission_yesterday: number;
   country: string;
 }
 
-/** Country group: country name + aggregated PnL + list of sales team rows */
+/** Country group: country name + aggregated PnL & IB commission + list of sales team rows */
 interface CountryGroup {
   country: string;
   net_pnl_today: number;
   net_pnl_yesterday: number;
   net_pnl_total: number;
+  ib_commission_today: number;
+  ib_commission_yesterday: number;
   teams: SalesTeamPnlRow[];
 }
 
@@ -46,6 +50,8 @@ function pnlColor(value: number): string {
   if (value < 0) return "text-red-600 dark:text-red-400";
   return "text-muted-foreground";
 }
+
+const IB_COMM_COLOR = "text-muted-foreground";
 
 /**
  * Dashboard widget: 近两日客户平仓净盈亏.
@@ -91,6 +97,8 @@ export default function Past24hClientPnlByCountry() {
         g.net_pnl_today += row.net_pnl_today;
         g.net_pnl_yesterday += row.net_pnl_yesterday;
         g.net_pnl_total += row.net_pnl_total;
+        g.ib_commission_today += row.ib_commission_today;
+        g.ib_commission_yesterday += row.ib_commission_yesterday;
         g.teams.push(row);
       } else {
         map.set(c, {
@@ -98,6 +106,8 @@ export default function Past24hClientPnlByCountry() {
           net_pnl_today: row.net_pnl_today,
           net_pnl_yesterday: row.net_pnl_yesterday,
           net_pnl_total: row.net_pnl_total,
+          ib_commission_today: row.ib_commission_today,
+          ib_commission_yesterday: row.ib_commission_yesterday,
           teams: [row],
         });
       }
@@ -139,34 +149,36 @@ export default function Past24hClientPnlByCountry() {
         </div>
       </CardHeader>
       <CardContent className="min-h-0 flex-1 overflow-hidden">
-        <div className="h-[260px] overflow-auto rounded-md border">
+        <div className="h-[260px] overflow-auto rounded-md border text-xs">
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead className="w-9" aria-label="展开" />
-                <TableHead>国家/地区</TableHead>
-                <TableHead className="text-left">今日</TableHead>
-                <TableHead className="text-left">昨日</TableHead>
+                <TableHead className="w-7" aria-label="展开" />
+                <TableHead className="text-xs">国家/地区</TableHead>
+                <TableHead className="text-left text-xs">今日Profit</TableHead>
+                <TableHead className="text-left text-xs">今日IB佣金</TableHead>
+                <TableHead className="text-left text-xs">昨日Profit</TableHead>
+                <TableHead className="text-left text-xs">昨日IB佣金</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {loading && (
                 <TableRow>
-                  <TableCell colSpan={4} className="text-muted-foreground text-center py-8">
+                  <TableCell colSpan={6} className="text-muted-foreground text-center py-8">
                     加载中…
                   </TableCell>
                 </TableRow>
               )}
               {error && (
                 <TableRow>
-                  <TableCell colSpan={4} className="text-destructive text-center py-4">
+                  <TableCell colSpan={6} className="text-destructive text-center py-4">
                     {error}
                   </TableCell>
                 </TableRow>
               )}
               {!loading && !error && countryGroups.length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={4} className="text-muted-foreground text-center py-8">
+                  <TableCell colSpan={6} className="text-muted-foreground text-center py-8">
                     暂无数据
                   </TableCell>
                 </TableRow>
@@ -185,28 +197,34 @@ export default function Past24hClientPnlByCountry() {
                           setExpandedCountry((c) => (c === group.country ? null : group.country))
                         }
                       >
-                        <TableCell className="w-9 p-0 align-middle">
+                        <TableCell className="w-7 p-0 align-middle">
                           <span
                             className={cn(
-                              "inline-flex size-8 items-center justify-center rounded",
+                              "inline-flex size-6 items-center justify-center rounded",
                               isExpanded && "rotate-90",
                             )}
                           >
-                            <ChevronRight className="size-4 transition-transform duration-200" />
+                            <ChevronRight className="size-3.5 transition-transform duration-200" />
                           </span>
                         </TableCell>
                         <TableCell className="font-medium">{group.country}</TableCell>
                         <TableCell className={cn("text-left", pnlColor(group.net_pnl_today))}>
                           {formatPnl(group.net_pnl_today)}
                         </TableCell>
+                        <TableCell className={cn("text-left", IB_COMM_COLOR)}>
+                          {formatPnl(group.ib_commission_today)}
+                        </TableCell>
                         <TableCell className={cn("text-left", pnlColor(group.net_pnl_yesterday))}>
                           {formatPnl(group.net_pnl_yesterday)}
+                        </TableCell>
+                        <TableCell className={cn("text-left", IB_COMM_COLOR)}>
+                          {formatPnl(group.ib_commission_yesterday)}
                         </TableCell>
                       </TableRow>
                       {isExpanded && (
                         <TableRow className="bg-muted/20 hover:bg-muted/20">
-                          <TableCell colSpan={4} className="p-0 align-top">
-                            <table className="w-full text-sm">
+                          <TableCell colSpan={6} className="p-0 align-top">
+                            <table className="w-full text-xs">
                               <tbody>
                                 {group.teams.map((team, teamIndex) => (
                                   <tr
@@ -216,15 +234,21 @@ export default function Past24hClientPnlByCountry() {
                                       teamIndex % 2 === 1 && "bg-muted/20",
                                     )}
                                   >
-                                    <td className="w-9 py-1" />
-                                    <td className="pl-8 py-1 text-muted-foreground">
+                                    <td className="w-7 py-1" />
+                                    <td className="pl-6 py-1 text-muted-foreground">
                                       {team.sales_team}
                                     </td>
                                     <td className={cn("text-left py-1", pnlColor(team.net_pnl_today))}>
                                       {formatPnl(team.net_pnl_today)}
                                     </td>
+                                    <td className={cn("text-left py-1", IB_COMM_COLOR)}>
+                                      {formatPnl(team.ib_commission_today)}
+                                    </td>
                                     <td className={cn("text-left py-1", pnlColor(team.net_pnl_yesterday))}>
                                       {formatPnl(team.net_pnl_yesterday)}
+                                    </td>
+                                    <td className={cn("text-left py-1", IB_COMM_COLOR)}>
+                                      {formatPnl(team.ib_commission_yesterday)}
                                     </td>
                                   </tr>
                                 ))}
