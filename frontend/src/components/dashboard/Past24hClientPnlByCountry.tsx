@@ -155,9 +155,9 @@ export default function Past24hClientPnlByCountry() {
               <TableRow>
                 <TableHead className="w-7" aria-label="展开" />
                 <TableHead className="text-xs">国家/地区</TableHead>
-                <TableHead className="text-left text-xs">今日Profit</TableHead>
+                <TableHead className="text-left text-xs">今日Profit Excl.comm</TableHead>
                 <TableHead className="text-left text-xs">今日IB佣金</TableHead>
-                <TableHead className="text-left text-xs">昨日Profit</TableHead>
+                <TableHead className="text-left text-xs">昨日Profit Excl.comm</TableHead>
                 <TableHead className="text-left text-xs">昨日IB佣金</TableHead>
               </TableRow>
             </TableHeader>

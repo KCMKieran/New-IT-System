@@ -79,7 +79,7 @@ function SortIcon({ active, asc }: { active: boolean; asc: boolean }) {
 /**
  * Dashboard widget: 近两日客户平仓净盈亏 (Group).
  * Rows = mt4_users.GROUP (expandable -> sales team).
- * Columns = 今日Profit / 今日IB佣金 / 昨日Profit / 昨日IB佣金.
+ * Columns = 今日Profit(Excl.comm) / 今日IB佣金 / 昨日Profit(Excl.comm) / 昨日IB佣金.
  * All 4 data columns support click-to-sort.
  */
 export default function Past24hClientPnlByGroup() {
@@ -204,13 +204,13 @@ export default function Past24hClientPnlByGroup() {
                 <TableHead className="w-7" aria-label="展开" />
                 <TableHead className="text-xs">账户组</TableHead>
                 <TableHead className={thSortClass} onClick={() => handleSort("pnl_today")}>
-                  今日Profit<SortIcon active={sortKey === "pnl_today"} asc={sortAsc} />
+                  今日Profit Excl.comm<SortIcon active={sortKey === "pnl_today"} asc={sortAsc} />
                 </TableHead>
                 <TableHead className={thSortClass} onClick={() => handleSort("ib_today")}>
                   今日IB佣金<SortIcon active={sortKey === "ib_today"} asc={sortAsc} />
                 </TableHead>
                 <TableHead className={thSortClass} onClick={() => handleSort("pnl_yesterday")}>
-                  昨日Profit<SortIcon active={sortKey === "pnl_yesterday"} asc={sortAsc} />
+                  昨日Profit Excl.comm<SortIcon active={sortKey === "pnl_yesterday"} asc={sortAsc} />
                 </TableHead>
                 <TableHead className={thSortClass} onClick={() => handleSort("ib_yesterday")}>
                   昨日IB佣金<SortIcon active={sortKey === "ib_yesterday"} asc={sortAsc} />
