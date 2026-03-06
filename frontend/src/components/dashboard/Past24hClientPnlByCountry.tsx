@@ -114,7 +114,9 @@ export default function Past24hClientPnlByCountry() {
     }
     const groups = Array.from(map.values());
     groups.sort((a, b) => a.net_pnl_yesterday - b.net_pnl_yesterday);
-    groups.forEach((g) => g.teams.sort((a, b) => a.net_pnl_yesterday - b.net_pnl_yesterday));
+    groups.forEach((g) =>
+      g.teams.sort((a, b) => a.net_pnl_yesterday - b.net_pnl_yesterday),
+    );
     return groups;
   }, [items]);
 
@@ -123,7 +125,9 @@ export default function Past24hClientPnlByCountry() {
       <CardHeader className="shrink-0 flex flex-row flex-wrap items-start justify-between gap-x-2 gap-y-1 pb-0">
         <div className="min-w-0">
           <CardTitle className="text-lg">近两日客户平仓净盈亏</CardTitle>
-          <CardDescription className="text-xs">时间口径：MT Server 时间</CardDescription>
+          <CardDescription className="text-xs">
+            时间口径：MT Server 时间
+          </CardDescription>
         </div>
         <div className="flex flex-shrink-0 flex-wrap items-center gap-2">
           <Button
@@ -143,7 +147,8 @@ export default function Past24hClientPnlByCountry() {
           {fetchedAt && (
             <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
               <Clock className="h-3 w-3" />
-              数据获取时间: {fetchedAt.toLocaleString("zh-CN", { hour12: false })}
+              数据获取时间:{" "}
+              {fetchedAt.toLocaleString("zh-CN", { hour12: false })}
             </span>
           )}
         </div>
@@ -155,35 +160,49 @@ export default function Past24hClientPnlByCountry() {
               <TableRow>
                 <TableHead className="w-7" aria-label="展开" />
                 <TableHead className="text-xs">国家/地区</TableHead>
-                <TableHead className="text-left text-xs">今日Profit Excl.comm</TableHead>
+                <TableHead className="text-left text-xs">
+                  今日Profit (Excl.rbt)
+                </TableHead>
                 <TableHead className="text-left text-xs">今日IB佣金</TableHead>
-                <TableHead className="text-left text-xs">昨日Profit Excl.comm</TableHead>
+                <TableHead className="text-left text-xs">
+                  昨日Profit (Excl.rbt)
+                </TableHead>
                 <TableHead className="text-left text-xs">昨日IB佣金</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {loading && (
                 <TableRow>
-                  <TableCell colSpan={6} className="text-muted-foreground text-center py-8">
+                  <TableCell
+                    colSpan={6}
+                    className="text-muted-foreground text-center py-8"
+                  >
                     加载中…
                   </TableCell>
                 </TableRow>
               )}
               {error && (
                 <TableRow>
-                  <TableCell colSpan={6} className="text-destructive text-center py-4">
+                  <TableCell
+                    colSpan={6}
+                    className="text-destructive text-center py-4"
+                  >
                     {error}
                   </TableCell>
                 </TableRow>
               )}
               {!loading && !error && countryGroups.length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={6} className="text-muted-foreground text-center py-8">
+                  <TableCell
+                    colSpan={6}
+                    className="text-muted-foreground text-center py-8"
+                  >
                     暂无数据
                   </TableCell>
                 </TableRow>
               )}
-              {!loading && !error &&
+              {!loading &&
+                !error &&
                 countryGroups.map((group, rowIndex) => {
                   const isExpanded = expandedCountry === group.country;
                   return (
@@ -194,7 +213,9 @@ export default function Past24hClientPnlByCountry() {
                           rowIndex % 2 === 1 && "bg-muted/30",
                         )}
                         onClick={() =>
-                          setExpandedCountry((c) => (c === group.country ? null : group.country))
+                          setExpandedCountry((c) =>
+                            c === group.country ? null : group.country,
+                          )
                         }
                       >
                         <TableCell className="w-7 p-0 align-middle">
@@ -207,14 +228,26 @@ export default function Past24hClientPnlByCountry() {
                             <ChevronRight className="size-3.5 transition-transform duration-200" />
                           </span>
                         </TableCell>
-                        <TableCell className="font-medium">{group.country}</TableCell>
-                        <TableCell className={cn("text-left", pnlColor(group.net_pnl_today))}>
+                        <TableCell className="font-medium">
+                          {group.country}
+                        </TableCell>
+                        <TableCell
+                          className={cn(
+                            "text-left",
+                            pnlColor(group.net_pnl_today),
+                          )}
+                        >
                           {formatPnl(group.net_pnl_today)}
                         </TableCell>
                         <TableCell className={cn("text-left", IB_COMM_COLOR)}>
                           {formatPnl(group.ib_commission_today)}
                         </TableCell>
-                        <TableCell className={cn("text-left", pnlColor(group.net_pnl_yesterday))}>
+                        <TableCell
+                          className={cn(
+                            "text-left",
+                            pnlColor(group.net_pnl_yesterday),
+                          )}
+                        >
                           {formatPnl(group.net_pnl_yesterday)}
                         </TableCell>
                         <TableCell className={cn("text-left", IB_COMM_COLOR)}>
@@ -238,16 +271,36 @@ export default function Past24hClientPnlByCountry() {
                                     <td className="pl-6 py-1 text-muted-foreground">
                                       {team.sales_team}
                                     </td>
-                                    <td className={cn("text-left py-1", pnlColor(team.net_pnl_today))}>
+                                    <td
+                                      className={cn(
+                                        "text-left py-1",
+                                        pnlColor(team.net_pnl_today),
+                                      )}
+                                    >
                                       {formatPnl(team.net_pnl_today)}
                                     </td>
-                                    <td className={cn("text-left py-1", IB_COMM_COLOR)}>
+                                    <td
+                                      className={cn(
+                                        "text-left py-1",
+                                        IB_COMM_COLOR,
+                                      )}
+                                    >
                                       {formatPnl(team.ib_commission_today)}
                                     </td>
-                                    <td className={cn("text-left py-1", pnlColor(team.net_pnl_yesterday))}>
+                                    <td
+                                      className={cn(
+                                        "text-left py-1",
+                                        pnlColor(team.net_pnl_yesterday),
+                                      )}
+                                    >
                                       {formatPnl(team.net_pnl_yesterday)}
                                     </td>
-                                    <td className={cn("text-left py-1", IB_COMM_COLOR)}>
+                                    <td
+                                      className={cn(
+                                        "text-left py-1",
+                                        IB_COMM_COLOR,
+                                      )}
+                                    >
                                       {formatPnl(team.ib_commission_yesterday)}
                                     </td>
                                   </tr>

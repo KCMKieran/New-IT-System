@@ -15,7 +15,14 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
-import { ArrowDown, ArrowUp, ArrowUpDown, ChevronRight, Clock, RefreshCw } from "lucide-react";
+import {
+  ArrowDown,
+  ArrowUp,
+  ArrowUpDown,
+  ChevronRight,
+  Clock,
+  RefreshCw,
+} from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const COL_SPAN = 6; // expand + group + 4 data columns
@@ -62,18 +69,25 @@ function pnlColor(value: number): string {
 
 function getSortValue(row: GroupData | TeamPnl, key: SortKey): number {
   switch (key) {
-    case "pnl_today": return row.net_pnl_today;
-    case "ib_today": return row.ib_commission_today;
-    case "pnl_yesterday": return row.net_pnl_yesterday;
-    case "ib_yesterday": return row.ib_commission_yesterday;
+    case "pnl_today":
+      return row.net_pnl_today;
+    case "ib_today":
+      return row.ib_commission_today;
+    case "pnl_yesterday":
+      return row.net_pnl_yesterday;
+    case "ib_yesterday":
+      return row.ib_commission_yesterday;
   }
 }
 
 function SortIcon({ active, asc }: { active: boolean; asc: boolean }) {
-  if (!active) return <ArrowUpDown className="inline ml-0.5 h-3 w-3 opacity-40" />;
-  return asc
-    ? <ArrowUp className="inline ml-0.5 h-3 w-3" />
-    : <ArrowDown className="inline ml-0.5 h-3 w-3" />;
+  if (!active)
+    return <ArrowUpDown className="inline ml-0.5 h-3 w-3 opacity-40" />;
+  return asc ? (
+    <ArrowUp className="inline ml-0.5 h-3 w-3" />
+  ) : (
+    <ArrowDown className="inline ml-0.5 h-3 w-3" />
+  );
 }
 
 /**
@@ -91,14 +105,17 @@ export default function Past24hClientPnlByGroup() {
   const [sortKey, setSortKey] = useState<SortKey>("pnl_yesterday");
   const [sortAsc, setSortAsc] = useState(true);
 
-  const handleSort = useCallback((key: SortKey) => {
-    if (key === sortKey) {
-      setSortAsc((a) => !a);
-    } else {
-      setSortKey(key);
-      setSortAsc(true);
-    }
-  }, [sortKey]);
+  const handleSort = useCallback(
+    (key: SortKey) => {
+      if (key === sortKey) {
+        setSortAsc((a) => !a);
+      } else {
+        setSortKey(key);
+        setSortAsc(true);
+      }
+    },
+    [sortKey],
+  );
 
   const fetchData = useCallback(() => {
     setLoading(true);
@@ -144,13 +161,15 @@ export default function Past24hClientPnlByGroup() {
           net_pnl_yesterday: row.net_pnl_yesterday,
           ib_commission_today: row.ib_commission_today,
           ib_commission_yesterday: row.ib_commission_yesterday,
-          teams: [{
-            sales_team: row.sales_team,
-            net_pnl_today: row.net_pnl_today,
-            net_pnl_yesterday: row.net_pnl_yesterday,
-            ib_commission_today: row.ib_commission_today,
-            ib_commission_yesterday: row.ib_commission_yesterday,
-          }],
+          teams: [
+            {
+              sales_team: row.sales_team,
+              net_pnl_today: row.net_pnl_today,
+              net_pnl_yesterday: row.net_pnl_yesterday,
+              ib_commission_today: row.ib_commission_today,
+              ib_commission_yesterday: row.ib_commission_yesterday,
+            },
+          ],
         });
       }
     }
@@ -164,14 +183,19 @@ export default function Past24hClientPnlByGroup() {
     return groups;
   }, [items, sortKey, sortAsc]);
 
-  const thSortClass = "text-left text-xs cursor-pointer select-none hover:text-foreground";
+  const thSortClass =
+    "text-left text-xs cursor-pointer select-none hover:text-foreground";
 
   return (
     <Card className="flex h-full min-h-[320px] flex-col gap-2">
       <CardHeader className="shrink-0 flex flex-row flex-wrap items-start justify-between gap-x-2 gap-y-1 pb-0">
         <div className="min-w-0">
-          <CardTitle className="text-lg">近两日客户平仓净盈亏 (Group)</CardTitle>
-          <CardDescription className="text-xs">时间口径：MT Server 时间 · 按账户组分组</CardDescription>
+          <CardTitle className="text-lg">
+            近两日客户平仓净盈亏 (Group)
+          </CardTitle>
+          <CardDescription className="text-xs">
+            时间口径：MT Server 时间 · 按账户组分组
+          </CardDescription>
         </div>
         <div className="flex flex-shrink-0 flex-wrap items-center gap-2">
           <Button
@@ -191,7 +215,8 @@ export default function Past24hClientPnlByGroup() {
           {fetchedAt && (
             <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
               <Clock className="h-3 w-3" />
-              数据获取时间: {fetchedAt.toLocaleString("zh-CN", { hour12: false })}
+              数据获取时间:{" "}
+              {fetchedAt.toLocaleString("zh-CN", { hour12: false })}
             </span>
           )}
         </div>
@@ -203,43 +228,72 @@ export default function Past24hClientPnlByGroup() {
               <TableRow>
                 <TableHead className="w-7" aria-label="展开" />
                 <TableHead className="text-xs">账户组</TableHead>
-                <TableHead className={thSortClass} onClick={() => handleSort("pnl_today")}>
-                  今日Profit Excl.comm<SortIcon active={sortKey === "pnl_today"} asc={sortAsc} />
+                <TableHead
+                  className={thSortClass}
+                  onClick={() => handleSort("pnl_today")}
+                >
+                  今日Profit (Excl.rbt)
+                  <SortIcon active={sortKey === "pnl_today"} asc={sortAsc} />
                 </TableHead>
-                <TableHead className={thSortClass} onClick={() => handleSort("ib_today")}>
-                  今日IB佣金<SortIcon active={sortKey === "ib_today"} asc={sortAsc} />
+                <TableHead
+                  className={thSortClass}
+                  onClick={() => handleSort("ib_today")}
+                >
+                  今日IB佣金
+                  <SortIcon active={sortKey === "ib_today"} asc={sortAsc} />
                 </TableHead>
-                <TableHead className={thSortClass} onClick={() => handleSort("pnl_yesterday")}>
-                  昨日Profit Excl.comm<SortIcon active={sortKey === "pnl_yesterday"} asc={sortAsc} />
+                <TableHead
+                  className={thSortClass}
+                  onClick={() => handleSort("pnl_yesterday")}
+                >
+                  昨日Profit (Excl.rbt)
+                  <SortIcon
+                    active={sortKey === "pnl_yesterday"}
+                    asc={sortAsc}
+                  />
                 </TableHead>
-                <TableHead className={thSortClass} onClick={() => handleSort("ib_yesterday")}>
-                  昨日IB佣金<SortIcon active={sortKey === "ib_yesterday"} asc={sortAsc} />
+                <TableHead
+                  className={thSortClass}
+                  onClick={() => handleSort("ib_yesterday")}
+                >
+                  昨日IB佣金
+                  <SortIcon active={sortKey === "ib_yesterday"} asc={sortAsc} />
                 </TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {loading && (
                 <TableRow>
-                  <TableCell colSpan={COL_SPAN} className="text-muted-foreground text-center py-8">
+                  <TableCell
+                    colSpan={COL_SPAN}
+                    className="text-muted-foreground text-center py-8"
+                  >
                     加载中…
                   </TableCell>
                 </TableRow>
               )}
               {error && (
                 <TableRow>
-                  <TableCell colSpan={COL_SPAN} className="text-destructive text-center py-4">
+                  <TableCell
+                    colSpan={COL_SPAN}
+                    className="text-destructive text-center py-4"
+                  >
                     {error}
                   </TableCell>
                 </TableRow>
               )}
               {!loading && !error && groupData.length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={COL_SPAN} className="text-muted-foreground text-center py-8">
+                  <TableCell
+                    colSpan={COL_SPAN}
+                    className="text-muted-foreground text-center py-8"
+                  >
                     暂无数据
                   </TableCell>
                 </TableRow>
               )}
-              {!loading && !error &&
+              {!loading &&
+                !error &&
                 groupData.map((group, rowIndex) => {
                   const isExpanded = expandedGroup === group.account_group;
                   return (
@@ -251,7 +305,9 @@ export default function Past24hClientPnlByGroup() {
                         )}
                         onClick={() =>
                           setExpandedGroup((prev) =>
-                            prev === group.account_group ? null : group.account_group,
+                            prev === group.account_group
+                              ? null
+                              : group.account_group,
                           )
                         }
                       >
@@ -265,14 +321,26 @@ export default function Past24hClientPnlByGroup() {
                             <ChevronRight className="size-3.5 transition-transform duration-200" />
                           </span>
                         </TableCell>
-                        <TableCell className="font-medium">{group.account_group}</TableCell>
-                        <TableCell className={cn("text-left", pnlColor(group.net_pnl_today))}>
+                        <TableCell className="font-medium">
+                          {group.account_group}
+                        </TableCell>
+                        <TableCell
+                          className={cn(
+                            "text-left",
+                            pnlColor(group.net_pnl_today),
+                          )}
+                        >
                           {formatPnl(group.net_pnl_today)}
                         </TableCell>
                         <TableCell className={cn("text-left", IB_COMM_COLOR)}>
                           {formatPnl(group.ib_commission_today)}
                         </TableCell>
-                        <TableCell className={cn("text-left", pnlColor(group.net_pnl_yesterday))}>
+                        <TableCell
+                          className={cn(
+                            "text-left",
+                            pnlColor(group.net_pnl_yesterday),
+                          )}
+                        >
                           {formatPnl(group.net_pnl_yesterday)}
                         </TableCell>
                         <TableCell className={cn("text-left", IB_COMM_COLOR)}>
@@ -281,7 +349,10 @@ export default function Past24hClientPnlByGroup() {
                       </TableRow>
                       {isExpanded && (
                         <TableRow className="bg-muted/20 hover:bg-muted/20">
-                          <TableCell colSpan={COL_SPAN} className="p-0 align-top">
+                          <TableCell
+                            colSpan={COL_SPAN}
+                            className="p-0 align-top"
+                          >
                             <table className="w-full text-xs">
                               <tbody>
                                 {group.teams.map((team, teamIndex) => (
@@ -296,16 +367,36 @@ export default function Past24hClientPnlByGroup() {
                                     <td className="pl-6 py-1 text-muted-foreground">
                                       {team.sales_team}
                                     </td>
-                                    <td className={cn("text-left py-1", pnlColor(team.net_pnl_today))}>
+                                    <td
+                                      className={cn(
+                                        "text-left py-1",
+                                        pnlColor(team.net_pnl_today),
+                                      )}
+                                    >
                                       {formatPnl(team.net_pnl_today)}
                                     </td>
-                                    <td className={cn("text-left py-1", IB_COMM_COLOR)}>
+                                    <td
+                                      className={cn(
+                                        "text-left py-1",
+                                        IB_COMM_COLOR,
+                                      )}
+                                    >
                                       {formatPnl(team.ib_commission_today)}
                                     </td>
-                                    <td className={cn("text-left py-1", pnlColor(team.net_pnl_yesterday))}>
+                                    <td
+                                      className={cn(
+                                        "text-left py-1",
+                                        pnlColor(team.net_pnl_yesterday),
+                                      )}
+                                    >
                                       {formatPnl(team.net_pnl_yesterday)}
                                     </td>
-                                    <td className={cn("text-left py-1", IB_COMM_COLOR)}>
+                                    <td
+                                      className={cn(
+                                        "text-left py-1",
+                                        IB_COMM_COLOR,
+                                      )}
+                                    >
                                       {formatPnl(team.ib_commission_yesterday)}
                                     </td>
                                   </tr>
