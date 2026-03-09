@@ -58,7 +58,7 @@ External access: Cloudflare Tunnel → analysis.kohleservices.com → :3000
 
 | Component | Technology | Notes |
 |-----------|------------|-------|
-| Frontend | React 19 + TypeScript + Vite 7 | SPA with client-side routing |
+| Frontend | React 19 + TypeScript + Vite 7 | SPA with client-side routing, ErrorBoundary + lazy retry |
 | UI Library | shadcn/ui + Tailwind CSS 4 | Dark/light theme support |
 | Data Grid | AG-Grid v34 Community | Server-side pagination |
 | Backend | Python 3.11 + FastAPI | Async, auto-docs at /docs |
@@ -101,6 +101,7 @@ New-IT-System/
 │   │   │   │   ├── PositionSummary.tsx    # Position summary widget
 │   │   │   │   ├── ReturnRateSummary.tsx  # Client return rate widget
 │   │   │   │   └── Past24hClientPnlByGroup.tsx  # PnL by account group widget
+│   │   │   ├── LazyErrorBoundary.tsx # Chunk load error recovery + retry
 │   │   │   ├── site-header.tsx # Page titles
 │   │   │   └── app-sidebar.tsx # Navigation
 │   │   ├── providers/
@@ -357,6 +358,7 @@ New-IT-System/
 - **Styling**: Tailwind CSS classes, shadcn/ui components
 - **State**: React useState/useEffect, localStorage for persistence
 - **Tables**: AG-Grid with server-side pagination
+- **Lazy Loading**: All pages use `lazyWithRetry()` (auto-retry 2x on network failure). `LazyErrorBoundary` catches chunk errors, auto-reloads on first failure, shows retry button on repeated failure. Vendor libraries split via `manualChunks` in `vite.config.ts` (react, ag-grid, recharts, three, ui icons).
 - **Comments**: English only
 
 ### Backend
@@ -421,6 +423,8 @@ When 4 identical requests arrive before Redis cache is populated, only 1 hits Cl
 | ClickHouse connection | Check VPN, verify credentials |
 | CEN account wrong amounts | Ensure dividing by 100 |
 | Cache not updating | Wait for TTL expiry (PnL: 30min, IB: 10min, Return Rate: 3h) or use clear cache button |
+| Page blank after deploy | Old chunk URLs 404 after rebuild. `LazyErrorBoundary` auto-reloads once; if still fails, shows retry button. Users on stale tabs recover automatically. |
+| Chunk load failure on mobile | Network instability over Cloudflare Tunnel. `lazyWithRetry()` retries 2x before showing error. Vendor bundle split reduces per-request size. |
 
 ---
 

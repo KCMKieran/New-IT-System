@@ -6,7 +6,7 @@
 - 2) `src/main.tsx`  
   - 前端入口。挂载 React 应用到 `#root`，导入全局样式（`src/index.css`），并包裹顶层 Providers（如 `ThemeProvider`）。
 - 3) `src/App.tsx`  
-  - 根组件。决定“首页看到什么”，再组合使用各种业务/UI组件（如 Sidebar、Header、Charts 等）。
+  - 根组件。使用 `lazyWithRetry()` 动态加载所有页面（网络失败自动重试 2 次），外层包裹 `LazyErrorBoundary`（chunk 加载失败时自动 reload 或显示重试按钮）和 `Suspense`（加载中显示居中 Spinner）。
 - 4) 组件与样式  
   - `src/components/**` 放组件；`src/index.css` 放全局样式与 Tailwind 指令；`src/App.css`（若被导入）只影响 `App` 内部样式。
 
@@ -14,10 +14,11 @@
 
 ### `src` 目录关键文件
 - `src/main.tsx`：应用入口，创建根节点、挂载 `<App />`，引入全局 CSS，放置全局 Provider（如主题、路由、状态等）。
-- `src/App.tsx`：根组件。当前已集成 Sidebar、Header、统计卡片、图表、主题切换等。
+- `src/App.tsx`：根组件。所有页面通过 `lazyWithRetry()` 懒加载，`LazyErrorBoundary` 处理加载失败，`Suspense` 显示加载 Spinner。
 - `src/index.css`：全局样式（Tailwind 指令、CSS 变量、主题色、基础层 `@layer base`）。影响全站。
 - `src/App.css`：仅当被显式 `import './App.css'` 时生效；通常用于 `App` 组件的局部样式。你当前代码未引入，等于未使用。
-- `src/components/**`：可复用组件。  
+- `src/components/**`：可复用组件。
+  - `components/LazyErrorBoundary.tsx`：chunk 加载错误恢复组件，导出 `lazyWithRetry()`（自动重试）、`PageLoader`（加载 Spinner）、`LazyErrorBoundary`（错误边界，自动 reload + 重试按钮）。  
   - `components/ui/*`：UI 基础组件（Button、Sidebar、Card 等）。  
   - `components/theme-provider.tsx`：主题上下文/状态管理（light/dark/system）。  
   - `components/mode-toggle.tsx`：点击切换主题的按钮。
@@ -27,7 +28,7 @@
 
 ### 配置类文件（根目录）
 - `index.html`：单页应用模板，包含 `#root` 容器。Vite 会注入模块脚本，启动你的 `src/main.tsx`。
-- `vite.config.ts`：Vite 构建/开发配置（插件、别名、服务器配置等）。
+- `vite.config.ts`：Vite 构建/开发配置（插件、别名、服务器配置等）。含 `manualChunks` 拆分大型 vendor 库（react、ag-grid、recharts、three、icons），避免单个主 bundle 过大。
 - `tsconfig.json`：TypeScript 根配置（如路径别名 `@/*`）。通常用作“聚合与共享”配置。
 - `tsconfig.app.json`：给前端运行代码用的 TS 配置（开启 JSX、DOM lib、bundler 模块解析等）。
 - `tsconfig.node.json`：给 Node 环境文件用（如 `vite.config.ts`），开启 Node/ESNext 能力与额外选项。
