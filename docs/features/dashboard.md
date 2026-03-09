@@ -140,11 +140,29 @@ The Dashboard (`/` or `/home`) is the first page users see after login. It displ
 
 **API**: TBD
 
-### 3.6 CN渠道支付成功率 (Placeholder)
+### 3.6 CN渠道支付成功率 (CnPaymentSuccessRate)
 
-**Status**: Coming Soon — left column placeholder card
+**File**: `frontend/src/components/dashboard/CnPaymentSuccessRate.tsx`
 
-**Planned**: Real-time payment channel success rate monitoring
+**What it shows**:
+- Per-PSP channel deposit stats (CN channels only, `psps.cid = 0`)
+- Time window toggle: 3h / 6h / 24h (default 3h)
+- Each channel card: total/approved/declined/fresh counts + approved total amount + mini progress bar
+- Collapsible "Top 3 approved" section per channel (default collapsed): order ID, amount, user ID (with CRM link)
+- Overall summary bar: total orders + overall success rate (color coded)
+
+**API**: `GET /api/v1/dashboard/cn-payment-success-rate?hours=3`
+
+**Data source**: MySQL `fxbackoffice` — `transactions` (type='deposit', createdAt within window) INNER JOIN `psps` (cid=0 for CN channels). Groups by `psps.displayName`. Top 3 uses `ROW_NUMBER()` window function.
+
+**Behavior**:
+- Auto-fetches on page mount (default 3h window)
+- ToggleGroup to switch time window (3h/6h/24h), auto-refetches on change
+- Refresh button for manual reload
+- Data fetch timestamp displayed
+- Top 3 approved orders collapsible per channel (click to expand/collapse)
+
+**Docs**: [cn-payment-success-rate.md](cn-payment-success-rate.md)
 
 ---
 
@@ -158,6 +176,7 @@ Both widgets auto-fetch data when the Dashboard mounts (including browser refres
 | ReturnRateSummary | On mount (6h window) | Redis 3h TTL | <100ms (cached) / 5-15s (fresh) |
 | Past24hClientPnlByCountry | On mount | None | 1–3s |
 | Past24hClientPnlByGroup | On mount | None | 1–3s |
+| CnPaymentSuccessRate | On mount (3h window) | None | 1–3s |
 | SuspiciousClients | — | — | Framework only |
 
 ---
@@ -243,14 +262,17 @@ This ensures only one request queries MySQL when multiple users trigger the same
 | `frontend/src/components/dashboard/ReturnRateSummary.tsx` | Client return rate widget (AG Grid) |
 | `frontend/src/components/dashboard/Past24hClientPnlByCountry.tsx` | 近两日客户平仓净盈亏（按国家/团队，可展开） |
 | `frontend/src/components/dashboard/Past24hClientPnlByGroup.tsx` | 近两日客户平仓净盈亏（按账户组(GROUP)分组） |
+| `frontend/src/components/dashboard/CnPaymentSuccessRate.tsx` | CN渠道支付成功率 widget (per-PSP channel cards) |
 | `frontend/src/components/dashboard/SuspiciousClients.tsx` | Suspicious clients list (table framework) |
 | `backend/app/api/v1/routes/open_positions.py` | API: `/api/v1/open-positions/symbol-summary` |
 | `backend/app/api/v1/routes/client_return_rate.py` | API: `/api/v1/client-return-rate/query` |
-| `backend/app/api/v1/routes/dashboard.py` | API: `/api/v1/dashboard/pnl-by-sales-team`, `/api/v1/dashboard/pnl-by-group` |
+| `backend/app/api/v1/routes/dashboard.py` | API: `/api/v1/dashboard/pnl-by-sales-team`, `/pnl-by-group`, `/cn-payment-success-rate` |
 | `backend/app/services/open_positions_service.py` | Position query logic (MySQL, no cache) |
 | `backend/app/services/client_return_service.py` | Return rate query logic (MySQL + Redis cache) |
 | `backend/app/services/dashboard_pnl_service.py` | Dashboard PnL by sales team (MySQL stats_trading + country mapping) |
 | `backend/app/services/dashboard_pnl_group_service.py` | Dashboard PnL by account group (MySQL stats_trading + GROUP grouping) |
+| `backend/app/services/cn_payment_service.py` | CN payment success rate (transactions + psps, cid=0) |
+| `backend/app/schemas/cn_payment.py` | Pydantic schemas for CN payment API |
 
 ---
 
@@ -280,7 +302,7 @@ The base `ToggleGroupItem` component (`toggle-group.tsx`) no longer sets `rounde
 
 ## 8. Future Enhancements
 
-- [ ] CN渠道支付成功率 — integrate payment channel API
+- [x] CN渠道支付成功率 — per-PSP deposit success rate (past 3h, psps.cid=0)
 - [ ] Connection pool for MySQL (`DBUtils.PooledDB`)
 - [ ] Short-TTL Redis cache for position summary (30-60s)
 - [ ] Singleflight for return rate queries
