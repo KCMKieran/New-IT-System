@@ -1,36 +1,37 @@
-import { lazy, Suspense } from "react"
+import { Suspense } from "react"
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom"
 import { AuthProvider, useAuth } from "@/providers/auth-provider"
+import { LazyErrorBoundary, PageLoader, lazyWithRetry } from "@/components/LazyErrorBoundary"
 
-const DashboardLayout = lazy(() => import("@/layouts/DashboardLayout"))
-const LoginPage = lazy(() => import("@/pages/Login"))
-const HomePage = lazy(() => import("@/pages/Home"))
-const DashboardTemplatePage = lazy(() => import("@/pages/Dashboard"))
+const DashboardLayout = lazyWithRetry(() => import("@/layouts/DashboardLayout"))
+const LoginPage = lazyWithRetry(() => import("@/pages/Login"))
+const HomePage = lazyWithRetry(() => import("@/pages/Home"))
+const DashboardTemplatePage = lazyWithRetry(() => import("@/pages/Dashboard"))
 // [HIDDEN] Basis page - 10.6.20.138:8050 service disabled
-// const BasisPage = lazy(() => import("@/pages/Basis"))
-const GoldQuotePage = lazy(() => import("@/pages/GoldQuote"))
+// const BasisPage = lazyWithRetry(() => import("@/pages/Basis"))
+const GoldQuotePage = lazyWithRetry(() => import("@/pages/GoldQuote"))
 // [REMOVED] Downloads page deprecated
-// const DownloadsPage = lazy(() => import("@/pages/Downloads"))
-const WarehousePage = lazy(() => import("@/pages/Warehouse"))
+// const DownloadsPage = lazyWithRetry(() => import("@/pages/Downloads"))
+const WarehousePage = lazyWithRetry(() => import("@/pages/Warehouse"))
 // [REMOVED] EquityMonitor page deleted
-// const EquityMonitorPage = lazy(() => import("@/pages/EquityMonitor"))
-const PositionPage = lazy(() => import("@/pages/Position"))
-const WarehouseProductsPage = lazy(() => import("@/pages/WarehouseProducts"))
-const WarehouseOthersPage = lazy(() => import("@/pages/WarehouseOthers"))
-const IBDataPage = lazy(() => import("@/pages/IBData"))
-const LoginIPsPage = lazy(() => import("@/pages/LoginIPs"))
-const ProfitPage = lazy(() => import("@/pages/Profit"))
-const AgentGlobalPage = lazy(() => import("@/pages/AgentGlobal"))
-const IbidLotsPage = lazy(() => import("@/pages/IbidLots"))
-const SwapFreeControlPage = lazy(() => import("@/pages/SwapFreeControl"))
+// const EquityMonitorPage = lazyWithRetry(() => import("@/pages/EquityMonitor"))
+const PositionPage = lazyWithRetry(() => import("@/pages/Position"))
+const WarehouseProductsPage = lazyWithRetry(() => import("@/pages/WarehouseProducts"))
+const WarehouseOthersPage = lazyWithRetry(() => import("@/pages/WarehouseOthers"))
+const IBDataPage = lazyWithRetry(() => import("@/pages/IBData"))
+const LoginIPsPage = lazyWithRetry(() => import("@/pages/LoginIPs"))
+const ProfitPage = lazyWithRetry(() => import("@/pages/Profit"))
+const AgentGlobalPage = lazyWithRetry(() => import("@/pages/AgentGlobal"))
+const IbidLotsPage = lazyWithRetry(() => import("@/pages/IbidLots"))
+const SwapFreeControlPage = lazyWithRetry(() => import("@/pages/SwapFreeControl"))
 // [HIDDEN] ClientPnLMonitor page hidden
-// const ClientPnLMonitorPage = lazy(() => import("@/pages/ClientPnLMonitor"))
-const ClientPnLAnalysisPage = lazy(() => import("@/pages/ClientPnLAnalysis"))
-const ClientReturnRatePage = lazy(() => import("@/pages/ClientReturnRate"))
-const ConfigPlaceholder = lazy(() => import("@/pages/ConfigPlaceholder"))
-const IBReportPage = lazy(() => import("@/pages/IBReport"))
-const SettingsPage = lazy(() => import("@/pages/Settings"))
-const SearchPage = lazy(() => import("@/pages/Search"))
+// const ClientPnLMonitorPage = lazyWithRetry(() => import("@/pages/ClientPnLMonitor"))
+const ClientPnLAnalysisPage = lazyWithRetry(() => import("@/pages/ClientPnLAnalysis"))
+const ClientReturnRatePage = lazyWithRetry(() => import("@/pages/ClientReturnRate"))
+const ConfigPlaceholder = lazyWithRetry(() => import("@/pages/ConfigPlaceholder"))
+const IBReportPage = lazyWithRetry(() => import("@/pages/IBReport"))
+const SettingsPage = lazyWithRetry(() => import("@/pages/Settings"))
+const SearchPage = lazyWithRetry(() => import("@/pages/Search"))
 
 function PrivateRoute({ children }: { children: React.ReactElement }) {
   if (import.meta.env.VITE_DISABLE_AUTH === 'true') return children
@@ -42,7 +43,8 @@ function App() {
   return (
     <AuthProvider>
       <BrowserRouter>
-        <Suspense fallback={<div className="p-4">Loading...</div>}>
+        <LazyErrorBoundary>
+        <Suspense fallback={<PageLoader />}>
           <Routes>
             <Route path="/login" element={<LoginPage />} />
             <Route
@@ -97,6 +99,7 @@ function App() {
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </Suspense>
+        </LazyErrorBoundary>
       </BrowserRouter>
     </AuthProvider>
   )

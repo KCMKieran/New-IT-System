@@ -25,3 +25,5 @@ frontend/public/profit_last_refresh.txt
 backend/logs/*.log
 backend/logs/*.log.*
 !backend/logs/.gitkeep
+backend/logs-prod/*.log.*
+*.log

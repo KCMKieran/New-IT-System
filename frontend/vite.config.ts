@@ -11,6 +11,19 @@ export default defineConfig({
       "@": path.resolve(__dirname, "./src"),
     },
   },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          "vendor-react": ["react", "react-dom", "react-router-dom"],
+          "vendor-ag-grid": ["ag-grid-community", "ag-grid-react"],
+          "vendor-charts": ["recharts"],
+          "vendor-three": ["three"],
+          "vendor-ui": ["lucide-react", "@tabler/icons-react"],
+        },
+      },
+    },
+  },
   server: {
     allowedHosts: [
       "localhost",
