@@ -25,7 +25,7 @@ function WidgetSkeleton() {
 
 export default function HomePage() {
   return (
-    <div className="grid h-full grid-cols-1 gap-4 p-4 lg:grid-cols-4">
+    <div className="grid h-full grid-cols-1 gap-4 lg:grid-cols-4">
       {/* Left column: 1/4 - CN payment success rate placeholder */}
       <div className="lg:col-span-1 self-start lg:sticky lg:top-4">
         <Card>

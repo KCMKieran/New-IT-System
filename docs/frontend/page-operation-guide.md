@@ -227,10 +227,56 @@ const data = {
 }
 ```
 
-### 2. 隐藏/删除页面
+### 2. 隐藏页面（从侧边栏移除，保留路由和代码）
+
+**文件**: `frontend/src/components/app-sidebar.tsx`
+
+**隐藏步骤**:
+1. 找到目标页面所在的 `navSections` 条目
+2. 将该行注释掉，并在上方加 `// [HIDDEN]` 标记和原因说明
+
 ```tsx
-// 隐藏：从 app-sidebar.tsx 中删除条目（保留路由）
-// 删除：同时从 App.tsx 移除路由和 site-header.tsx 移除标题
+// Before
+{ title: t("nav.profitAnalysis"), url: "/profit" },
+
+// After
+// [HIDDEN] Profit Analysis - temporarily hidden
+// { title: t("nav.profitAnalysis"), url: "/profit" },
+```
+
+**恢复步骤**:
+1. 在 `app-sidebar.tsx` 中搜索 `[HIDDEN]`
+2. 取消目标条目的注释，同时删除 `[HIDDEN]` 注释行
+
+```tsx
+// Before (hidden)
+// [HIDDEN] Profit Analysis - temporarily hidden
+// { title: t("nav.profitAnalysis"), url: "/profit" },
+
+// After (restored)
+{ title: t("nav.profitAnalysis"), url: "/profit" },
+```
+
+> **注意**: 隐藏后用户仍可通过直接输入 URL 访问页面（路由未移除）。如需完全禁止访问，还需在 `App.tsx` 中注释对应的 `<Route>`。
+
+#### 当前隐藏页面清单
+
+| Page | URL | Section | Reason |
+|------|-----|---------|--------|
+| Client PnL Monitor | `/client-pnl-monitor` | CS Department | Page hidden |
+| Client PnL Analysis | `/client-pnl-analysis` | Risk Control | Temporarily hidden |
+| Basis Analysis | `/basis` | Risk Control | 10.6.20.138:8050 service disabled |
+| Profit Analysis | `/profit` | Risk Control | Temporarily hidden |
+| Agent Global | `/warehouse/agent-global` | Other | Static JSON page, not using backend API |
+
+> 此清单最后更新于 2026-03-09，以 `app-sidebar.tsx` 中 `[HIDDEN]` 注释为准。
+
+### 3. 删除页面（完全移除）
+```tsx
+// 从 app-sidebar.tsx 移除条目
+// 从 App.tsx 移除路由
+// 从 site-header.tsx 移除标题映射
+// 删除 src/pages/ 下的页面组件文件
 ```
 
 ## API 调用规范
