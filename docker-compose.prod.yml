@@ -1,0 +1,46 @@
+# Production deployment: Nginx (static frontend) + FastAPI + Redis
+# Runs alongside dev containers without conflict
+version: "3.9"
+
+services:
+  # Frontend: Nginx serves pre-built static files on port 80
+  web:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.prod
+    container_name: new-it-frontend-prod
+    ports:
+      - "3000:80"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  # Backend: FastAPI with Uvicorn (production mode, 2 workers, no --reload)
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: new-it-backend-prod
+    # No host port mapping: Nginx proxies to api:8001 via Docker internal network
+    env_file:
+      - ./backend/.env
+    environment:
+      - PYTHONUNBUFFERED=1
+      - REDIS_HOST=redis-prod
+      - REDIS_PORT=6379
+    restart: unless-stopped
+    depends_on:
+      - redis-prod
+    volumes:
+      - ./backend/logs:/app/logs
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "10"
+        compress: "true"
+
+  redis-prod:
+    image: redis:7-alpine
+    container_name: new-it-redis-prod
+    restart: unless-stopped

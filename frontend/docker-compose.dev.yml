@@ -18,12 +18,8 @@ services:
       - WATCHPACK_POLLING=true
       - VITE_API_PROXY_TARGET=http://host.docker.internal:8001
       - VITE_DISABLE_AUTH=true
-      - VITE_PUBLIC_ORIGIN=https://analysis.kohleservices.com
-      - VITE_HMR_PROTOCOL=wss
-      - VITE_HMR_HOST=analysis.kohleservices.com
-      - VITE_HMR_CLIENT_PORT=443
-      # 后端代理通过宿主机连接（推荐方式）
-      # - VITE_API_PROXY_TARGET=http://new-it-backend-dev:8001
+      # Dev uses direct IP access, no need for domain-based HMR
+      # HMR works automatically at http://10.6.20.138:5173
     restart: unless-stopped
     extra_hosts:
       - "host.docker.internal:host-gateway"

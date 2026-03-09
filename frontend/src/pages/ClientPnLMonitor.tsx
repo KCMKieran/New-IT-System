@@ -9,7 +9,7 @@ import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMe
 import { Settings2, X, Search, RefreshCw, Filter } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { FilterBuilder } from "@/components/FilterBuilder"
-import { FilterGroup, operatorNeedsValue, operatorNeedsTwoValues, OPERATOR_LABELS, ColumnMeta } from "@/types/filter"
+import { FilterGroup, FilterOperator, operatorNeedsValue, operatorNeedsTwoValues, OPERATOR_LABELS, ColumnMeta } from "@/types/filter"
 import { AgGridReact } from 'ag-grid-react'
 import { ColDef, GridReadyEvent, SortChangedEvent, GridApi, PostSortRowsParams, IRowNode } from 'ag-grid-community'
 
@@ -636,7 +636,7 @@ export default function ClientPnLMonitor() {
       // Add new rule
       const newRule = {
         field: 'account_last_updated',
-        op: 'after',
+        op: 'after' as FilterOperator,
         value: targetDate.toISOString()
       }
       
@@ -1370,14 +1370,14 @@ export default function ClientPnLMonitor() {
             <div className="sm:hidden w-full">
               <Select value={timeRange} onValueChange={handleTimeRangeChange}>
                 <SelectTrigger className="h-9 w-full">
-                  <SelectValue placeholder={t('pnlMonitor.timeRange', '账户活跃时间')} />
+                  <SelectValue placeholder={tz('pnlMonitor.timeRange', '账户活跃时间', 'Account Active Time')} />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="all">{t('pnlMonitor.timeRangeAll', '全部时间', 'All Time')}</SelectItem>
-                  <SelectItem value="1w">{t('pnlMonitor.timeRange1w', '过去 1 周', 'Past 1 Week')}</SelectItem>
-                  <SelectItem value="2w">{t('pnlMonitor.timeRange2w', '过去 2 周', 'Past 2 Weeks')}</SelectItem>
-                  <SelectItem value="1m">{t('pnlMonitor.timeRange1m', '过去 1 个月', 'Past 1 Month')}</SelectItem>
-                  <SelectItem value="3m">{t('pnlMonitor.timeRange3m', '过去 3 个月', 'Past 3 Months')}</SelectItem>
+                  <SelectItem value="all">{tz('pnlMonitor.timeRangeAll', '全部时间', 'All Time')}</SelectItem>
+                  <SelectItem value="1w">{tz('pnlMonitor.timeRange1w', '过去 1 周', 'Past 1 Week')}</SelectItem>
+                  <SelectItem value="2w">{tz('pnlMonitor.timeRange2w', '过去 2 周', 'Past 2 Weeks')}</SelectItem>
+                  <SelectItem value="1m">{tz('pnlMonitor.timeRange1m', '过去 1 个月', 'Past 1 Month')}</SelectItem>
+                  <SelectItem value="3m">{tz('pnlMonitor.timeRange3m', '过去 3 个月', 'Past 3 Months')}</SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -1480,14 +1480,14 @@ export default function ClientPnLMonitor() {
                 <div className="w-48">
                   <Select value={timeRange} onValueChange={handleTimeRangeChange}>
                     <SelectTrigger className="h-9 w-full">
-                      <SelectValue placeholder={t('pnlMonitor.timeRange', '账户活跃时间')} />
+                      <SelectValue placeholder={tz('pnlMonitor.timeRange', '账户活跃时间', 'Account Active Time')} />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="all">{t('pnlMonitor.timeRangeAll', '全部时间', 'All Time')}</SelectItem>
-                      <SelectItem value="1w">{t('pnlMonitor.timeRange1w', '过去 1 周', 'Past 1 Week')}</SelectItem>
-                      <SelectItem value="2w">{t('pnlMonitor.timeRange2w', '过去 2 周', 'Past 2 Weeks')}</SelectItem>
-                      <SelectItem value="1m">{t('pnlMonitor.timeRange1m', '过去 1 个月', 'Past 1 Month')}</SelectItem>
-                      <SelectItem value="3m">{t('pnlMonitor.timeRange3m', '过去 3 个月', 'Past 3 Months')}</SelectItem>
+                      <SelectItem value="all">{tz('pnlMonitor.timeRangeAll', '全部时间', 'All Time')}</SelectItem>
+                      <SelectItem value="1w">{tz('pnlMonitor.timeRange1w', '过去 1 周', 'Past 1 Week')}</SelectItem>
+                      <SelectItem value="2w">{tz('pnlMonitor.timeRange2w', '过去 2 周', 'Past 2 Weeks')}</SelectItem>
+                      <SelectItem value="1m">{tz('pnlMonitor.timeRange1m', '过去 1 个月', 'Past 1 Month')}</SelectItem>
+                      <SelectItem value="3m">{tz('pnlMonitor.timeRange3m', '过去 3 个月', 'Past 3 Months')}</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>

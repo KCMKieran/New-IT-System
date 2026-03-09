@@ -5,8 +5,13 @@ import { enUS } from "./locales/en-US"
 // Supported languages
 export type Language = "zh-CN" | "en-US"
 
-// Translation dictionary type
-export type Translations = typeof zhCN
+// Recursively widen literal string types to `string` while preserving key structure
+type DeepStringRecord<T> = {
+  readonly [K in keyof T]: T[K] extends string ? string : DeepStringRecord<T[K]>
+}
+
+// Translation dictionary keeps zhCN's nested key structure but accepts any string values
+export type Translations = DeepStringRecord<typeof zhCN>
 
 // All translations mapped by language code
 export const translations: Record<Language, Translations> = {

@@ -29,16 +29,17 @@
 ┌─────────────────────────────────────────────────────────────────┐
 │                         Frontend (React)                         │
 │  - Pages: Position, ClientPnL, IBReport, Equity, TradeSummary   │
-│  - UI: shadcn/ui + Tailwind CSS + AG-Grid                       │
-│  - Port: 5173 (dev)                                              │
+│  - UI: shadcn/ui + Tailwind CSS 4 + AG-Grid                     │
+│  - Dev: Vite dev server on :5173                                 │
+│  - Prod: Nginx on :3000 (pre-built static files)                 │
 └─────────────────────────┬───────────────────────────────────────┘
-                          │ HTTP/REST API
+                          │ HTTP/REST API (/api/*)
                           ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                      Backend (FastAPI)                           │
 │  - API: /api/v1/* endpoints                                      │
 │  - Layers: routes → schemas → services                          │
-│  - Port: 8001                                                    │
+│  - Dev: :8001 (--reload)  |  Prod: internal (via Nginx proxy)   │
 └───────┬─────────────────┬─────────────────┬─────────────────────┘
         │                 │                 │
         ▼                 ▼                 ▼
@@ -48,20 +49,26 @@
 │  - Reports    │ │  - Trades     │ │  - TTL: varies│
 │  - Stats      │ │  - Users      │ │               │
 └───────────────┘ └───────────────┘ └───────────────┘
+
+Deployment: Docker Compose on Ubuntu (10.6.20.138)
+External access: Cloudflare Tunnel → analysis.kohleservices.com → :3000
 ```
 
 ### Tech Stack Details
 
 | Component | Technology | Notes |
 |-----------|------------|-------|
-| Frontend | React 18 + TypeScript + Vite | SPA with client-side routing |
-| UI Library | shadcn/ui + Tailwind CSS | Dark/light theme support |
+| Frontend | React 19 + TypeScript + Vite 7 | SPA with client-side routing |
+| UI Library | shadcn/ui + Tailwind CSS 4 | Dark/light theme support |
 | Data Grid | AG-Grid v34 Community | Server-side pagination |
-| Backend | Python FastAPI | Async, auto-docs at /docs |
+| Backend | Python 3.11 + FastAPI | Async, auto-docs at /docs |
 | Primary DB | ClickHouse | Analytics, large aggregations |
 | Trading DB | MySQL | MT4/MT5 direct connection |
+| Reporting DB | PostgreSQL | ETL pipeline data |
 | Cache | Redis | Query result caching |
 | Data Processing | DuckDB, Parquet | Local data transformations |
+| Deployment | Docker Compose + Nginx | Dev & Prod run simultaneously |
+| External Access | Cloudflare Tunnel + Zero Trust | Auth bypass for office IP |
 
 ---
 
@@ -131,12 +138,16 @@ New-IT-System/
 │
 ├── docs/                        # Documentation
 │   ├── README.md               # Documentation hub
+│   ├── deployment/             # ⭐ Dev/Prod workflow & Cloudflare Tunnel
 │   ├── architecture/           # System design docs
 │   ├── backend/                # Backend dev guides
 │   ├── frontend/               # Frontend dev guides
 │   ├── features/               # Feature specifications
-│   ├── operations/             # Deployment guides
+│   ├── operations/             # Operations & maintenance
 │   └── ai-context/             # This file
+│
+├── docker-compose.prod.yml      # Production orchestration
+├── deploy.sh                    # One-click production deployment
 │
 └── .cursor/rules/              # Cursor AI rules
     └── project-context.mdc     # Auto-loaded context
@@ -307,6 +318,7 @@ New-IT-System/
 
 ### Base URL
 - Development: `http://localhost:8001/api/v1/`
+- Production: `https://analysis.kohleservices.com/api/v1/` (via Nginx proxy)
 - API Docs: `http://localhost:8001/docs` (Swagger UI)
 
 ### Common Parameters

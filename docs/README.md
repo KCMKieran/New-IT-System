@@ -19,10 +19,10 @@ This is the documentation hub for the KCM IT System - an internal financial trad
 
 | Layer | Technology |
 |-------|------------|
-| Frontend | React + TypeScript + Vite + shadcn/ui + AG-Grid |
-| Backend | Python FastAPI + ClickHouse + Redis |
-| Database | ClickHouse (analytics) + MySQL (MT4/MT5 data) |
-| Deployment | Docker + systemd |
+| Frontend | React 19 + TypeScript + Vite 7 + shadcn/ui + AG-Grid |
+| Backend | Python 3.11 + FastAPI + ClickHouse + Redis |
+| Database | ClickHouse (analytics) + MySQL (MT4/MT5) + PostgreSQL (reporting) |
+| Deployment | Docker Compose + Nginx + Cloudflare Tunnel |
 
 ### Core Modules
 
@@ -69,40 +69,36 @@ docs/
 │   ├── profit-deep-analysis.md
 │   ├── pnl-monitor-integration.md
 │   └── filter-backend-integration.md
-├── operations/                  # Deployment & operations
+├── deployment/                  # ⭐ Deployment & DevOps
+│   └── dev-prod-guide.md      # Dev/Prod workflow, Docker, Cloudflare Tunnel
+├── operations/                  # Operations & maintenance
 │   ├── clickhouse-connection.md # ClickHouse production setup
-│   ├── create-ib_downline_net_deposit_agg.md # Create ib_downline_net_deposit_agg in KCM_fxbackoffice
+│   ├── create-ib_downline_net_deposit_agg.md
 │   └── clientid-based-page.md
 └── ai-context/                  # AI assistant context
     └── PROJECT_CONTEXT.md      # Detailed project context for AI
 ```
 
-## Development Setup
+## Development & Deployment
 
-### Prerequisites
-- Node.js 18+ and npm
-- Python 3.10+
-- Docker (recommended)
+> **Full guide**: [deployment/dev-prod-guide.md](deployment/dev-prod-guide.md)
 
-### Quick Start
+Both Dev and Prod run simultaneously on the same server via Docker:
+
+| Environment | Access URL | Purpose |
+|---|---|---|
+| **Dev** | `http://10.6.20.138:5173` | Write & debug code (hot reload) |
+| **Prod** | `http://10.6.20.138:3000` or `analysis.kohleservices.com` | Stable version for end users |
+
+### Quick Commands
 
 ```bash
-# Clone repository
-git clone <repo-url>
-cd New-IT-System
+# Start dev containers
+cd backend && docker compose -f docker-compose.dev.yml up -d && cd ..
+cd frontend && docker compose -f docker-compose.dev.yml up -d && cd ..
 
-# Backend setup
-cd backend
-python -m venv venv
-source venv/bin/activate  # Windows: .\venv\Scripts\activate
-pip install -r requirements.txt
-cp .env.example .env      # Configure database credentials
-uvicorn main:app --reload --port 8001
-
-# Frontend setup (new terminal)
-cd frontend
-npm install
-npm run dev               # Runs on http://localhost:5173
+# Deploy to production (one-click)
+./deploy.sh
 ```
 
 ## Contributing
