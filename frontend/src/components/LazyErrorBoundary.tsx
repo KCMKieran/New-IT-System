@@ -3,6 +3,18 @@ import { Loader2, RotateCw } from "lucide-react"
 
 type ModuleDefault = { default: React.ComponentType<unknown> }
 
+const RELOAD_KEY = "lazy-chunk-reload"
+
+function isChunkLoadError(error: unknown): boolean {
+  const msg = error instanceof Error ? error.message : String(error)
+  return (
+    msg.includes("Failed to fetch dynamically imported module") ||
+    msg.includes("Loading chunk") ||
+    msg.includes("Loading CSS chunk") ||
+    msg.includes("Importing a module script failed")
+  )
+}
+
 function importWithRetry(
   importFn: () => Promise<ModuleDefault>,
   retries: number,
@@ -25,7 +37,6 @@ export function lazyWithRetry(
   return React.lazy(() => importWithRetry(importFn, retries, delay))
 }
 
-// Full-screen spinner shown while a lazy chunk is downloading
 export function PageLoader() {
   return (
     <div className="flex h-full items-center justify-center">
@@ -42,24 +53,41 @@ interface State {
   hasError: boolean
 }
 
-// Catches chunk-load errors and shows a retry UI instead of a white screen
+// React.lazy caches rejected promises, so setState alone can't recover.
+// The only reliable recovery is a full page reload to fetch fresh index.html
+// (which contains updated chunk references after a deploy).
+// A sessionStorage flag prevents infinite reload loops.
 export class LazyErrorBoundary extends Component<Props, State> {
   state: State = { hasError: false }
 
-  static getDerivedStateFromError(): State {
+  static getDerivedStateFromError(_error: Error): State {
     return { hasError: true }
   }
 
+  componentDidCatch(error: Error) {
+    if (isChunkLoadError(error)) {
+      const lastReload = sessionStorage.getItem(RELOAD_KEY)
+      const now = Date.now()
+      // Auto-reload once if we haven't reloaded in the last 10 seconds
+      if (!lastReload || now - Number(lastReload) > 10_000) {
+        sessionStorage.setItem(RELOAD_KEY, String(now))
+        window.location.reload()
+        return
+      }
+    }
+  }
+
   handleRetry = () => {
-    this.setState({ hasError: false })
+    sessionStorage.removeItem(RELOAD_KEY)
+    window.location.reload()
   }
 
   render() {
     if (this.state.hasError) {
       return (
-        <div className="flex h-full flex-col items-center justify-center gap-4 text-muted-foreground">
+        <div className="flex h-screen flex-col items-center justify-center gap-4 text-muted-foreground">
           <p className="text-lg">页面加载失败</p>
-          <p className="text-sm">网络波动导致资源加载失败，请点击重试</p>
+          <p className="text-sm">可能是网络问题或系统刚更新，请点击重试</p>
           <button
             onClick={this.handleRetry}
             className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm text-primary-foreground hover:bg-primary/90"
