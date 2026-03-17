@@ -60,7 +60,7 @@ def add_ib(ib_id: str, ib_name: Optional[str], operator: str) -> None:
                 raise ValueError(f"IB {ib_id} already exists in watchlist")
             conn.execute(
                 "UPDATE watchlist SET is_active = 1, ib_name = ?, added_by = ?, "
-                "added_at = datetime('now') WHERE ib_id = ?",
+                "added_at = datetime('now', '+8 hours') WHERE ib_id = ?",
                 (ib_name, operator, ib_id),
             )
         else:
@@ -95,7 +95,7 @@ def batch_add_ib(
                     continue
                 conn.execute(
                     "UPDATE watchlist SET is_active = 1, ib_name = ?, added_by = ?, "
-                    "added_at = datetime('now') WHERE ib_id = ?",
+                    "added_at = datetime('now', '+8 hours') WHERE ib_id = ?",
                     (ib_name, operator, ib_id),
                 )
             else:
@@ -261,7 +261,7 @@ def update_report_config(
 
         set_parts.append("updated_by = ?")
         values.append(operator)
-        set_parts.append("updated_at = datetime('now')")
+        set_parts.append("updated_at = datetime('now', '+8 hours')")
 
         sql = f"UPDATE report_config SET {', '.join(set_parts)} WHERE id = 1"
         conn.execute(sql, values)

@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS watchlist (
     ib_id     TEXT    NOT NULL UNIQUE,
     ib_name   TEXT,
     added_by  TEXT,
-    added_at  DATETIME DEFAULT (datetime('now')),
+    added_at  DATETIME DEFAULT (datetime('now', '+8 hours')),
     is_active INTEGER  DEFAULT 1
 );
 
@@ -51,7 +51,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
     action     TEXT,
     detail     TEXT,
     operator   TEXT,
-    created_at DATETIME DEFAULT (datetime('now'))
+    created_at DATETIME DEFAULT (datetime('now', '+8 hours'))
 );
 """
 
