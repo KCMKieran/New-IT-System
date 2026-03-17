@@ -47,6 +47,7 @@ export const enUS = {
     dataQuery: "Data Query",
     ibidLots: "IBID Lots Lookup",
     clientReturnRate: "Client Return Rate",
+    ibFinancialMonitor: "IB Financial Monitor",
     home: "Home",
   },
   
@@ -77,6 +78,7 @@ export const enUS = {
     configuration: "Configuration",
     ibidLots: "IBID Lots Lookup",
     clientReturnRate: "Client Return Rate",
+    ibFinancialMonitor: "IB Financial Monitor",
   },
   
   ibidLotsPage: {

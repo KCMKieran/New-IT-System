@@ -4,78 +4,198 @@
 
 ## 1. Business Requirements
 
-### Monitoring Rules
+### Rule System (7 Rules, 3 Tiers)
 
-| Rule | Description | Detection Logic | Time Window |
-|------|-------------|-----------------|-------------|
-| **R1** | 单一客户5秒内开3+张、每张≥5手 | GROUP BY loginSid → sliding 5s window, `lots >= 5`, `COUNT >= 3` | 5s |
-| **R2** | R1 + 开平仓时间≤2分钟 | R1 hit + `CLOSE_TIME - OPEN_TIME <= 120s` | 5s open + 2min hold |
-| **R3** | 1秒内同方向开3+张（频繁推仓） | GROUP BY loginSid + CMD → sliding 1s window, `COUNT >= 3` | 1s |
+#### Tier 1 — Must Have (directly impacts company P&L)
 
-**Common filter**: Only flag clients with `PROFIT > 0` (profitable trades).
+| Rule | Name | Detection Logic | Time Window |
+|------|------|-----------------|-------------|
+| **R4** | 大额敞口预警 | Single client open lots on one symbol > threshold | Snapshot |
+| **R5** | 快速盈利提取 | Single client realized profit > $X within 20min | 20min |
+| **R2** | 快速开平 | Burst orders (5s, 3+, lots≥5) + hold ≤ 2min | 5s open + 2min hold |
 
-### Two Monitoring Layers
+#### Tier 2 — Should Have
 
-| Layer | Data Source | Scope |
-|-------|-------------|-------|
-| **Historical** (past 24h) | Closed + open trades where `openDate >= yesterday` | R1, R2, R3 all applicable |
-| **Real-time** (open positions) | Open trades where `CLOSE_TIME = '1970-01-01'` | R1, R3 only (R2 needs close time) |
+| Rule | Name | Detection Logic | Time Window |
+|------|------|-----------------|-------------|
+| **R1** | 爆发下单 | Single client opens 3+ orders within 5s, each ≥ 5 lots | 5s |
+| **R6** | 同向集中度 | All clients net long/short lots on a symbol > threshold (company-level) | Snapshot |
+| **R3** | 频繁推仓 | 3+ same-direction orders within 1s, lots ≥ 1 | 1s |
 
-### Update Frequency
+#### Tier 3 — Nice to Have
 
-~10 minutes (frontend polling). No SSE/WebSocket needed.
+| Rule | Name | Detection Logic | Time Window |
+|------|------|-----------------|-------------|
+| **R7** | 高胜率异常 | Win rate > 80% over last N trades with short hold times | Historical |
+
+### Rule Detail
+
+**R4 — Large Exposure Alert** (Tier 1, Highest Priority)
+
+A single client holding excessive lots on one symbol creates unhedged risk for the broker. This is the **most dangerous scenario** — a client quietly holding 200 lots XAUUSD (~$20M notional) won't trigger any pattern-based rule.
+
+Default thresholds (adjustable):
+
+| Symbol | Threshold (lots) | Approx. Notional |
+|--------|------------------|------------------|
+| XAUUSD | 50 | ~$5M |
+| XAGUSD | 200 | ~$2M |
+| Default | 100 | Varies |
+
+**R5 — Rapid Profit Extraction** (Tier 1)
+
+Detects clients extracting significant profit within a short window, regardless of order pattern. Catches latency arbitrage and news trading that other rules may miss.
+
+- Window: 20 minutes (matches polling interval × 2)
+- Threshold: $5,000 total realized profit (adjustable)
+- Data source: recently closed trades
+
+**R2 — Quick Open-Close** (Tier 1, existing, unchanged)
+
+R1 pattern + hold time ≤ 2 minutes. The most precise indicator of latency arbitrage / scalping abuse.
+
+**R1 — Burst Orders** (Tier 2, existing, unchanged)
+
+3+ orders within 5 seconds, each ≥ 5 lots. Detects EA/bot activity and news trading load-up patterns.
+
+**R6 — Directional Concentration** (Tier 2, new)
+
+Company-level risk: all clients combined net position on a symbol. If net exposure exceeds threshold, the broker's unhedged risk is too high. This is not per-client — it's a market-level alert.
+
+- Threshold: 500 net lots (adjustable per symbol)
+- Output: symbol, net direction (LONG/SHORT), total lots
+
+**R3 — Rapid Same-Direction Orders** (Tier 2, improved)
+
+Original rule had no lot filter, causing high false positives. Added `lots >= 1` minimum to filter out micro-lot noise.
+
+**R7 — High Win Rate Anomaly** (Tier 3)
+
+Clients with > 80% win rate over N trades AND average hold time < 5 minutes. Indicates systematic exploitation. Requires historical data — implement in a later phase.
+
+### PROFIT Filter: Behavior vs Outcome
+
+> **Design decision**: `PROFIT > 0` is used as a **severity sorting criterion**, NOT a filter.
+>
+> Risk monitoring should detect **behavioral patterns** regardless of outcome. A client who repeatedly uses latency arbitrage but occasionally loses is still a risk. Waiting until they profit to flag them is too late.
+>
+> Exception: R5 (Rapid Profit) inherently requires `PROFIT > 0` since it measures profit extraction.
+
+### Monitoring Architecture: Pseudo-Real-Time
+
+| Aspect | Design |
+|--------|--------|
+| **Update frequency** | Every 10 minutes (frontend polling) |
+| **Data window** | Open positions + last 20 min closed trades |
+| **No 24h historical scan** | Only scans recent data per poll; historical review via separate on-demand endpoint |
+| **Transport** | REST polling, no SSE/WebSocket needed |
 
 ---
 
 ## 2. Data Source
 
-### Table: `fxbackoffice.mt4_trades` (~55M rows)
+### Primary: `mt4_live.mt4_trades` (Slave DB, ~18M rows)
 
-Full schema in `database-context/mysql-schemas.md`.
+Direct MT4 server database with near-real-time data. Preferred over `fxbackoffice.mt4_trades` for risk monitoring due to lower latency (no CRM sync delay).
 
-**Key columns for this feature:**
+**Why `mt4_live` over `fxbackoffice`:**
+
+| Aspect | `fxbackoffice.mt4_trades` | `mt4_live.mt4_trades` |
+|--------|--------------------------|----------------------|
+| **Data freshness** | CRM sync delay (minutes) | Near real-time |
+| **Row count** | ~55M (all SIDs merged) | ~18M (MT4 Live only) |
+| **Account ID** | `loginSid` (VARCHAR, "SID-LOGIN") | `LOGIN` (INT) |
+| **Lots** | `lots` (virtual column) | `VOLUME / 100` (manual calc) |
+| **Total profit** | `totalProfit` (virtual column) | `PROFIT + SWAPS + COMMISSION` |
+| **Date indexes** | `openDate`, `closeDate` (generated) | `OPEN_TIME`, `CLOSE_TIME` (native) |
+| **Server coverage** | All SIDs (1, 5, 6) | SID 1 (MT4 Live) only |
+
+**Limitation**: `mt4_live` only contains SID 1 data. MT4 Live2 (SID 6) and MT5 (SID 5) require separate database connections if needed.
+
+### Table Schema: `mt4_live.mt4_trades`
 
 | Column | Type | Indexed | Notes |
 |--------|------|---------|-------|
-| `loginSid` | varchar | ✅ `loginSid`, `(loginSid, closeDate)` | Composite `{SID}-{LOGIN}` |
-| `OPEN_TIME` | datetime | ❌ (no direct index) | Use `openDate` for range scans |
-| `openDate` | date (generated) | ✅ `IDX_OPEN_DATE` | `CAST(OPEN_TIME AS DATE)` |
-| `CLOSE_TIME` | datetime | ❌ | Open positions = `'1970-01-01 00:00:00'` |
-| `closeDate` | date (generated) | ✅ `INDEX_CLOSEDATE` | `CAST(CLOSE_TIME AS DATE)` |
-| `CMD` | int | ❌ | 0=Buy, 1=Sell |
-| `lots` | decimal (virtual) | ❌ | `VOLUME / 100` |
+| `TICKET` | int | ✅ PK | Trade ticket number |
+| `LOGIN` | int | ✅ `INDEX_LOGIN` | MT4 login number |
+| `SYMBOL` | char(16) | ❌ | Trading symbol |
+| `DIGITS` | int | ❌ | Price decimal digits |
+| `CMD` | int | ✅ `INDEX_CMD` | 0=Buy, 1=Sell |
+| `VOLUME` | int | ❌ | Raw volume (÷100 = lots) |
+| `OPEN_TIME` | datetime | ✅ `INDEX_OPENTIME` | Trade open time |
+| `OPEN_PRICE` | double | ❌ | Entry price |
+| `SL` | double | ❌ | Stop loss |
+| `TP` | double | ❌ | Take profit |
+| `CLOSE_TIME` | datetime | ✅ `INDEX_CLOSETIME` | Close time; `'1970-01-01'` = open |
+| `COMMISSION` | double | ❌ | Commission charged |
+| `SWAPS` | double | ❌ | Swap charges |
+| `CLOSE_PRICE` | double | ❌ | Exit price |
 | `PROFIT` | double | ❌ | Raw P&L |
-| `totalProfit` | decimal (virtual) | ❌ | `PROFIT + SWAPS + COMMISSION` |
+| `COMMENT` | char(32) | ❌ | Trade comment |
+| `TIMESTAMP` | int | ✅ `INDEX_STAMP` | Unix timestamp |
+| `MAGIC` | int | ❌ | EA magic number |
+
+### Performance: Verified on Slave DB
+
+| Query | Index Used | Rows | Time |
+|-------|-----------|------|------|
+| Open positions (`CLOSE_TIME = '1970-01-01'`) | `INDEX_CLOSETIME` | ~3,400 | 4ms |
+| Last 24h trades (`OPEN_TIME >= -24h`) | `INDEX_OPENTIME` | ~30,000 | 36ms |
+| Last 20min trades (estimated) | `INDEX_OPENTIME` | ~400 | <5ms |
+
+**Total polling load: ~10ms per 10 min cycle** — negligible impact on slave DB.
 
 ### Performance Strategy
 
-**Do NOT do sliding window detection in SQL** (self-join on 55M rows is too slow).
+**Do NOT do sliding window detection in SQL** (self-join on millions of rows is too slow).
 
 Instead:
-1. **SQL**: Pull candidate trades using indexed columns (`openDate`) → small dataset (thousands of rows)
+1. **SQL**: Pull candidate trades using indexed columns → small dataset (thousands of rows)
 2. **Python**: In-memory sliding window detection → microsecond-level processing
 
-### SQL Query (single query, uses index)
+### SQL Queries (use `UNION ALL`, not `OR`, to preserve index usage)
 
 ```sql
--- Historical: past 24h trades, uses IDX_OPEN_DATE index
-SELECT TICKET, loginSid, sid, LOGIN, SYMBOL, CMD,
-       lots, OPEN_TIME, CLOSE_TIME, PROFIT, totalProfit
-FROM fxbackoffice.mt4_trades
-WHERE openDate >= DATE_SUB(CURDATE(), INTERVAL 1 DAY)
+-- Query 1: Open positions (R1, R3, R4, R6)
+-- Uses INDEX_CLOSETIME, ~3400 rows, 4ms
+SELECT TICKET, LOGIN, SYMBOL, CMD,
+       VOLUME / 100 AS lots,
+       OPEN_TIME, CLOSE_TIME,
+       PROFIT, SWAPS, COMMISSION,
+       PROFIT + SWAPS + COMMISSION AS total_profit
+FROM mt4_live.mt4_trades
+WHERE CLOSE_TIME = '1970-01-01 00:00:00'
   AND CMD IN (0, 1)
-ORDER BY loginSid, OPEN_TIME
+ORDER BY LOGIN, OPEN_TIME;
 
--- Real-time: open positions only, uses INDEX_CLOSEDATE index
-SELECT TICKET, loginSid, sid, LOGIN, SYMBOL, CMD,
-       lots, OPEN_TIME, CLOSE_TIME, PROFIT, totalProfit
-FROM fxbackoffice.mt4_trades
-WHERE closeDate = '1970-01-01'
+-- Query 2: Recently closed trades (R2, R5)
+-- Uses INDEX_CLOSETIME, ~400 rows, <5ms
+SELECT TICKET, LOGIN, SYMBOL, CMD,
+       VOLUME / 100 AS lots,
+       OPEN_TIME, CLOSE_TIME,
+       TIMESTAMPDIFF(SECOND, OPEN_TIME, CLOSE_TIME) AS hold_seconds,
+       PROFIT, SWAPS, COMMISSION,
+       PROFIT + SWAPS + COMMISSION AS total_profit
+FROM mt4_live.mt4_trades
+WHERE CLOSE_TIME >= DATE_SUB(NOW(), INTERVAL 20 MINUTE)
+  AND CLOSE_TIME != '1970-01-01 00:00:00'
   AND CMD IN (0, 1)
-ORDER BY loginSid, OPEN_TIME
+ORDER BY LOGIN, CLOSE_TIME;
 ```
 
-**Avoid `OR` on date columns** — it breaks index usage. Use `UNION ALL` if combining both.
+### Account Exclusion
+
+```sql
+-- Exclude test/demo accounts (applied via NOT EXISTS subquery)
+AND LOGIN NOT LIKE '7%'
+AND NOT EXISTS (
+    SELECT 1 FROM mt4_live.mt4_users u
+    WHERE u.LOGIN = t.LOGIN
+      AND (u.`NAME` LIKE '%test%'
+           OR u.`GROUP` LIKE '%demo%'
+           OR u.`GROUP` LIKE '%test%')
+)
+```
 
 ---
 
@@ -84,25 +204,27 @@ ORDER BY loginSid, OPEN_TIME
 ### Data Flow
 
 ```
-Frontend polls every 10 min
-        │
-        ▼
-   GET /api/v1/risk-monitor/scan?hours=24
-        │
-        ▼
-   SQL: Pull trades from past N hours (indexed openDate scan)
-        │
-        ▼
-   Python in-memory detection:
-   ├── R1: group by loginSid → sliding 5s window → lots>=5, count>=3
-   ├── R2: R1 hits + (CLOSE_TIME - OPEN_TIME) <= 120s
-   └── R3: group by loginSid+CMD → sliding 1s window → count>=3
-        │
-        ▼
-   Filter: only keep PROFIT > 0
-        │
-        ▼
-   Return alert list (+ optional: email on new alerts)
+Every 10 minutes (frontend polling)
+    │
+    ├─ Query 1: Open positions (~3400 rows, 4ms)
+    │   → R4: Large exposure detection
+    │   → R6: Directional concentration detection
+    │   → R1: Burst order pattern detection
+    │   → R3: Rapid same-direction detection
+    │
+    ├─ Query 2: Last 20min closed trades (~400 rows, <5ms)
+    │   → R2: Quick open-close detection
+    │   → R5: Rapid profit extraction detection
+    │
+    ▼
+Python in-memory detection engine
+    │
+    ├─ Deduplicate: Compare with Redis (previous scan results)
+    │   Only keep new alerts
+    │
+    ├─ Sort by severity: PROFIT as ranking criterion (not filter)
+    │
+    └─ Output: API response → Frontend display / Email notification
 ```
 
 ### File Structure
@@ -118,74 +240,126 @@ backend/app/
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/v1/risk-monitor/scan` | GET | Scan past N hours, return alert list |
-| `/api/v1/risk-monitor/realtime` | GET | Scan open positions only |
+| `/api/v1/risk-monitor/scan` | GET | Pseudo-real-time scan (open + recent 20min) |
 
-**Query params**: `hours` (default 24), `login` (optional, filter specific account).
-
-Both endpoints share the same Python detection logic, differing only in SQL WHERE clause.
+**Query params**: `login` (optional, filter specific account).
 
 ### Python Detection Logic
 
 ```python
 from itertools import groupby
 from datetime import timedelta
+from collections import defaultdict
 
-def detect_all_rules(trades: list[dict]) -> list[dict]:
+
+def detect_all(open_trades: list[dict], closed_trades: list[dict]) -> list[dict]:
     """
-    In-memory sliding window detection.
-    trades: pre-sorted by (loginSid, OPEN_TIME), filtered to CMD IN (0,1).
+    In-memory detection engine. Runs all rules against two datasets:
+    - open_trades: current open positions (from Query 1)
+    - closed_trades: recently closed trades (from Query 2)
     """
     alerts = []
 
-    trades.sort(key=lambda t: (t["loginSid"], t["OPEN_TIME"]))
+    # === R4: Large Exposure (per client per symbol) ===
+    exposure = defaultdict(lambda: defaultdict(float))
+    for t in open_trades:
+        exposure[t["LOGIN"]][t["SYMBOL"]] += t["lots"]
 
-    for login, group in groupby(trades, key=lambda t: t["loginSid"]):
+    EXPOSURE_THRESHOLDS = {"XAUUSD": 50, "XAGUSD": 200, "DEFAULT": 100}
+    for login, symbols in exposure.items():
+        for symbol, total_lots in symbols.items():
+            threshold = EXPOSURE_THRESHOLDS.get(
+                symbol, EXPOSURE_THRESHOLDS["DEFAULT"]
+            )
+            if total_lots >= threshold:
+                alerts.append({
+                    "rule": "R4", "LOGIN": login, "symbol": symbol,
+                    "total_lots": total_lots, "threshold": threshold,
+                    "severity": "HIGH",
+                })
+
+    # === R5: Rapid Profit (per client, 20min window) ===
+    profit_by_login = defaultdict(float)
+    for t in closed_trades:
+        if t["total_profit"] > 0:
+            profit_by_login[t["LOGIN"]] += t["total_profit"]
+
+    PROFIT_THRESHOLD = 5000  # USD
+    for login, total in profit_by_login.items():
+        if total >= PROFIT_THRESHOLD:
+            alerts.append({
+                "rule": "R5", "LOGIN": login,
+                "profit_20min": total, "severity": "HIGH",
+            })
+
+    # === R1 / R2: Burst Orders + Quick Close ===
+    open_trades.sort(key=lambda t: (t["LOGIN"], t["OPEN_TIME"]))
+
+    # R1 from open positions
+    for login, group in groupby(open_trades, key=lambda t: t["LOGIN"]):
         orders = list(group)
-
-        # --- R1: 5s window, lots >= 5, count >= 3, profit > 0 ---
-        big_orders = [o for o in orders if o["lots"] >= 5]
-        for i, anchor in enumerate(big_orders):
-            window_end = anchor["OPEN_TIME"] + timedelta(seconds=5)
-            window = [o for o in big_orders[i:] if o["OPEN_TIME"] <= window_end]
+        big = [o for o in orders if o["lots"] >= 5]
+        for i, anchor in enumerate(big):
+            end = anchor["OPEN_TIME"] + timedelta(seconds=5)
+            window = [o for o in big[i:] if o["OPEN_TIME"] <= end]
             if len(window) >= 3:
-                profitable = [o for o in window if o["PROFIT"] and o["PROFIT"] > 0]
-                if profitable:
+                alerts.append({
+                    "rule": "R1", "LOGIN": login,
+                    "window_start": anchor["OPEN_TIME"],
+                    "orders": window,
+                })
+
+    # R2 from closed trades (needs CLOSE_TIME)
+    closed_trades.sort(key=lambda t: (t["LOGIN"], t["OPEN_TIME"]))
+    for login, group in groupby(closed_trades, key=lambda t: t["LOGIN"]):
+        orders = list(group)
+        big = [o for o in orders if o["lots"] >= 5]
+        for i, anchor in enumerate(big):
+            end = anchor["OPEN_TIME"] + timedelta(seconds=5)
+            window = [o for o in big[i:] if o["OPEN_TIME"] <= end]
+            if len(window) >= 3:
+                quick = [
+                    o for o in window
+                    if o["hold_seconds"] and o["hold_seconds"] <= 120
+                ]
+                if len(quick) >= 3:
                     alerts.append({
-                        "rule": "R1", "loginSid": login,
+                        "rule": "R2", "LOGIN": login,
+                        "window_start": anchor["OPEN_TIME"],
+                        "orders": quick,
+                    })
+
+    # === R3: Rapid Same-Direction (lots >= 1 filter) ===
+    for login, group in groupby(open_trades, key=lambda t: t["LOGIN"]):
+        orders = list(group)
+        for cmd in [0, 1]:
+            same = [o for o in orders if o["CMD"] == cmd and o["lots"] >= 1]
+            for i, anchor in enumerate(same):
+                end = anchor["OPEN_TIME"] + timedelta(seconds=1)
+                window = [o for o in same[i:] if o["OPEN_TIME"] <= end]
+                if len(window) >= 3:
+                    alerts.append({
+                        "rule": "R3", "LOGIN": login,
+                        "direction": "Buy" if cmd == 0 else "Sell",
                         "window_start": anchor["OPEN_TIME"],
                         "orders": window,
                     })
 
-                    # --- R2: R1 + hold time <= 2 min ---
-                    quick_close = [
-                        o for o in window
-                        if o["CLOSE_TIME"] and o["CLOSE_TIME"].year > 1970
-                        and (o["CLOSE_TIME"] - o["OPEN_TIME"]).total_seconds() <= 120
-                        and o["PROFIT"] > 0
-                    ]
-                    if len(quick_close) >= 3:
-                        alerts.append({
-                            "rule": "R2", "loginSid": login,
-                            "window_start": anchor["OPEN_TIME"],
-                            "orders": quick_close,
-                        })
+    # === R6: Market-Level Directional Concentration ===
+    net_by_symbol = defaultdict(float)
+    for t in open_trades:
+        sign = 1 if t["CMD"] == 0 else -1
+        net_by_symbol[t["SYMBOL"]] += sign * t["lots"]
 
-        # --- R3: 1s window, same direction, count >= 3, profit > 0 ---
-        for cmd in [0, 1]:
-            same_dir = [o for o in orders if o["CMD"] == cmd]
-            for i, anchor in enumerate(same_dir):
-                window_end = anchor["OPEN_TIME"] + timedelta(seconds=1)
-                window = [o for o in same_dir[i:] if o["OPEN_TIME"] <= window_end]
-                if len(window) >= 3:
-                    profitable = [o for o in window if o["PROFIT"] and o["PROFIT"] > 0]
-                    if profitable:
-                        alerts.append({
-                            "rule": "R3", "loginSid": login,
-                            "direction": "Buy" if cmd == 0 else "Sell",
-                            "window_start": anchor["OPEN_TIME"],
-                            "orders": window,
-                        })
+    CONCENTRATION_THRESHOLD = 500  # net lots
+    for symbol, net in net_by_symbol.items():
+        if abs(net) >= CONCENTRATION_THRESHOLD:
+            alerts.append({
+                "rule": "R6", "symbol": symbol,
+                "net_lots": net,
+                "direction": "LONG" if net > 0 else "SHORT",
+                "severity": "MEDIUM",
+            })
 
     return deduplicate(alerts)
 ```
@@ -195,7 +369,7 @@ def detect_all_rules(trades: list[dict]) -> list[dict]:
 Deduplication via Redis to avoid repeated notifications:
 
 ```python
-key = f"risk_alert:{alert['loginSid']}:{alert['rule']}:{alert['window_start']}"
+key = f"risk_alert:{alert['LOGIN']}:{alert['rule']}:{alert['window_start']}"
 if not redis.exists(key):
     send_email(alert)
     redis.set(key, 1, ex=3600)  # no repeat within 1 hour
@@ -220,23 +394,22 @@ RISK_TEAM_EMAIL=risk@example.com
 Auto-refresh every 10 minutes + manual refresh button.
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│  交易风控监控              上次更新: 14:32  [🔄 刷新]     │
-│                            自动刷新: 每10分钟            │
-├─────────────────────────────────────────────────────────┤
-│  ┌────────┐  ┌────────┐  ┌────────┐                    │
-│  │ R1: 12 │  │ R2: 3  │  │ R3: 8  │   Stat cards       │
-│  └────────┘  └────────┘  └────────┘                    │
-├─────────────────────────────────────────────────────────┤
-│  [实时(未平仓)]  [历史(24h)]          Tab switch          │
-├─────────────────────────────────────────────────────────┤
-│  AG-Grid table                                          │
-│  Columns: Rule | Account | Direction | Window Time |    │
-│           Order Count | Symbols | Lots Detail |         │
-│           Hold Time | Profit                            │
-│                                                         │
-│  Supports: sort, filter, CSV export                     │
-└─────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────┐
+│  交易风控监控                       上次更新: 14:32  [🔄 刷新]           │
+│                                     自动刷新: 每10分钟                  │
+├─────────────────────────────────────────────────────────────────────────┤
+│  ┌────────┐  ┌────────┐  ┌────────┐  ┌────────┐  ┌────────┐           │
+│  │ R4: 2  │  │ R5: 1  │  │ R2: 3  │  │ R1: 12 │  │ R6: 1  │  Cards   │
+│  │ 大额   │  │ 快利   │  │ 快平   │  │ 爆发   │  │ 集中   │           │
+│  └────────┘  └────────┘  └────────┘  └────────┘  └────────┘           │
+├─────────────────────────────────────────────────────────────────────────┤
+│  AG-Grid table                                                         │
+│  Columns: Severity | Rule | Account | Symbol | Direction |             │
+│           Lots (Detail) | Window Time | Hold Time | Profit             │
+│                                                                        │
+│  Supports: sort, filter, CSV export                                    │
+│  Color coding: HIGH = red row bg, MEDIUM = orange                      │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Auto-Refresh Pattern
@@ -267,57 +440,179 @@ Existing `SuspiciousClients.tsx` (currently placeholder) → show latest N alert
 
 | Phase | Scope | Estimate |
 |-------|-------|----------|
-| **Phase 1** | Backend detection engine (`risk_monitor_service.py`) + API | 1 day |
+| **Phase 1** | Backend detection engine (`risk_monitor_service.py`) + API — implement R4, R5, R2, R1 | 1-2 days |
 | **Phase 2** | Frontend page (table + stat cards + auto-refresh) | 1-2 days |
-| **Phase 3** | Dashboard widget integration (`SuspiciousClients.tsx`) | 0.5 day |
+| **Phase 3** | Add R3, R6 detection + dashboard widget (`SuspiciousClients.tsx`) | 1 day |
 | **Phase 4** | Email alerting + Redis dedup | 0.5 day |
+| **Phase 5** | Threshold tuning (run 1 week, analyze false positive rate, adjust) | Ongoing |
 
-**Total: ~4 days**
+**Total: ~5 days + 1 week tuning**
 
 ---
 
-## 6. Exploratory SQL (for manual analysis)
+## 6. Risk Rule Design Rationale
 
-### Trades with lots > 5 (past week)
+### Why these rules? (CFD Broker Risk Perspective)
+
+**The biggest risks for a CFD broker:**
+
+1. **Unhedged large exposure** — A single client holding 200 lots XAUUSD means the broker is exposed to ~$20M of market risk if not hedged. This is why **R4 is the highest priority** rule.
+
+2. **Latency arbitrage** — Clients exploit price feed delays (especially during news events like NFP, FOMC) to guarantee profits. They open large positions during price gaps and close quickly. **R2 + R5** catch this pattern from two angles: R2 via order pattern, R5 via profit outcome.
+
+3. **EA/Bot abuse** — Automated strategies that exploit market microstructure. **R1 + R3** detect the mechanical ordering patterns that EAs produce.
+
+4. **Concentration risk** — If all clients are long XAUUSD and gold drops, the broker's total exposure could be catastrophic. **R6** monitors this at the market level, not per-client.
+
+### Why not filter on PROFIT > 0?
+
+| Approach | Pros | Cons |
+|----------|------|------|
+| **Filter** (PROFIT > 0 required) | Fewer alerts, less noise | Misses pattern before it becomes profitable; too late to act |
+| **Sort** (PROFIT as severity rank) | Catches behavior early; profitable trades ranked higher | More alerts initially; needs threshold tuning |
+
+**Decision**: Use PROFIT as a **sorting/severity signal**, not a filter. Exception: R5 inherently requires profit > 0.
+
+### Symbol Risk Weights (for future enhancement)
+
+| Symbol | Approx. Contract Value per Lot | Volatility |
+|--------|-------------------------------|------------|
+| XAUUSD | ~$100,000 | High |
+| XAGUSD | ~$10,000 | Very High |
+| EURUSD | ~$100,000 | Low |
+| GBPUSD | ~$100,000 | Medium |
+| US30 | ~$10 × index | Medium |
+
+Future: weight lots by contract value for normalized exposure comparison.
+
+---
+
+## 7. Exploratory SQL (for manual analysis on mt4_live)
+
+### Verify data freshness
 
 ```sql
-SELECT TICKET, loginSid, sid, SYMBOL, CMD, lots,
-       OPEN_TIME, CLOSE_TIME, PROFIT, totalProfit
-FROM fxbackoffice.mt4_trades
-WHERE openDate >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
-  AND CMD IN (0, 1)
-  AND lots > 5
+-- Check latest data timestamp (uses INDEX_OPENTIME reverse scan, <5ms)
+SELECT OPEN_TIME, CLOSE_TIME, TICKET, LOGIN, SYMBOL
+FROM mt4_live.mt4_trades
 ORDER BY OPEN_TIME DESC
-LIMIT 5000;
+LIMIT 1;
 ```
 
-### Same-second order clusters (past week)
+### Open positions count
 
 ```sql
-SELECT loginSid, sid,
-       DATE_FORMAT(OPEN_TIME, '%Y-%m-%d %H:%i:%s') AS open_second,
-       COUNT(*) AS orders_in_1sec,
-       GROUP_CONCAT(TICKET ORDER BY OPEN_TIME) AS tickets,
-       GROUP_CONCAT(SYMBOL ORDER BY OPEN_TIME) AS symbols,
-       GROUP_CONCAT(lots ORDER BY OPEN_TIME) AS lots_list,
-       GROUP_CONCAT(CMD ORDER BY OPEN_TIME) AS cmds
-FROM fxbackoffice.mt4_trades
-WHERE openDate >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
-  AND CMD IN (0, 1)
-GROUP BY loginSid, sid, DATE_FORMAT(OPEN_TIME, '%Y-%m-%d %H:%i:%s')
+-- Uses INDEX_CLOSETIME, ~4ms
+SELECT COUNT(*) AS open_positions
+FROM mt4_live.mt4_trades
+WHERE CLOSE_TIME = '1970-01-01 00:00:00';
+```
+
+### R1 candidates: large-lot clusters
+
+```sql
+SELECT
+    t.LOGIN,
+    DATE_FORMAT(t.OPEN_TIME, '%Y-%m-%d %H:%i:%s') AS open_second,
+    COUNT(*) AS big_orders_in_window,
+    GROUP_CONCAT(t.TICKET ORDER BY t.OPEN_TIME) AS tickets,
+    GROUP_CONCAT(t.SYMBOL ORDER BY t.OPEN_TIME) AS symbols,
+    GROUP_CONCAT(t.VOLUME / 100 ORDER BY t.OPEN_TIME) AS lots_list,
+    SUM(t.PROFIT) AS total_profit
+FROM mt4_live.mt4_trades t
+WHERE t.OPEN_TIME >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
+  AND t.CMD IN (0, 1)
+  AND t.VOLUME / 100 >= 5
+  AND t.LOGIN NOT LIKE '7%'
+GROUP BY t.LOGIN, DATE_FORMAT(t.OPEN_TIME, '%Y-%m-%d %H:%i:%s')
+HAVING big_orders_in_window >= 2
+ORDER BY open_second DESC
+LIMIT 200;
+```
+
+### R3 candidates: same-second same-direction clusters
+
+```sql
+SELECT
+    t.LOGIN, t.CMD,
+    CASE WHEN t.CMD = 0 THEN 'Buy' ELSE 'Sell' END AS direction,
+    DATE_FORMAT(t.OPEN_TIME, '%Y-%m-%d %H:%i:%s') AS open_second,
+    COUNT(*) AS orders_in_1sec,
+    GROUP_CONCAT(t.TICKET ORDER BY t.OPEN_TIME) AS tickets,
+    GROUP_CONCAT(t.SYMBOL ORDER BY t.OPEN_TIME) AS symbols,
+    GROUP_CONCAT(t.VOLUME / 100 ORDER BY t.OPEN_TIME) AS lots_list,
+    SUM(t.PROFIT) AS total_profit
+FROM mt4_live.mt4_trades t
+WHERE t.OPEN_TIME >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
+  AND t.CMD IN (0, 1)
+  AND t.LOGIN NOT LIKE '7%'
+GROUP BY t.LOGIN, t.CMD, DATE_FORMAT(t.OPEN_TIME, '%Y-%m-%d %H:%i:%s')
 HAVING orders_in_1sec >= 3
 ORDER BY open_second DESC
+LIMIT 200;
+```
+
+### R2 candidates: quick close with profit
+
+```sql
+SELECT
+    t.TICKET, t.LOGIN, t.SYMBOL, t.CMD,
+    t.VOLUME / 100 AS lots,
+    t.OPEN_TIME, t.CLOSE_TIME,
+    TIMESTAMPDIFF(SECOND, t.OPEN_TIME, t.CLOSE_TIME) AS hold_seconds,
+    t.PROFIT,
+    t.PROFIT + t.SWAPS + t.COMMISSION AS total_profit
+FROM mt4_live.mt4_trades t
+WHERE t.OPEN_TIME >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
+  AND t.CMD IN (0, 1)
+  AND t.CLOSE_TIME != '1970-01-01 00:00:00'
+  AND TIMESTAMPDIFF(SECOND, t.OPEN_TIME, t.CLOSE_TIME) <= 120
+  AND t.PROFIT > 0
+  AND t.VOLUME / 100 >= 5
+  AND t.LOGIN NOT LIKE '7%'
+ORDER BY t.LOGIN, t.OPEN_TIME
 LIMIT 500;
 ```
 
-### Check specific account (e.g. 67034699)
+### Check specific account
 
 ```sql
-SELECT loginSid, sid, SYMBOL, CMD, lots,
-       OPEN_TIME, CLOSE_TIME, PROFIT
-FROM fxbackoffice.mt4_trades
-WHERE loginSid LIKE '%67034699%'
-  AND openDate >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
+SELECT
+    t.TICKET, t.LOGIN, t.SYMBOL,
+    CASE WHEN t.CMD = 0 THEN 'Buy' ELSE 'Sell' END AS direction,
+    t.VOLUME / 100 AS lots,
+    t.OPEN_TIME, t.CLOSE_TIME,
+    CASE
+        WHEN t.CLOSE_TIME = '1970-01-01 00:00:00' THEN 'OPEN'
+        ELSE CONCAT(TIMESTAMPDIFF(SECOND, t.OPEN_TIME, t.CLOSE_TIME), 's')
+    END AS hold_time,
+    t.PROFIT
+FROM mt4_live.mt4_trades t
+WHERE t.LOGIN = 67034699
+  AND t.OPEN_TIME >= DATE_SUB(NOW(), INTERVAL 7 DAY)
+  AND t.CMD IN (0, 1)
+ORDER BY t.OPEN_TIME DESC;
+```
+
+### Compare data freshness: mt4_live vs fxbackoffice
+
+```sql
+SELECT
+    'mt4_live' AS source,
+    MAX(OPEN_TIME) AS latest_open_time,
+    COUNT(*) AS open_position_count
+FROM mt4_live.mt4_trades
+WHERE CLOSE_TIME = '1970-01-01 00:00:00'
   AND CMD IN (0, 1)
-ORDER BY OPEN_TIME DESC;
+
+UNION ALL
+
+SELECT
+    'fxbackoffice' AS source,
+    MAX(OPEN_TIME) AS latest_open_time,
+    COUNT(*) AS open_position_count
+FROM fxbackoffice.mt4_trades
+WHERE closeDate = '1970-01-01'
+  AND CMD IN (0, 1)
+  AND sid = 1;
 ```

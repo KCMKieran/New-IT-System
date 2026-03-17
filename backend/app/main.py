@@ -9,6 +9,7 @@ This module initializes the FastAPI application with:
 """
 
 import os
+from contextlib import asynccontextmanager
 
 # IMPORTANT: Initialize logging BEFORE importing other app modules
 # This ensures all loggers inherit the correct configuration
@@ -28,6 +29,17 @@ from fastapi.responses import RedirectResponse
 
 from app.api.v1.routers import api_v1_router
 from app.core.trace_middleware import TraceIDMiddleware
+from app.core.database import init_db
+from app.core.scheduler import start_scheduler, stop_scheduler
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Manage startup/shutdown lifecycle events."""
+    init_db()
+    start_scheduler()
+    yield
+    stop_scheduler()
 
 
 def create_app() -> FastAPI:
@@ -41,7 +53,7 @@ def create_app() -> FastAPI:
     """
     logger.info("Creating FastAPI application...")
     
-    app = FastAPI(title="New IT System API", version="v1")
+    app = FastAPI(title="New IT System API", version="v1", lifespan=lifespan)
 
     # Add Trace ID middleware (must be first to capture all requests)
     app.add_middleware(TraceIDMiddleware)

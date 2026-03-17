@@ -47,6 +47,7 @@ export const zhCN = {
     dataQuery: "Data Query",
     ibidLots: "IB及旗下客户交易查询",
     clientReturnRate: "客户收益率",
+    ibFinancialMonitor: "IB 资金监控",
     home: "首页",
   },
 
@@ -77,6 +78,7 @@ export const zhCN = {
     configuration: "配置",
     ibidLots: "IBID 手数查询",
     clientReturnRate: "客户收益率",
+    ibFinancialMonitor: "IB 资金监控",
   },
 
   ibidLotsPage: {

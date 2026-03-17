@@ -87,6 +87,7 @@ New-IT-System/
 │   │   │   # ├── ClientPnLMonitor.tsx  # [HIDDEN] 2026-01, use ClientPnLAnalysis
 │   │   │   ├── ClientPnLAnalysis.tsx   # Client PnL (ClickHouse, recommended)
 │   │   │   ├── IBReport.tsx
+│   │   │   ├── IBFinancialMonitor.tsx  # IB financial monitoring (3 tabs)
 │   │   │   └── ...
 │   │   │   # Removed/Hidden pages:
 │   │   │   # - CustomerPnLMonitor.tsx (replaced by ClientPnLAnalysis, 2025-01)
@@ -119,14 +120,19 @@ New-IT-System/
 │   │   │       ├── client_pnl.py
 │   │   │       ├── open_positions.py
 │   │   │       ├── ib_data.py
+│   │   │       ├── ib_financial.py  # IB Financial Monitor routes
 │   │   │       └── ...
 │   │   ├── schemas/            # Pydantic models
 │   │   ├── services/           # Business logic
 │   │   │   ├── clickhouse_service.py
 │   │   │   ├── client_pnl_service.py
+│   │   │   ├── ib_financial_service.py  # IB Financial Monitor
+│   │   │   ├── email_service.py  # SMTP email sending
 │   │   │   └── ...
 │   │   └── core/
 │   │       ├── config.py       # Settings from .env
+│   │       ├── database.py     # SQLite for IB Financial config
+│   │       ├── scheduler.py    # APScheduler for daily reports
 │   │       ├── logging_config.py
 │   │       └── singleflight.py # Request coalescing utility
 │   ├── main.py                 # ASGI entry (uvicorn main:app)
@@ -278,6 +284,37 @@ New-IT-System/
 **Purpose**: Track account balances and equity changes.
 
 **API**: `GET /api/v1/equity/monitor`
+
+### 4.7 IB Financial Monitor (`IBFinancialMonitor.tsx`)
+**Purpose**: Monitor IB financial status — deposits, withdrawals, equity, and differences. Replaces the standalone D08 cron script.
+
+**Key Features**:
+- Configurable IB watchlist (add/remove via UI, stored in SQLite)
+- Real-time financial data query from MySQL fxbackoffice
+- Manual email report sending + scheduled daily auto-send (APScheduler)
+- Report config management (TO/CC/schedule time/enable toggle)
+- Email verification required for all config changes (6-digit code, Redis TTL 5min, admin whitelist)
+- Full audit log of all operations
+
+**APIs**:
+- `GET /api/v1/ib-financial/watchlist` - List active IBs
+- `GET /api/v1/ib-financial/query` - Query financial data by date
+- `POST /api/v1/ib-financial/send-report` - Manually send report email
+- `GET /api/v1/ib-financial/config` - Get report config
+- `POST /api/v1/ib-financial/request-code` - Request verification code
+- `POST /api/v1/ib-financial/verify-action` - Verify code and execute action
+- `GET /api/v1/ib-financial/audit-log` - View operation history
+- `GET /api/v1/ib-financial/whitelist` - List admin emails
+
+**Data sources**: MySQL `fxbackoffice` (stats_transactions, stats_balances, ib_tree_with_self), SQLite `ib_financial.db` (config)
+
+**Key Files**:
+- `frontend/src/pages/IBFinancialMonitor.tsx`
+- `backend/app/api/v1/routes/ib_financial.py`
+- `backend/app/services/ib_financial_service.py`
+- `backend/app/services/email_service.py`
+- `backend/app/core/database.py` (SQLite)
+- `backend/app/core/scheduler.py` (APScheduler)
 
 ---
 

@@ -43,6 +43,12 @@ class Settings:
     # CORS
     CORS_ORIGINS: List[str]
 
+    # SMTP (email sending)
+    SMTP_SERVER: str | None
+    SMTP_PORT: int
+    SMTP_USERNAME: str | None
+    SMTP_PASSWORD: str | None
+
     # Logging
     LOG_LEVEL: str
 
@@ -78,6 +84,12 @@ class Settings:
         self.PUBLIC_EXPORT_DIR = os.environ.get("PUBLIC_EXPORT_DIR")
 
         self.CORS_ORIGINS = [o.strip() for o in os.environ.get("CORS_ORIGINS", "*").split(",") if o.strip()]
+
+        # SMTP (email sending)
+        self.SMTP_SERVER = os.environ.get("SMTP_SERVER", "smtp.office365.com")
+        self.SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
+        self.SMTP_USERNAME = os.environ.get("SMTP_USERNAME")
+        self.SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD")
 
         # Logging configuration
         # Options: DEBUG, INFO, WARNING, ERROR, CRITICAL

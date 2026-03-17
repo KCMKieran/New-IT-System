@@ -30,6 +30,7 @@ const ClientPnLAnalysisPage = lazyWithRetry(() => import("@/pages/ClientPnLAnaly
 const ClientReturnRatePage = lazyWithRetry(() => import("@/pages/ClientReturnRate"))
 const ConfigPlaceholder = lazyWithRetry(() => import("@/pages/ConfigPlaceholder"))
 const IBReportPage = lazyWithRetry(() => import("@/pages/IBReport"))
+const IBFinancialMonitorPage = lazyWithRetry(() => import("@/pages/IBFinancialMonitor"))
 const SettingsPage = lazyWithRetry(() => import("@/pages/Settings"))
 const SearchPage = lazyWithRetry(() => import("@/pages/Search"))
 
@@ -81,6 +82,7 @@ function App() {
               <Route path="client-pnl-analysis" element={<ClientPnLAnalysisPage />} />
               <Route path="client-return-rate" element={<ClientReturnRatePage />} />
               <Route path="ib-report" element={<IBReportPage />} />
+              <Route path="ib-financial-monitor" element={<IBFinancialMonitorPage />} />
               {/* test page removed */}
               <Route path="settings" element={<SettingsPage />} />
               <Route path="search" element={<SearchPage />} />

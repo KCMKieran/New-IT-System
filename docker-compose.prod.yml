@@ -33,6 +33,7 @@ services:
       - redis-prod
     volumes:
       - ./backend/logs-prod:/app/logs
+      - ./backend/data:/app/data
     logging:
       driver: "json-file"
       options:

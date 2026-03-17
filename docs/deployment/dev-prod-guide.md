@@ -1,231 +1,231 @@
-# Dev & Prod Deployment Guide
+# 开发 & 生产环境部署指南
 
-> Comprehensive guide for development workflow, production deployment, and Cloudflare Tunnel configuration on the internal Ubuntu server.
+> 本指南讲解日常开发流程、生产环境部署、以及 Cloudflare Tunnel 的配置方式。服务器是内网的 Ubuntu 机器。
 
-## Architecture Overview
+## 整体架构
 
 ```
-Ubuntu Server (10.6.20.138)
+Ubuntu 服务器 (10.6.20.138)
 ┌───────────────────────────────────────────────────────────────┐
 │                                                               │
-│  ┌─ Production (docker-compose.prod.yml) ──────────────────┐  │
-│  │                                                         │  │
-│  │  Nginx (:3000)──→ FastAPI (internal:8001) ──→ Redis     │  │
-│  │  Pre-built static     Code baked into image              │  │
-│  │  Fast, stable         No --reload                        │  │
-│  └─────────────────────────────────────────────────────────┘  │
+│  ┌─ 生产环境 (docker-compose.prod.yml) ──────────────────┐   │
+│  │                                                       │   │
+│  │  Nginx (:3000) ──→ FastAPI (内部:8001) ──→ Redis      │   │
+│  │  预编译好的静态文件    代码打包进镜像                    │   │
+│  │  速度快、稳定          不会自动重启                      │   │
+│  └───────────────────────────────────────────────────────┘   │
 │        ↑                                                      │
-│   analysis.kohleservices.com (via Cloudflare Tunnel)          │
-│   http://10.6.20.138:3000  (direct internal access)          │
+│   analysis.kohleservices.com（通过 Cloudflare Tunnel 访问）    │
+│   http://10.6.20.138:3000（内网直接访问）                      │
 │                                                               │
-│  ┌─ Development (frontend & backend docker-compose.dev.yml)┐  │
-│  │                                                         │  │
-│  │  Vite dev (:5173) ──→ FastAPI (:8001) ──→ Redis         │  │
-│  │  Mounts live code      --reload, auto-restart            │  │
-│  │  Hot refresh           Code changes take effect instantly │  │
-│  └─────────────────────────────────────────────────────────┘  │
+│  ┌─ 开发环境 (frontend & backend docker-compose.dev.yml) ┐   │
+│  │                                                       │   │
+│  │  Vite (:5173) ──→ FastAPI (:8001) ──→ Redis           │   │
+│  │  挂载本地代码          改代码自动重启                    │   │
+│  │  热更新、秒级刷新      修改即生效                        │   │
+│  └───────────────────────────────────────────────────────┘   │
 │        ↑                                                      │
-│   http://10.6.20.138:5173  (internal only)                    │
+│   http://10.6.20.138:5173（仅内网可访问）                      │
 │                                                               │
-│  ┌─ Other Services ────────────────────────────────────────┐  │
-│  │  :80  → blacklist-frontend-prod (csblacklist domain)    │  │
-│  │  :8000 → login_analysis_service (/ipmonitor/*)          │  │
-│  └─────────────────────────────────────────────────────────┘  │
+│  ┌─ 其他服务 ────────────────────────────────────────────┐   │
+│  │  :80  → blacklist-frontend-prod（csblacklist 域名）   │   │
+│  │  :8000 → login_analysis_service（/ipmonitor/*）       │   │
+│  └───────────────────────────────────────────────────────┘   │
 └───────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Dev vs Prod Comparison
+## 开发 vs 生产环境对比
 
-| | **Dev** | **Prod** |
+| | **开发环境** | **生产环境** |
 |---|---|---|
-| **Frontend server** | Vite dev server (on-the-fly ESM) | Nginx (pre-built static bundle) |
-| **Backend server** | Uvicorn + `--reload` | Uvicorn 2 workers (no reload) |
-| **Code source** | Volume-mounted from disk (live) | Copied into Docker image at build time |
-| **After code change** | Browser auto-refreshes | No effect until `./deploy.sh` |
-| **HTTP requests** | 200-500 (unbundled modules) | 5-10 (bundled + gzip) |
-| **Auth** | Disabled (`VITE_DISABLE_AUTH=true`) | Disabled (Cloudflare Zero Trust handles auth) |
-| **Port** | Frontend `:5173`, Backend `:8001` | Nginx `:3000` (unified entry, proxies `/api` internally) |
-| **Access URL** | `http://10.6.20.138:5173` | `http://10.6.20.138:3000` or `analysis.kohleservices.com` |
-| **Use case** | Writing & debugging code | Serving end users |
+| **前端** | Vite 开发服务器（实时编译） | Nginx（预打包好的静态文件） |
+| **后端** | Uvicorn + `--reload`（改代码自动重启） | Uvicorn 2 个 worker（不自动重启） |
+| **代码来源** | 从磁盘挂载（实时同步） | 构建时拷贝进 Docker 镜像 |
+| **改了代码之后** | 浏览器自动刷新 | 不会生效，需要跑 `./deploy.sh` |
+| **页面 HTTP 请求数** | 200-500 个（模块没打包） | 5-10 个（打包 + gzip 压缩） |
+| **登录认证** | 关闭（`VITE_DISABLE_AUTH=true`） | 关闭（Cloudflare Zero Trust 负责认证） |
+| **端口** | 前端 `:5173`，后端 `:8001` | Nginx `:3000`（统一入口，内部转发 `/api`） |
+| **访问地址** | `http://10.6.20.138:5173` | `http://10.6.20.138:3000` 或 `analysis.kohleservices.com` |
+| **用途** | 写代码、调试 | 给用户使用 |
 
 ---
 
-## Access Methods
+## 访问方式
 
-| Address | What you see | Traffic path |
+| 地址 | 看到的内容 | 走的路径 |
 |---|---|---|
-| `http://10.6.20.138:5173` | Dev (live code) | Direct to server, fastest |
-| `http://10.6.20.138:3000` | Prod (stable build) | Direct to server, fast |
-| `https://analysis.kohleservices.com` | Prod (stable build) | Browser → Cloudflare Edge → Tunnel → `:3000` |
+| `http://10.6.20.138:5173` | 开发版（实时代码） | 直连服务器，最快 |
+| `http://10.6.20.138:3000` | 生产版（稳定构建） | 直连服务器，很快 |
+| `https://analysis.kohleservices.com` | 生产版（稳定构建） | 浏览器 → Cloudflare 边缘节点 → Tunnel → `:3000` |
 
-> **Note**: Even from the internal network, `analysis.kohleservices.com` resolves to Cloudflare IPs (not `10.6.20.138`). Traffic always goes through Cloudflare. A bypass rule skips Zero Trust authentication for the office IP range, so internal users don't see the login prompt.
+> **注意**：即使在内网，`analysis.kohleservices.com` 也是解析到 Cloudflare 的 IP（不是 `10.6.20.138`）。流量一定会走 Cloudflare。不过已经配了 bypass 规则，办公室 IP 段不需要登录认证。
 
 ---
 
-## Daily Development Workflow
+## 日常开发流程
 
-### Step 1: Write code (Dev mode)
+### 第一步：写代码（开发模式）
 
-Open Cursor, connect to the server, edit code. View changes at `http://10.6.20.138:5173`.
+打开 Cursor，连到服务器，编辑代码。在浏览器打开 `http://10.6.20.138:5173` 查看效果。
 
-Code changes → Browser auto-refreshes → Instant feedback.
+改代码 → 浏览器自动刷新 → 马上看到效果。
 
-### Step 2: Deploy to Production
+### 第二步：部署到生产
 
-When you're satisfied with your changes:
+改好了、测试没问题后：
 
 ```bash
-# Option A: Commit first, then deploy (recommended)
-git add . && git commit -m "feat: description" && git push origin main
+# 方式 A：先提交代码，再部署（推荐）
+git add . && git commit -m "feat: 你的描述" && git push origin main
 ./deploy.sh
 
-# Option B: Deploy without committing (testing prod build)
+# 方式 B：不提交，直接部署（用于测试生产构建）
 docker compose -f docker-compose.prod.yml up -d --build
 ```
 
-`deploy.sh` does: `git pull` → rebuild images → restart prod containers. Takes ~20 seconds. **Dev containers are not affected.**
+`deploy.sh` 做的事情：`git pull` → 重新构建镜像 → 重启生产容器。大约需要 20 秒。**开发环境的容器不受影响。**
 
-### Step 3: Verify
+### 第三步：验证
 
-Open `http://10.6.20.138:3000` to check the production build looks correct.
+打开 `http://10.6.20.138:3000`，检查生产版本是否正常。
 
 ---
 
-## Docker Container Map
+## Docker 容器一览
 
-### Production containers (`docker-compose.prod.yml`)
+### 生产容器（`docker-compose.prod.yml`）
 
-| Container | Image | Port | Notes |
+| 容器名 | 镜像 | 端口 | 说明 |
 |---|---|---|---|
-| `new-it-frontend-prod` | Nginx + static build | `3000:80` | Serves React build + proxies `/api` |
-| `new-it-backend-prod` | FastAPI (Uvicorn) | internal only | 2 workers, no `--reload` |
-| `new-it-redis-prod` | Redis 7 Alpine | internal only | Prod cache |
+| `new-it-frontend-prod` | Nginx + 静态构建 | `3000:80` | 提供 React 页面 + 转发 `/api` |
+| `new-it-backend-prod` | FastAPI (Uvicorn) | 仅内部 | 2 个 worker，不自动重启 |
+| `new-it-redis-prod` | Redis 7 Alpine | 仅内部 | 生产缓存 |
 
-### Development containers
+### 开发容器
 
-| Container | Compose file | Port | Notes |
+| 容器名 | compose 文件 | 端口 | 说明 |
 |---|---|---|---|
-| `new-it-frontend-dev` | `frontend/docker-compose.dev.yml` | `5173:5173` | Vite dev server, hot reload |
+| `new-it-frontend-dev` | `frontend/docker-compose.dev.yml` | `5173:5173` | Vite 开发服务器，热更新 |
 | `new-it-backend-dev` | `backend/docker-compose.dev.yml` | `8001:8001` | Uvicorn + `--reload` |
-| `new-it-redis` | `backend/docker-compose.dev.yml` | internal only | Dev cache |
+| `new-it-redis` | `backend/docker-compose.dev.yml` | 仅内部 | 开发缓存 |
 
-### Starting containers
+### 启动容器
 
 ```bash
-# Start dev (if not already running)
+# 启动开发环境（如果没跑起来的话）
 cd /opt/myproject/New-IT-System/backend && docker compose -f docker-compose.dev.yml up -d
 cd /opt/myproject/New-IT-System/frontend && docker compose -f docker-compose.dev.yml up -d
 
-# Start prod
+# 启动生产环境
 cd /opt/myproject/New-IT-System && docker compose -f docker-compose.prod.yml up -d --build
 ```
 
-### Useful commands
+### 常用命令
 
 ```bash
-# View all running containers
+# 查看所有运行中的容器
 docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
 
-# View prod logs
+# 查看生产日志
 docker logs new-it-frontend-prod --tail 50
 docker logs new-it-backend-prod --tail 50
 
-# Restart only the prod frontend (e.g. after frontend-only changes)
+# 只重启生产前端（比如只改了前端代码）
 docker compose -f docker-compose.prod.yml up -d --build web
 
-# Restart only the prod backend
+# 只重启生产后端
 docker compose -f docker-compose.prod.yml up -d --build api
 ```
 
 ---
 
-## Key Files
+## 关键文件
 
-| File | Purpose |
+| 文件 | 用途 |
 |---|---|
-| `docker-compose.prod.yml` | Production orchestration (root directory) |
-| `frontend/docker-compose.dev.yml` | Dev frontend (Vite) |
-| `backend/docker-compose.dev.yml` | Dev backend (FastAPI + Redis) |
-| `frontend/Dockerfile.prod` | Multi-stage build: Node (build) → Nginx (serve) |
-| `frontend/Dockerfile` | Dev image (Node only, for Vite dev server) |
-| `backend/Dockerfile` | Backend image (Python, shared by dev & prod) |
-| `frontend/nginx.conf` | Nginx config: static files + API proxy + gzip |
-| `frontend/.dockerignore` | Excludes `node_modules` from Docker context |
-| `deploy.sh` | One-click production deployment script |
+| `docker-compose.prod.yml` | 生产环境编排文件（在项目根目录） |
+| `frontend/docker-compose.dev.yml` | 开发前端（Vite） |
+| `backend/docker-compose.dev.yml` | 开发后端（FastAPI + Redis） |
+| `frontend/Dockerfile.prod` | 多阶段构建：Node（编译）→ Nginx（服务） |
+| `frontend/Dockerfile` | 开发镜像（只有 Node，跑 Vite 开发服务器） |
+| `backend/Dockerfile` | 后端镜像（Python，开发和生产共用） |
+| `frontend/nginx.conf` | Nginx 配置：静态文件 + API 转发 + gzip 压缩 |
+| `frontend/.dockerignore` | 排除 `node_modules`，加快 Docker 构建 |
+| `deploy.sh` | 一键部署生产环境的脚本 |
 
 ---
 
-## Cloudflare Tunnel Configuration
+## Cloudflare Tunnel 配置
 
-The tunnel runs as a systemd service using a **local config file** (not managed via Cloudflare Dashboard).
+Tunnel 以 systemd 服务运行，使用**本地配置文件**（不是 Cloudflare Dashboard 管理的）。
 
-### Config file location
+### 配置文件位置
 
 ```
 /etc/cloudflared/config.yml
 ```
 
-### Current ingress rules
+### 当前路由规则
 
 ```yaml
 ingress:
   - hostname: csblacklist.kohleservices.com
-    service: http://localhost:80          # Blacklist frontend
+    service: http://localhost:80          # 黑名单前端
 
   - hostname: analysis.kohleservices.com
     path: /dash/*
-    service: http://10.6.20.138:8050     # Dash service (disabled)
+    service: http://10.6.20.138:8050     # Dash 服务（已停用）
 
   - hostname: analysis.kohleservices.com
     path: /ipmonitor/*
-    service: http://10.6.20.138:8000     # IP login monitor
+    service: http://10.6.20.138:8000     # IP 登录监控
 
   - hostname: analysis.kohleservices.com
-    service: http://localhost:3000        # Main app (Prod Nginx)
+    service: http://localhost:3000        # 主应用（生产 Nginx）
 
-  - service: http_status:404             # Catch-all
+  - service: http_status:404             # 兜底：都不匹配就返回 404
 ```
 
-Rules are matched **top-to-bottom**, first match wins.
+规则是**从上往下匹配**的，第一个匹配到就生效。
 
-### Modifying tunnel config
+### 修改 Tunnel 配置
 
 ```bash
-sudo nano /etc/cloudflared/config.yml    # Edit the file
-sudo systemctl restart cloudflared       # Apply changes
-sudo systemctl status cloudflared        # Verify running
+sudo nano /etc/cloudflared/config.yml    # 编辑配置
+sudo systemctl restart cloudflared       # 重启让配置生效
+sudo systemctl status cloudflared        # 确认服务正常运行
 ```
 
-> **Important**: This tunnel is CLI-managed. Do NOT modify ingress rules via the Cloudflare Zero Trust Dashboard — it will conflict with the local config file.
+> **重要**：这个 Tunnel 是通过命令行管理的。**不要**在 Cloudflare Zero Trust Dashboard 上改路由规则，会和本地配置文件冲突。
 
-### DNS resolution
+### DNS 解析说明
 
-`analysis.kohleservices.com` resolves to Cloudflare IPs (e.g., `104.21.27.230`), not the internal server IP. All traffic goes through Cloudflare, even from the internal network. A Cloudflare Access bypass policy skips authentication for the office IP range.
-
----
-
-## Why Prod is Faster Than Dev (via Cloudflare)
-
-| Factor | Dev (Vite) | Prod (Nginx) |
-|---|---|---|
-| HTTP requests per page load | 200-500 | 5-10 |
-| Per-request Cloudflare overhead | ~100ms × 200 = **20s** | ~100ms × 5 = **0.5s** |
-| Gzip compression | No | Yes |
-| Static asset caching | Disabled | 1 year (content-hashed filenames) |
-| WebSocket (HMR) | Yes (may fail via tunnel) | No |
+`analysis.kohleservices.com` 解析到的是 Cloudflare 的 IP（比如 `104.21.27.230`），不是内网服务器的 IP。所有流量都走 Cloudflare，即使在内网也是。已经配了 Access bypass 策略，办公室 IP 段免登录。
 
 ---
 
-## Troubleshooting
+## 为什么生产比开发快很多（通过 Cloudflare 访问时）
 
-| Symptom | Cause | Fix |
+| 因素 | 开发（Vite） | 生产（Nginx） |
 |---|---|---|
-| Prod shows login page | `VITE_DISABLE_AUTH` not set at build time | Check `Dockerfile.prod` has `ENV VITE_DISABLE_AUTH=true` before `RUN npm run build`, then rebuild |
-| `./deploy.sh` fails on `npm run build` | TypeScript errors | Fix TS errors first (dev mode doesn't catch them because Vite skips `tsc`) |
-| Port 3000 already in use | Another container on that port | `docker ps` to find it, stop or change port |
-| Cloudflare shows "Authentication error" | Browser has stale cookies | Clear cookies for `analysis.kohleservices.com` or use incognito |
-| Tunnel config change not taking effect | `cloudflared` not restarted | `sudo systemctl restart cloudflared` |
-| API returns 502 via Cloudflare | Backend container not running | `docker logs new-it-backend-prod` to check, restart if needed |
-| Docker build slow (500MB+ context) | Missing `.dockerignore` | Ensure `frontend/.dockerignore` contains `node_modules` |
+| 每次页面加载的 HTTP 请求数 | 200-500 个 | 5-10 个 |
+| 每个请求过 Cloudflare 的延迟 | ~100ms × 200 = **20 秒** | ~100ms × 5 = **0.5 秒** |
+| Gzip 压缩 | 没有 | 有 |
+| 静态资源缓存 | 不缓存 | 缓存 1 年（文件名带 hash） |
+| WebSocket（热更新） | 有（但通过 Tunnel 可能不稳定） | 没有 |
+
+---
+
+## 常见问题排查
+
+| 现象 | 原因 | 解决方法 |
+|---|---|---|
+| 生产环境显示登录页面 | 构建时没设 `VITE_DISABLE_AUTH` | 检查 `Dockerfile.prod` 里 `RUN npm run build` 之前有没有 `ENV VITE_DISABLE_AUTH=true`，然后重新构建 |
+| `./deploy.sh` 在 `npm run build` 失败 | TypeScript 类型错误 | 先修好 TS 报错（开发模式下 Vite 不做类型检查，所以开发时不报错） |
+| 端口 3000 被占用 | 有别的容器占了这个端口 | 用 `docker ps` 找到它，停掉或换端口 |
+| Cloudflare 显示 "Authentication error" | 浏览器有过期的 cookie | 清除 `analysis.kohleservices.com` 的 cookie，或用无痕模式 |
+| 改了 Tunnel 配置没生效 | `cloudflared` 没重启 | 跑 `sudo systemctl restart cloudflared` |
+| 通过 Cloudflare 访问 API 返回 502 | 后端容器没在运行 | 用 `docker logs new-it-backend-prod` 看日志，有问题就重启 |
+| Docker 构建很慢（500MB+ 上下文） | 缺少 `.dockerignore` | 确认 `frontend/.dockerignore` 里有 `node_modules` |

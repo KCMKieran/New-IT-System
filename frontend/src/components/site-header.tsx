@@ -27,6 +27,7 @@ const routeToKeyMap: Record<string, string> = {
   "/ib-report": "pages.ibReport",
   "/ibid-lots": "pages.ibidLots",
   "/swap-free-control": "pages.swapFreeControl",
+  "/ib-financial-monitor": "pages.ibFinancialMonitor",
   "/customer-pnl-monitor": "pages.customerPnLMonitor",
   "/customer-pnl-monitor-v2": "pages.customerPnLMonitorV2",
   "/settings": "pages.settings",

@@ -73,6 +73,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
             // [HIDDEN] Client PnL Analysis - temporarily hidden
             // { title: "盈亏监控 (Preview)", url: "/client-pnl-analysis" },
             { title: t("nav.swapFreeControl"), url: "/swap-free-control" },
+            { title: t("nav.ibFinancialMonitor"), url: "/ib-financial-monitor" },
             // [HIDDEN] Basis page - 10.6.20.138:8050 service disabled
             // { title: t("nav.basisAnalysis"), url: "/basis" },
             // [HIDDEN] Profit Analysis - temporarily hidden

@@ -32,6 +32,7 @@ This is the documentation hub for the KCM IT System - an internal financial trad
 | Client PnL Analysis | Customer profit/loss analysis | [Features](features/) |
 | Position Monitor | Real-time position monitoring | [position-monitor.md](features/position-monitor.md) |
 | IB Report | Broker commission reports | [ib-report.md](features/ib-report.md) |
+| IB Financial Monitor | IB fund monitoring & scheduled reports | [ib-financial-monitor.md](features/ib-financial-monitor.md) |
 
 ## Documentation Structure
 
@@ -68,6 +69,7 @@ docs/
 │   ├── client-pnl-column-toggle.md
 │   ├── profit-deep-analysis.md
 │   ├── pnl-monitor-integration.md
+│   ├── ib-financial-monitor.md  # IB Financial Monitor (replaces D08)
 │   └── filter-backend-integration.md
 ├── deployment/                  # ⭐ Deployment & DevOps
 │   └── dev-prod-guide.md      # Dev/Prod workflow, Docker, Cloudflare Tunnel
