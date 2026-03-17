@@ -9,6 +9,8 @@ via the API, call `reschedule()` to apply the new time immediately.
 from __future__ import annotations
 
 import logging
+import os
+from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -16,6 +18,7 @@ from apscheduler.triggers.cron import CronTrigger
 logger = logging.getLogger(__name__)
 
 JOB_ID = "ib_financial_daily_report"
+HKT = ZoneInfo("Asia/Hong_Kong")
 
 # Module-level singleton; initialised by start_scheduler()
 _scheduler: BackgroundScheduler | None = None
@@ -52,12 +55,20 @@ def _send_daily_report() -> None:
 
 
 def start_scheduler() -> None:
-    """Start the background scheduler using report_config from SQLite."""
+    """Start the background scheduler using report_config from SQLite.
+
+    Controlled by SCHEDULER_ENABLED env var (default: "true").
+    Set to "false" in dev to avoid duplicate emails since dev/prod share SQLite.
+    """
     global _scheduler
     if _scheduler is not None:
         return
 
-    _scheduler = BackgroundScheduler(timezone="Asia/Hong_Kong")
+    if os.getenv("SCHEDULER_ENABLED", "true").lower() == "false":
+        logger.info("Scheduler disabled by SCHEDULER_ENABLED=false")
+        return
+
+    _scheduler = BackgroundScheduler(timezone=HKT)
 
     from ..services.ib_financial_service import get_report_config
     cfg = get_report_config()
@@ -65,7 +76,7 @@ def start_scheduler() -> None:
     hour, minute = _parse_time(cfg.get("schedule_time", "17:00"))
     _scheduler.add_job(
         _send_daily_report,
-        CronTrigger(hour=hour, minute=minute),
+        CronTrigger(hour=hour, minute=minute, timezone=HKT),
         id=JOB_ID,
         replace_existing=True,
     )
@@ -92,7 +103,7 @@ def reschedule() -> None:
 
     _scheduler.reschedule_job(
         JOB_ID,
-        trigger=CronTrigger(hour=hour, minute=minute),
+        trigger=CronTrigger(hour=hour, minute=minute, timezone=HKT),
     )
     logger.info(f"Scheduler rescheduled: daily report at {hour:02d}:{minute:02d} HKT")
 

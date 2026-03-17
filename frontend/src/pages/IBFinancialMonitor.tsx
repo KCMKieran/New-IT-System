@@ -197,8 +197,8 @@ function QueryTab() {
                   <TableHead>Currency</TableHead>
                   <TableHead className="text-right">今天入金</TableHead>
                   <TableHead className="text-right">今天出金</TableHead>
-                  <TableHead className="text-right">总入金</TableHead>
-                  <TableHead className="text-right">总出金</TableHead>
+                  <TableHead className="text-right">总入金(含下级)</TableHead>
+                  <TableHead className="text-right">总出金(含下级)</TableHead>
                   <TableHead className="text-right">MT4净值</TableHead>
                   <TableHead className="text-right">IB钱包净值</TableHead>
                   <TableHead className="text-right">差异</TableHead>
@@ -254,7 +254,7 @@ function WatchlistTab() {
   const [newIbs, setNewIbs] = useState([{ ib_id: "", ib_name: "" }]);
 
   // Remove IB dialog state
-  const [removeTarget, setRemoveTarget] = useState<string | null>(null);
+  const [_removeTarget, setRemoveTarget] = useState<string | null>(null);
 
   // Verification dialog state
   const [verifyOpen, setVerifyOpen] = useState(false);

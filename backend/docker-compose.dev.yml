@@ -23,6 +23,7 @@ services:
       - PYTHONUNBUFFERED=1
       - REDIS_HOST=new-it-redis
       - REDIS_PORT=6379
+      - SCHEDULER_ENABLED=false
     restart: unless-stopped
     depends_on:
       - redis

@@ -25,6 +25,7 @@ export default function ConfigPlaceholder() {
       title: t("nav.dataQuery"),
       icon: IconChartBar,
       items: [
+        { title: t("nav.ibFinancialMonitor"), url: "/ib-financial-monitor" },
         { title: t("nav.warehouseProducts"), url: "/warehouse/products" },
         { title: t("nav.position"), url: "/position" },
         { title: t("nav.ibData"), url: "/warehouse/ib-data" },
@@ -38,7 +39,6 @@ export default function ConfigPlaceholder() {
         { title: t("nav.clientReturnRate"), url: "/client-return-rate" },
         { title: "盈亏监控 (Preview)", url: "/client-pnl-analysis" },
         { title: t("nav.swapFreeControl"), url: "/swap-free-control" },
-        { title: t("nav.ibFinancialMonitor"), url: "/ib-financial-monitor" },
         { title: t("nav.profitAnalysis"), url: "/profit" },
       ],
     },

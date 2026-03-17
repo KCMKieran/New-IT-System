@@ -23,6 +23,6 @@ COPY . /app
 EXPOSE 8001
 
 # Default command (production-like). In dev, compose will override with --reload
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8001", "--workers", "2"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8001", "--workers", "1"]
 
 
