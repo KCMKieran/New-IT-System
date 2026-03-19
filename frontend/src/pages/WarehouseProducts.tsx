@@ -1,4 +1,5 @@
 import * as React from "react"
+import { apiFetch } from "@/lib/fetch"
 
 import { Button } from "@/components/ui/button"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
@@ -103,7 +104,7 @@ export default function WarehouseProductsPage() {
     body: { date: string; symbol: string; mode?: "prefer_cache" | "refresh" },
     signal?: AbortSignal,
   ) {
-    const res = await fetch("/api/v1/trade-summary/query", {
+    const res = await apiFetch("/api/v1/trade-summary/query", {
       method: "POST",
       headers: { "Content-Type": "application/json", accept: "application/json" },
       body: JSON.stringify(body),

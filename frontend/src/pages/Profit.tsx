@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react"
+import { apiFetch } from "@/lib/fetch"
 import {
   Card,
   CardContent,
@@ -274,7 +275,7 @@ export default function ProfitPage() {
     setSelectedTimeRange(timeRange)
 
     try {
-      const response = await fetch("/api/v1/trading/hourly-details", {
+      const response = await apiFetch("/api/v1/trading/hourly-details", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -442,7 +443,7 @@ export default function ProfitPage() {
 
   const loadLastRefresh = async (): Promise<string | null> => {
     try {
-      const res = await fetch('/api/v1/aggregate/last-refresh')
+      const res = await apiFetch('/api/v1/aggregate/last-refresh')
       const json = await res.json()
       const refreshedAt: string | null = json?.refreshed_at ?? null
       setLastRefreshed(refreshedAt)
@@ -467,7 +468,7 @@ export default function ProfitPage() {
   const onRefresh = async () => {
     setLoading(true)
     try {
-      await fetch("/api/v1/aggregate/refresh", { method: "POST" })
+      await apiFetch("/api/v1/aggregate/refresh", { method: "POST" })
     } catch {
       // ignore
     } finally {

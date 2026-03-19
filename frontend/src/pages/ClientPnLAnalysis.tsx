@@ -1,6 +1,7 @@
 import { useState, useCallback, useMemo, useEffect } from "react";
 import { useTheme } from "@/components/theme-provider";
 import { useI18n } from "@/components/i18n-provider";
+import { apiFetch } from "@/lib/fetch";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -296,7 +297,7 @@ export default function ClientPnLAnalysis() {
           params.append("search", searchInput.trim());
         }
 
-        const response = await fetch(
+        const response = await apiFetch(
           `/api/v1/client-pnl-analysis/query?${params}`,
           { signal },
         );

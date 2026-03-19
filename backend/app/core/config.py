@@ -95,6 +95,9 @@ class Settings:
         # Options: DEBUG, INFO, WARNING, ERROR, CRITICAL
         self.LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
 
+        # API Key for protecting /api/* endpoints (None = skip validation, for dev)
+        self.API_KEY = os.environ.get("API_KEY")
+
     @property
     def repo_root(self) -> Path:
         # This file: backend/app/core/config.py -> repo root is parents[3]

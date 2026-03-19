@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import { Link } from "react-router-dom";
 import { useTheme } from "@/components/theme-provider";
+import { apiFetch } from "@/lib/fetch";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
@@ -175,7 +176,7 @@ export default function ReturnRateSummary() {
         close_time_start: format(from, "yyyy-MM-dd HH:mm:ss"),
       });
 
-      const res = await fetch(`/api/v1/client-return-rate/query?${p}`);
+      const res = await apiFetch(`/api/v1/client-return-rate/query?${p}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const r = await res.json();
       setRows(r.data || []);

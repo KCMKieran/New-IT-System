@@ -52,6 +52,7 @@
 
 Deployment: Docker Compose on Ubuntu (10.6.20.138)
 External access: Cloudflare Tunnel → analysis.kohleservices.com → :3000
+API security: CF Access Bypass /api/* + X-API-Key header (Nginx + FastAPI middleware)
 ```
 
 ### Tech Stack Details
@@ -68,7 +69,7 @@ External access: Cloudflare Tunnel → analysis.kohleservices.com → :3000
 | Cache | Redis | Query result caching |
 | Data Processing | DuckDB, Parquet | Local data transformations |
 | Deployment | Docker Compose + Nginx | Dev & Prod run simultaneously |
-| External Access | Cloudflare Tunnel + Zero Trust | Auth bypass for office IP |
+| External Access | Cloudflare Tunnel + Zero Trust | CF Access Bypass on /api/*, API Key defense-in-depth |
 
 ---
 
@@ -107,7 +108,9 @@ New-IT-System/
 │   │   │   └── app-sidebar.tsx # Navigation
 │   │   ├── providers/
 │   │   │   └── auth-provider.tsx
-│   │   └── lib/utils.ts
+│   │   └── lib/
+│   │       ├── utils.ts
+│   │       └── fetch.ts           # apiFetch() — auto-injects X-API-Key header
 │   ├── public/                  # Static assets, exported JSONs
 │   └── package.json
 │
@@ -134,6 +137,7 @@ New-IT-System/
 │   │       ├── database.py     # SQLite for IB Financial config
 │   │       ├── scheduler.py    # APScheduler for daily reports
 │   │       ├── logging_config.py
+│   │       ├── api_key_middleware.py # X-API-Key validation for /api/*
 │   │       └── singleflight.py # Request coalescing utility
 │   ├── main.py                 # ASGI entry (uvicorn main:app)
 │   ├── requirements.txt
@@ -395,6 +399,7 @@ New-IT-System/
 - **Styling**: Tailwind CSS classes, shadcn/ui components
 - **State**: React useState/useEffect, localStorage for persistence
 - **Tables**: AG-Grid with server-side pagination
+- **API calls**: Use `apiFetch()` from `@/lib/fetch` instead of native `fetch()` for all `/api/*` requests. It auto-injects the `X-API-Key` header in production.
 - **Lazy Loading**: All pages use `lazyWithRetry()` (auto-retry 2x on network failure). `LazyErrorBoundary` catches chunk errors, auto-reloads on first failure, shows retry button on repeated failure. Vendor libraries split via `manualChunks` in `vite.config.ts` (react, ag-grid, recharts, three, ui icons).
 - **Comments**: English only
 
@@ -420,7 +425,7 @@ useEffect(() => {
 }, []);
 ```
 
-Fetch functions should accept an optional `signal?: AbortSignal` param and pass it to `fetch()`.
+Fetch functions should accept an optional `signal?: AbortSignal` param and pass it to `apiFetch()`.
 Catch blocks should ignore `AbortError`:
 ```tsx
 catch (error) {
@@ -457,6 +462,7 @@ When 4 identical requests arrive before Redis cache is populated, only 1 hits Cl
 | AG-Grid blank | Set container height (e.g., `h-[600px]`) |
 | AG-Grid error #272 | Register modules in main.tsx |
 | CORS errors | Set CORS_ORIGINS in backend .env |
+| API 403 Forbidden | Check X-API-Key header. See `docs/deployment/cloudflare-api-blocked.md` §方案C |
 | ClickHouse connection | Check VPN, verify credentials |
 | CEN account wrong amounts | Ensure dividing by 100 |
 | Cache not updating | Wait for TTL expiry (PnL: 30min, IB: 10min, Return Rate: 3h) or use clear cache button |
@@ -479,13 +485,17 @@ REDIS_HOST=localhost
 REDIS_PORT=6379
 
 CORS_ORIGINS=http://localhost:5173
+API_KEY=<your_key>  # Required in prod; if unset, API Key middleware is skipped (dev mode)
 ```
 
-### Frontend (.env.development)
+### Frontend (.env.development / .env.production)
 ```env
-VITE_API_BASE_URL=http://localhost:8001
-VITE_DISABLE_AUTH=true  # Skip login for dev
+VITE_DISABLE_AUTH=true    # Skip login for dev (prod sets via Dockerfile ENV)
+VITE_API_KEY=<your_key>  # API Key for X-API-Key header (required for /api/* access)
 ```
+
+> `VITE_API_KEY` must match `API_KEY` in `backend/.env` and the key in `frontend/nginx.conf`.
+> See `docs/deployment/cloudflare-api-blocked.md` §方案C for the full key rotation procedure.
 
 ---
 

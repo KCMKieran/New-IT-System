@@ -1,6 +1,7 @@
 import { useState, useCallback, useMemo, useRef, useEffect } from "react"
 import { useTheme } from "@/components/theme-provider"
 import { useI18n } from "@/components/i18n-provider"
+import { apiFetch } from "@/lib/fetch"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
@@ -105,7 +106,7 @@ function fetchWithTimeout(url: string, options: any = {}, timeout = 60000) {
   const controller = new AbortController()
   const id = setTimeout(() => controller.abort(), timeout)
   const opts = { ...options, signal: controller.signal }
-  return fetch(url, opts).finally(() => clearTimeout(id))
+  return apiFetch(url, opts).finally(() => clearTimeout(id))
 }
 
 // backend response for V2 refresh endpoint
@@ -377,7 +378,7 @@ export default function ClientPnLMonitor() {
         params.append('filters_json', JSON.stringify(appliedFilters))
       }
       
-      const response = await fetch(`/api/v1/client-pnl/summary/paginated?${params}`)
+      const response = await apiFetch(`/api/v1/client-pnl/summary/paginated?${params}`)
       const result = await response.json()
       
       if (result.ok) {
@@ -454,7 +455,7 @@ export default function ClientPnLMonitor() {
       }
 
       // 2) 刷新 client 汇总，并展示 zipcode 变化详情
-      const res = await fetch('/api/v1/etl/client-pnl/refresh', {
+      const res = await apiFetch('/api/v1/etl/client-pnl/refresh', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', accept: 'application/json' },
       })
@@ -665,7 +666,7 @@ export default function ClientPnLMonitor() {
         throw new Error(`Invalid client_id: ${clientId}`)
       }
 
-      const response = await fetch(`/api/v1/client-pnl/${clientIdNum}/accounts`)
+      const response = await apiFetch(`/api/v1/client-pnl/${clientIdNum}/accounts`)
       
       // Check HTTP status before parsing JSON
       if (!response.ok) {

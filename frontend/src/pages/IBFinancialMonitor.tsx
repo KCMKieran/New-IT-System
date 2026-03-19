@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { apiFetch } from "@/lib/fetch";
 import { toast } from "sonner";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -129,7 +130,7 @@ function QueryTab() {
   const handleQuery = async () => {
     setLoading(true);
     try {
-      const res = await fetch(`/api/v1/ib-financial/query?target_date=${date}`);
+      const res = await apiFetch(`/api/v1/ib-financial/query?target_date=${date}`);
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
       setRecords(data.records || []);
@@ -144,7 +145,7 @@ function QueryTab() {
   const handleSendEmail = async () => {
     setSending(true);
     try {
-      const res = await fetch(`/api/v1/ib-financial/send-report?target_date=${date}`, {
+      const res = await apiFetch(`/api/v1/ib-financial/send-report?target_date=${date}`, {
         method: "POST",
       });
       if (!res.ok) throw new Error(await res.text());
@@ -235,7 +236,7 @@ function WatchlistTab() {
 
   const fetchWatchlist = async () => {
     try {
-      const res = await fetch("/api/v1/ib-financial/watchlist");
+      const res = await apiFetch("/api/v1/ib-financial/watchlist");
       const data = await res.json();
       setItems(data.items || []);
     } catch {
@@ -269,7 +270,7 @@ function WatchlistTab() {
 
   const fetchWhitelist = async () => {
     try {
-      const res = await fetch("/api/v1/ib-financial/whitelist");
+      const res = await apiFetch("/api/v1/ib-financial/whitelist");
       const data = await res.json();
       setWhitelistEmails(data.emails || []);
     } catch {
@@ -294,7 +295,7 @@ function WatchlistTab() {
       return;
     }
     try {
-      const res = await fetch("/api/v1/ib-financial/request-code", {
+      const res = await apiFetch("/api/v1/ib-financial/request-code", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email: verifyEmail, action: verifyAction }),
@@ -313,7 +314,7 @@ function WatchlistTab() {
   const handleVerifyAndExecute = async () => {
     setVerifying(true);
     try {
-      const res = await fetch("/api/v1/ib-financial/verify-action", {
+      const res = await apiFetch("/api/v1/ib-financial/verify-action", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -559,9 +560,9 @@ function SettingsTab() {
   const fetchAll = async () => {
     try {
       const [cfgRes, logRes, wlRes] = await Promise.all([
-        fetch("/api/v1/ib-financial/config"),
-        fetch("/api/v1/ib-financial/audit-log?limit=20"),
-        fetch("/api/v1/ib-financial/whitelist"),
+        apiFetch("/api/v1/ib-financial/config"),
+        apiFetch("/api/v1/ib-financial/audit-log?limit=20"),
+        apiFetch("/api/v1/ib-financial/whitelist"),
       ]);
       const cfgData = await cfgRes.json();
       const logData = await logRes.json();
@@ -600,7 +601,7 @@ function SettingsTab() {
       return;
     }
     try {
-      const res = await fetch("/api/v1/ib-financial/request-code", {
+      const res = await apiFetch("/api/v1/ib-financial/request-code", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email: verifyEmail, action: "update_config" }),
@@ -619,7 +620,7 @@ function SettingsTab() {
   const handleVerifyAndSave = async () => {
     setVerifying(true);
     try {
-      const res = await fetch("/api/v1/ib-financial/verify-action", {
+      const res = await apiFetch("/api/v1/ib-financial/verify-action", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

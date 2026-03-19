@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo, Fragment, useCallback } from "react";
+import { apiFetch } from "@/lib/fetch";
 import {
   Card,
   CardContent,
@@ -68,7 +69,7 @@ export default function Past24hClientPnlByCountry() {
   const fetchData = useCallback(() => {
     setLoading(true);
     setError(null);
-    fetch("/api/v1/dashboard/pnl-by-sales-team")
+    apiFetch("/api/v1/dashboard/pnl-by-sales-team")
       .then((res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return res.json();

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { apiFetch } from "@/lib/fetch";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -247,7 +248,7 @@ export default function IBDataPage() {
     };
 
     try {
-      const res = await fetch("/api/v1/ib-data/region-query", {
+      const res = await apiFetch("/api/v1/ib-data/region-query", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -292,7 +293,7 @@ export default function IBDataPage() {
 
     const loadLastRun = async () => {
       try {
-        const res = await fetch("/api/v1/ib-data/last-run", { signal: controller.signal });
+        const res = await apiFetch("/api/v1/ib-data/last-run", { signal: controller.signal });
         if (!res.ok) return;
         const data = (await res.json()) as LastRunResponsePayload;
         setLastQueryTime(data.last_query_time ?? null);
@@ -368,7 +369,7 @@ export default function IBDataPage() {
       end: toSqlDateTime(normalizedRange.end),
     };
     try {
-      const res = await fetch("/api/v1/ib-data/query", {
+      const res = await apiFetch("/api/v1/ib-data/query", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

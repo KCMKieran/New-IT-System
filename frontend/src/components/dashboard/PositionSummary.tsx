@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { Link } from "react-router-dom";
+import { apiFetch } from "@/lib/fetch";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -73,7 +74,7 @@ export default function PositionSummary() {
     setSummaryError(null);
     setSummaryLoading(true);
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `/api/v1/open-positions/symbol-summary?symbol=${targetSymbol}`,
       );
       if (!res.ok) throw new Error(`HTTP ${res.status}`);

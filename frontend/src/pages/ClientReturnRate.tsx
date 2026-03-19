@@ -16,6 +16,7 @@
  */
 import { useState, useCallback, useMemo, useRef } from "react";
 import { useTheme } from "@/components/theme-provider";
+import { apiFetch } from "@/lib/fetch";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -240,7 +241,7 @@ export default function ClientReturnRate() {
       if ((timeRange === "1h" || timeRange === "6h") && dr?.from) {
         p.set("close_time_start", format(dr.from, "yyyy-MM-dd HH:mm:ss"));
       }
-      const res = await fetch(`/api/v1/client-return-rate/query?${p}`);
+      const res = await apiFetch(`/api/v1/client-return-rate/query?${p}`);
       if (res.status === 504) {
         const body = await res.json().catch(() => null);
         throw new Error(body?.detail || "查询超时，请缩小时间范围后重试");
@@ -300,7 +301,7 @@ export default function ClientReturnRate() {
 
   const handleClearCache = useCallback(async () => {
     try {
-      await fetch("/api/v1/client-return-rate/cache", { method: "DELETE" });
+      await apiFetch("/api/v1/client-return-rate/cache", { method: "DELETE" });
       sessionStorage.removeItem(SESSION_KEY);
       await fetchData();
     } catch (e) {

@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
+import { apiFetch } from "@/lib/fetch";
 import {
   Card,
   CardContent,
@@ -73,7 +74,7 @@ export default function CnPaymentSuccessRate() {
   const fetchData = useCallback(() => {
     setLoading(true);
     setError(null);
-    fetch(`/api/v1/dashboard/cn-payment-success-rate?hours=${hours}`)
+    apiFetch(`/api/v1/dashboard/cn-payment-success-rate?hours=${hours}`)
       .then((res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return res.json();

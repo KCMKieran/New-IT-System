@@ -1,5 +1,6 @@
 import { useState, useCallback, useMemo, useEffect } from "react";
 import { useTheme } from "@/components/theme-provider";
+import { apiFetch } from "@/lib/fetch";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
@@ -227,7 +228,7 @@ export default function IBReport() {
   // AbortSignal allows cancelling the request on unmount (React 18 StrictMode cleanup)
   const fetchAllGroups = useCallback(async (signal?: AbortSignal) => {
     try {
-      const res = await fetch("/api/v1/ib-report/groups", { signal });
+      const res = await apiFetch("/api/v1/ib-report/groups", { signal });
       if (!res.ok) throw new Error("Failed to fetch groups");
       const data: GroupsApiResponse = await res.json();
       setAllGroups(data.group_list);
@@ -341,7 +342,7 @@ export default function IBReport() {
       setLoading(true);
       setSearchError(null);
       try {
-        const response = await fetch("/api/v1/ib-report/search", {
+        const response = await apiFetch("/api/v1/ib-report/search", {
           method: "POST",
           headers: {
             "Content-Type": "application/json",

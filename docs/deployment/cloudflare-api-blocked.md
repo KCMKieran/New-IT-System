@@ -1,7 +1,7 @@
 # Cloudflare Access 拦截 Dashboard API 刷新请求
 
 > **日期**: 2026-03-19
-> **状态**: 已修复（方案 B：iframe token 续签）
+> **状态**: 已修复（方案 C：API Bypass + API Key 纵深防御）
 > **影响范围**: 所有通过 `analysis.kohleservices.com` 外网访问的用户
 
 ## 问题描述
@@ -171,7 +171,7 @@ JS `fetch()` 是 `Sec-Fetch-Mode: cors` 请求。CF Access **不会**为 cors �
 | **D: 延长 Session Duration** | 延长到 30 天 | 高 | 低（不治本，CF_Authorization 仍 10s） | 无 |
 | **E: 前端 fetch 重试** | 捕获错误后重试 | — | 低（CF Access 持续拦截，重试也失败） | 前端 |
 
-## 已实施的修复：方案 B — iframe token 续签
+## 历史修复：方案 B — iframe token 续签（已被方案 C 替代）
 
 ### 原理
 
@@ -269,15 +269,109 @@ location /api {
 - 如果未来 Cloudflare 修改 CF_Authorization 的 TTL 策略，可以调整 `intervalMs` 参数或移除此方案
 - 如果需要更稳定的方案，可切换到方案 A（Bypass）或方案 C（Bypass + API Key）
 
+## 当前修复：方案 C — API Bypass + API Key 纵深防御
+
+> **实施日期**: 2026-03-19
+
+### 原理
+
+在 Cloudflare Access 中为 `/api/*` 路径创建独立的 Bypass Application，使 API 请求不再经过 CF Access 认证。同时通过 API Key 四层纵深防御补偿安全性：
+
+```
+请求进入方向：
+
+  外部请求 → Cloudflare WAF（可选，边缘拦截）
+               → Nginx（无 Key → 403，第二层）
+                   → FastAPI APIKeyMiddleware（校验 Key，核心层）
+                       → 业务逻辑
+
+  前端 apiFetch() → 自动注入 X-API-Key header → 正常通过所有层
+```
+
+### Cloudflare 配置
+
+在 CF Zero Trust → Access → Applications 中新建：
+
+| 字段 | 值 |
+|------|---|
+| Application name | `Analysis API Bypass` |
+| Application domain | `analysis.kohleservices.com` |
+| Path | `api/` |
+| Policy Action | Bypass, Include: Everyone |
+
+### 代码改动
+
+#### 1. 后端 API Key 中间件
+
+新建 `backend/app/core/api_key_middleware.py`：
+- 校验 `/api/*` 请求的 `X-API-Key` header
+- Key 不匹配返回 403，跳过 OPTIONS（CORS 预检）
+- `API_KEY` 未配置时跳过校验（兼容 dev 环境）
+
+`backend/app/main.py` 注册 `APIKeyMiddleware`，CORS `allow_headers` 追加 `X-API-Key`。
+
+#### 2. 前端 apiFetch 封装
+
+新建 `frontend/src/lib/fetch.ts`，导出 `apiFetch()` 函数：
+- 自动为 `/api/*` 请求注入 `X-API-Key` header
+- Key 来自 `VITE_API_KEY` 环境变量（构建时内联）
+- 无 Key 时退化为原生 fetch（dev 环境）
+
+15 个前端文件中的 `fetch("/api/...")` 调用替换为 `apiFetch(...)`。
+
+#### 3. Nginx 层拒绝
+
+`frontend/nginx.conf` 的 `location /api` 块新增 API Key 检查，无 Key 直接返回 403。
+
+### API Key 位置
+
+| 位置 | 文件 | 变量名 |
+|------|------|--------|
+| 后端 | `backend/.env` | `API_KEY` |
+| 前端 | `frontend/.env.production` | `VITE_API_KEY` |
+| Nginx | `frontend/nginx.conf` | 硬编码在 `if` 条件中 |
+
+### 变更 API Key 流程
+
+1. 生成新 Key：`openssl rand -hex 32`
+2. 更新 `backend/.env` 的 `API_KEY`
+3. 更新 `frontend/.env.production` 的 `VITE_API_KEY`
+4. 更新 `frontend/nginx.conf` 中的 Key 值
+5. 运行 `./deploy.sh` 重新构建
+6. （可选）更新 Cloudflare WAF 规则中的 Key
+
+### 可选：Cloudflare WAF 规则（边缘层防护）
+
+在 Cloudflare Dashboard → Security → WAF → Custom rules 中添加：
+
+| 字段 | 值 |
+|------|---|
+| Rule name | `Block API without Key` |
+| Expression | `(http.request.uri.path starts with "/api/" and not http.request.headers["x-api-key"] eq "YOUR_KEY")` |
+| Action | Block |
+
+此规则在 CF 边缘直接拦截无 Key 请求，不消耗服务器资源。
+
+### 部署步骤
+
+1. 运行 `./deploy.sh` 重新构建生产容器
+2. 验证无 Key 被拒绝：`curl -s -o /dev/null -w "%{http_code}" https://analysis.kohleservices.com/api/v1/dashboard/pnl-by-group` → `403`
+3. 验证有 Key 通过：`curl -s -o /dev/null -w "%{http_code}" -H "X-API-Key: YOUR_KEY" https://analysis.kohleservices.com/api/v1/dashboard/pnl-by-group` → `200`
+4. 外网浏览器打开 Dashboard，确认所有 widget 正常加载和刷新
+
 ## 相关文件
 
 | 文件 | 说明 |
 |------|------|
-| `frontend/public/cf-refresh.html` | iframe token 续签用的轻量页面 |
-| `frontend/src/layouts/DashboardLayout.tsx` | `useCfTokenRefresh` hook（iframe 定时刷新） |
-| `frontend/nginx.conf` | Nginx 反向代理配置（`/api` → `api:8001`）+ API 限速 |
-| `backend/app/main.py` | CORS 配置（白名单模式）|
-| `backend/.env` | CORS_ORIGINS 环境变量 |
+| `backend/app/core/api_key_middleware.py` | API Key 校验中间件 |
+| `backend/.env` | `API_KEY` 环境变量 |
+| `backend/app/core/config.py` | Settings 读取 `API_KEY` |
+| `backend/app/main.py` | 注册中间件 + CORS allow_headers |
+| `frontend/.env.production` | `VITE_API_KEY` 环境变量 |
+| `frontend/src/lib/fetch.ts` | `apiFetch()` 封装函数 |
+| `frontend/nginx.conf` | Nginx 反向代理 + API Key 检查 + 限速 |
+| `frontend/public/cf-refresh.html` | iframe token 续签（方案 B 遗留，可移除） |
+| `frontend/src/layouts/DashboardLayout.tsx` | `useCfTokenRefresh` hook（方案 B 遗留，可移除） |
 | `/etc/cloudflared/config.yml` | Cloudflare Tunnel 路由配置 |
 | `docker-compose.prod.yml` | 生产环境容器编排 |
 | `frontend/src/pages/Home.tsx` | Dashboard 首页（lazy load 所有 widget） |

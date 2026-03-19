@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback } from "react"
+import { apiFetch } from "@/lib/fetch"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Input } from "@/components/ui/input"
@@ -85,7 +86,7 @@ export default function SwapFreeControlPage() {
       setDistLoading(true)
       setDistError(null)
       try {
-        const res = await fetch("/api/v1/zipcode/distribution", { signal: controller.signal })
+        const res = await apiFetch("/api/v1/zipcode/distribution", { signal: controller.signal })
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
         const payload = await res.json()
         const data: DistRow[] = payload?.data ?? []
@@ -140,7 +141,7 @@ export default function SwapFreeControlPage() {
       if (start) params.set("start", start)
       if (end) params.set("end", end)
       if (clientId) params.set("client_id", String(clientId))
-      const res = await fetch(`/api/v1/zipcode/changes?${params.toString()}`, { signal })
+      const res = await apiFetch(`/api/v1/zipcode/changes?${params.toString()}`, { signal })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const payload = await res.json()
       const data: ChangeLogRow[] = payload?.data ?? []
@@ -211,7 +212,7 @@ export default function SwapFreeControlPage() {
     setExLoading(true)
     setExError(null)
     try {
-      const res = await fetch(`/api/v1/zipcode/exclusions?is_active=true`, { signal })
+      const res = await apiFetch(`/api/v1/zipcode/exclusions?is_active=true`, { signal })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const payload = await res.json()
       const data: ExclusionRow[] = payload?.data ?? []
@@ -255,7 +256,7 @@ export default function SwapFreeControlPage() {
 
     setExAddLoading(true)
     try {
-      const res = await fetch(`/api/v1/zipcode/exclusions`, {
+      const res = await apiFetch(`/api/v1/zipcode/exclusions`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ client_id: clientId, note }),
@@ -304,7 +305,7 @@ export default function SwapFreeControlPage() {
     setFreqLoading(true)
     setFreqError(null)
     try {
-      const res = await fetch(`/api/v1/zipcode/change-frequency?window_days=30&page=1&page_size=200`, { signal })
+      const res = await apiFetch(`/api/v1/zipcode/change-frequency?window_days=30&page=1&page_size=200`, { signal })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const payload = await res.json()
       const data: FrequencyRow[] = Array.isArray(payload?.data) ? payload.data : []

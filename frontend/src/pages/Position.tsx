@@ -1,4 +1,5 @@
 import * as React from "react";
+import { apiFetch } from "@/lib/fetch";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -193,7 +194,7 @@ export default function PositionPage() {
   const [summaryError, setSummaryError] = React.useState<string | null>(null);
 
   async function fetchOpenPositions(signal?: AbortSignal) {
-    const res = await fetch(`/api/v1/open-positions/today?source=${source}`, {
+    const res = await apiFetch(`/api/v1/open-positions/today?source=${source}`, {
       method: "GET",
       headers: { accept: "application/json" },
       signal,
@@ -208,7 +209,7 @@ export default function PositionPage() {
     setSummaryError(null);
     setSummaryLoading(true);
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `/api/v1/open-positions/symbol-summary?symbol=${summarySymbol}`,
       );
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
