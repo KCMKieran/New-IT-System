@@ -17,8 +17,8 @@ export function InfoHeader(
   const handleSort = () => {
     if (!props.enableSorting) return;
     const current = props.column.getSort();
-    const next = current === "asc" ? "desc" : current === "desc" ? null : "asc";
-    props.setSort(next ?? undefined);
+    if (current === "asc") props.setSort("desc");
+    else props.setSort("asc");
   };
 
   return (
