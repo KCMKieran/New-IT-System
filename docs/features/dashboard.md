@@ -34,7 +34,7 @@ The Dashboard (`/` or `/home`) is the first page users see after login. It displ
 │  │ Coming   │  │                                    │    │
 │  │ Soon     │  │ ┌────────────────────────────────┐ │    │
 │  │          │  │ │ 客户收益率 (ReturnRateSummary) │ │    │
-│  │          │  │ │ - AG Grid (6h data)            │ │    │
+│  │          │  │ │ - AG Grid (6h/24h toggle)      │ │    │
 │  │          │  │ │ - CN/Global + AKCM filters     │ │    │
 │  │          │  │ └────────────────────────────────┘ │    │
 │  │          │  │ ┌──────────────┐ ┌──────────────┐   │    │
@@ -81,8 +81,10 @@ The Dashboard (`/` or `/home`) is the first page users see after login. It displ
 **File**: `frontend/src/components/dashboard/ReturnRateSummary.tsx`
 
 **What it shows**:
-- AG Grid table of clients with closed trades in the past 6 hours
-- Columns: 客户ID, 净值, 历史净入金, 历史总利润, 过去6小时内利润, 收益率%, 负净入金收益率%
+- AG Grid table of clients with closed trades in the selected time window
+- **6h / 24h toggle** in CardHeader (default 6h, switching auto-refetches)
+- Columns: 客户ID, 净值(Excl. IB Wallet), 历史净入金, 历史总利润, 过去N小时内利润, 收益率%, 负净入金收益率%
+- 收益率% and 负净入金收益率% columns have ℹ️ info tooltip showing formula
 - CN/Global and AKCM toggle filters (frontend filtering)
 - Data fetch timestamp (精确到秒)
 
@@ -91,7 +93,7 @@ The Dashboard (`/` or `/home`) is the first page users see after login. It displ
 **Data source**: MySQL `fxbackoffice` → **Redis cache (TTL 3h)**. Excludes demo and employee accounts (see `docs/features/client-return-rate.md` §6).
 
 **Behavior**:
-- Auto-fetches on page mount (fixed 6-hour window)
+- Auto-fetches on page mount (default 6h window); switching to 24h triggers refetch
 - User can click "刷新" for manual refresh
 - AG Grid features: sortable columns, column filters, pagination (100/page)
 - "查看全部" links to `/client-return-rate` for full date range queries
@@ -173,7 +175,7 @@ Both widgets auto-fetch data when the Dashboard mounts (including browser refres
 | Widget | Auto-load | Cache | Typical Latency |
 |---|---|---|---|
 | PositionSummary | On mount (XAUUSD) | None | 1-3s |
-| ReturnRateSummary | On mount (6h window) | Redis 3h TTL | <100ms (cached) / 5-15s (fresh) |
+| ReturnRateSummary | On mount (6h default, 24h optional) | Redis 3h TTL | <100ms (cached) / 5-15s (fresh) |
 | Past24hClientPnlByCountry | On mount | None | 1–3s |
 | Past24hClientPnlByGroup | On mount | None | 1–3s |
 | CnPaymentSuccessRate | On mount (3h window) | None | 1–3s |

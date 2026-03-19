@@ -45,6 +45,7 @@ import {
 } from "@/components/ui/popover";
 import { DateRange } from "react-day-picker";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import { InfoHeader } from "@/components/ui/info-header";
 
 interface ClientReturnRateRow {
   client_id: number;
@@ -341,7 +342,7 @@ export default function ClientReturnRate() {
       },
       {
         field: "equity",
-        headerName: "现时账户余额",
+        headerName: "现时账户余额(Excl. IB Wallet)",
         width: 140,
         valueFormatter: (p) => formatCurrency(p.value),
       },
@@ -405,6 +406,11 @@ export default function ClientReturnRate() {
       {
         field: "return_non_adjusted",
         headerName: "正数入金收益率%",
+        headerComponent: InfoHeader,
+        headerComponentParams: {
+          tooltip:
+            "公式: (净值 − 历史净入金) / 历史净入金 × 100%\nFormula: (Equity − Net Deposit) / Net Deposit × 100%\n\n仅净入金 > 0 的客户显示此列",
+        },
         width: 160,
         valueFormatter: (p) => formatPercent(p.value),
         cellClass: (p) => getProfitColor(p.value),
@@ -418,6 +424,11 @@ export default function ClientReturnRate() {
       {
         field: "return_neg_adjusted",
         headerName: "负数入金收益率%",
+        headerComponent: InfoHeader,
+        headerComponentParams: {
+          tooltip:
+            "公式: (净值 − A) / A × 100%\n其中 A = MAX(最近90天入金, |历史净入金|)\n\nFormula: (Equity − A) / A × 100%\nwhere A = MAX(Deposits_90d, |Net Deposit|)\n\n仅净入金 ≤ 0 的客户显示此列",
+        },
         width: 170,
         valueFormatter: (p) => formatPercent(p.value),
         cellClass: (p) => getProfitColor(p.value),

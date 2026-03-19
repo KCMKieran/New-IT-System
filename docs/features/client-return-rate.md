@@ -39,7 +39,7 @@
 | 客户ID | `client_id` | `mt4_users.userId` | 是（筛选维度） | 直接取值，链接到 CRM |
 | 历史净入金 | `net_deposit_hist` | `stats_transactions` | 否（全历史） | `SUM(deposit) + SUM(withdrawal + ib_withdrawal)` |
 | 区间净入金 | `net_deposit_month` | `stats_transactions` | 是 | 同上，限定时间范围 |
-| 现时账户余额 | `equity` | `mt4_users.EQUITY` | 否（实时） | `SUM(EQUITY)`，CEN 账户除以 100 |
+| 现时账户余额(Excl. IB Wallet) | `equity` | `mt4_users.EQUITY` | 否（实时） | `SUM(EQUITY)`，CEN 账户除以 100，`sid IN (1,5,6)` 排除 IB Wallet |
 | 历史利润 | `profit_hist` | `stats_trading_running_totals` | 否 | `SUM(plClosedHavingActivityRunningTotal)`。该表已预处理 CEN 账户（无需再除以 100）。纯已实现交易利润，不含 IB 佣金/奖金/浮动盈亏 |
 | 区间交易利润 | `month_trade_profit` | `stats_trading` / `mt4_trades` | 是 | `SUM(PROFIT + SWAPS + COMMISSION)`，CEN 账户除以 100 |
 | 调整后收益率(2K以下)% | `adj_0_2000` | 计算字段 | 否 | 净入金≤0 且平均入金<2K 时：`equity / 2000 × 100` |

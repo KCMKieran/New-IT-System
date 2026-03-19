@@ -170,7 +170,7 @@ New-IT-System/
 **Key Features**:
 - Grid layout: left 1/4 (CN payment placeholder, sticky) + right 3/4 (widgets stacked)
 - **实时持仓** widget — cross-server XAUUSD/XAGUSD summary (auto-loads on mount)
-- **客户收益率 (6h)** widget — AG Grid with CN/Global + AKCM filters (auto-loads on mount)
+- **客户收益率 (6h/24h)** widget — AG Grid with time toggle, CN/Global + AKCM filters (auto-loads on mount)
 - **近两日客户平仓净盈亏** widget — table by country/sales team (today + yesterday, MT Server; expandable rows)
 - **近两日客户平仓净盈亏 (Group)** widget — PnL + IB commission grouped by mt4_users.GROUP with expandable sales_team detail; click-to-sort on all 4 data columns
 - **可疑客户** widget — table list (framework; data TBD)

@@ -8,6 +8,7 @@ import { RefreshCw, ExternalLink, Search, Clock } from "lucide-react";
 import { AgGridReact } from "ag-grid-react";
 import { ColDef, GridReadyEvent } from "ag-grid-community";
 import { cn } from "@/lib/utils";
+import { InfoHeader } from "@/components/ui/info-header";
 import { format } from "date-fns";
 
 interface ClientReturnRateRow {
@@ -43,6 +44,8 @@ function getProfitColor(value: number | null | undefined): string {
 const TOGGLE_ITEM_CLASS =
   "flex-1 rounded-full first:rounded-l-full last:rounded-r-full px-2 py-0.5 text-center text-xs text-muted-foreground data-[state=on]:bg-background data-[state=on]:text-foreground data-[state=on]:shadow";
 
+type HoursOption = "6" | "24";
+
 export default function ReturnRateSummary() {
   const { theme } = useTheme();
   const isDarkMode = theme === "dark";
@@ -51,6 +54,7 @@ export default function ReturnRateSummary() {
   const [rows, setRows] = useState<ClientReturnRateRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [total, setTotal] = useState(0);
+  const [hours, setHours] = useState<HoursOption>("6");
   const [countryFilter, setCountryFilter] = useState("all");
   const [akcmFilter, setAkcmFilter] = useState("all");
   const [fetchedAt, setFetchedAt] = useState<Date | null>(null);
@@ -73,8 +77,7 @@ export default function ReturnRateSummary() {
       {
         field: "client_id",
         headerName: "客户ID",
-        minWidth: 90,
-        flex: 0.8,
+        width: 90,
         pinned: "left",
         cellRenderer: (p: { value: number }) => (
           <a
@@ -89,7 +92,7 @@ export default function ReturnRateSummary() {
       },
       {
         field: "equity",
-        headerName: "净值",
+        headerName: "净值(Excl. IB Wallet)",
         minWidth: 110,
         flex: 1,
         valueFormatter: (p) => formatCurrency(p.value),
@@ -112,7 +115,7 @@ export default function ReturnRateSummary() {
       },
       {
         field: "month_trade_profit",
-        headerName: "过去6小时内利润",
+        headerName: `过去${hours}小时内利润`,
         minWidth: 130,
         flex: 1.2,
         valueFormatter: (p) => formatCurrency(p.value),
@@ -121,6 +124,11 @@ export default function ReturnRateSummary() {
       {
         field: "return_non_adjusted",
         headerName: "收益率%",
+        headerComponent: InfoHeader,
+        headerComponentParams: {
+          tooltip:
+            "公式: (净值 − 历史净入金) / 历史净入金 × 100%\nFormula: (Equity − Net Deposit) / Net Deposit × 100%\n\n仅净入金 > 0 的客户显示此列",
+        },
         minWidth: 100,
         flex: 0.9,
         valueFormatter: (p) => formatPercent(p.value),
@@ -129,13 +137,18 @@ export default function ReturnRateSummary() {
       {
         field: "return_neg_adjusted",
         headerName: "负净入金收益率%",
+        headerComponent: InfoHeader,
+        headerComponentParams: {
+          tooltip:
+            "公式: (净值 − A) / A × 100%\n其中 A = MAX(最近90天入金, |历史净入金|)\n\nFormula: (Equity − A) / A × 100%\nwhere A = MAX(Deposits_90d, |Net Deposit|)\n\n仅净入金 ≤ 0 的客户显示此列",
+        },
         minWidth: 130,
         flex: 1.1,
         valueFormatter: (p) => formatPercent(p.value),
         cellClass: (p) => getProfitColor(p.value),
       },
     ],
-    [],
+    [hours],
   );
 
   const defaultColDef = useMemo(
@@ -145,12 +158,12 @@ export default function ReturnRateSummary() {
 
   const onGridReady = useCallback((_e: GridReadyEvent) => {}, []);
 
-  async function fetchData() {
+  const fetchData = useCallback(async () => {
     setLoading(true);
     try {
       const now = new Date();
       const from = new Date(now);
-      from.setHours(now.getHours() - 6);
+      from.setHours(now.getHours() - Number(hours));
 
       const p = new URLSearchParams({
         page: "1",
@@ -175,16 +188,27 @@ export default function ReturnRateSummary() {
     } finally {
       setLoading(false);
     }
-  }
+  }, [hours]);
 
   useEffect(() => {
     fetchData();
-  }, []);
+  }, [fetchData]);
 
   return (
     <Card className="flex flex-col gap-2">
-      <CardHeader className="flex flex-row items-center justify-between pb-0">
-        <CardTitle className="text-lg">客户收益率 (最近6小时)</CardTitle>
+      <CardHeader className="flex flex-row items-center justify-between gap-2 pb-0">
+        <div className="flex items-center gap-2">
+          <CardTitle className="text-lg">客户收益率</CardTitle>
+          <ToggleGroup
+            type="single"
+            value={hours}
+            onValueChange={(v) => v && setHours(v as HoursOption)}
+            className="inline-flex items-center rounded-full bg-muted p-0.5"
+          >
+            <ToggleGroupItem value="6" className="rounded-full px-4 py-1 text-center text-xs text-muted-foreground data-[state=on]:bg-background data-[state=on]:text-foreground data-[state=on]:shadow">6h</ToggleGroupItem>
+            <ToggleGroupItem value="24" className="rounded-full px-4 py-1 text-center text-xs text-muted-foreground data-[state=on]:bg-background data-[state=on]:text-foreground data-[state=on]:shadow">24h</ToggleGroupItem>
+          </ToggleGroup>
+        </div>
         <Button variant="ghost" size="sm" asChild className="gap-1 text-xs">
           <Link to="/client-return-rate">
             查看全部 <ExternalLink className="h-3 w-3" />
