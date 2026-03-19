@@ -1,12 +1,18 @@
-# 交易风控监控系统 — Trade Risk Monitor
+# 交易实时监控 — Trade Real-time Monitor
 
 > 可扩展的实时风控监控平台，覆盖 MT4 + MT5 全部交易服务器。
+>
+> **Agent Skill**: `.cursor/skills/risk-monitor/SKILL.md` (精简版，写代码时优先读 Skill)
 
 ## 1. 系统概览
 
 ### 目标
 
-每 10 分钟扫描所有交易服务器的持仓和近期成交，检测可疑交易模式，提前预警风控团队。
+每 10 分钟扫描所有交易服务器的持仓和近期成交，检测高杠杆 / 高资金利用率客户，预警风控团队。
+
+### 业务背景
+
+KCM 是 B-Book CFD 券商：客户亏损 = 公司盈利。真正的风险是客户资金利用率高（杠杆开得猛），一旦方向押对，公司面临大额亏损。本系统的目的**不是保护客户**，而是**识别对公司 B-Book P&L 构成风险的高敞口客户**。
 
 ### 覆盖范围
 
@@ -281,14 +287,16 @@ RULES: list[RuleFunc] = [
 
 **输出字段**: 账户、品种、方向、持仓笔数、总手数、浮动盈亏、余额、单手资金比、保证金比例
 
-**告警等级** (基于单手资金比):
+**告警等级** (基于单手资金比，从公司风险角度):
 
-| 单手资金比 | 等级 | 含义 |
+| 单手资金比 | 等级 | 含义 (公司视角) |
 |-----------|------|------|
-| > $5,000 | NORMAL | 资金充裕 |
-| $2,000 ~ $5,000 | WATCH | 需关注 |
-| $500 ~ $2,000 | HIGH | 高危 |
-| < $500 | **CRITICAL** | 极高风险，接近爆仓 |
+| < $500 | **CRITICAL** | 杠杆极高，客户方向一对公司亏损巨大 |
+| $500 ~ $2,000 | HIGH | 高杠杆操作，需关注 |
+| $2,000 ~ $5,000 | WATCH | 中等杠杆，留意 |
+| > $5,000 | _(不显示)_ | 杠杆不高，风险可控 |
+
+> **注意**: NORMAL 等级不在前端显示，减少噪音。等级标签用英文 (CRITICAL/HIGH/WATCH)。
 
 **案例参考 (MT5 Account 67035072)**:
 
@@ -511,9 +519,11 @@ conn = pymysql.connect(
 }
 ```
 
-### Email 告警
+### Email 告警 (未来阶段)
 
-仅对 `CRITICAL` 和 `HIGH` 等级发送邮件，通过 Redis 去重:
+> **首期不实现**，后续按需加入。
+
+设计方案: 仅对 `CRITICAL` 和 `HIGH` 等级发送邮件，通过 Redis 去重:
 
 ```python
 key = f"risk_alert:{alert.server}:{alert.login}:{alert.rule}"
@@ -522,53 +532,172 @@ if not redis.exists(key):
     redis.set(key, 1, ex=3600)  # 1 小时内不重复
 ```
 
+复用 `email_service.py` 的 `send_email()` 函数，参考 `.cursor/skills/email-notification/SKILL.md`。
+
 ---
 
 ## 5. 前端设计
 
 ### 页面: `/risk-monitor`
 
-每 10 分钟自动刷新 + 手动刷新按钮。
+- 侧边栏分组: Risk Control，页面标题: 交易实时监控
+- 纯中文 UI，不需要 i18n，等级标签用英文
+- 每 10 分钟自动刷新 + 手动刷新按钮
+- A-Book 客户不做过滤，在 UI 中显示 GROUP 列即可
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│  交易风控监控                          上次更新: 14:32  [🔄 刷新]     │
+│  交易实时监控                          上次扫描: 14:32  [🔄 刷新]     │
 │                                        自动刷新: 每10分钟            │
 ├──────────────────────────────────────────────────────────────────────┤
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐            │
-│  │ CRITICAL │  │  HIGH    │  │  WATCH   │  │  扫描耗时 │            │
-│  │    1     │  │    3     │  │    5     │  │   28ms   │            │
+│  │ CRITICAL │  │  HIGH    │  │  WATCH   │  │ 扫描账户数│            │
+│  │    2     │  │    5     │  │   12     │  │  2,400   │            │
 │  └──────────┘  └──────────┘  └──────────┘  └──────────┘            │
 ├──────────────────────────────────────────────────────────────────────┤
-│  筛选: [全部服务器 ▼] [全部规则 ▼] [CRITICAL+HIGH ▼]               │
+│  筛选: [全部服务器 ▼] [CRITICAL+HIGH ▼] [搜索账户号...]             │
 ├──────────────────────────────────────────────────────────────────────┤
-│  AG-Grid 表格                                                        │
-│  列: 等级 | 规则 | 服务器 | 账户 | 品种 | 方向 | 持仓数 | 总手数 |    │
-│      余额 | 单手资金比 | 保证金% | 浮动盈亏 | 建仓时间               │
+│  AG-Grid 表格 (客户端模式，不分页)                                    │
+│  列: 等级 | 服务器 | 账户 | 品种 | 方向 | 持仓数 | 总手数 |          │
+│      余额 | 单手资金比 | 浮动盈亏 | 杠杆 | 首笔时间 | 末笔时间 |     │
+│      账户组                                                          │
 │                                                                      │
-│  功能: 排序, 筛选, CSV 导出                                           │
-│  颜色: CRITICAL=红色, HIGH=橙色, WATCH=黄色                           │
+│  行颜色: CRITICAL=浅红, HIGH=浅橙, WATCH=浅黄                        │
+│  浮动盈亏: 正值(客户赚=公司亏)→红色, 负值(客户亏=公司赚)→绿色        │
+│  默认排序: severity desc (CRITICAL 在最上面)                          │
+│  无 CSV 导出                                                         │
+│                                                 扫描耗时: 28ms       │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
-### Dashboard 组件
-
-`SuspiciousClients.tsx` → 显示最新 CRITICAL + HIGH 告警摘要，链接到 `/risk-monitor`。
+> **暂不实现**: Dashboard SuspiciousClients 组件 — 后续按需接入。
 
 ---
 
 ## 6. 开发计划
 
-| 阶段 | 范围 | 预估 |
-|------|------|------|
-| **Phase 1** | 后端: MT5 持仓累积检测 + 资金比 + API | 1 天 |
-| **Phase 2** | 后端: 加入 MT4 Live + MT4 Live2 数据采集 | 0.5 天 |
-| **Phase 3** | 前端: 页面 (表格 + 统计卡片 + 自动刷新 + 筛选) | 1-2 天 |
-| **Phase 4** | 后端: 批量平仓检测规则 | 0.5 天 |
-| **Phase 5** | Dashboard 组件 + Email 告警 + Redis 去重 | 1 天 |
-| **Phase 6** | 阈值调优 (跑一周, 分析误报率) | 持续 |
+> **Agent 须知**: 每个 Phase 完成后必须执行「验证」步骤，全部通过才能进入下一阶段。
+> 精简版清单见 `.cursor/skills/risk-monitor/SKILL.md` → Implementation Status。
 
-**总计: ~5 天 + 持续调优**
+### Phase 1: 后端骨架 + MT5 数据验证
+
+**目标**: 最小可用后端，先通 MT5 一个数据源，验证整条链路。
+
+| 步骤 | 做什么 | 细节 |
+|------|--------|------|
+| 1a | `schemas/risk_monitor.py` | 定义 Pydantic 模型：AlertDetail、Alert、ScanSummary、ScanResponse，字段严格按 Skill 中的 API Contract |
+| 1b | `services/risk_monitor_service.py` | `_query_mt5_positions()`: MT5 SQL → 标准化 dict 列表。`rule_scale_in_detect()`: 分组+计算+分级。`scan()`: 主入口串联采集→规则→响应组装 |
+| 1c | `routes/risk_monitor.py` | GET `/scan` 路由，接收 login/server 可选参数 |
+| 1d | `routers.py` | 注册 risk_monitor router，prefix `/risk-monitor` |
+
+**验证**:
+- [ ] dev 服务器启动无报错
+- [ ] `GET /api/v1/risk-monitor/scan` 返回 200，响应结构符合 ScanResponse schema
+- [ ] MT5 持仓数据非空（预期几千行），手数换算正确（Volume/10000）
+- [ ] ≥3 笔同方向持仓的账户产生了告警，severity 分级合理
+- [ ] `?login=xxx` 参数能正确过滤单个账户
+- [ ] `scan_time_ms` < 200ms
+
+---
+
+### Phase 2: 加入 MT4 双服务器
+
+**目标**: 数据采集层覆盖全部三个服务器。
+
+| 步骤 | 做什么 | 细节 |
+|------|--------|------|
+| 2a | `_query_mt4_positions()` | MT4 Live SQL: CLOSE_TIME='1970' + JOIN mt4_users 拿 BALANCE/LEVERAGE/GROUP，返回标准化格式 |
+| 2b | 复制改库名 | MT4 Live2 查询与 Live 完全一致，库名 `mt4_live` → `mt4_live2` |
+| 2c | `scan()` 合并 | 三个查询结果 concat 后传给规则引擎 |
+| 2d | server 参数 | `?server=mt4_live` 只查对应数据源 |
+
+**验证**:
+- [ ] 不传 server 参数时返回三个服务器的告警
+- [ ] `?server=mt4_live` / `?server=mt4_live2` / `?server=mt5` 各自只返回对应数据
+- [ ] MT4 手数换算正确（VOLUME/100，注意和 MT5 /10000 的区别）
+- [ ] MT4 LOGIN LIKE '7%' 的内部账户已排除
+- [ ] demo/test 组账户已排除
+- [ ] summary.total_accounts_scanned 包含三个服务器的合计
+- [ ] 整体 scan_time_ms 仍 < 200ms
+
+---
+
+### Phase 3: 前端页面 — 基础框架
+
+**目标**: 页面能跑起来，看到数据。
+
+| 步骤 | 做什么 | 细节 |
+|------|--------|------|
+| 3a | 路由/侧边栏注册 | `App.tsx` 加 lazy route。`app-sidebar.tsx` Risk Control 分组下加"交易实时监控"。`site-header.tsx` 加标题映射 |
+| 3b | `RiskMonitor.tsx` 骨架 | useEffect + AbortController 调 /scan API |
+| 3c | 统计卡片 | 顶部 4 张 Card: CRITICAL/HIGH/WATCH 数量 + 扫描账户数 |
+| 3d | AG-Grid 表格 | 14 列 columnDefs，客户端模式，rowData 直接传入 |
+
+**验证**:
+- [ ] 侧边栏 Risk Control 分组下出现"交易实时监控"，点击可导航
+- [ ] 页面标题显示"交易实时监控"
+- [ ] 页面加载后自动发起 /scan 请求，表格展示数据
+- [ ] 4 张统计卡片数字与表格行数匹配
+- [ ] 所有 14 列都有数据（balance、leverage 等可能为 null 的字段能优雅处理）
+- [ ] 浏览器控制台无报错
+
+---
+
+### Phase 4: 前端页面 — 交互完善
+
+**目标**: 筛选、颜色、自动刷新等交互细节。
+
+| 步骤 | 做什么 | 细节 |
+|------|--------|------|
+| 4a | 行颜色 | getRowStyle 按 severity 设背景色 |
+| 4b | 等级徽章 | severity 列 cellRenderer 渲染 Badge |
+| 4c | 浮动盈亏颜色 | 正值(客户赚=公司亏)→红色，负值→绿色 |
+| 4d | 筛选器 | 服务器下拉 + 等级下拉(默认 CRITICAL+HIGH) + 账户号搜索 |
+| 4e | 自动刷新 | setInterval 10min + 手动刷新按钮 + "上次扫描时间"显示 |
+| 4f | 排序 | severity 自定义排序 CRITICAL > HIGH > WATCH |
+| 4g | 加载状态 | 首次 Skeleton，刷新中按钮 loading |
+
+**验证**:
+- [ ] CRITICAL 行浅红、HIGH 行浅橙、WATCH 行浅黄
+- [ ] 浮动盈亏正值显示红色，负值显示绿色
+- [ ] 等级下拉默认只显示 CRITICAL + HIGH，切换到"全部"后显示 WATCH
+- [ ] 服务器下拉能正确筛选
+- [ ] 账户号搜索能精确匹配
+- [ ] 等待 10 分钟或手动点刷新，数据自动更新
+- [ ] 刷新过程中按钮显示 loading，表格不闪烁
+- [ ] 默认排序 CRITICAL 在最上面
+
+---
+
+### Phase 5: 部署 + 观察调优
+
+**目标**: 上线，观察告警质量，调整参数。
+
+| 步骤 | 做什么 | 细节 |
+|------|--------|------|
+| 5a | 部署到 prod | `deploy.sh` 部署，确认 prod 能正常查询 MySQL Slave |
+| 5b | 观察 1-2 天 | 记录：告警总数、CRITICAL 数、HIGH 数。判断是否合理 |
+| 5c | 调整阈值 | CRITICAL 太多 → $500 阈值下调；告警太少 → ≥3 门槛放松 |
+| 5d | 确认业务价值 | 和风控团队确认展示的客户是否确实需要关注 |
+
+**验证**:
+- [ ] 生产环境页面可正常访问
+- [ ] 10 分钟自动刷新在生产环境正常工作
+- [ ] 告警数量在合理范围（预期 CRITICAL 0-5，HIGH 5-20，WATCH 10-50）
+- [ ] 风控团队反馈：展示的客户确实有风险价值
+
+---
+
+### 后续阶段（不在首期范围，按需启动）
+
+| 阶段 | 内容 | 前置条件 |
+|------|------|---------|
+| 批量平仓规则 | 同秒 ≥3 笔平仓检测，20min 已平仓数据源 | Phase 5 阈值调好 |
+| Email 告警 | Redis 去重 + send_email()，收件人: kieran.xiang@kohleservices.com | 确认告警质量 |
+| Dashboard 组件 | SuspiciousClients.tsx 卡片 | 页面稳定 |
+| 更多规则 | 爆发下单、快速盈利、大额敞口等 | 按风控需求逐步添加 |
+
+**首期总计: Phase 1-4 约 1 天开发 + Phase 5 持续 1-2 天观察**
 
 ---
 
