@@ -40,7 +40,7 @@
 | 历史净入金 | `net_deposit_hist` | `stats_transactions` | 否（全历史） | `SUM(deposit) + SUM(withdrawal + ib_withdrawal)` |
 | 区间净入金 | `net_deposit_month` | `stats_transactions` | 是 | 同上，限定时间范围 |
 | 现时账户余额 | `equity` | `mt4_users.EQUITY` | 否（实时） | `SUM(EQUITY)`，CEN 账户除以 100 |
-| 历史利润 | `profit_hist` | `stats_trading_running_totals` | 否 | `SUM(plClosedHavingActivityRunningTotal)`，CEN 账户除以 100。纯已实现交易利润，不含 IB 佣金/奖金/浮动盈亏 |
+| 历史利润 | `profit_hist` | `stats_trading_running_totals` | 否 | `SUM(plClosedHavingActivityRunningTotal)`。该表已预处理 CEN 账户（无需再除以 100）。纯已实现交易利润，不含 IB 佣金/奖金/浮动盈亏 |
 | 区间交易利润 | `month_trade_profit` | `stats_trading` / `mt4_trades` | 是 | `SUM(PROFIT + SWAPS + COMMISSION)`，CEN 账户除以 100 |
 | 调整后收益率(2K以下)% | `adj_0_2000` | 计算字段 | 否 | 净入金≤0 且平均入金<2K 时：`equity / 2000 × 100` |
 | 调整后收益率(2K-5K)% | `adj_2000_5000` | 计算字段 | 否 | 净入金≤0 且 2K≤平均入金<5K 时：`equity / 5000 × 100` |
@@ -72,7 +72,7 @@
 - `th`: `stats_transactions` 全历史入金/出金（sid IN 1,2,5,6，含 IB Wallet）
 - `txm`: `stats_transactions` 所选时间范围内入金/出金（sid IN 1,2,5,6）
 - `dep90`: `stats_transactions` 近 90 天入金（sid IN 1,2,5,6）
-- `rt`: `stats_trading_running_totals` 全历史累计已实现交易利润（按 userId 聚合，CEN 除以 100）
+- `rt`: `stats_trading_running_totals` 全历史累计已实现交易利润（按 userId 聚合，该表已预处理 CEN 无需再除 100）
 - `ade`（可选）: `stats_balances` INNER JOIN `stats_trading` 全历史活跃天日均 equity，排除休眠尘埃天、IB Wallet (sid=2)、demo 账户。仅当 `include_avg_equity=true` 时加入查询
 
 ### 4.2 时区处理

@@ -232,15 +232,10 @@ WHERE mu.userId = @client_id
   AND sb.endingEquity > 0
 GROUP BY mu.userId;
 
--- 4) 历史盈亏
+-- 4) 历史盈亏 (该表已预处理 CEN，无需再 /100)
 SELECT
     userId AS client_id,
-    ROUND(
-        SUM(IF(currency = 'CEN',
-            plClosedHavingActivityRunningTotal / 100.0,
-            plClosedHavingActivityRunningTotal)),
-        2
-    ) AS profit_hist
+    ROUND(SUM(plClosedHavingActivityRunningTotal), 2) AS profit_hist
 FROM stats_trading_running_totals
 WHERE userId = @client_id
 GROUP BY userId;
@@ -270,9 +265,7 @@ FROM (
 JOIN (
     SELECT
         userId AS client_id,
-        SUM(IF(currency = 'CEN',
-            plClosedHavingActivityRunningTotal / 100.0,
-            plClosedHavingActivityRunningTotal)) AS profit_hist
+        SUM(plClosedHavingActivityRunningTotal) AS profit_hist
     FROM stats_trading_running_totals
     WHERE userId = @client_id
     GROUP BY userId

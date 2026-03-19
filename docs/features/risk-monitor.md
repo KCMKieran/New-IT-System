@@ -1,618 +1,962 @@
-# Trade Risk Monitor — 交易风控监控
+# 交易风控监控系统 — Trade Risk Monitor
 
-> Feature spec for detecting suspicious trading patterns and alerting the risk team.
+> 可扩展的实时风控监控平台，覆盖 MT4 + MT5 全部交易服务器。
 
-## 1. Business Requirements
+## 1. 系统概览
 
-### Rule System (7 Rules, 3 Tiers)
+### 目标
 
-#### Tier 1 — Must Have (directly impacts company P&L)
+每 10 分钟扫描所有交易服务器的持仓和近期成交，检测可疑交易模式，提前预警风控团队。
 
-| Rule | Name | Detection Logic | Time Window |
-|------|------|-----------------|-------------|
-| **R4** | 大额敞口预警 | Single client open lots on one symbol > threshold | Snapshot |
-| **R5** | 快速盈利提取 | Single client realized profit > $X within 20min | 20min |
-| **R2** | 快速开平 | Burst orders (5s, 3+, lots≥5) + hold ≤ 2min | 5s open + 2min hold |
+### 覆盖范围
 
-#### Tier 2 — Should Have
+| 服务器 | 数据库 | 持仓数据 | 成交数据 | 账户数据 |
+|--------|--------|---------|---------|---------|
+| MT4 Live (SID 1) | `mt4_live` | `mt4_trades` (CLOSE_TIME='1970') | `mt4_trades` | `mt4_users` |
+| MT4 Live2 (SID 6) | `mt4_live2` | `mt4_trades` (CLOSE_TIME='1970') | `mt4_trades` | `mt4_users` |
+| MT5 | `mt5_live` | `mt5_positions` | `mt5_deals` | `mt5_users` |
 
-| Rule | Name | Detection Logic | Time Window |
-|------|------|-----------------|-------------|
-| **R1** | 爆发下单 | Single client opens 3+ orders within 5s, each ≥ 5 lots | 5s |
-| **R6** | 同向集中度 | All clients net long/short lots on a symbol > threshold (company-level) | Snapshot |
-| **R3** | 频繁推仓 | 3+ same-direction orders within 1s, lots ≥ 1 | 1s |
+**所有库在同一台 MySQL Slave 上**，单个 pymysql 连接即可跨库查询。
 
-#### Tier 3 — Nice to Have
+### 架构总览
 
-| Rule | Name | Detection Logic | Time Window |
-|------|------|-----------------|-------------|
-| **R7** | 高胜率异常 | Win rate > 80% over last N trades with short hold times | Historical |
-
-### Rule Detail
-
-**R4 — Large Exposure Alert** (Tier 1, Highest Priority)
-
-A single client holding excessive lots on one symbol creates unhedged risk for the broker. This is the **most dangerous scenario** — a client quietly holding 200 lots XAUUSD (~$20M notional) won't trigger any pattern-based rule.
-
-Default thresholds (adjustable):
-
-| Symbol | Threshold (lots) | Approx. Notional |
-|--------|------------------|------------------|
-| XAUUSD | 50 | ~$5M |
-| XAGUSD | 200 | ~$2M |
-| Default | 100 | Varies |
-
-**R5 — Rapid Profit Extraction** (Tier 1)
-
-Detects clients extracting significant profit within a short window, regardless of order pattern. Catches latency arbitrage and news trading that other rules may miss.
-
-- Window: 20 minutes (matches polling interval × 2)
-- Threshold: $5,000 total realized profit (adjustable)
-- Data source: recently closed trades
-
-**R2 — Quick Open-Close** (Tier 1, existing, unchanged)
-
-R1 pattern + hold time ≤ 2 minutes. The most precise indicator of latency arbitrage / scalping abuse.
-
-**R1 — Burst Orders** (Tier 2, existing, unchanged)
-
-3+ orders within 5 seconds, each ≥ 5 lots. Detects EA/bot activity and news trading load-up patterns.
-
-**R6 — Directional Concentration** (Tier 2, new)
-
-Company-level risk: all clients combined net position on a symbol. If net exposure exceeds threshold, the broker's unhedged risk is too high. This is not per-client — it's a market-level alert.
-
-- Threshold: 500 net lots (adjustable per symbol)
-- Output: symbol, net direction (LONG/SHORT), total lots
-
-**R3 — Rapid Same-Direction Orders** (Tier 2, improved)
-
-Original rule had no lot filter, causing high false positives. Added `lots >= 1` minimum to filter out micro-lot noise.
-
-**R7 — High Win Rate Anomaly** (Tier 3)
-
-Clients with > 80% win rate over N trades AND average hold time < 5 minutes. Indicates systematic exploitation. Requires historical data — implement in a later phase.
-
-### PROFIT Filter: Behavior vs Outcome
-
-> **Design decision**: `PROFIT > 0` is used as a **severity sorting criterion**, NOT a filter.
->
-> Risk monitoring should detect **behavioral patterns** regardless of outcome. A client who repeatedly uses latency arbitrage but occasionally loses is still a risk. Waiting until they profit to flag them is too late.
->
-> Exception: R5 (Rapid Profit) inherently requires `PROFIT > 0` since it measures profit extraction.
-
-### Monitoring Architecture: Pseudo-Real-Time
-
-| Aspect | Design |
-|--------|--------|
-| **Update frequency** | Every 10 minutes (frontend polling) |
-| **Data window** | Open positions + last 20 min closed trades |
-| **No 24h historical scan** | Only scans recent data per poll; historical review via separate on-demand endpoint |
-| **Transport** | REST polling, no SSE/WebSocket needed |
-
----
-
-## 2. Data Source
-
-### Primary: `mt4_live.mt4_trades` (Slave DB, ~18M rows)
-
-Direct MT4 server database with near-real-time data. Preferred over `fxbackoffice.mt4_trades` for risk monitoring due to lower latency (no CRM sync delay).
-
-**Why `mt4_live` over `fxbackoffice`:**
-
-| Aspect | `fxbackoffice.mt4_trades` | `mt4_live.mt4_trades` |
-|--------|--------------------------|----------------------|
-| **Data freshness** | CRM sync delay (minutes) | Near real-time |
-| **Row count** | ~55M (all SIDs merged) | ~18M (MT4 Live only) |
-| **Account ID** | `loginSid` (VARCHAR, "SID-LOGIN") | `LOGIN` (INT) |
-| **Lots** | `lots` (virtual column) | `VOLUME / 100` (manual calc) |
-| **Total profit** | `totalProfit` (virtual column) | `PROFIT + SWAPS + COMMISSION` |
-| **Date indexes** | `openDate`, `closeDate` (generated) | `OPEN_TIME`, `CLOSE_TIME` (native) |
-| **Server coverage** | All SIDs (1, 5, 6) | SID 1 (MT4 Live) only |
-
-**Limitation**: `mt4_live` only contains SID 1 data. MT4 Live2 (SID 6) and MT5 (SID 5) require separate database connections if needed.
-
-### Table Schema: `mt4_live.mt4_trades`
-
-| Column | Type | Indexed | Notes |
-|--------|------|---------|-------|
-| `TICKET` | int | ✅ PK | Trade ticket number |
-| `LOGIN` | int | ✅ `INDEX_LOGIN` | MT4 login number |
-| `SYMBOL` | char(16) | ❌ | Trading symbol |
-| `DIGITS` | int | ❌ | Price decimal digits |
-| `CMD` | int | ✅ `INDEX_CMD` | 0=Buy, 1=Sell |
-| `VOLUME` | int | ❌ | Raw volume (÷100 = lots) |
-| `OPEN_TIME` | datetime | ✅ `INDEX_OPENTIME` | Trade open time |
-| `OPEN_PRICE` | double | ❌ | Entry price |
-| `SL` | double | ❌ | Stop loss |
-| `TP` | double | ❌ | Take profit |
-| `CLOSE_TIME` | datetime | ✅ `INDEX_CLOSETIME` | Close time; `'1970-01-01'` = open |
-| `COMMISSION` | double | ❌ | Commission charged |
-| `SWAPS` | double | ❌ | Swap charges |
-| `CLOSE_PRICE` | double | ❌ | Exit price |
-| `PROFIT` | double | ❌ | Raw P&L |
-| `COMMENT` | char(32) | ❌ | Trade comment |
-| `TIMESTAMP` | int | ✅ `INDEX_STAMP` | Unix timestamp |
-| `MAGIC` | int | ❌ | EA magic number |
-
-### Performance: Verified on Slave DB
-
-| Query | Index Used | Rows | Time |
-|-------|-----------|------|------|
-| Open positions (`CLOSE_TIME = '1970-01-01'`) | `INDEX_CLOSETIME` | ~3,400 | 4ms |
-| Last 24h trades (`OPEN_TIME >= -24h`) | `INDEX_OPENTIME` | ~30,000 | 36ms |
-| Last 20min trades (estimated) | `INDEX_OPENTIME` | ~400 | <5ms |
-
-**Total polling load: ~10ms per 10 min cycle** — negligible impact on slave DB.
-
-### Performance Strategy
-
-**Do NOT do sliding window detection in SQL** (self-join on millions of rows is too slow).
-
-Instead:
-1. **SQL**: Pull candidate trades using indexed columns → small dataset (thousands of rows)
-2. **Python**: In-memory sliding window detection → microsecond-level processing
-
-### SQL Queries (use `UNION ALL`, not `OR`, to preserve index usage)
-
-```sql
--- Query 1: Open positions (R1, R3, R4, R6)
--- Uses INDEX_CLOSETIME, ~3400 rows, 4ms
-SELECT TICKET, LOGIN, SYMBOL, CMD,
-       VOLUME / 100 AS lots,
-       OPEN_TIME, CLOSE_TIME,
-       PROFIT, SWAPS, COMMISSION,
-       PROFIT + SWAPS + COMMISSION AS total_profit
-FROM mt4_live.mt4_trades
-WHERE CLOSE_TIME = '1970-01-01 00:00:00'
-  AND CMD IN (0, 1)
-ORDER BY LOGIN, OPEN_TIME;
-
--- Query 2: Recently closed trades (R2, R5)
--- Uses INDEX_CLOSETIME, ~400 rows, <5ms
-SELECT TICKET, LOGIN, SYMBOL, CMD,
-       VOLUME / 100 AS lots,
-       OPEN_TIME, CLOSE_TIME,
-       TIMESTAMPDIFF(SECOND, OPEN_TIME, CLOSE_TIME) AS hold_seconds,
-       PROFIT, SWAPS, COMMISSION,
-       PROFIT + SWAPS + COMMISSION AS total_profit
-FROM mt4_live.mt4_trades
-WHERE CLOSE_TIME >= DATE_SUB(NOW(), INTERVAL 20 MINUTE)
-  AND CLOSE_TIME != '1970-01-01 00:00:00'
-  AND CMD IN (0, 1)
-ORDER BY LOGIN, CLOSE_TIME;
 ```
-
-### Account Exclusion
-
-```sql
--- Exclude test/demo accounts (applied via NOT EXISTS subquery)
-AND LOGIN NOT LIKE '7%'
-AND NOT EXISTS (
-    SELECT 1 FROM mt4_live.mt4_users u
-    WHERE u.LOGIN = t.LOGIN
-      AND (u.`NAME` LIKE '%test%'
-           OR u.`GROUP` LIKE '%demo%'
-           OR u.`GROUP` LIKE '%test%')
-)
+┌──────────────────────────────────────────────────────────────┐
+│                     前端 (每 10 分钟轮询)                      │
+│  GET /api/v1/risk-monitor/scan                               │
+└──────────────────────┬───────────────────────────────────────┘
+                       │
+                       ▼
+┌──────────────────────────────────────────────────────────────┐
+│                      后端 (FastAPI)                           │
+│                                                              │
+│  ┌────────────────────────────────────────────────────────┐  │
+│  │               数据采集层 (Data Collector)                │  │
+│  │                                                        │  │
+│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐             │  │
+│  │  │ MT4 Live │  │MT4 Live2 │  │   MT5    │             │  │
+│  │  │ Adapter  │  │ Adapter  │  │ Adapter  │             │  │
+│  │  └────┬─────┘  └────┬─────┘  └────┬─────┘             │  │
+│  │       └──────────────┼──────────────┘                  │  │
+│  │                      ▼                                 │  │
+│  │          统一持仓格式 (Normalized Position)              │  │
+│  └──────────────────────┬─────────────────────────────────┘  │
+│                         ▼                                    │
+│  ┌────────────────────────────────────────────────────────┐  │
+│  │               规则引擎 (Rule Engine)                     │  │
+│  │                                                        │  │
+│  │  ┌─────────────────┐  ┌────────────────┐              │  │
+│  │  │ 持仓累积检测     │  │ 批量平仓检测   │  ← 当前      │  │
+│  │  │ (Scale-In)      │  │ (Batch-Close)  │              │  │
+│  │  └─────────────────┘  └────────────────┘              │  │
+│  │  ┌─────────────────┐  ┌────────────────┐              │  │
+│  │  │ 未来规则 A      │  │ 未来规则 B     │  ← 扩展      │  │
+│  │  └─────────────────┘  └────────────────┘              │  │
+│  └──────────────────────┬─────────────────────────────────┘  │
+│                         ▼                                    │
+│  ┌────────────────────────────────────────────────────────┐  │
+│  │               告警输出 (Alert Output)                    │  │
+│  │  Redis 去重 → API 响应 + Email 通知                     │  │
+│  └────────────────────────────────────────────────────────┘  │
+└──────────────────────────────────────────────────────────────┘
+                       │
+                       ▼ (单个 pymysql 连接)
+┌──────────────────────────────────────────────────────────────┐
+│              MySQL Slave (Azure)                              │
+│  ┌────────────┐ ┌────────────┐ ┌────────────┐               │
+│  │ mt4_live   │ │fxbackoffice│ │ mt5_live   │               │
+│  │ mt4_trades │ │ mt4_trades │ │ mt5_deals  │               │
+│  │ mt4_users  │ │ mt4_users  │ │mt5_positions│              │
+│  │            │ │ users      │ │ mt5_users  │               │
+│  └────────────┘ └────────────┘ └────────────┘               │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 3. Backend Architecture
+## 2. 数据采集层
 
-### Data Flow
+### 设计原则
 
-```
-Every 10 minutes (frontend polling)
-    │
-    ├─ Query 1: Open positions (~3400 rows, 4ms)
-    │   → R4: Large exposure detection
-    │   → R6: Directional concentration detection
-    │   → R1: Burst order pattern detection
-    │   → R3: Rapid same-direction detection
-    │
-    ├─ Query 2: Last 20min closed trades (~400 rows, <5ms)
-    │   → R2: Quick open-close detection
-    │   → R5: Rapid profit extraction detection
-    │
-    ▼
-Python in-memory detection engine
-    │
-    ├─ Deduplicate: Compare with Redis (previous scan results)
-    │   Only keep new alerts
-    │
-    ├─ Sort by severity: PROFIT as ranking criterion (not filter)
-    │
-    └─ Output: API response → Frontend display / Email notification
-```
+MT4 和 MT5 的表结构完全不同，但风控规则不应关心数据来源。采集层负责将不同服务器的数据**标准化为统一格式**，供规则引擎使用。
 
-### File Structure
+### MT4 vs MT5 数据差异
 
-```
-backend/app/
-├── services/risk_monitor_service.py   # SQL query + Python detection engine
-├── schemas/risk_monitor.py            # Pydantic request/response models
-└── api/v1/routes/risk_monitor.py      # API endpoints
-```
+| 差异 | MT4 | MT5 |
+|------|-----|-----|
+| 交易记录 | 单表 `mt4_trades`，开平仓都在一条记录 | `mt5_deals` 开仓一条 + 平仓一条，用 `PositionID` 关联 |
+| 持仓判断 | `CLOSE_TIME = '1970-01-01'` | 独立的 `mt5_positions` 表 |
+| 手数换算 | `VOLUME / 100` | `Volume / 10000` |
+| 方向字段 | `CMD`: 0=Buy, 1=Sell | `Action`: 0=Buy, 1=Sell |
+| 隔夜利息 | `SWAPS` | `Storage` |
+| 总盈亏 | `PROFIT + SWAPS + COMMISSION` | `Profit + Storage + Commission` |
+| 时间索引 | `INDEX_OPENTIME`, `INDEX_CLOSETIME` | `Timestamp` (Unix, 有索引) |
+| 合约信息 | 无 (需硬编码) | `ContractSize`, `PriceCurrent` (直接可用) |
+| 账户余额 | `mt4_users` 待确认 | `mt5_users.Balance` ✅ |
+| 账户杠杆 | `mt4_users` 待确认 | `mt5_users.Leverage` ✅ |
 
-### API Endpoints
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/v1/risk-monitor/scan` | GET | Pseudo-real-time scan (open + recent 20min) |
-
-**Query params**: `login` (optional, filter specific account).
-
-### Python Detection Logic
+### 统一持仓格式
 
 ```python
+@dataclass
+class NormalizedPosition:
+    """规则引擎使用的统一持仓格式，屏蔽 MT4/MT5 差异"""
+    server: str           # "MT4_Live" | "MT4_Live2" | "MT5"
+    login: int            # 账户号
+    group: str            # 账户组
+    symbol: str           # 品种
+    direction: str        # "Buy" | "Sell"
+    lots: float           # 手数 (已换算)
+    open_time: datetime   # 开仓时间
+    profit: float         # 浮动盈亏 / 已实现盈亏
+    balance: float | None # 账户余额 (可能无法获取)
+    leverage: int | None  # 杠杆倍数
+    contract_size: float | None  # 合约大小 (MT5 可用)
+    current_price: float | None  # 当前价格 (MT5 可用)
+```
+
+### SQL 查询
+
+#### MT4 Live — 未平仓持仓
+
+```sql
+SELECT
+    'MT4_Live' AS server,
+    t.LOGIN AS login,
+    t.SYMBOL AS symbol,
+    CASE WHEN t.CMD = 0 THEN 'Buy' ELSE 'Sell' END AS direction,
+    t.VOLUME / 100 AS lots,
+    t.OPEN_TIME AS open_time,
+    t.OPEN_PRICE AS open_price,
+    t.PROFIT AS profit,
+    t.SWAPS AS swaps,
+    t.COMMISSION AS commission,
+    t.PROFIT + t.SWAPS + t.COMMISSION AS total_profit
+FROM mt4_live.mt4_trades t
+WHERE t.CLOSE_TIME = '1970-01-01 00:00:00'
+  AND t.CMD IN (0, 1)
+  AND t.LOGIN NOT LIKE '7%'
+  AND NOT EXISTS (
+      SELECT 1 FROM mt4_live.mt4_users u
+      WHERE u.LOGIN = t.LOGIN
+        AND (u.`NAME` LIKE '%test%'
+             OR u.`GROUP` LIKE '%demo%'
+             OR u.`GROUP` LIKE '%test%')
+  )
+ORDER BY t.LOGIN, t.OPEN_TIME;
+```
+
+#### MT4 Live2 — 未平仓持仓
+
+```sql
+SELECT
+    'MT4_Live2' AS server,
+    t.LOGIN AS login,
+    t.SYMBOL AS symbol,
+    CASE WHEN t.CMD = 0 THEN 'Buy' ELSE 'Sell' END AS direction,
+    t.VOLUME / 100 AS lots,
+    t.OPEN_TIME AS open_time,
+    t.OPEN_PRICE AS open_price,
+    t.PROFIT AS profit,
+    t.SWAPS AS swaps,
+    t.COMMISSION AS commission,
+    t.PROFIT + t.SWAPS + t.COMMISSION AS total_profit
+FROM mt4_live2.mt4_trades t
+WHERE t.CLOSE_TIME = '1970-01-01 00:00:00'
+  AND t.CMD IN (0, 1)
+  AND t.LOGIN NOT LIKE '7%'
+  AND NOT EXISTS (
+      SELECT 1 FROM mt4_live2.mt4_users u
+      WHERE u.LOGIN = t.LOGIN
+        AND (u.`NAME` LIKE '%test%'
+             OR u.`GROUP` LIKE '%demo%'
+             OR u.`GROUP` LIKE '%test%')
+  )
+ORDER BY t.LOGIN, t.OPEN_TIME;
+```
+
+#### MT5 — 当前持仓 (从 positions 表)
+
+```sql
+SELECT
+    'MT5' AS server,
+    p.Login AS login,
+    u.`Group` AS `group`,
+    p.Symbol AS symbol,
+    CASE WHEN p.Action = 0 THEN 'Buy' ELSE 'Sell' END AS direction,
+    p.Volume / 10000 AS lots,
+    p.TimeCreate AS open_time,
+    p.PriceOpen AS open_price,
+    p.PriceCurrent AS current_price,
+    p.Profit AS profit,
+    p.Storage AS swaps,
+    p.ContractSize AS contract_size,
+    u.Balance AS balance,
+    u.Leverage AS leverage
+FROM mt5_live.mt5_positions p
+INNER JOIN mt5_live.mt5_users u ON p.Login = u.Login
+WHERE u.`Group` NOT LIKE '%demo%'
+  AND u.`Group` NOT LIKE '%test%'
+ORDER BY p.Login, p.TimeCreate;
+```
+
+#### MT4 Live — 最近 20 分钟已平仓
+
+```sql
+SELECT
+    'MT4_Live' AS server,
+    t.TICKET AS ticket,
+    t.LOGIN AS login,
+    t.SYMBOL AS symbol,
+    CASE WHEN t.CMD = 0 THEN 'Buy' ELSE 'Sell' END AS direction,
+    t.VOLUME / 100 AS lots,
+    t.OPEN_TIME AS open_time,
+    t.CLOSE_TIME AS close_time,
+    TIMESTAMPDIFF(SECOND, t.OPEN_TIME, t.CLOSE_TIME) AS hold_seconds,
+    t.PROFIT + t.SWAPS + t.COMMISSION AS total_profit
+FROM mt4_live.mt4_trades t
+WHERE t.CLOSE_TIME >= DATE_SUB(NOW(), INTERVAL 20 MINUTE)
+  AND t.CLOSE_TIME != '1970-01-01 00:00:00'
+  AND t.CMD IN (0, 1)
+  AND t.LOGIN NOT LIKE '7%'
+ORDER BY t.LOGIN, t.CLOSE_TIME;
+```
+
+#### MT5 — 最近 20 分钟已平仓
+
+```sql
+SELECT
+    'MT5' AS server,
+    d.Deal AS ticket,
+    d.Login AS login,
+    d.Symbol AS symbol,
+    CASE WHEN d.Action = 0 THEN 'Buy' ELSE 'Sell' END AS direction,
+    d.Volume / 10000 AS lots,
+    d.Time AS close_time,
+    d.Profit + d.Commission + d.Storage AS total_profit,
+    d.PositionID
+FROM mt5_live.mt5_deals d
+WHERE d.Timestamp >= UNIX_TIMESTAMP(DATE_SUB(NOW(), INTERVAL 20 MINUTE))
+  AND d.Action IN (0, 1)
+  AND d.Entry IN (1, 3)
+ORDER BY d.Login, d.Time;
+```
+
+### 性能预估 (单次轮询)
+
+| 查询 | 预估行数 | 预估耗时 |
+|------|---------|---------|
+| MT4 Live 未平仓 | ~3,400 | 4ms |
+| MT4 Live2 未平仓 | ~2,000 | 3ms |
+| MT5 持仓 | ~数千 | <10ms |
+| MT4 Live 20min平仓 | ~数百 | <5ms |
+| MT5 20min平仓 | ~数百 | <5ms |
+| **合计** | | **<30ms** |
+
+每 10 分钟 30ms 查询负载，对 Slave DB 无压力。
+
+---
+
+## 3. 规则引擎
+
+### 设计原则
+
+- 每条规则是一个**独立函数**，接收标准化数据，返回告警列表
+- 规则可独立启用/禁用，互不影响
+- 新增规则只需添加函数 + 注册到引擎，不改现有代码
+
+### 规则注册表
+
+```python
+RULES: list[RuleFunc] = [
+    rule_scale_in_detect,      # 当前: 持仓累积检测
+    rule_batch_close_detect,   # 当前: 同秒批量平仓检测
+    # rule_xxx,                # 未来: 新增规则只需在此注册
+]
+```
+
+### 当前规则: 持仓累积 + 资金比 (Scale-In Detection)
+
+**触发条件**: 同一账户 + 同一品种 + 同一方向，持有 ≥ 3 笔未平仓单。
+
+**输出字段**: 账户、品种、方向、持仓笔数、总手数、浮动盈亏、余额、单手资金比、保证金比例
+
+**告警等级** (基于单手资金比):
+
+| 单手资金比 | 等级 | 含义 |
+|-----------|------|------|
+| > $5,000 | NORMAL | 资金充裕 |
+| $2,000 ~ $5,000 | WATCH | 需关注 |
+| $500 ~ $2,000 | HIGH | 高危 |
+| < $500 | **CRITICAL** | 极高风险，接近爆仓 |
+
+**案例参考 (MT5 Account 67035072)**:
+
+```
+余额: $1,489 | 杠杆: 1:1000 | 持仓: 10笔×1手 XAUUSD
+名义价值: $5M | 保证金: $5,000 | 保证金比例: ~154%
+单手资金比: $769 → 等级: HIGH
+特征: 分批手动建仓, 越跌越买, EA一键全平
+一天内亏损 80% (昨日余额 $7,192 → 今日 $1,489)
+```
+
+### 当前规则: 同秒批量平仓 (Batch-Close Detection)
+
+**触发条件**: 同一账户在同一秒内平仓 ≥ 3 笔。
+
+**输出字段**: 账户、品种、平仓时间、批次大小、总手数、总盈亏、胜率
+
+**数据源**: 最近 20 分钟已平仓成交
+
+### Python 检测引擎
+
+```python
+from dataclasses import dataclass
+from datetime import datetime
 from itertools import groupby
-from datetime import timedelta
 from collections import defaultdict
 
 
-def detect_all(open_trades: list[dict], closed_trades: list[dict]) -> list[dict]:
-    """
-    In-memory detection engine. Runs all rules against two datasets:
-    - open_trades: current open positions (from Query 1)
-    - closed_trades: recently closed trades (from Query 2)
-    """
+@dataclass
+class Alert:
+    rule: str
+    server: str
+    login: int
+    severity: str        # CRITICAL | HIGH | WATCH | NORMAL
+    details: dict
+
+
+def run_all_rules(
+    positions: list[dict],
+    recent_closes: list[dict],
+) -> list[Alert]:
+    """主入口: 对标准化数据执行所有已注册的规则"""
+    alerts = []
+    alerts.extend(rule_scale_in_detect(positions))
+    alerts.extend(rule_batch_close_detect(recent_closes))
+    return alerts
+
+
+# ---------- 规则 1: 持仓累积检测 ----------
+
+def rule_scale_in_detect(positions: list[dict]) -> list[Alert]:
     alerts = []
 
-    # === R4: Large Exposure (per client per symbol) ===
-    exposure = defaultdict(lambda: defaultdict(float))
-    for t in open_trades:
-        exposure[t["LOGIN"]][t["SYMBOL"]] += t["lots"]
+    # group by (server, login, symbol, direction)
+    key_fn = lambda p: (p["server"], p["login"], p["symbol"], p["direction"])
+    positions.sort(key=key_fn)
 
-    EXPOSURE_THRESHOLDS = {"XAUUSD": 50, "XAGUSD": 200, "DEFAULT": 100}
-    for login, symbols in exposure.items():
-        for symbol, total_lots in symbols.items():
-            threshold = EXPOSURE_THRESHOLDS.get(
-                symbol, EXPOSURE_THRESHOLDS["DEFAULT"]
-            )
-            if total_lots >= threshold:
-                alerts.append({
-                    "rule": "R4", "LOGIN": login, "symbol": symbol,
-                    "total_lots": total_lots, "threshold": threshold,
-                    "severity": "HIGH",
-                })
-
-    # === R5: Rapid Profit (per client, 20min window) ===
-    profit_by_login = defaultdict(float)
-    for t in closed_trades:
-        if t["total_profit"] > 0:
-            profit_by_login[t["LOGIN"]] += t["total_profit"]
-
-    PROFIT_THRESHOLD = 5000  # USD
-    for login, total in profit_by_login.items():
-        if total >= PROFIT_THRESHOLD:
-            alerts.append({
-                "rule": "R5", "LOGIN": login,
-                "profit_20min": total, "severity": "HIGH",
-            })
-
-    # === R1 / R2: Burst Orders + Quick Close ===
-    open_trades.sort(key=lambda t: (t["LOGIN"], t["OPEN_TIME"]))
-
-    # R1 from open positions
-    for login, group in groupby(open_trades, key=lambda t: t["LOGIN"]):
+    for key, group in groupby(positions, key=key_fn):
         orders = list(group)
-        big = [o for o in orders if o["lots"] >= 5]
-        for i, anchor in enumerate(big):
-            end = anchor["OPEN_TIME"] + timedelta(seconds=5)
-            window = [o for o in big[i:] if o["OPEN_TIME"] <= end]
-            if len(window) >= 3:
-                alerts.append({
-                    "rule": "R1", "LOGIN": login,
-                    "window_start": anchor["OPEN_TIME"],
-                    "orders": window,
-                })
+        if len(orders) < 3:
+            continue
 
-    # R2 from closed trades (needs CLOSE_TIME)
-    closed_trades.sort(key=lambda t: (t["LOGIN"], t["OPEN_TIME"]))
-    for login, group in groupby(closed_trades, key=lambda t: t["LOGIN"]):
+        server, login, symbol, direction = key
+        total_lots = sum(o["lots"] for o in orders)
+        floating_pnl = sum(o["profit"] for o in orders)
+        balance = orders[0].get("balance")
+
+        # capital per lot
+        capital_per_lot = balance / total_lots if balance and total_lots > 0 else None
+
+        # severity
+        if capital_per_lot is None:
+            severity = "WATCH"
+        elif capital_per_lot < 500:
+            severity = "CRITICAL"
+        elif capital_per_lot < 2000:
+            severity = "HIGH"
+        elif capital_per_lot < 5000:
+            severity = "WATCH"
+        else:
+            severity = "NORMAL"
+
+        alerts.append(Alert(
+            rule="SCALE_IN",
+            server=server,
+            login=login,
+            severity=severity,
+            details={
+                "symbol": symbol,
+                "direction": direction,
+                "open_count": len(orders),
+                "total_lots": total_lots,
+                "floating_pnl": floating_pnl,
+                "balance": balance,
+                "leverage": orders[0].get("leverage"),
+                "capital_per_lot": capital_per_lot,
+                "first_open": min(o["open_time"] for o in orders),
+                "last_open": max(o["open_time"] for o in orders),
+            },
+        ))
+
+    return alerts
+
+
+# ---------- 规则 2: 同秒批量平仓检测 ----------
+
+def rule_batch_close_detect(recent_closes: list[dict]) -> list[Alert]:
+    alerts = []
+
+    # group by (server, login, close_time rounded to second)
+    key_fn = lambda c: (
+        c["server"], c["login"], c["symbol"],
+        c["close_time"].replace(microsecond=0) if isinstance(c["close_time"], datetime)
+        else c["close_time"]
+    )
+    recent_closes.sort(key=key_fn)
+
+    for key, group in groupby(recent_closes, key=key_fn):
         orders = list(group)
-        big = [o for o in orders if o["lots"] >= 5]
-        for i, anchor in enumerate(big):
-            end = anchor["OPEN_TIME"] + timedelta(seconds=5)
-            window = [o for o in big[i:] if o["OPEN_TIME"] <= end]
-            if len(window) >= 3:
-                quick = [
-                    o for o in window
-                    if o["hold_seconds"] and o["hold_seconds"] <= 120
-                ]
-                if len(quick) >= 3:
-                    alerts.append({
-                        "rule": "R2", "LOGIN": login,
-                        "window_start": anchor["OPEN_TIME"],
-                        "orders": quick,
-                    })
+        if len(orders) < 3:
+            continue
 
-    # === R3: Rapid Same-Direction (lots >= 1 filter) ===
-    for login, group in groupby(open_trades, key=lambda t: t["LOGIN"]):
-        orders = list(group)
-        for cmd in [0, 1]:
-            same = [o for o in orders if o["CMD"] == cmd and o["lots"] >= 1]
-            for i, anchor in enumerate(same):
-                end = anchor["OPEN_TIME"] + timedelta(seconds=1)
-                window = [o for o in same[i:] if o["OPEN_TIME"] <= end]
-                if len(window) >= 3:
-                    alerts.append({
-                        "rule": "R3", "LOGIN": login,
-                        "direction": "Buy" if cmd == 0 else "Sell",
-                        "window_start": anchor["OPEN_TIME"],
-                        "orders": window,
-                    })
+        server, login, symbol, close_time = key
+        total_profit = sum(o["total_profit"] for o in orders)
+        wins = sum(1 for o in orders if o["total_profit"] > 0)
 
-    # === R6: Market-Level Directional Concentration ===
-    net_by_symbol = defaultdict(float)
-    for t in open_trades:
-        sign = 1 if t["CMD"] == 0 else -1
-        net_by_symbol[t["SYMBOL"]] += sign * t["lots"]
+        severity = "HIGH" if total_profit > 1000 else "WATCH"
 
-    CONCENTRATION_THRESHOLD = 500  # net lots
-    for symbol, net in net_by_symbol.items():
-        if abs(net) >= CONCENTRATION_THRESHOLD:
-            alerts.append({
-                "rule": "R6", "symbol": symbol,
-                "net_lots": net,
-                "direction": "LONG" if net > 0 else "SHORT",
-                "severity": "MEDIUM",
-            })
+        alerts.append(Alert(
+            rule="BATCH_CLOSE",
+            server=server,
+            login=login,
+            severity=severity,
+            details={
+                "symbol": symbol,
+                "close_time": close_time,
+                "batch_size": len(orders),
+                "total_lots": sum(o["lots"] for o in orders),
+                "total_profit": total_profit,
+                "win_rate": wins / len(orders),
+            },
+        ))
 
-    return deduplicate(alerts)
+    return alerts
 ```
 
-### Email Alerting
+---
 
-Deduplication via Redis to avoid repeated notifications:
+## 4. 后端实现
+
+### 文件结构
+
+```
+backend/app/
+├── services/
+│   └── risk_monitor_service.py    # 数据采集 + 规则引擎 + 告警输出
+├── schemas/
+│   └── risk_monitor.py            # Pydantic 请求/响应模型
+└── api/v1/routes/
+    └── risk_monitor.py            # API 接口
+```
+
+### 数据库连接
+
+使用现有的 `DB_HOST` / `DB_USER` / `DB_PASSWORD` 配置 (Slave DB)，通过跨库查询访问所有数据:
 
 ```python
-key = f"risk_alert:{alert['LOGIN']}:{alert['rule']}:{alert['window_start']}"
+conn = pymysql.connect(
+    host=settings.DB_HOST,
+    user=settings.DB_USER,
+    password=settings.DB_PASSWORD,
+    port=int(settings.DB_PORT),
+    charset=settings.DB_CHARSET,
+    cursorclass=pymysql.cursors.DictCursor,
+)
+# 跨库查询: mt4_live.mt4_trades, mt5_live.mt5_positions, ...
+```
+
+不需要新增任何 `.env` 配置项。
+
+### API
+
+| 接口 | 方法 | 说明 |
+|------|------|------|
+| `/api/v1/risk-monitor/scan` | GET | 全量扫描 (MT4+MT5 持仓+近期平仓) |
+
+**查询参数**:
+- `login` (可选): 过滤特定账户
+- `server` (可选): 过滤特定服务器 (`mt4_live`, `mt4_live2`, `mt5`)
+
+**响应格式**:
+
+```json
+{
+  "alerts": [
+    {
+      "rule": "SCALE_IN",
+      "server": "MT5",
+      "login": 67035072,
+      "severity": "HIGH",
+      "details": {
+        "symbol": "XAUUSD",
+        "direction": "Buy",
+        "open_count": 10,
+        "total_lots": 10.0,
+        "capital_per_lot": 769.0,
+        "balance": 7692.0,
+        "floating_pnl": 1636.0
+      }
+    }
+  ],
+  "summary": {
+    "critical": 1,
+    "high": 3,
+    "watch": 5,
+    "total_accounts_scanned": 2400
+  },
+  "scan_time_ms": 28,
+  "scanned_at": "2026-03-18T07:00:00"
+}
+```
+
+### Email 告警
+
+仅对 `CRITICAL` 和 `HIGH` 等级发送邮件，通过 Redis 去重:
+
+```python
+key = f"risk_alert:{alert.server}:{alert.login}:{alert.rule}"
 if not redis.exists(key):
     send_email(alert)
-    redis.set(key, 1, ex=3600)  # no repeat within 1 hour
-```
-
-Email via Python `smtplib`. Config in `.env`:
-
-```env
-SMTP_HOST=smtp.example.com
-SMTP_PORT=587
-SMTP_USER=alert@example.com
-SMTP_PASSWORD=xxx
-RISK_TEAM_EMAIL=risk@example.com
+    redis.set(key, 1, ex=3600)  # 1 小时内不重复
 ```
 
 ---
 
-## 4. Frontend Design
+## 5. 前端设计
 
-### Page: `/risk-monitor`
+### 页面: `/risk-monitor`
 
-Auto-refresh every 10 minutes + manual refresh button.
+每 10 分钟自动刷新 + 手动刷新按钮。
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│  交易风控监控                       上次更新: 14:32  [🔄 刷新]           │
-│                                     自动刷新: 每10分钟                  │
-├─────────────────────────────────────────────────────────────────────────┤
-│  ┌────────┐  ┌────────┐  ┌────────┐  ┌────────┐  ┌────────┐           │
-│  │ R4: 2  │  │ R5: 1  │  │ R2: 3  │  │ R1: 12 │  │ R6: 1  │  Cards   │
-│  │ 大额   │  │ 快利   │  │ 快平   │  │ 爆发   │  │ 集中   │           │
-│  └────────┘  └────────┘  └────────┘  └────────┘  └────────┘           │
-├─────────────────────────────────────────────────────────────────────────┤
-│  AG-Grid table                                                         │
-│  Columns: Severity | Rule | Account | Symbol | Direction |             │
-│           Lots (Detail) | Window Time | Hold Time | Profit             │
-│                                                                        │
-│  Supports: sort, filter, CSV export                                    │
-│  Color coding: HIGH = red row bg, MEDIUM = orange                      │
-└─────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│  交易风控监控                          上次更新: 14:32  [🔄 刷新]     │
+│                                        自动刷新: 每10分钟            │
+├──────────────────────────────────────────────────────────────────────┤
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐            │
+│  │ CRITICAL │  │  HIGH    │  │  WATCH   │  │  扫描耗时 │            │
+│  │    1     │  │    3     │  │    5     │  │   28ms   │            │
+│  └──────────┘  └──────────┘  └──────────┘  └──────────┘            │
+├──────────────────────────────────────────────────────────────────────┤
+│  筛选: [全部服务器 ▼] [全部规则 ▼] [CRITICAL+HIGH ▼]               │
+├──────────────────────────────────────────────────────────────────────┤
+│  AG-Grid 表格                                                        │
+│  列: 等级 | 规则 | 服务器 | 账户 | 品种 | 方向 | 持仓数 | 总手数 |    │
+│      余额 | 单手资金比 | 保证金% | 浮动盈亏 | 建仓时间               │
+│                                                                      │
+│  功能: 排序, 筛选, CSV 导出                                           │
+│  颜色: CRITICAL=红色, HIGH=橙色, WATCH=黄色                           │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
-### Auto-Refresh Pattern
+### Dashboard 组件
 
-```tsx
-useEffect(() => {
-  const controller = new AbortController();
-  fetchData(controller.signal);
-
-  const interval = setInterval(() => {
-    fetchData(controller.signal);
-  }, 10 * 60 * 1000); // 10 minutes
-
-  return () => {
-    controller.abort();
-    clearInterval(interval);
-  };
-}, []);
-```
-
-### Dashboard Widget
-
-Existing `SuspiciousClients.tsx` (currently placeholder) → show latest N alerts summary with link to `/risk-monitor`.
+`SuspiciousClients.tsx` → 显示最新 CRITICAL + HIGH 告警摘要，链接到 `/risk-monitor`。
 
 ---
 
-## 5. Development Plan
+## 6. 开发计划
 
-| Phase | Scope | Estimate |
-|-------|-------|----------|
-| **Phase 1** | Backend detection engine (`risk_monitor_service.py`) + API — implement R4, R5, R2, R1 | 1-2 days |
-| **Phase 2** | Frontend page (table + stat cards + auto-refresh) | 1-2 days |
-| **Phase 3** | Add R3, R6 detection + dashboard widget (`SuspiciousClients.tsx`) | 1 day |
-| **Phase 4** | Email alerting + Redis dedup | 0.5 day |
-| **Phase 5** | Threshold tuning (run 1 week, analyze false positive rate, adjust) | Ongoing |
+| 阶段 | 范围 | 预估 |
+|------|------|------|
+| **Phase 1** | 后端: MT5 持仓累积检测 + 资金比 + API | 1 天 |
+| **Phase 2** | 后端: 加入 MT4 Live + MT4 Live2 数据采集 | 0.5 天 |
+| **Phase 3** | 前端: 页面 (表格 + 统计卡片 + 自动刷新 + 筛选) | 1-2 天 |
+| **Phase 4** | 后端: 批量平仓检测规则 | 0.5 天 |
+| **Phase 5** | Dashboard 组件 + Email 告警 + Redis 去重 | 1 天 |
+| **Phase 6** | 阈值调优 (跑一周, 分析误报率) | 持续 |
 
-**Total: ~5 days + 1 week tuning**
-
----
-
-## 6. Risk Rule Design Rationale
-
-### Why these rules? (CFD Broker Risk Perspective)
-
-**The biggest risks for a CFD broker:**
-
-1. **Unhedged large exposure** — A single client holding 200 lots XAUUSD means the broker is exposed to ~$20M of market risk if not hedged. This is why **R4 is the highest priority** rule.
-
-2. **Latency arbitrage** — Clients exploit price feed delays (especially during news events like NFP, FOMC) to guarantee profits. They open large positions during price gaps and close quickly. **R2 + R5** catch this pattern from two angles: R2 via order pattern, R5 via profit outcome.
-
-3. **EA/Bot abuse** — Automated strategies that exploit market microstructure. **R1 + R3** detect the mechanical ordering patterns that EAs produce.
-
-4. **Concentration risk** — If all clients are long XAUUSD and gold drops, the broker's total exposure could be catastrophic. **R6** monitors this at the market level, not per-client.
-
-### Why not filter on PROFIT > 0?
-
-| Approach | Pros | Cons |
-|----------|------|------|
-| **Filter** (PROFIT > 0 required) | Fewer alerts, less noise | Misses pattern before it becomes profitable; too late to act |
-| **Sort** (PROFIT as severity rank) | Catches behavior early; profitable trades ranked higher | More alerts initially; needs threshold tuning |
-
-**Decision**: Use PROFIT as a **sorting/severity signal**, not a filter. Exception: R5 inherently requires profit > 0.
-
-### Symbol Risk Weights (for future enhancement)
-
-| Symbol | Approx. Contract Value per Lot | Volatility |
-|--------|-------------------------------|------------|
-| XAUUSD | ~$100,000 | High |
-| XAGUSD | ~$10,000 | Very High |
-| EURUSD | ~$100,000 | Low |
-| GBPUSD | ~$100,000 | Medium |
-| US30 | ~$10 × index | Medium |
-
-Future: weight lots by contract value for normalized exposure comparison.
+**总计: ~5 天 + 持续调优**
 
 ---
 
-## 7. Exploratory SQL (for manual analysis on mt4_live)
+## 7. 规则扩展路线 (TODO)
 
-### Verify data freshness
+以下规则已设计但暂不实现，后续按需添加:
 
-```sql
--- Check latest data timestamp (uses INDEX_OPENTIME reverse scan, <5ms)
-SELECT OPEN_TIME, CLOSE_TIME, TICKET, LOGIN, SYMBOL
-FROM mt4_live.mt4_trades
-ORDER BY OPEN_TIME DESC
-LIMIT 1;
-```
+- [ ] **爆发下单**: 5s 内 3+ 单, 每单 ≥ 5 手
+- [ ] **快速开平**: 大手数 + 持仓 ≤ 2 分钟
+- [ ] **频繁推仓**: 1s 内同方向 3+ 单
+- [ ] **大额敞口**: 单客户单品种未平仓总手数 > 阈值
+- [ ] **快速盈利**: 20min 内总利润 > $5,000
+- [ ] **同向集中度**: 全客户单品种净头寸 > 阈值 (公司级风险)
+- [ ] **高胜率异常**: 胜率 > 80% + 平均持仓 < 5 分钟
+- [ ] **跨账户关联**: 同 IP / 同 IB 树的账户同时同方向建仓
+- [ ] **新闻窗口**: 重大经济数据发布前后的大额建仓
 
-### Open positions count
+新增规则只需:
+1. 编写检测函数 (接收标准化数据, 返回 Alert 列表)
+2. 注册到 `RULES` 列表
+3. 无需修改数据采集层或前端
 
-```sql
--- Uses INDEX_CLOSETIME, ~4ms
-SELECT COUNT(*) AS open_positions
-FROM mt4_live.mt4_trades
-WHERE CLOSE_TIME = '1970-01-01 00:00:00';
-```
+---
 
-### R1 candidates: large-lot clusters
+## 8. 已确认事项
 
-```sql
-SELECT
-    t.LOGIN,
-    DATE_FORMAT(t.OPEN_TIME, '%Y-%m-%d %H:%i:%s') AS open_second,
-    COUNT(*) AS big_orders_in_window,
-    GROUP_CONCAT(t.TICKET ORDER BY t.OPEN_TIME) AS tickets,
-    GROUP_CONCAT(t.SYMBOL ORDER BY t.OPEN_TIME) AS symbols,
-    GROUP_CONCAT(t.VOLUME / 100 ORDER BY t.OPEN_TIME) AS lots_list,
-    SUM(t.PROFIT) AS total_profit
-FROM mt4_live.mt4_trades t
-WHERE t.OPEN_TIME >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
-  AND t.CMD IN (0, 1)
-  AND t.VOLUME / 100 >= 5
-  AND t.LOGIN NOT LIKE '7%'
-GROUP BY t.LOGIN, DATE_FORMAT(t.OPEN_TIME, '%Y-%m-%d %H:%i:%s')
-HAVING big_orders_in_window >= 2
-ORDER BY open_second DESC
-LIMIT 200;
-```
+- [x] `mt4_live.mt4_users` 有 `BALANCE`, `EQUITY`, `MARGIN`, `MARGIN_LEVEL`, `MARGIN_FREE`, `LEVERAGE`, `CURRENCY` 字段 ✅
+- [x] MT4 Live2 有独立的 `mt4_live2.mt4_trades` 表，结构与 `mt4_live.mt4_trades` 完全一致 (同样的索引) ✅
+- [x] MT4 账户的 Group 排除逻辑与 MT5 一致 (`GROUP NOT LIKE '%demo%' AND GROUP NOT LIKE '%test%'`) ✅
 
-### R3 candidates: same-second same-direction clusters
+---
+
+## 9. 探索性 SQL
+
+### 9.1 三个 Server 未平仓订单明细
+
+#### MT4 Live
 
 ```sql
 SELECT
-    t.LOGIN, t.CMD,
-    CASE WHEN t.CMD = 0 THEN 'Buy' ELSE 'Sell' END AS direction,
-    DATE_FORMAT(t.OPEN_TIME, '%Y-%m-%d %H:%i:%s') AS open_second,
-    COUNT(*) AS orders_in_1sec,
-    GROUP_CONCAT(t.TICKET ORDER BY t.OPEN_TIME) AS tickets,
-    GROUP_CONCAT(t.SYMBOL ORDER BY t.OPEN_TIME) AS symbols,
-    GROUP_CONCAT(t.VOLUME / 100 ORDER BY t.OPEN_TIME) AS lots_list,
-    SUM(t.PROFIT) AS total_profit
-FROM mt4_live.mt4_trades t
-WHERE t.OPEN_TIME >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
-  AND t.CMD IN (0, 1)
-  AND t.LOGIN NOT LIKE '7%'
-GROUP BY t.LOGIN, t.CMD, DATE_FORMAT(t.OPEN_TIME, '%Y-%m-%d %H:%i:%s')
-HAVING orders_in_1sec >= 3
-ORDER BY open_second DESC
-LIMIT 200;
-```
-
-### R2 candidates: quick close with profit
-
-```sql
-SELECT
-    t.TICKET, t.LOGIN, t.SYMBOL, t.CMD,
-    t.VOLUME / 100 AS lots,
-    t.OPEN_TIME, t.CLOSE_TIME,
-    TIMESTAMPDIFF(SECOND, t.OPEN_TIME, t.CLOSE_TIME) AS hold_seconds,
-    t.PROFIT,
-    t.PROFIT + t.SWAPS + t.COMMISSION AS total_profit
-FROM mt4_live.mt4_trades t
-WHERE t.OPEN_TIME >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
-  AND t.CMD IN (0, 1)
-  AND t.CLOSE_TIME != '1970-01-01 00:00:00'
-  AND TIMESTAMPDIFF(SECOND, t.OPEN_TIME, t.CLOSE_TIME) <= 120
-  AND t.PROFIT > 0
-  AND t.VOLUME / 100 >= 5
-  AND t.LOGIN NOT LIKE '7%'
-ORDER BY t.LOGIN, t.OPEN_TIME
-LIMIT 500;
-```
-
-### Check specific account
-
-```sql
-SELECT
+    'MT4_Live' AS server,
     t.TICKET, t.LOGIN, t.SYMBOL,
     CASE WHEN t.CMD = 0 THEN 'Buy' ELSE 'Sell' END AS direction,
     t.VOLUME / 100 AS lots,
-    t.OPEN_TIME, t.CLOSE_TIME,
-    CASE
-        WHEN t.CLOSE_TIME = '1970-01-01 00:00:00' THEN 'OPEN'
-        ELSE CONCAT(TIMESTAMPDIFF(SECOND, t.OPEN_TIME, t.CLOSE_TIME), 's')
-    END AS hold_time,
-    t.PROFIT
+    t.OPEN_TIME, t.OPEN_PRICE,
+    t.PROFIT, t.SWAPS, t.COMMISSION,
+    t.PROFIT + t.SWAPS + t.COMMISSION AS total_profit,
+    t.SL, t.TP, t.MAGIC, t.COMMENT
 FROM mt4_live.mt4_trades t
-WHERE t.LOGIN = 67034699
-  AND t.OPEN_TIME >= DATE_SUB(NOW(), INTERVAL 7 DAY)
+WHERE t.CLOSE_TIME = '1970-01-01 00:00:00'
   AND t.CMD IN (0, 1)
-ORDER BY t.OPEN_TIME DESC;
+  AND NOT EXISTS (
+      SELECT 1 FROM mt4_live.mt4_users u
+      WHERE u.LOGIN = t.LOGIN
+        AND (u.`GROUP` LIKE '%demo%' OR u.`GROUP` LIKE '%test%')
+  )
+ORDER BY t.LOGIN, t.OPEN_TIME;
 ```
 
-### Compare data freshness: mt4_live vs fxbackoffice
+#### MT4 Live2
 
 ```sql
 SELECT
-    'mt4_live' AS source,
-    MAX(OPEN_TIME) AS latest_open_time,
-    COUNT(*) AS open_position_count
+    'MT4_Live2' AS server,
+    t.TICKET, t.LOGIN, t.SYMBOL,
+    CASE WHEN t.CMD = 0 THEN 'Buy' ELSE 'Sell' END AS direction,
+    t.VOLUME / 100 AS lots,
+    t.OPEN_TIME, t.OPEN_PRICE,
+    t.PROFIT, t.SWAPS, t.COMMISSION,
+    t.PROFIT + t.SWAPS + t.COMMISSION AS total_profit,
+    t.SL, t.TP, t.MAGIC, t.COMMENT
+FROM mt4_live2.mt4_trades t
+WHERE t.CLOSE_TIME = '1970-01-01 00:00:00'
+  AND t.CMD IN (0, 1)
+  AND NOT EXISTS (
+      SELECT 1 FROM mt4_live2.mt4_users u
+      WHERE u.LOGIN = t.LOGIN
+        AND (u.`GROUP` LIKE '%demo%' OR u.`GROUP` LIKE '%test%')
+  )
+ORDER BY t.LOGIN, t.OPEN_TIME;
+```
+
+#### MT5
+
+```sql
+SELECT
+    'MT5' AS server,
+    p.Position, p.Login, p.Symbol,
+    CASE WHEN p.Action = 0 THEN 'Buy' ELSE 'Sell' END AS direction,
+    p.Volume / 10000 AS lots,
+    p.TimeCreate, p.PriceOpen, p.PriceCurrent,
+    p.Profit, p.Storage AS swaps,
+    p.ContractSize,
+    p.Comment, p.ExpertID
+FROM mt5_live.mt5_positions p
+INNER JOIN mt5_live.mt5_users u ON p.Login = u.Login
+WHERE u.`Group` NOT LIKE '%demo%'
+  AND u.`Group` NOT LIKE '%test%'
+ORDER BY p.Login, p.TimeCreate;
+```
+
+#### 三个 Server 未平仓订单数量汇总
+
+```sql
+SELECT 'MT4_Live' AS server, COUNT(*) AS open_count
 FROM mt4_live.mt4_trades
-WHERE CLOSE_TIME = '1970-01-01 00:00:00'
-  AND CMD IN (0, 1)
+WHERE CLOSE_TIME = '1970-01-01 00:00:00' AND CMD IN (0, 1)
 
 UNION ALL
 
+SELECT 'MT4_Live2', COUNT(*)
+FROM mt4_live2.mt4_trades
+WHERE CLOSE_TIME = '1970-01-01 00:00:00' AND CMD IN (0, 1)
+
+UNION ALL
+
+SELECT 'MT5', COUNT(*)
+FROM mt5_live.mt5_positions;
+```
+
+### 9.2 按账户汇总未平仓 (手数 + 盈亏)
+
+#### MT4 Live — 按账户汇总
+
+```sql
 SELECT
-    'fxbackoffice' AS source,
-    MAX(OPEN_TIME) AS latest_open_time,
-    COUNT(*) AS open_position_count
-FROM fxbackoffice.mt4_trades
-WHERE closeDate = '1970-01-01'
+    'MT4_Live' AS server,
+    t.LOGIN,
+    u.`GROUP`,
+    u.BALANCE, u.EQUITY, u.LEVERAGE,
+    COUNT(*) AS open_count,
+    SUM(t.VOLUME / 100) AS total_lots,
+    SUM(t.PROFIT) AS total_profit,
+    SUM(t.SWAPS) AS total_swaps,
+    SUM(t.PROFIT + t.SWAPS + t.COMMISSION) AS total_pnl,
+    GROUP_CONCAT(DISTINCT t.SYMBOL ORDER BY t.SYMBOL) AS symbols,
+    ROUND(u.BALANCE / NULLIF(SUM(t.VOLUME / 100), 0), 2) AS capital_per_lot
+FROM mt4_live.mt4_trades t
+INNER JOIN mt4_live.mt4_users u ON t.LOGIN = u.LOGIN
+WHERE t.CLOSE_TIME = '1970-01-01 00:00:00'
+  AND t.CMD IN (0, 1)
+  AND u.`GROUP` NOT LIKE '%demo%'
+  AND u.`GROUP` NOT LIKE '%test%'
+GROUP BY t.LOGIN, u.`GROUP`, u.BALANCE, u.EQUITY, u.LEVERAGE
+ORDER BY total_lots DESC;
+```
+
+#### MT4 Live2 — 按账户汇总
+
+```sql
+SELECT
+    'MT4_Live2' AS server,
+    t.LOGIN,
+    u.`GROUP`,
+    u.BALANCE, u.EQUITY, u.LEVERAGE,
+    COUNT(*) AS open_count,
+    SUM(t.VOLUME / 100) AS total_lots,
+    SUM(t.PROFIT) AS total_profit,
+    SUM(t.SWAPS) AS total_swaps,
+    SUM(t.PROFIT + t.SWAPS + t.COMMISSION) AS total_pnl,
+    GROUP_CONCAT(DISTINCT t.SYMBOL ORDER BY t.SYMBOL) AS symbols,
+    ROUND(u.BALANCE / NULLIF(SUM(t.VOLUME / 100), 0), 2) AS capital_per_lot
+FROM mt4_live2.mt4_trades t
+INNER JOIN mt4_live2.mt4_users u ON t.LOGIN = u.LOGIN
+WHERE t.CLOSE_TIME = '1970-01-01 00:00:00'
+  AND t.CMD IN (0, 1)
+  AND u.`GROUP` NOT LIKE '%demo%'
+  AND u.`GROUP` NOT LIKE '%test%'
+GROUP BY t.LOGIN, u.`GROUP`, u.BALANCE, u.EQUITY, u.LEVERAGE
+ORDER BY total_lots DESC;
+```
+
+#### MT5 — 按账户汇总
+
+```sql
+SELECT
+    'MT5' AS server,
+    p.Login,
+    u.`Group`,
+    u.Balance, u.Leverage,
+    COUNT(*) AS open_count,
+    SUM(p.Volume / 10000) AS total_lots,
+    SUM(p.Profit) AS total_profit,
+    SUM(p.Storage) AS total_swaps,
+    GROUP_CONCAT(DISTINCT p.Symbol ORDER BY p.Symbol) AS symbols,
+    ROUND(u.Balance / NULLIF(SUM(p.Volume / 10000), 0), 2) AS capital_per_lot
+FROM mt5_live.mt5_positions p
+INNER JOIN mt5_live.mt5_users u ON p.Login = u.Login
+WHERE u.`Group` NOT LIKE '%demo%'
+  AND u.`Group` NOT LIKE '%test%'
+GROUP BY p.Login, u.`Group`, u.Balance, u.Leverage
+ORDER BY total_lots DESC;
+```
+
+### 9.3 未平仓中同秒开仓 ≥ N 笔 (粗筛)
+
+> **不要用 Self-JOIN 做滑动窗口** — 对数千行未平仓数据做 Self-JOIN 复杂度 O(N²)，会超时。
+> 用 GROUP BY 按秒聚合做粗筛 (秒级返回)，> 1 秒的精确窗口检测交给 Python。
+
+#### MT4 Live
+
+```sql
+SELECT
+    t.LOGIN, t.SYMBOL,
+    CASE WHEN t.CMD = 0 THEN 'Buy' ELSE 'Sell' END AS direction,
+    DATE_FORMAT(t.OPEN_TIME, '%Y-%m-%d %H:%i:%s') AS open_second,
+    COUNT(*) AS orders_in_1sec,
+    SUM(t.VOLUME / 100) AS total_lots,
+    GROUP_CONCAT(t.TICKET ORDER BY t.OPEN_TIME) AS tickets,
+    GROUP_CONCAT(t.VOLUME / 100 ORDER BY t.OPEN_TIME) AS lots_list
+FROM mt4_live.mt4_trades t
+WHERE t.CLOSE_TIME = '1970-01-01 00:00:00'
+  AND t.CMD IN (0, 1)
+  AND NOT EXISTS (
+      SELECT 1 FROM mt4_live.mt4_users u
+      WHERE u.LOGIN = t.LOGIN
+        AND (u.`GROUP` LIKE '%demo%' OR u.`GROUP` LIKE '%test%')
+  )
+GROUP BY t.LOGIN, t.SYMBOL, t.CMD, DATE_FORMAT(t.OPEN_TIME, '%Y-%m-%d %H:%i:%s')
+HAVING orders_in_1sec >= 3
+ORDER BY orders_in_1sec DESC;
+```
+
+#### MT4 Live2
+
+```sql
+SELECT
+    t.LOGIN, t.SYMBOL,
+    CASE WHEN t.CMD = 0 THEN 'Buy' ELSE 'Sell' END AS direction,
+    DATE_FORMAT(t.OPEN_TIME, '%Y-%m-%d %H:%i:%s') AS open_second,
+    COUNT(*) AS orders_in_1sec,
+    SUM(t.VOLUME / 100) AS total_lots,
+    GROUP_CONCAT(t.TICKET ORDER BY t.OPEN_TIME) AS tickets,
+    GROUP_CONCAT(t.VOLUME / 100 ORDER BY t.OPEN_TIME) AS lots_list
+FROM mt4_live2.mt4_trades t
+WHERE t.CLOSE_TIME = '1970-01-01 00:00:00'
+  AND t.CMD IN (0, 1)
+  AND NOT EXISTS (
+      SELECT 1 FROM mt4_live2.mt4_users u
+      WHERE u.LOGIN = t.LOGIN
+        AND (u.`GROUP` LIKE '%demo%' OR u.`GROUP` LIKE '%test%')
+  )
+GROUP BY t.LOGIN, t.SYMBOL, t.CMD, DATE_FORMAT(t.OPEN_TIME, '%Y-%m-%d %H:%i:%s')
+HAVING orders_in_1sec >= 3
+ORDER BY orders_in_1sec DESC;
+```
+
+#### MT5
+
+```sql
+SELECT
+    p.Login, p.Symbol,
+    CASE WHEN p.Action = 0 THEN 'Buy' ELSE 'Sell' END AS direction,
+    DATE_FORMAT(p.TimeCreate, '%Y-%m-%d %H:%i:%s') AS open_second,
+    COUNT(*) AS orders_in_1sec,
+    SUM(p.Volume / 10000) AS total_lots,
+    GROUP_CONCAT(p.Position ORDER BY p.TimeCreate) AS position_ids,
+    GROUP_CONCAT(p.Volume / 10000 ORDER BY p.TimeCreate) AS lots_list
+FROM mt5_live.mt5_positions p
+INNER JOIN mt5_live.mt5_users u ON p.Login = u.Login
+WHERE u.`Group` NOT LIKE '%demo%'
+  AND u.`Group` NOT LIKE '%test%'
+GROUP BY p.Login, p.Symbol, p.Action, DATE_FORMAT(p.TimeCreate, '%Y-%m-%d %H:%i:%s')
+HAVING orders_in_1sec >= 3
+ORDER BY orders_in_1sec DESC;
+```
+
+### 9.4 Volume 与 Lots 换算关系验证
+
+MT4 和 MT5 的 Volume 编码方式不同:
+
+| 平台 | Volume 含义 | 换算公式 | 示例 |
+|------|------------|---------|------|
+| MT4 | lots × 100 | `VOLUME / 100` | Volume=100 → 1.00 手 |
+| MT5 | lots × 10000 | `Volume / 10000` | Volume=10000 → 1.00 手 |
+
+原因: MT5 支持更高精度的手数 (最小 0.0001 手)，MT4 最小精度 0.01 手。
+
+```sql
+-- MT4 Live: 查看原始 Volume 和换算结果
+SELECT TICKET, LOGIN, SYMBOL, VOLUME,
+       VOLUME / 100 AS lots_div100,
+       VOLUME / 10000 AS lots_div10000
+FROM mt4_live.mt4_trades
+WHERE CLOSE_TIME = '1970-01-01 00:00:00'
   AND CMD IN (0, 1)
-  AND sid = 1;
+ORDER BY OPEN_TIME DESC
+LIMIT 10;
+
+-- MT4 Live2: 同样验证
+SELECT TICKET, LOGIN, SYMBOL, VOLUME,
+       VOLUME / 100 AS lots_div100,
+       VOLUME / 10000 AS lots_div10000
+FROM mt4_live2.mt4_trades
+WHERE CLOSE_TIME = '1970-01-01 00:00:00'
+  AND CMD IN (0, 1)
+ORDER BY OPEN_TIME DESC
+LIMIT 10;
+
+-- MT5: 查看原始 Volume 和换算结果
+SELECT Position, Login, Symbol, Volume,
+       Volume / 100 AS lots_div100,
+       Volume / 10000 AS lots_div10000
+FROM mt5_live.mt5_positions
+ORDER BY TimeCreate DESC
+LIMIT 10;
+```
+
+### 9.5 MT5 账户交易分析
+
+#### 查看账户已平仓记录
+
+```sql
+SELECT
+    d.Deal, d.Login, d.Symbol,
+    CASE WHEN d.Action = 0 THEN 'Buy' ELSE 'Sell' END AS direction,
+    CASE d.Entry WHEN 0 THEN 'Open' WHEN 1 THEN 'Close' WHEN 3 THEN 'CloseBy' END AS entry_type,
+    d.Volume / 10000 AS lots,
+    d.Price, d.Profit, d.Commission,
+    d.Storage AS swaps,
+    d.Profit + d.Commission + d.Storage AS total_profit,
+    d.PositionID, d.Time, d.Comment
+FROM mt5_live.mt5_deals d
+WHERE d.Login = <账户号>
+  AND d.Action IN (0, 1)
+  AND d.Entry IN (1, 3)
+ORDER BY d.Time DESC
+LIMIT 50;
+```
+
+#### 查看完整交易生命周期 (开仓→平仓配对)
+
+```sql
+SELECT
+    open_d.Deal AS open_deal,
+    open_d.PositionID,
+    open_d.Volume / 10000 AS lots,
+    CASE WHEN open_d.Action = 0 THEN 'Buy' ELSE 'Sell' END AS direction,
+    open_d.Price AS open_price,
+    open_d.Time AS open_time,
+    close_d.Deal AS close_deal,
+    close_d.Price AS close_price,
+    close_d.Profit,
+    close_d.Time AS close_time,
+    TIMESTAMPDIFF(SECOND, open_d.Time, close_d.Time) AS hold_seconds
+FROM mt5_live.mt5_deals close_d
+INNER JOIN mt5_live.mt5_deals open_d
+    ON close_d.PositionID = open_d.PositionID
+    AND open_d.Entry = 0
+WHERE close_d.Login = <账户号>
+  AND close_d.Action IN (0, 1)
+  AND close_d.Entry IN (1, 3)
+ORDER BY open_d.Time DESC
+LIMIT 50;
+```
+
+### 9.6 账户资金状况
+
+```sql
+-- MT4 Live
+SELECT LOGIN, `GROUP`, BALANCE, EQUITY, MARGIN,
+       MARGIN_LEVEL, MARGIN_FREE, LEVERAGE, CURRENCY
+FROM mt4_live.mt4_users WHERE LOGIN = <账户号>;
+
+-- MT4 Live2
+SELECT LOGIN, `GROUP`, BALANCE, EQUITY, MARGIN,
+       MARGIN_LEVEL, MARGIN_FREE, LEVERAGE, CURRENCY
+FROM mt4_live2.mt4_users WHERE LOGIN = <账户号>;
+
+-- MT5
+SELECT Login, `Group`, Balance, Credit, Leverage,
+       BalancePrevDay, EquityPrevDay
+FROM mt5_live.mt5_users WHERE Login = <账户号>;
+```
+
+### 9.7 数据延迟检查
+
+```sql
+SELECT 'MT4_Live' AS server, OPEN_TIME AS latest
+FROM mt4_live.mt4_trades ORDER BY OPEN_TIME DESC LIMIT 1
+
+UNION ALL
+
+SELECT 'MT4_Live2', OPEN_TIME
+FROM mt4_live2.mt4_trades ORDER BY OPEN_TIME DESC LIMIT 1
+
+UNION ALL
+
+SELECT 'MT5', Time
+FROM mt5_live.mt5_deals ORDER BY Timestamp DESC LIMIT 1;
 ```

@@ -285,9 +285,7 @@ LEFT JOIN (
 
 LEFT JOIN (
     SELECT userId AS client_id,
-           SUM(IF(currency = 'CEN',
-               plClosedHavingActivityRunningTotal / 100.0,
-               plClosedHavingActivityRunningTotal)) AS profit_hist_trades
+           SUM(plClosedHavingActivityRunningTotal) AS profit_hist_trades
     FROM stats_trading_running_totals
     WHERE userId IN ({id_list_str})
     GROUP BY userId
