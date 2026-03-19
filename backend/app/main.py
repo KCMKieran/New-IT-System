@@ -28,6 +28,7 @@ from starlette.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
 
 from app.api.v1.routers import api_v1_router
+from app.core.config import get_settings
 from app.core.trace_middleware import TraceIDMiddleware
 from app.core.database import init_db
 from app.core.scheduler import start_scheduler, stop_scheduler
@@ -58,13 +59,16 @@ def create_app() -> FastAPI:
     # Add Trace ID middleware (must be first to capture all requests)
     app.add_middleware(TraceIDMiddleware)
     
-    # CORS: keep permissive for now; tighten via settings later
+    # CORS: restricted to allowed origins (configured via CORS_ORIGINS env var)
+    # After Cloudflare Access bypass on /api/*, CORS is the primary browser-level
+    # security layer preventing unauthorized cross-origin API access
+    settings = get_settings()
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=settings.CORS_ORIGINS,
         allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        allow_headers=["Content-Type", "Authorization", "X-Trace-ID"],
     )
 
     # Mount versioned routers

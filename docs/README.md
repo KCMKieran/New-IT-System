@@ -72,7 +72,8 @@ docs/
 │   ├── ib-financial-monitor.md  # IB Financial Monitor (replaces D08)
 │   └── filter-backend-integration.md
 ├── deployment/                  # ⭐ Deployment & DevOps
-│   └── dev-prod-guide.md      # Dev/Prod workflow, Docker, Cloudflare Tunnel
+│   ├── dev-prod-guide.md      # Dev/Prod workflow, Docker, Cloudflare Tunnel
+│   └── cloudflare-api-blocked.md # Cloudflare Access 拦截 API 问题排查
 ├── operations/                  # Operations & maintenance
 │   ├── clickhouse-connection.md # ClickHouse production setup
 │   ├── create-ib_downline_net_deposit_agg.md

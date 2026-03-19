@@ -228,4 +228,5 @@ sudo systemctl status cloudflared        # 确认服务正常运行
 | Cloudflare 显示 "Authentication error" | 浏览器有过期的 cookie | 清除 `analysis.kohleservices.com` 的 cookie，或用无痕模式 |
 | 改了 Tunnel 配置没生效 | `cloudflared` 没重启 | 跑 `sudo systemctl restart cloudflared` |
 | 通过 Cloudflare 访问 API 返回 502 | 后端容器没在运行 | 用 `docker logs new-it-backend-prod` 看日志，有问题就重启 |
+| Dashboard 首次加载正常，点刷新后 "Load failed" | Cloudflare Access 拦截了后续 fetch 请求 | 详见 [cloudflare-api-blocked.md](cloudflare-api-blocked.md)，需在 Access 中为 `/api/*` 添加 Bypass |
 | Docker 构建很慢（500MB+ 上下文） | 缺少 `.dockerignore` | 确认 `frontend/.dockerignore` 里有 `node_modules` |
