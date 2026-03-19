@@ -77,9 +77,13 @@ def setup_logging(log_level: str = "INFO") -> None:
     console_handler.addFilter(TraceIDFilter())
     
     # === File Handler with Daily Rotation ===
-    # Logs persist even if container is restarted
-    log_dir = Path("/app/logs")
-    log_dir.mkdir(parents=True, exist_ok=True)
+    # Docker uses /app/logs; local dev falls back to ./logs
+    log_dir = Path(os.environ.get("LOG_FILE_DIR", "/app/logs"))
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+    except PermissionError:
+        log_dir = Path(__file__).resolve().parents[2] / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
     
     file_handler = TimedRotatingFileHandler(
         filename=log_dir / "backend.log",

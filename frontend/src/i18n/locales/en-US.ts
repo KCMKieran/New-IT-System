@@ -70,6 +70,7 @@ export const enUS = {
     profitAnalysis: "Profit Analysis",
     clientTrading: "Client Trading Analysis",
     ibReport: "IB Performance",
+    riskMonitor: "Trade Real-time Monitor",
     swapFreeControl: "Swap Free Control",
     customerPnLMonitor: "Customer P&L Monitor",
     customerPnLMonitorV2: "Customer P&L Monitor (V2)",

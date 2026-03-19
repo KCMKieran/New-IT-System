@@ -320,6 +320,29 @@ New-IT-System/
 - `backend/app/core/database.py` (SQLite)
 - `backend/app/core/scheduler.py` (APScheduler)
 
+### 4.8 Trade Real-time Monitor (`RiskMonitor.tsx`)
+**Purpose**: Scan all MT servers every 10 minutes for clients with high leverage / capital utilization. B-Book perspective: flags clients whose positions pose risk to company P&L.
+
+**Key Features**:
+- Cross-server open position scanning (MT4 Live + MT4 Live2 + MT5)
+- Scale-In detection: ≥3 orders same account + symbol + direction → alert
+- Severity classification by capital_per_lot (CRITICAL / HIGH / WATCH)
+- 10-minute auto-refresh + manual refresh
+- Client-side AG-Grid with severity row colors, P&L color inversion (B-Book view)
+- Server / severity / account filters
+
+**API**: `GET /api/v1/risk-monitor/scan`
+
+**Data sources**: MySQL Slave (`mt4_live`, `mt4_live2`, `mt5_live`) — same DB_HOST config
+
+**Key Files**:
+- `frontend/src/pages/RiskMonitor.tsx`
+- `backend/app/api/v1/routes/risk_monitor.py`
+- `backend/app/services/risk_monitor_service.py`
+- `backend/app/schemas/risk_monitor.py`
+
+**Docs**: [risk-monitor.md](../features/risk-monitor.md) | **Skill**: `.cursor/skills/risk-monitor/SKILL.md`
+
 ---
 
 ## 5. Database Schema (ClickHouse)

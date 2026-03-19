@@ -31,6 +31,7 @@ const ClientReturnRatePage = lazyWithRetry(() => import("@/pages/ClientReturnRat
 const ConfigPlaceholder = lazyWithRetry(() => import("@/pages/ConfigPlaceholder"))
 const IBReportPage = lazyWithRetry(() => import("@/pages/IBReport"))
 const IBFinancialMonitorPage = lazyWithRetry(() => import("@/pages/IBFinancialMonitor"))
+const RiskMonitorPage = lazyWithRetry(() => import("@/pages/RiskMonitor"))
 const SettingsPage = lazyWithRetry(() => import("@/pages/Settings"))
 const SearchPage = lazyWithRetry(() => import("@/pages/Search"))
 
@@ -83,6 +84,7 @@ function App() {
               <Route path="client-return-rate" element={<ClientReturnRatePage />} />
               <Route path="ib-report" element={<IBReportPage />} />
               <Route path="ib-financial-monitor" element={<IBFinancialMonitorPage />} />
+              <Route path="risk-monitor" element={<RiskMonitorPage />} />
               {/* test page removed */}
               <Route path="settings" element={<SettingsPage />} />
               <Route path="search" element={<SearchPage />} />

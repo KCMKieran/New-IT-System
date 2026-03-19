@@ -70,6 +70,7 @@ export const zhCN = {
     profitAnalysis: "利润分析",
     clientTrading: "客户交易分析",
     ibReport: "IB 业绩报表",
+    riskMonitor: "交易实时监控",
     swapFreeControl: "Swap Free Control",
     customerPnLMonitor: "客户盈亏监控",
     customerPnLMonitorV2: "客户盈亏监控（V2）",

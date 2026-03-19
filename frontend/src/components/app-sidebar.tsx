@@ -70,6 +70,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
           title: t("nav.riskControlDepartment"),
           icon: IconDashboard,
           children: [
+            { title: "交易实时监控", url: "/risk-monitor" },
             { title: t("nav.clientReturnRate"), url: "/client-return-rate" },
             // [HIDDEN] Client PnL Analysis - temporarily hidden
             // { title: "盈亏监控 (Preview)", url: "/client-pnl-analysis" },
