@@ -275,10 +275,84 @@ ORDER BY d.Login, d.Time;
 
 ```python
 RULES: list[RuleFunc] = [
-    rule_scale_in_detect,      # 当前: 持仓累积检测
-    rule_batch_close_detect,   # 当前: 同秒批量平仓检测
+    rule_frequent_open_detect, # ✅ 已实现: 频繁开仓检测
+    rule_scale_in_detect,      # ✅ 已实现: 持仓累积检测
+    rule_batch_close_detect,   # 设计中: 同秒批量平仓检测
     # rule_xxx,                # 未来: 新增规则只需在此注册
 ]
+```
+
+### 当前规则: 频繁开仓检测 (Frequent Opening Detection)
+
+**触发条件**: 最近 N 分钟内，同一账户开仓笔数 ≥ 阈值（不区分品种、不区分方向）。
+
+**三个可调参数**:
+
+| 参数 | 含义 | 默认值 | API 参数名 |
+|------|------|--------|-----------|
+| 检查窗口 | 时间范围 (分钟) | 8 | `check_interval` |
+| 最少开仓数 | 开仓笔数阈值 | 3 | `min_order_count` |
+| 每手净值阈值 | 低于此值标 ALERT (USD) | 2000 | `equity_per_lot_threshold` |
+
+**核心指标**: `equity_per_lot = equity / total_lots_in_window`
+
+- **Equity** (净值): MT4 从 `mt4_users.EQUITY` 直接取；MT5 计算 `Balance + SUM(mt5_positions.Profit + Storage)`
+- 使用 Equity 而非 Balance，因为 Equity 反映账户当前真实可用资金
+
+**告警等级** (两级):
+
+| 条件 | 等级 | 含义 |
+|------|------|------|
+| 开仓数 ≥ 阈值 且 equity_per_lot < threshold | **ALERT** (红) | 频繁开仓 + 高杠杆 |
+| 开仓数 ≥ 阈值 但 equity_per_lot ≥ threshold | **WATCH** (黄) | 频繁开仓但资金充足 |
+
+**数据源差异** (与 Scale-In 不同):
+
+| | Scale-In | Frequent Open |
+|--|---|---|
+| 扫描范围 | 所有未平仓持仓 | **最近 N 分钟开仓的订单** |
+| 分组 | 账户+品种+方向 | **仅账户** |
+| 已平仓订单 | 不包含 | **包含** (开了又平也会被捕获) |
+| MT4 数据源 | mt4_trades WHERE CLOSE_TIME='1970' | mt4_trades WHERE OPEN_TIME >= cutoff |
+| MT5 数据源 | mt5_positions | **mt5_deals WHERE Entry=0** |
+
+**MT5 Timestamp 注意事项**:
+
+`mt5_deals.Timestamp` 存储的是 **Windows FILETIME** 格式 (自 1601-01-01 起的 100 纳秒计数)，**不是** Unix 时间戳。转换公式:
+
+```
+filetime = (unix_seconds + 11644473600) × 10000000
+```
+
+查询示例:
+```sql
+WHERE d.Timestamp >= (UNIX_TIMESTAMP(DATE_SUB(NOW(), INTERVAL 8 MINUTE)) + 11644473600) * 10000000
+```
+
+**API**:
+
+```
+GET /api/v1/risk-monitor/frequent-open
+  ?check_interval=8
+  ?min_order_count=3
+  ?equity_per_lot_threshold=2000
+  ?server=mt5              (optional)
+  ?login=12345             (optional)
+```
+
+**响应**:
+```json
+{
+  "alerts": [{ "rule": "FREQUENT_OPEN", "server": "MT4_Live", "login": 12345, "severity": "ALERT",
+    "details": { "order_count": 5, "total_lots": 5.0, "symbols": "XAUUSD,EURUSD",
+                 "equity": 10000.0, "balance": 12000.0, "equity_per_lot": 2000.0,
+                 "leverage": 500, "group": "real\\kcm_std",
+                 "first_open": "2026-03-20 11:20:00", "last_open": "2026-03-20 11:25:00" } }],
+  "summary": { "alert_count": 2, "watch_count": 5, "total_accounts_scanned": 150 },
+  "params": { "check_interval": 8, "min_order_count": 3, "equity_per_lot_threshold": 2000 },
+  "scan_time_ms": 35,
+  "scanned_at": "2026-03-20T07:00:00Z"
+}
 ```
 
 ### 当前规则: 持仓累积 + 资金比 (Scale-In Detection)
@@ -542,33 +616,41 @@ if not redis.exists(key):
 
 - 侧边栏分组: Risk Control，页面标题: 交易实时监控
 - 纯中文 UI，不需要 i18n，等级标签用英文
-- 每 10 分钟自动刷新 + 手动刷新按钮
+- **Tab 切换**: 频繁开仓 (默认) / 持仓累积
+- 每个 Tab 独立的 API、刷新间隔、筛选器、表格列
 - A-Book 客户不做过滤，在 UI 中显示 GROUP 列即可
+
+#### Tab 1: 频繁开仓 (默认)
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│  交易实时监控                          上次扫描: 14:32  [🔄 刷新]     │
-│                                        自动刷新: 每10分钟            │
+│  [频繁开仓] [持仓累积]                                                │
 ├──────────────────────────────────────────────────────────────────────┤
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐            │
-│  │ CRITICAL │  │  HIGH    │  │  WATCH   │  │ 扫描账户数│            │
-│  │    2     │  │    5     │  │   12     │  │  2,400   │            │
-│  └──────────┘  └──────────┘  └──────────┘  └──────────┘            │
+│  检测最近 N 分钟内频繁开仓的账户             [🔄 立即扫描]             │
+│  上次扫描: 14:32 · 耗时 35ms · 每 8 分钟自动刷新                     │
 ├──────────────────────────────────────────────────────────────────────┤
-│  筛选: [全部服务器 ▼] [CRITICAL+HIGH ▼] [搜索账户号...]             │
+│  ┌─ 参数设置 ────────────────────────────────────────────────────┐  │
+│  │  检查窗口: [8min ▼]  最少开仓: [3] 笔  每手净值 < [2000] USD │  │
+│  └───────────────────────────────────────────────────────────────┘  │
 ├──────────────────────────────────────────────────────────────────────┤
-│  AG-Grid 表格 (客户端模式，不分页)                                    │
-│  列: 等级 | 服务器 | 账户 | 品种 | 方向 | 持仓数 | 总手数 |          │
-│      余额 | 单手资金比 | 浮动盈亏 | 杠杆 | 首笔时间 | 末笔时间 |     │
-│      账户组                                                          │
-│                                                                      │
-│  行颜色: CRITICAL=浅红, HIGH=浅橙, WATCH=浅黄                        │
-│  浮动盈亏: 正值(客户赚=公司亏)→红色, 负值(客户亏=公司赚)→绿色        │
-│  默认排序: severity desc (CRITICAL 在最上面)                          │
-│  无 CSV 导出                                                         │
-│                                                 扫描耗时: 28ms       │
+│  ┌──────────┐  ┌──────────┐  ┌──────────────────┐                  │
+│  │ 🔴 ALERT │  │ 🟡 WATCH │  │ 窗口内账户数      │                  │
+│  │    2     │  │    5     │  │      150         │                  │
+│  └──────────┘  └──────────┘  └──────────────────┘                  │
+├──────────────────────────────────────────────────────────────────────┤
+│  筛选: [全部服务器 ▼]  [搜索账户号...]                                │
+├──────────────────────────────────────────────────────────────────────┤
+│  AG-Grid 表格                                                        │
+│  列: 等级 | 服务器 | 账户 | 开仓笔数 | 总手数 | 品种 |               │
+│      净值(Equity) | 每手净值比 | 杠杆 | 账户组 | 首笔时间 | 末笔时间 │
+│  行颜色: ALERT=浅红, WATCH=浅黄                                      │
+│  自动刷新: 等于 check_interval 参数值                                 │
 └──────────────────────────────────────────────────────────────────────┘
 ```
+
+#### Tab 2: 持仓累积
+
+原有 Scale-In 逻辑不变 — CRITICAL/HIGH/WATCH 卡片 + 14 列表格 + 10 分钟自动刷新。
 
 > **暂不实现**: Dashboard SuspiciousClients 组件 — 后续按需接入。
 
