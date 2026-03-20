@@ -424,6 +424,8 @@ export default function IBReport() {
       resizable: true,
       filter: true,
       minWidth: 50,
+      wrapHeaderText: true,
+      autoHeaderHeight: true,
     }),
     []
   );

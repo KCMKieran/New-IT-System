@@ -153,7 +153,7 @@ export default function ReturnRateSummary() {
   );
 
   const defaultColDef = useMemo(
-    () => ({ resizable: true, sortable: true, filter: true, flex: 1 }),
+    () => ({ resizable: true, sortable: true, filter: true, flex: 1, wrapHeaderText: true, autoHeaderHeight: true }),
     [],
   );
 

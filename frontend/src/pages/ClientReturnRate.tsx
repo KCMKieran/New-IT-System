@@ -439,7 +439,7 @@ export default function ClientReturnRate() {
   );
 
   const defaultColDef = useMemo(
-    () => ({ resizable: true, sortable: true, filter: true }),
+    () => ({ resizable: true, sortable: true, filter: true, wrapHeaderText: true, autoHeaderHeight: true }),
     [],
   );
   const onGridReady = useCallback((_e: GridReadyEvent) => {}, []);

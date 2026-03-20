@@ -299,6 +299,8 @@ export default function RiskMonitor() {
     filter: true,
     minWidth: 80,
     suppressMovable: true,
+    wrapHeaderText: true,
+    autoHeaderHeight: true,
   };
 
   const getRowStyle = (params: { data?: Alert }) => {
