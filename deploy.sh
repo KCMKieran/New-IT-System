@@ -15,8 +15,10 @@ git pull origin main
 # Rebuild and restart prod containers only
 docker compose -f docker-compose.prod.yml up -d --build
 
-# Clean up dangling images
+# Clean up dangling images (safe, always recommended)
 docker image prune -f
+# Clean build cache older than 7 days (keep recent cache for fast rebuilds)
+docker builder prune --filter "until=168h" -f
 
 echo ""
 docker compose -f docker-compose.prod.yml ps

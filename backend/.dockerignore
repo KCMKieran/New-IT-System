@@ -1,5 +1,12 @@
 __pycache__
 *.pyc
 .git
+.env
 logs
+logs-dev
+logs-prod
 *.log
+.venv
+venv
+data
+docker-compose.dev.yml
