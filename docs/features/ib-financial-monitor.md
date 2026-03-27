@@ -6,10 +6,12 @@
 ## 1. Overview
 
 This page allows risk/CS team members to:
-- **Manage** which IBs are monitored (add/remove via UI)
+- **Manage** which IDs are monitored (add/remove via UI) — supports both **IB IDs** and **plain client IDs**
 - **Query** real-time financial data (deposits, withdrawals, equity, differences)
 - **Send** report emails manually or on a daily schedule
 - **Configure** email recipients, CC, schedule time, and on/off toggle
+
+> **IB vs Client**: The service auto-detects whether a watchlist ID is an IB (expands downstream clients via `ib_tree_with_self`) or a plain client (queries only their own data, `ib_wallet_equity` = 0). No manual tagging required.
 
 All write operations require **email verification** via a 6-digit code sent to whitelisted admin emails.
 
@@ -117,13 +119,33 @@ User clicks Add/Remove/Save
 
 ## 5. SQL Query (ported from D08)
 
-The financial query uses a CTE-based approach against MySQL `fxbackoffice`:
+The service automatically classifies watchlist IDs into **IBs** and **plain clients** via `_classify_ids()`, then runs the appropriate query for each group.
+
+### 5a. IB Query (`_IB_FINANCIAL_QUERY`)
+
+CTE-based approach against MySQL `fxbackoffice`, expands IB tree to include all downstream clients:
 
 1. **Target_IB_List** — `ib_tree_with_self` to find all clients under each IB
 2. **Transaction_Stats** — `stats_transactions` for daily and all-time deposit/withdrawal sums
 3. **Balance_Snapshot** — `stats_balances` for MT4 equity and IB wallet equity on target date
 4. **All_Keys** — UNION to simulate FULL OUTER JOIN on (ib_id, currency)
 5. **Final output** — today deposit/withdrawal, total deposit/withdrawal, MT4 equity, IB wallet equity, difference
+
+### 5b. Client Query (`_CLIENT_FINANCIAL_QUERY`)
+
+For IDs that are **not** IBs (not found in `ib_tree_with_self.ibid`), queries the user's own data directly without tree expansion:
+
+1. **Transaction_Stats** — same aggregation but filtered by `WHERE userid IN (...)` directly (no IB tree JOIN)
+2. **Balance_Snapshot** — only MT4 equity (`loginsid NOT LIKE '2-%'`); `ib_wallet_equity` is always 0
+3. **Final output** — same columns as IB query for API compatibility; `ib_wallet_equity` hardcoded to 0
+
+### Classification Logic (`_classify_ids`)
+
+```
+Watchlist IDs → SELECT DISTINCT ibid FROM ib_tree_with_self WHERE ibid IN (...)
+  → Found in result  → IB (use _IB_FINANCIAL_QUERY)
+  → NOT found        → Client (use _CLIENT_FINANCIAL_QUERY)
+```
 
 Key difference from D08: uses parameterised `%s` placeholders instead of f-string interpolation to prevent SQL injection.
 
@@ -327,3 +349,4 @@ Dev 环境自动重载 (http://10.6.20.138:5173)
 | 2026-03-17 | `requirements.txt` 编码损坏（UTF-16LE） | `iconv` 转换为 UTF-8，解决 prod 构建 pip install 失败 |
 | 2026-03-17 | 定时任务实际在 UTC 17:00（HKT 01:00）触发，而非预期的 HKT 17:00 | `scheduler.py`：`CronTrigger` 未传 `timezone` 参数，在 UTC 容器中默认按 UTC 解释。改用 `ZoneInfo("Asia/Hong_Kong")` 对象显式传入 `BackgroundScheduler` 和 `CronTrigger` 的 `timezone` 参数 |
 | 2026-03-17 | 表头"总入金/总出金"易与 CRM（仅 IB 自身）混淆 | 前端表头和邮件报表表头改为"总入金(含下级)"/"总出金(含下级)"，明确数据包含 IB 及其下级客户 |
+| 2026-03-27 | watchlist 中添加普通 client ID（非 IB）时查询无数据 | `query_financial_data()` 增加 `_classify_ids()` 自动分流：IB 走 `_IB_FINANCIAL_QUERY`（展开下级），client 走 `_CLIENT_FINANCIAL_QUERY`（仅查自身数据，`ib_wallet_equity` = 0）。前端无需改动 |

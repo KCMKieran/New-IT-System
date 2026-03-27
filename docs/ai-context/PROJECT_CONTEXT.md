@@ -293,7 +293,8 @@ New-IT-System/
 **Purpose**: Monitor IB financial status — deposits, withdrawals, equity, and differences. Replaces the standalone D08 cron script.
 
 **Key Features**:
-- Configurable IB watchlist (add/remove via UI, stored in SQLite; supports **batch add** for multiple IBs at once)
+- Configurable watchlist (add/remove via UI, stored in SQLite; supports **batch add** for multiple IDs at once)
+- Supports both **IB IDs** (expands downstream clients via `ib_tree_with_self`) and **plain client IDs** (queries own data only, auto-detected by `_classify_ids()`)
 - Real-time financial data query from MySQL fxbackoffice
 - Manual email report sending + scheduled daily auto-send (APScheduler), with distinct footer text per source
 - Report config management (TO/CC/schedule time/enable toggle)

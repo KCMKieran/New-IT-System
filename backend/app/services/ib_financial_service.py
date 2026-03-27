@@ -126,7 +126,8 @@ def remove_ib(ib_id: str, operator: str) -> None:
 
 # ── Financial Query (ported from D08) ─────────────────────
 
-_FINANCIAL_QUERY = """
+# IB query: expand IB tree to include all downstream clients
+_IB_FINANCIAL_QUERY = """
 WITH Target_IB_List AS (
     SELECT
         tree.ibid AS root_ib_id,
@@ -184,55 +185,150 @@ LEFT JOIN Balance_Snapshot b ON k.root_ib_id = b.root_ib_id AND k.currency = b.c
 ORDER BY k.root_ib_id, k.currency
 """
 
+# Client query: no IB tree expansion, query the user's own data directly.
+# Param order: date×2 (Transaction SELECT) → client_ids (Transaction WHERE)
+#            → client_ids (Balance WHERE) → date (Balance WHERE)
+_CLIENT_FINANCIAL_QUERY = """
+WITH Transaction_Stats AS (
+    SELECT
+        trans.userid AS client_id,
+        trans.currency,
+        SUM(CASE WHEN trans.type = 'deposit' AND trans.date = %s
+            THEN trans.amount ELSE 0 END) AS today_deposit,
+        SUM(CASE WHEN trans.type IN ('withdrawal', 'ib withdrawal') AND trans.date = %s
+            THEN trans.amount ELSE 0 END) AS today_withdrawal,
+        SUM(CASE WHEN trans.type = 'deposit'
+            THEN trans.amount ELSE 0 END) AS total_deposit,
+        SUM(CASE WHEN trans.type IN ('withdrawal', 'ib withdrawal')
+            THEN trans.amount ELSE 0 END) AS total_withdrawal
+    FROM fxbackoffice.stats_transactions trans
+    WHERE trans.userid IN ({client_placeholders})
+      AND trans.type IN ('deposit', 'withdrawal', 'ib withdrawal')
+    GROUP BY trans.userid, trans.currency
+),
+Balance_Snapshot AS (
+    SELECT
+        bal.userId AS client_id,
+        bal.currency,
+        SUM(bal.endingEquity) AS mt4_equity
+    FROM fxbackoffice.stats_balances bal
+    WHERE bal.userId IN ({client_placeholders})
+      AND bal.date = %s
+      AND bal.loginsid NOT LIKE '2-%%'
+    GROUP BY bal.userId, bal.currency
+),
+All_Keys AS (
+    SELECT client_id, currency FROM Transaction_Stats
+    UNION
+    SELECT client_id, currency FROM Balance_Snapshot
+)
+SELECT
+    k.client_id AS ib_id,
+    k.currency,
+    COALESCE(t.today_deposit, 0) AS today_deposit,
+    COALESCE(t.today_withdrawal, 0) AS today_withdrawal,
+    COALESCE(t.total_deposit, 0) AS total_deposit,
+    COALESCE(t.total_withdrawal, 0) AS total_withdrawal,
+    COALESCE(b.mt4_equity, 0) AS mt4_equity,
+    0 AS ib_wallet_equity,
+    (COALESCE(t.total_deposit, 0) + COALESCE(t.total_withdrawal, 0))
+        - COALESCE(b.mt4_equity, 0) AS difference
+FROM All_Keys k
+LEFT JOIN Transaction_Stats t ON k.client_id = t.client_id AND k.currency = t.currency
+LEFT JOIN Balance_Snapshot b ON k.client_id = b.client_id AND k.currency = b.currency
+ORDER BY k.client_id, k.currency
+"""
 
-def query_financial_data(
-    settings: Settings,
-    target_date: Optional[date] = None,
-) -> tuple[str, List[dict]]:
-    """Query IB financial data from MySQL fxbackoffice.
 
-    Returns (date_str, records) where records include ib_name from the watchlist.
-    """
-    watchlist = get_watchlist()
-    if not watchlist:
-        return str(target_date or _yesterday_hkt()), []
+def _classify_ids(
+    cursor, all_ids: List[str],
+) -> tuple[List[str], List[str]]:
+    """Split watchlist IDs into IB IDs and plain client IDs."""
+    if not all_ids:
+        return [], []
+    placeholders = ", ".join(["%s"] * len(all_ids))
+    cursor.execute(
+        f"SELECT DISTINCT ibid FROM fxbackoffice.ib_tree_with_self "
+        f"WHERE ibid IN ({placeholders})",
+        tuple(all_ids),
+    )
+    ib_set = {str(r["ibid"]) for r in cursor.fetchall()}
+    ib_ids = [i for i in all_ids if i in ib_set]
+    client_ids = [i for i in all_ids if i not in ib_set]
+    return ib_ids, client_ids
 
-    ib_map: Dict[str, str] = {
-        w["ib_id"]: w["ib_name"] or w["ib_id"] for w in watchlist
-    }
-    ib_ids = list(ib_map.keys())
 
-    if target_date is None:
-        target_date = _yesterday_hkt()
-
-    date_str = str(target_date)
-
-    # Build parameterised query: IB IDs use %s placeholders
-    placeholders = ", ".join(["%s"] * len(ib_ids))
-    query = _FINANCIAL_QUERY.format(ib_placeholders=placeholders)
-    # Parameters: ib_ids... + target_date × 3 (today_deposit, today_withdrawal, balance)
-    params = tuple(ib_ids) + (date_str, date_str, date_str)
-
-    conn = _connect_fxbackoffice(settings)
-    try:
-        with conn.cursor() as cursor:
-            logger.info(f"IB Financial query for date={date_str}, ibs={ib_ids}")
-            cursor.execute(query, params)
-            rows = cursor.fetchall()
-    finally:
-        conn.close()
-
-    # Enrich with ib_name from watchlist
+def _enrich_rows(
+    rows: List[dict], name_map: Dict[str, str],
+) -> List[dict]:
+    """Convert numeric types and attach ib_name from watchlist."""
     records = []
     for row in rows:
-        # MySQL returns ib_id as int; convert to str for Pydantic schema
         row["ib_id"] = str(row["ib_id"])
-        row["ib_name"] = ib_map.get(row["ib_id"], row["ib_id"])
+        row["ib_name"] = name_map.get(row["ib_id"], row["ib_id"])
         for key in ("today_deposit", "today_withdrawal", "total_deposit",
                      "total_withdrawal", "mt4_equity", "ib_wallet_equity", "difference"):
             if key in row and row[key] is not None:
                 row[key] = float(row[key])
         records.append(row)
+    return records
+
+
+def query_financial_data(
+    settings: Settings,
+    target_date: Optional[date] = None,
+) -> tuple[str, List[dict]]:
+    """Query financial data for all active watchlist IDs.
+
+    Automatically detects which IDs are IBs (expand downstream via ib_tree)
+    and which are plain clients (query their own data directly).
+    """
+    watchlist = get_watchlist()
+    if not watchlist:
+        return str(target_date or _yesterday_hkt()), []
+
+    name_map: Dict[str, str] = {
+        w["ib_id"]: w["ib_name"] or w["ib_id"] for w in watchlist
+    }
+    all_ids = list(name_map.keys())
+
+    if target_date is None:
+        target_date = _yesterday_hkt()
+    date_str = str(target_date)
+
+    conn = _connect_fxbackoffice(settings)
+    try:
+        with conn.cursor() as cursor:
+            ib_ids, client_ids = _classify_ids(cursor, all_ids)
+            logger.info(
+                "IB Financial query date=%s, ibs=%s, clients=%s",
+                date_str, ib_ids, client_ids,
+            )
+
+            records: List[dict] = []
+
+            # Query IB data (with downstream expansion)
+            if ib_ids:
+                ph = ", ".join(["%s"] * len(ib_ids))
+                query = _IB_FINANCIAL_QUERY.format(ib_placeholders=ph)
+                params = tuple(ib_ids) + (date_str, date_str, date_str)
+                cursor.execute(query, params)
+                records.extend(_enrich_rows(cursor.fetchall(), name_map))
+
+            # Query client data (own data only, no tree expansion)
+            if client_ids:
+                ph = ", ".join(["%s"] * len(client_ids))
+                query = _CLIENT_FINANCIAL_QUERY.format(client_placeholders=ph)
+                # Param order: date×2 (Trans SELECT) → client_ids (Trans WHERE)
+                #            → client_ids (Bal WHERE) → date (Bal WHERE)
+                params = (
+                    (date_str, date_str) + tuple(client_ids)
+                    + tuple(client_ids) + (date_str,)
+                )
+                cursor.execute(query, params)
+                records.extend(_enrich_rows(cursor.fetchall(), name_map))
+    finally:
+        conn.close()
 
     return date_str, records
 
