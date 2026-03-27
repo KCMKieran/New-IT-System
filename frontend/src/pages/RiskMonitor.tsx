@@ -38,13 +38,6 @@ interface Alert {
   details: Record<string, any>;
 }
 
-interface ScaleInResponse {
-  alerts: Alert[];
-  summary: { critical: number; high: number; watch: number; total_accounts_scanned: number };
-  scan_time_ms: number;
-  scanned_at: string;
-}
-
 interface FrequentOpenResponse {
   alerts: Alert[];
   summary: { alert_count: number; watch_count: number; total_accounts_scanned: number };
@@ -143,14 +136,17 @@ export default function RiskMonitor() {
       <Tabs value={activeTab} onValueChange={setActiveTab}>
         <TabsList>
           <TabsTrigger value="frequent-open">频繁开仓</TabsTrigger>
-          <TabsTrigger value="scale-in">持仓累积</TabsTrigger>
+          <TabsTrigger value="gap-trading">缺口交易</TabsTrigger>
         </TabsList>
 
         <TabsContent value="frequent-open">
           <FrequentOpenTab active={activeTab === "frequent-open"} />
         </TabsContent>
-        <TabsContent value="scale-in">
-          <ScaleInTab active={activeTab === "scale-in"} />
+        <TabsContent value="gap-trading">
+          <div className="flex flex-col items-center justify-center py-20 text-muted-foreground">
+            <p className="text-lg font-medium">缺口交易检测</p>
+            <p className="text-sm mt-1">开发中 — 检测休市前后的开平仓行为</p>
+          </div>
         </TabsContent>
       </Tabs>
 
@@ -497,261 +493,6 @@ function FrequentOpenTab({ active }: { active: boolean }) {
   );
 }
 
-// ── Scale-In Tab (existing rule) ──────────────────────────
-
-const SCALE_IN_SEVERITY_ORDER: Record<string, number> = { CRITICAL: 0, HIGH: 1, WATCH: 2 };
-const SCALE_IN_REFRESH_MS = 10 * 60 * 1000;
-
-function ScaleInTab({ active }: { active: boolean }) {
-  const { theme } = useTheme();
-  const isDarkMode = theme === "dark";
-  const gridRef = useRef<AgGridReact>(null);
-  const gridStyle = useGridThemeStyle(isDarkMode);
-
-  const [data, setData] = useState<ScaleInResponse | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [lastRefresh, setLastRefresh] = useState<string | null>(null);
-
-  const [serverFilter, setServerFilter] = useState("all");
-  const [severityFilter, setSeverityFilter] = useState("critical_high");
-  const [loginSearch, setLoginSearch] = useState("");
-
-  const fetchData = useCallback(async (signal?: AbortSignal) => {
-    setLoading(true);
-    try {
-      const res = await apiFetch("/api/v1/risk-monitor/scan", { signal });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const json: ScaleInResponse = await res.json();
-      setData(json);
-      setLastRefresh(new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }));
-    } catch (err) {
-      if (err instanceof DOMException && err.name === "AbortError") return;
-      console.error("Scale-in scan failed:", err);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (!active) return;
-    const controller = new AbortController();
-    fetchData(controller.signal);
-    const timer = setInterval(() => fetchData(), SCALE_IN_REFRESH_MS);
-    return () => {
-      controller.abort();
-      clearInterval(timer);
-    };
-  }, [fetchData, active]);
-
-  const filteredAlerts = (data?.alerts ?? []).filter((a) => {
-    if (serverFilter !== "all" && a.server !== serverFilter) return false;
-    if (severityFilter === "critical_high" && a.severity === "WATCH") return false;
-    if (loginSearch && !String(a.login).includes(loginSearch)) return false;
-    return true;
-  });
-
-  const columnDefs: ColDef<Alert>[] = [
-    {
-      headerName: "等级",
-      field: "severity",
-      width: 110,
-      pinned: "left",
-      sort: "asc",
-      comparator: (a: string, b: string) => (SCALE_IN_SEVERITY_ORDER[a] ?? 99) - (SCALE_IN_SEVERITY_ORDER[b] ?? 99),
-      cellRenderer: SeverityCell,
-    },
-    { headerName: "服务器", field: "server", width: 110 },
-    { headerName: "账户", field: "login", width: 110, cellRenderer: LoginCell },
-    { headerName: "品种", width: 120, valueGetter: (p) => p.data?.details.symbol },
-    {
-      headerName: "方向",
-      width: 80,
-      valueGetter: (p) => p.data?.details.direction,
-      cellStyle: (p) => ({ color: p.value === "Buy" ? "#2563eb" : "#dc2626", fontWeight: 600 }),
-    },
-    {
-      headerName: "持仓数",
-      width: 90,
-      cellClass: "ag-right-aligned-cell",
-      filter: "agNumberColumnFilter",
-      valueGetter: (p) => p.data?.details.open_count,
-    },
-    {
-      headerName: "总手数",
-      width: 100,
-      cellClass: "ag-right-aligned-cell",
-      filter: "agNumberColumnFilter",
-      valueGetter: (p) => p.data?.details.total_lots,
-      valueFormatter: (p) => p.value?.toFixed(2) ?? "",
-    },
-    {
-      headerName: "余额",
-      width: 120,
-      cellClass: "ag-right-aligned-cell",
-      filter: "agNumberColumnFilter",
-      valueGetter: (p) => p.data?.details.balance,
-      cellRenderer: (p: { value: number | null }) => {
-        const v = p.value;
-        if (v === null || v === undefined) return "—";
-        return (
-          <span className={v >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-red-600 dark:text-red-400"}>
-            {fmtCurrency(v)}
-          </span>
-        );
-      },
-    },
-    {
-      headerName: "单手资金比",
-      width: 130,
-      cellClass: "ag-right-aligned-cell",
-      filter: "agNumberColumnFilter",
-      valueGetter: (p) => p.data?.details.capital_per_lot,
-      valueFormatter: (p) => fmtCurrency(p.value),
-      cellStyle: { backgroundColor: "rgba(0,0,0,0.035)" },
-    },
-    {
-      headerName: "浮动盈亏",
-      width: 120,
-      cellClass: "ag-right-aligned-cell",
-      filter: "agNumberColumnFilter",
-      valueGetter: (p) => p.data?.details.floating_pnl,
-      cellRenderer: (p: { value: number | null }) => {
-        const v = p.value;
-        if (v === null || v === undefined) return "—";
-        if (v === 0) return <span className="text-muted-foreground">{fmtCurrency(v)}</span>;
-        return (
-          <span className={cn("font-semibold", v > 0 ? "text-red-600 dark:text-red-400" : "text-emerald-600 dark:text-emerald-400")}>
-            {fmtCurrency(v)}
-          </span>
-        );
-      },
-    },
-    {
-      headerName: "杠杆",
-      width: 80,
-      cellClass: "ag-right-aligned-cell",
-      filter: "agNumberColumnFilter",
-      valueGetter: (p) => p.data?.details.leverage,
-      valueFormatter: (p) => (p.value ? `1:${p.value}` : "—"),
-    },
-    {
-      headerName: "首笔时间",
-      width: 145,
-      valueGetter: (p) => p.data?.details.first_open,
-      valueFormatter: (p) => fmtTime(p.value),
-    },
-    {
-      headerName: "末笔时间",
-      width: 145,
-      valueGetter: (p) => p.data?.details.last_open,
-      valueFormatter: (p) => fmtTime(p.value),
-    },
-    { headerName: "账户组", width: 140, valueGetter: (p) => p.data?.details.group },
-  ];
-
-  const getRowStyle = (params: { data?: Alert }) => {
-    const sev = params.data?.severity;
-    if (sev === "CRITICAL")
-      return { background: isDarkMode ? "rgba(239,68,68,0.10)" : "rgba(239,68,68,0.06)" };
-    if (sev === "HIGH")
-      return { background: isDarkMode ? "rgba(249,115,22,0.10)" : "rgba(249,115,22,0.06)" };
-    if (sev === "WATCH")
-      return { background: isDarkMode ? "rgba(234,179,8,0.08)" : "rgba(234,179,8,0.04)" };
-    return undefined;
-  };
-
-  const summary = data?.summary;
-
-  return (
-    <div className="flex flex-col gap-4">
-      {/* Header */}
-      <div className="flex items-center justify-between flex-wrap gap-2">
-        <div>
-          <p className="text-sm text-muted-foreground">
-            扫描所有未平仓持仓，找出同账户 + 同品种 + 同方向持有 ≥3 笔的客户，按单手资金比分级
-          </p>
-          <p className="text-sm text-muted-foreground">
-            {lastRefresh ? `上次扫描: ${lastRefresh}` : "加载中..."}
-            {data && ` · 耗时 ${data.scan_time_ms}ms · 每 10 分钟自动刷新`}
-          </p>
-        </div>
-        <Button variant="outline" size="sm" onClick={() => fetchData()} disabled={loading}>
-          <RefreshCw className={cn("h-4 w-4 mr-1.5", loading && "animate-spin")} />
-          {loading ? "扫描中..." : "手动刷新"}
-        </Button>
-      </div>
-
-      {/* Summary cards */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-        <SummaryCard label="CRITICAL" value={summary?.critical ?? 0} dotColor="bg-red-500" textColor="text-red-600 dark:text-red-400" />
-        <SummaryCard label="HIGH" value={summary?.high ?? 0} dotColor="bg-orange-500" textColor="text-orange-600 dark:text-orange-400" />
-        <SummaryCard label="WATCH" value={summary?.watch ?? 0} dotColor="bg-yellow-500" textColor="text-yellow-600 dark:text-yellow-400" />
-        <SummaryCard label="扫描账户数" value={summary?.total_accounts_scanned ?? 0} dotColor="bg-blue-500" textColor="text-blue-600 dark:text-blue-400" />
-      </div>
-
-      {/* Filters */}
-      <div className="flex items-center gap-3 flex-wrap">
-        <Select value={serverFilter} onValueChange={setServerFilter}>
-          <SelectTrigger className="w-[150px]">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">全部服务器</SelectItem>
-            <SelectItem value="MT4_Live">MT4 Live</SelectItem>
-            <SelectItem value="MT4_Live2">MT4 Live2</SelectItem>
-            <SelectItem value="MT5">MT5</SelectItem>
-          </SelectContent>
-        </Select>
-
-        <Select value={severityFilter} onValueChange={setSeverityFilter}>
-          <SelectTrigger className="w-[170px]">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="critical_high">CRITICAL + HIGH</SelectItem>
-            <SelectItem value="all">全部等级</SelectItem>
-          </SelectContent>
-        </Select>
-
-        <div className="relative w-[180px]">
-          <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
-          <Input
-            placeholder="搜索账户号"
-            value={loginSearch}
-            onChange={(e) => setLoginSearch(e.target.value)}
-            className="pl-8"
-          />
-        </div>
-
-        <span className="text-sm text-muted-foreground ml-auto">
-          显示 {filteredAlerts.length} 条告警
-        </span>
-      </div>
-
-      {/* AG-Grid */}
-      <div
-        className={cn(
-          "risk-monitor-theme h-[calc(100vh-420px)] min-h-[400px] w-full",
-          isDarkMode ? "ag-theme-quartz-dark" : "ag-theme-quartz",
-        )}
-        style={gridStyle}
-      >
-        <AgGridReact<Alert>
-          ref={gridRef}
-          rowData={filteredAlerts}
-          columnDefs={columnDefs}
-          defaultColDef={defaultColDef}
-          gridOptions={{ theme: "legacy" }}
-          getRowStyle={getRowStyle}
-          animateRows={false}
-          enableCellTextSelection
-          suppressCellFocus
-          getRowId={(p) => `si-${p.data.server}-${p.data.login}-${p.data.details.symbol}-${p.data.details.direction}`}
-        />
-      </div>
-    </div>
-  );
-}
 
 // ── Sub-component ─────────────────────────────────────────
 

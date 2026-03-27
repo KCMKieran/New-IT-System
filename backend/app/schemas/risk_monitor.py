@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from pydantic import BaseModel
 
@@ -16,22 +15,6 @@ class Alert(BaseModel):
     login: int
     severity: str
     details: Dict[str, Any]
-
-
-# ── Scale-In scan ──────────────────────────────────────────
-
-class ScanSummary(BaseModel):
-    critical: int = 0
-    high: int = 0
-    watch: int = 0
-    total_accounts_scanned: int = 0
-
-
-class ScanResponse(BaseModel):
-    alerts: List[Alert]
-    summary: ScanSummary
-    scan_time_ms: int
-    scanned_at: str
 
 
 # ── Frequent Opening scan ─────────────────────────────────

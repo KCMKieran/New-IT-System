@@ -3,6 +3,8 @@
 > 可扩展的实时风控监控平台，覆盖 MT4 + MT5 全部交易服务器。
 >
 > **Agent Skill**: `.cursor/skills/risk-monitor/SKILL.md` (精简版，写代码时优先读 Skill)
+>
+> **变更记录**: 2026-03-26 移除 Scale-In (持仓累积) 规则的前后端代码，第二个 Tab 改为「缺口交易」(开发中)。原 Scale-In 的设计文档保留在本文件中供参考。
 
 ## 1. 系统概览
 
@@ -276,7 +278,8 @@ ORDER BY d.Login, d.Time;
 ```python
 RULES: list[RuleFunc] = [
     rule_frequent_open_detect, # ✅ 已实现: 频繁开仓检测
-    rule_scale_in_detect,      # ✅ 已实现: 持仓累积检测
+    # rule_scale_in_detect,    # ❌ 已移除 (2026-03): 持仓累积检测
+    # rule_gap_trading_detect, # 🚧 开发中: 缺口交易检测
     rule_batch_close_detect,   # 设计中: 同秒批量平仓检测
     # rule_xxx,                # 未来: 新增规则只需在此注册
 ]
@@ -356,7 +359,9 @@ GET /api/v1/risk-monitor/frequent-open
 }
 ```
 
-### 当前规则: 持仓累积 + 资金比 (Scale-In Detection)
+### ~~当前规则~~ 已移除 (2026-03): 持仓累积 + 资金比 (Scale-In Detection)
+
+> **注意**: Scale-In 规则的前后端代码已于 2026-03-26 删除。以下设计文档保留供参考。
 
 **触发条件**: 同一账户 + 同一品种 + 同一方向，持有 ≥ 3 笔未平仓单。
 
@@ -556,9 +561,13 @@ conn = pymysql.connect(
 
 | 接口 | 方法 | 说明 |
 |------|------|------|
-| `/api/v1/risk-monitor/scan` | GET | 全量扫描 (MT4+MT5 持仓+近期平仓) |
+| `/api/v1/risk-monitor/frequent-open` | GET | 频繁开仓检测 |
+| ~~`/api/v1/risk-monitor/scan`~~ | ~~GET~~ | ❌ 已移除 (2026-03) |
 
-**查询参数**:
+**频繁开仓查询参数**:
+- `check_interval` (默认 8): 检查窗口（分钟）
+- `min_order_count` (默认 3): 最少开仓笔数
+- `equity_per_lot_threshold` (默认 2000): 每手净值阈值（USD）
 - `login` (可选): 过滤特定账户
 - `server` (可选): 过滤特定服务器 (`mt4_live`, `mt4_live2`, `mt5`)
 
@@ -617,7 +626,7 @@ if not redis.exists(key):
 
 - 侧边栏分组: Risk Control，页面标题: 交易实时监控
 - 纯中文 UI，不需要 i18n，等级标签用英文
-- **Tab 切换**: 频繁开仓 (默认) / 持仓累积
+- **Tab 切换**: 频繁开仓 (默认) / 缺口交易 (开发中，当前为占位)
 - 每个 Tab 独立的 API、刷新间隔、筛选器、表格列
 - A-Book 客户不做过滤，在 UI 中显示 GROUP 列即可
 
@@ -653,11 +662,12 @@ if not redis.exists(key):
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
-#### Tab 2: 持仓累积
+#### Tab 2: 缺口交易 (开发中)
 
-原有 Scale-In 逻辑不变 — CRITICAL/HIGH/WATCH 卡片 + 14 列表格 + 10 分钟自动刷新。
-
-> **暂不实现**: Dashboard SuspiciousClients 组件 — 后续按需接入。
+> **原 Tab 2 "持仓累积" 已于 2026-03-26 移除**，替换为「缺口交易」检测。
+> 当前为占位 UI，显示"开发中 — 检测休市前后的开平仓行为"。
+>
+> 缺口交易检测目标: 识别客户在休市前（如周五收盘前）开仓压注，利用周一开盘缺口获利的行为。
 
 ---
 
@@ -890,10 +900,10 @@ if not redis.exists(key):
 
 | 阶段 | 内容 | 前置条件 |
 |------|------|---------|
+| **缺口交易规则** | 检测休市前开仓、开市后平仓利用缺口获利 | Tab 占位已创建 |
 | **后端驱动定时扫描** | 上述架构升级 | 首期 demo 观察完成，确认规则有效 |
-| UI 重设计 | 上述 1-9 项 | 首期 demo 观察完成 |
-| 批量平仓规则 | 同秒 ≥3 笔平仓检测，20min 已平仓数据源 | UI 重设计完成 |
-| 爆发开仓规则 | 1-5s 内 3+ 笔 ≥5 手 | UI Tab 框架就绪 |
+| 批量平仓规则 | 同秒 ≥3 笔平仓检测，20min 已平仓数据源 | Tab 框架就绪 |
+| 爆发开仓规则 | 1-5s 内 3+ 笔 ≥5 手 | Tab 框架就绪 |
 | Email 告警 | Redis 去重 + send_email()，收件人: kieran.xiang@kohleservices.com | **后端驱动扫描完成** |
 | Dashboard 组件 | SuspiciousClients.tsx 卡片 | 页面稳定 |
 

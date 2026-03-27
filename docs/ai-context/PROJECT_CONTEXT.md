@@ -322,17 +322,18 @@ New-IT-System/
 - `backend/app/core/scheduler.py` (APScheduler)
 
 ### 4.8 Trade Real-time Monitor (`RiskMonitor.tsx`)
-**Purpose**: Scan all MT servers every 10 minutes for clients with high leverage / capital utilization. B-Book perspective: flags clients whose positions pose risk to company P&L.
+**Purpose**: Scan all MT servers for clients with high leverage / capital utilization. B-Book perspective: flags clients whose positions pose risk to company P&L.
 
 **Key Features**:
-- Cross-server open position scanning (MT4 Live + MT4 Live2 + MT5)
-- Scale-In detection: ≥3 orders same account + symbol + direction → alert
-- Severity classification by capital_per_lot (CRITICAL / HIGH / WATCH)
-- 10-minute auto-refresh + manual refresh
+- Tab-based UI: 频繁开仓 (active) / 缺口交易 (placeholder, 开发中)
+- Frequent Opening detection: N 分钟内频繁开仓的账户，按 equity_per_lot 分级 (ALERT / WATCH)
+- Cross-server scanning (MT4 Live + MT4 Live2 + MT5)
+- Tunable params: check_interval, min_order_count, equity_per_lot_threshold
+- Auto-refresh (interval = check_interval) + manual refresh
 - Client-side AG-Grid with severity row colors, P&L color inversion (B-Book view)
-- Server / severity / account filters
+- Server / account filters
 
-**API**: `GET /api/v1/risk-monitor/scan`
+**API**: `GET /api/v1/risk-monitor/frequent-open`
 
 **Data sources**: MySQL Slave (`mt4_live`, `mt4_live2`, `mt5_live`) — same DB_HOST config
 

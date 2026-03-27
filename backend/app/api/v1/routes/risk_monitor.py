@@ -2,8 +2,7 @@
 Routes for Trade Real-time Monitor (交易实时监控).
 
 Endpoints:
-  GET /scan           — Scale-In detection (existing)
-  GET /frequent-open  — Frequent Opening detection (new)
+  GET /frequent-open  — Frequent Opening detection
 """
 
 from __future__ import annotations
@@ -19,8 +18,6 @@ from ....schemas.risk_monitor import (
     FrequentOpenParams,
     FrequentOpenResponse,
     FrequentOpenSummary,
-    ScanResponse,
-    ScanSummary,
 )
 from ....services import risk_monitor_service as svc
 
@@ -37,30 +34,6 @@ def _validate_server(server: Optional[str]) -> None:
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid server. Must be one of: {', '.join(_VALID_SERVERS)}",
         )
-
-
-@router.get("/scan", response_model=ScanResponse)
-async def scan(
-    login: Optional[int] = None,
-    server: Optional[str] = None,
-    settings: Settings = Depends(get_settings),
-):
-    """Scale-In detection: scan all open positions for high-leverage accumulation."""
-    _validate_server(server)
-    try:
-        result = svc.scan(settings, login=login, server=server)
-        return ScanResponse(
-            alerts=[Alert(**a) for a in result["alerts"]],
-            summary=ScanSummary(**result["summary"]),
-            scan_time_ms=result["scan_time_ms"],
-            scanned_at=result["scanned_at"],
-        )
-    except Exception as exc:
-        logger.error("Risk monitor scan failed: %s", exc, exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
-        ) from exc
 
 
 @router.get("/frequent-open", response_model=FrequentOpenResponse)
