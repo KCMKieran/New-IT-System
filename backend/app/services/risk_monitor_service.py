@@ -3,16 +3,16 @@ Service layer for Trade Real-time Monitor (交易实时监控).
 
 Handles:
 - Data collection from MT4 Live / MT4 Live2 / MT5 (MySQL Slave)
-- Normalization into unified position format
-- Rule engine execution (Frequent Opening detection)
-- Alert generation with severity classification
+- Normalization into unified open-order format
+- Burst Open Detection rule engine (sliding window within seconds)
+- Account info enrichment (equity, total open lots) for display
 
 Architecture:
   All 3 databases sit on the same MySQL Slave; one pymysql connection
   does cross-database queries.
 
 Rules:
-  1. Frequent Open: scan_frequent_open() → collect recent N-min opens → rule_frequent_open_detect()
+  1. Burst Open: scan_burst_open() → collect recent opens → rule_burst_open_detect()
 """
 
 from __future__ import annotations
@@ -46,14 +46,18 @@ def _get_connection(settings: Settings):
     )
 
 
-
-
-# ── Frequent Opening: Data Collectors ─────────────────────
+# ── Data Collectors ────────────────────────────────────────
 
 # MT5 Timestamp is Windows FILETIME (100-nanosecond intervals since 1601-01-01).
-# Conversion: filetime = (unix_seconds + 11644473600) * 10_000_000
 _FILETIME_EPOCH_OFFSET = 11644473600
 _FILETIME_TICKS_PER_SEC = 10_000_000
+
+# Which servers to query
+_SERVERS = [
+    {"key": "mt4_live",  "type": "mt4", "db": "mt4_live",  "label": "MT4_Live"},
+    {"key": "mt4_live2", "type": "mt4", "db": "mt4_live2", "label": "MT4_Live2"},
+    {"key": "mt5",       "type": "mt5", "db": "mt5_live",  "label": "MT5"},
+]
 
 
 def _query_mt4_recent_opens(
@@ -61,12 +65,12 @@ def _query_mt4_recent_opens(
     *,
     db_name: str,
     server_label: str,
-    check_interval: int,
+    check_interval_sec: int,
     login: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
-    """Fetch orders opened in the last N minutes from an MT4 server.
+    """Fetch orders opened in the last N seconds from an MT4 server.
 
-    Does NOT filter by CLOSE_TIME — captures both still-open and already-closed orders.
+    Does NOT filter by CLOSE_TIME — captures both still-open and already-closed.
     Uses INDEX_OPENTIME for fast range scan.
     """
     sql = f"""
@@ -79,20 +83,18 @@ def _query_mt4_recent_opens(
                  ELSE 'Sell' END                        AS direction,
             t.VOLUME / 100                              AS lots,
             t.OPEN_TIME                                 AS open_time,
-            t.CLOSE_TIME                                AS close_time,
-            t.PROFIT + t.SWAPS + t.COMMISSION           AS profit,
             u.EQUITY                                    AS equity,
             u.BALANCE                                   AS balance,
             u.LEVERAGE                                  AS leverage
         FROM {db_name}.mt4_trades t
         INNER JOIN {db_name}.mt4_users u ON t.LOGIN = u.LOGIN
-        WHERE t.OPEN_TIME >= DATE_SUB(NOW(), INTERVAL %s MINUTE)
+        WHERE t.OPEN_TIME >= DATE_SUB(NOW(), INTERVAL %s SECOND)
           AND t.CMD IN (0, 1)
           AND t.LOGIN NOT LIKE '7%%'
           AND u.`GROUP` NOT LIKE '%%demo%%'
           AND u.`GROUP` NOT LIKE '%%test%%'
     """
-    params: list = [check_interval]
+    params: list = [check_interval_sec]
     if login is not None:
         sql += " AND t.LOGIN = %s"
         params.append(login)
@@ -107,14 +109,13 @@ def _query_mt4_recent_opens(
 def _query_mt5_recent_opens(
     conn,
     *,
-    check_interval: int,
+    check_interval_sec: int,
     login: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
-    """Fetch opening deals from the last N minutes in MT5.
+    """Fetch opening deals from the last N seconds in MT5.
 
     Uses mt5_deals with Entry=0 (open) and the Timestamp index.
-    Does NOT join mt5_users here — account info is fetched separately
-    for the small set of matched accounts (see _get_mt5_account_info).
+    Account info is fetched separately for matched accounts only.
     """
     sql = """
         SELECT
@@ -127,12 +128,12 @@ def _query_mt5_recent_opens(
             d.Time                                      AS open_time,
             d.PositionID                                AS position_id
         FROM mt5_live.mt5_deals d
-        WHERE d.Timestamp >= (UNIX_TIMESTAMP(DATE_SUB(NOW(), INTERVAL %s MINUTE))
+        WHERE d.Timestamp >= (UNIX_TIMESTAMP(DATE_SUB(NOW(), INTERVAL %s SECOND))
                               + {epoch}) * {ticks}
           AND d.Entry = 0
           AND d.Action IN (0, 1)
     """.format(epoch=_FILETIME_EPOCH_OFFSET, ticks=_FILETIME_TICKS_PER_SEC)
-    params: list = [check_interval]
+    params: list = [check_interval_sec]
     if login is not None:
         sql += " AND d.Login = %s"
         params.append(login)
@@ -147,18 +148,16 @@ def _query_mt5_recent_opens(
 def _get_mt5_account_info(
     conn, logins: List[int]
 ) -> Dict[int, Dict[str, Any]]:
-    """Fetch equity, balance, leverage, group and open position details for MT5 accounts.
+    """Fetch equity, balance, leverage, group and total open lots for MT5 accounts.
 
     Equity = Balance + SUM(open positions' Profit + Storage).
-    Also returns per-position floating PnL for status determination.
-    Only called for the small set of accounts that triggered the rule.
+    Total open lots = SUM(all open positions' Volume / 10000).
     """
     if not logins:
         return {}
 
     placeholders = ",".join(["%s"] * len(logins))
 
-    # Account-level info + equity
     sql = f"""
         SELECT
             u.Login                                     AS login,
@@ -166,10 +165,12 @@ def _get_mt5_account_info(
             u.Balance                                   AS balance,
             u.Leverage                                  AS leverage,
             u.Balance + COALESCE(p.floating_pnl, 0)     AS equity,
-            COALESCE(p.floating_pnl, 0)                 AS floating_pnl
+            COALESCE(p.total_lots, 0)                   AS total_open_lots
         FROM mt5_live.mt5_users u
         LEFT JOIN (
-            SELECT Login, SUM(Profit + Storage) AS floating_pnl
+            SELECT Login,
+                   SUM(Profit + Storage) AS floating_pnl,
+                   SUM(Volume / 10000)   AS total_lots
             FROM mt5_live.mt5_positions
             WHERE Login IN ({placeholders})
             GROUP BY Login
@@ -182,176 +183,160 @@ def _get_mt5_account_info(
         cur.execute(sql, params)
         rows = cur.fetchall()
 
-    result = {int(r["login"]): r for r in rows}
+    return {int(r["login"]): dict(r) for r in rows}
 
-    # Get open position IDs with their floating PnL (for status determination)
-    pos_sql = f"""
-        SELECT Position AS position_id, Login AS login,
-               Profit + Storage AS floating_pnl
-        FROM mt5_live.mt5_positions
-        WHERE Login IN ({placeholders})
+
+def _get_mt4_account_total_lots(
+    conn, db_name: str, logins: List[int]
+) -> Dict[int, float]:
+    """Get total open lots across ALL positions for MT4 accounts."""
+    if not logins:
+        return {}
+
+    placeholders = ",".join(["%s"] * len(logins))
+    sql = f"""
+        SELECT t.LOGIN AS login, SUM(t.VOLUME / 100) AS total_lots
+        FROM {db_name}.mt4_trades t
+        WHERE t.CLOSE_TIME = '1970-01-01 00:00:00'
+          AND t.CMD IN (0, 1)
+          AND t.LOGIN IN ({placeholders})
+        GROUP BY t.LOGIN
     """
     with conn.cursor() as cur:
-        cur.execute(pos_sql, list(logins))
-        pos_rows = cur.fetchall()
-
-    # Build {login: {position_id: floating_pnl}} mapping
-    for login_id in result:
-        result[login_id]["open_positions"] = {}
-    for pr in pos_rows:
-        lid = int(pr["login"])
-        if lid in result:
-            result[lid]["open_positions"][int(pr["position_id"])] = float(pr["floating_pnl"])
-
-    return result
+        cur.execute(sql, list(logins))
+        rows = cur.fetchall()
+    return {int(r["login"]): float(r["total_lots"]) for r in rows}
 
 
-# ── Frequent Opening: Rule Engine ─────────────────────────
+# ── Burst Open: Rule Engine (sliding window) ──────────────
 
-def _compute_position_status(
-    orders: List[Dict[str, Any]],
-    server: str,
-    acct: Dict[str, Any],
-) -> tuple:
-    """Determine aggregate position status and floating PnL for an account's orders.
-
-    Returns (status_label, floating_pnl) where status_label is one of:
-      "未平仓" / "已平仓" / "部分平仓"
-    """
-    if server.startswith("MT4"):
-        # MT4: close_time == '1970-01-01 00:00:00' means still open
-        still_open = []
-        for o in orders:
-            ct = str(o.get("close_time", ""))
-            if ct.startswith("1970"):
-                still_open.append(o)
-
-        open_count = len(still_open)
-        floating_pnl = sum(float(o.get("profit") or 0) for o in still_open)
-    else:
-        # MT5: check if PositionID exists in mt5_positions via acct["open_positions"]
-        open_positions = acct.get("open_positions", {})
-        open_count = 0
-        floating_pnl = 0.0
-        for o in orders:
-            pid = int(o.get("position_id") or 0)
-            if pid in open_positions:
-                open_count += 1
-                floating_pnl += open_positions[pid]
-
-    if open_count == len(orders):
-        return "未平仓", floating_pnl
-    if open_count == 0:
-        return "已平仓", None
-    return "部分平仓", floating_pnl
-
-
-def rule_frequent_open_detect(
+def rule_burst_open_detect(
     recent_opens: List[Dict[str, Any]],
-    account_info: Dict[int, Dict[str, Any]],
-    min_order_count: int,
-    equity_per_lot_threshold: float,
+    rules: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
-    """Detect accounts that opened >= min_order_count orders in the time window.
+    """Detect burst-open events using a sliding window per (server, login, symbol).
 
-    Groups by (server, login) regardless of symbol or direction.
-    Severity: ALERT if equity_per_lot < threshold, otherwise WATCH.
+    For each rule, scans for clusters of orders within burst_window_sec
+    where every order has lots >= min_lots_per_order and the cluster
+    contains >= min_order_count orders.
+
+    Returns list of matched bursts, each tagged with the rule_id.
     """
     alerts: List[Dict[str, Any]] = []
 
-    key_fn = lambda p: (p["server"], p["login"])
+    key_fn = lambda p: (p["server"], p["login"], p["symbol"])
     sorted_opens = sorted(recent_opens, key=key_fn)
 
     for key, group_iter in groupby(sorted_opens, key=key_fn):
         orders = list(group_iter)
-        if len(orders) < min_order_count:
-            continue
+        server, login, symbol = key
 
-        server, login = key
-        total_lots = sum(float(o.get("lots") or 0) for o in orders)
-        symbols = sorted({o.get("symbol", "") for o in orders})
+        # Sort by open_time within the group
+        orders.sort(key=lambda o: o["open_time"])
 
-        acct = account_info.get(int(login), {})
-        if server.startswith("MT4"):
-            equity = orders[0].get("equity")
-            balance = orders[0].get("balance")
-            leverage = orders[0].get("leverage")
-            group = orders[0].get("group", "")
-        else:
-            equity = acct.get("equity")
-            balance = acct.get("balance")
-            leverage = acct.get("leverage")
-            group = acct.get("group", "")
+        for rule_idx, rule in enumerate(rules):
+            burst_sec = rule["burst_window_sec"]
+            min_count = rule["min_order_count"]
+            min_lots = rule["min_lots_per_order"]
+            rule_id = rule.get("id", rule_idx + 1)
 
-        # Skip demo/test accounts (MT5 deals query has no group filter for performance)
-        group_lower = group.lower()
-        if "demo" in group_lower or "test" in group_lower:
-            continue
+            matched_burst = _find_burst(orders, burst_sec, min_count, min_lots)
+            if matched_burst:
+                alerts.append({
+                    "rule_id": rule_id,
+                    "rule_label": f"Rule {rule_idx + 1}",
+                    "server": server,
+                    "login": login,
+                    "symbol": symbol,
+                    "order_count": len(matched_burst),
+                    "total_lots": round(
+                        sum(float(o.get("lots") or 0) for o in matched_burst), 2
+                    ),
+                    "orders": [
+                        {
+                            "direction": o.get("direction", ""),
+                            "lots": float(o.get("lots") or 0),
+                            "open_time": str(o.get("open_time", "")),
+                            "symbol": o.get("symbol", ""),
+                        }
+                        for o in matched_burst
+                    ],
+                    "first_open": str(matched_burst[0]["open_time"]),
+                    "last_open": str(matched_burst[-1]["open_time"]),
+                    # Account info filled in later by scan_burst_open
+                    "equity": None,
+                    "balance": None,
+                    "equity_per_lot": None,
+                    "total_open_lots": None,
+                    "leverage": None,
+                    "group": None,
+                })
 
-        equity_per_lot = None
-        if equity is not None and total_lots > 0:
-            equity_per_lot = float(equity) / total_lots
-
-        severity = "ALERT" if (
-            equity_per_lot is not None and equity_per_lot < equity_per_lot_threshold
-        ) else "WATCH"
-
-        open_times = [o["open_time"] for o in orders if o.get("open_time")]
-
-        # Determine position status and floating PnL
-        position_status, floating_pnl = _compute_position_status(
-            orders, server, acct,
-        )
-
-        alerts.append({
-            "rule": "FREQUENT_OPEN",
-            "server": server,
-            "login": login,
-            "severity": severity,
-            "details": {
-                "order_count": len(orders),
-                "total_lots": round(total_lots, 2),
-                "symbols": ",".join(symbols),
-                "equity": round(float(equity), 2) if equity is not None else None,
-                "balance": round(float(balance), 2) if balance is not None else None,
-                "equity_per_lot": round(equity_per_lot, 2) if equity_per_lot is not None else None,
-                "leverage": int(leverage) if leverage is not None else None,
-                "group": group,
-                "first_open": str(min(open_times)) if open_times else None,
-                "last_open": str(max(open_times)) if open_times else None,
-                "position_status": position_status,
-                "floating_pnl": round(floating_pnl, 2) if floating_pnl is not None else None,
-            },
-        })
-
-    # ALERT first, then WATCH
-    severity_order = {"ALERT": 0, "WATCH": 1}
-    alerts.sort(key=lambda a: (severity_order.get(a["severity"], 99),
-                               a["details"].get("equity_per_lot") or float("inf")))
     return alerts
+
+
+def _find_burst(
+    orders: List[Dict[str, Any]],
+    burst_window_sec: int,
+    min_order_count: int,
+    min_lots_per_order: float,
+) -> List[Dict[str, Any]] | None:
+    """Sliding window: find the largest burst cluster that satisfies the rule.
+
+    Returns the matched orders or None if no burst found.
+    """
+    n = len(orders)
+    if n < min_order_count:
+        return None
+
+    best_burst: List[Dict[str, Any]] | None = None
+
+    for i in range(n):
+        t_start = orders[i]["open_time"]
+        j = i
+        while j < n and _time_diff_sec(t_start, orders[j]["open_time"]) <= burst_window_sec:
+            j += 1
+        window = orders[i:j]
+
+        # All orders in the window must meet min_lots_per_order
+        qualifying = [o for o in window if float(o.get("lots") or 0) >= min_lots_per_order]
+        if len(qualifying) >= min_order_count:
+            if best_burst is None or len(qualifying) > len(best_burst):
+                best_burst = qualifying
+
+    return best_burst
+
+
+def _time_diff_sec(t1: Any, t2: Any) -> float:
+    """Compute seconds between two time values (datetime or str)."""
+    if isinstance(t1, str):
+        t1 = datetime.fromisoformat(t1)
+    if isinstance(t2, str):
+        t2 = datetime.fromisoformat(t2)
+    return abs((t2 - t1).total_seconds())
 
 
 # ── Main Entry Point ───────────────────────────────────────
 
-# Which servers to query and their config
-_SERVERS = [
-    {"key": "mt4_live",  "type": "mt4", "db": "mt4_live",  "label": "MT4_Live"},
-    {"key": "mt4_live2", "type": "mt4", "db": "mt4_live2", "label": "MT4_Live2"},
-    {"key": "mt5",       "type": "mt5", "db": "mt5_live",  "label": "MT5"},
-]
+# Fixed buffer (30 seconds) added to check_interval to catch bursts at scan boundaries
+_BOUNDARY_BUFFER_SEC = 30
 
 
-def scan_frequent_open(
+def scan_burst_open(
     settings: Settings,
     *,
-    check_interval: int = 8,
-    min_order_count: int = 3,
-    equity_per_lot_threshold: float = 2000.0,
+    scan_interval_min: int = 10,
+    rules: List[Dict[str, Any]],
     login: Optional[int] = None,
     server: Optional[str] = None,
+    previous_alerts: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    """Scan for accounts that opened many orders in the last N minutes."""
+    """Run a full burst-open scan across all servers.
+
+    check_interval = scan_interval_min * 60 + 30s boundary buffer.
+    """
     start = time.time()
+    check_interval_sec = scan_interval_min * 60 + _BOUNDARY_BUFFER_SEC
 
     conn = _get_connection(settings)
     try:
@@ -361,18 +346,17 @@ def scan_frequent_open(
         for srv in _SERVERS:
             if server and srv["key"] != server:
                 continue
-
             try:
                 if srv["type"] == "mt5":
                     rows = _query_mt5_recent_opens(
-                        conn, check_interval=check_interval, login=login,
+                        conn, check_interval_sec=check_interval_sec, login=login,
                     )
                 else:
                     rows = _query_mt4_recent_opens(
                         conn,
                         db_name=srv["db"],
                         server_label=srv["label"],
-                        check_interval=check_interval,
+                        check_interval_sec=check_interval_sec,
                         login=login,
                     )
                 all_opens.extend(rows)
@@ -383,39 +367,38 @@ def scan_frequent_open(
                     "Failed to query %s recent opens", srv["label"], exc_info=True
                 )
 
-        # Collect MT5 logins that need account info lookup
-        mt5_logins = list({
-            int(r["login"]) for r in all_opens if r["server"] == "MT5"
-        })
-        mt5_account_info: Dict[int, Dict[str, Any]] = {}
-        if mt5_logins:
-            try:
-                mt5_account_info = _get_mt5_account_info(conn, mt5_logins)
-            except Exception:
-                logger.error("Failed to query MT5 account info", exc_info=True)
+        # Run burst detection
+        alerts = rule_burst_open_detect(all_opens, rules)
 
-        # Run rule engine
-        alerts = rule_frequent_open_detect(
-            all_opens, mt5_account_info,
-            min_order_count, equity_per_lot_threshold,
-        )
+        # Dedup against previous scan to avoid re-reporting the same burst
+        if previous_alerts:
+            prev_keys = {
+                (a["rule_id"], a["server"], a["login"], a["symbol"], a["first_open"])
+                for a in previous_alerts
+            }
+            alerts = [
+                a for a in alerts
+                if (a["rule_id"], a["server"], a["login"], a["symbol"], a["first_open"])
+                not in prev_keys
+            ]
 
-        summary = {
-            "alert_count": sum(1 for a in alerts if a["severity"] == "ALERT"),
-            "watch_count": sum(1 for a in alerts if a["severity"] == "WATCH"),
-            "total_accounts_scanned": len(unique_logins),
-        }
+        # Enrich matched accounts with equity / balance / total open lots
+        _enrich_account_info(conn, alerts)
 
         elapsed_ms = int((time.time() - start) * 1000)
 
+        config = {
+            "scan_interval_min": scan_interval_min,
+            "rules": rules,
+        }
+
         return {
             "alerts": alerts,
-            "summary": summary,
-            "params": {
-                "check_interval": check_interval,
-                "min_order_count": min_order_count,
-                "equity_per_lot_threshold": equity_per_lot_threshold,
+            "summary": {
+                "suspicious_count": len(alerts),
+                "total_accounts_scanned": len(unique_logins),
             },
+            "config": config,
             "scan_time_ms": elapsed_ms,
             "scanned_at": datetime.now(timezone.utc)
             .isoformat(timespec="seconds")
@@ -423,3 +406,106 @@ def scan_frequent_open(
         }
     finally:
         conn.close()
+
+
+def _enrich_account_info(
+    conn, alerts: List[Dict[str, Any]]
+) -> None:
+    """Fill in equity, balance, leverage, group, total_open_lots, equity_per_lot
+    for each alert row. Modifies alerts in place.
+    """
+    if not alerts:
+        return
+
+    # Collect logins by server type
+    mt5_logins = list({a["login"] for a in alerts if a["server"] == "MT5"})
+    mt4_live_logins = list({a["login"] for a in alerts if a["server"] == "MT4_Live"})
+    mt4_live2_logins = list({a["login"] for a in alerts if a["server"] == "MT4_Live2"})
+
+    # Fetch MT5 account info (equity, balance, leverage, group, total_open_lots)
+    mt5_info: Dict[int, Dict[str, Any]] = {}
+    if mt5_logins:
+        try:
+            mt5_info = _get_mt5_account_info(conn, mt5_logins)
+        except Exception:
+            logger.error("Failed to query MT5 account info", exc_info=True)
+
+    # Fetch MT4 total open lots
+    mt4_live_lots: Dict[int, float] = {}
+    mt4_live2_lots: Dict[int, float] = {}
+    if mt4_live_logins:
+        try:
+            mt4_live_lots = _get_mt4_account_total_lots(conn, "mt4_live", mt4_live_logins)
+        except Exception:
+            logger.error("Failed to query MT4_Live total lots", exc_info=True)
+    if mt4_live2_logins:
+        try:
+            mt4_live2_lots = _get_mt4_account_total_lots(conn, "mt4_live2", mt4_live2_logins)
+        except Exception:
+            logger.error("Failed to query MT4_Live2 total lots", exc_info=True)
+
+    for alert in alerts:
+        srv = alert["server"]
+        lid = int(alert["login"])
+
+        if srv == "MT5":
+            acct = mt5_info.get(lid, {})
+            alert["equity"] = _round_or_none(acct.get("equity"))
+            alert["balance"] = _round_or_none(acct.get("balance"))
+            alert["leverage"] = int(acct["leverage"]) if acct.get("leverage") else None
+            alert["group"] = acct.get("group", "")
+            alert["total_open_lots"] = _round_or_none(acct.get("total_open_lots"))
+            # Skip demo/test accounts
+            grp = (alert["group"] or "").lower()
+            if "demo" in grp or "test" in grp:
+                alert["_skip"] = True
+        else:
+            # MT4: equity/balance/leverage/group come from the first order row
+            # (already joined in SQL). Find any alert order for this login
+            # to extract account info. The SQL query already excluded demo/test.
+            first_order = alert["orders"][0] if alert["orders"] else {}
+            # For MT4, account info was in the original SQL row — but our
+            # burst detection only stored order details. We need to look
+            # back at the raw opens. Instead, we query mt4_users directly.
+            _fill_mt4_account_info(conn, alert, srv, lid)
+
+            lots_map = mt4_live_lots if srv == "MT4_Live" else mt4_live2_lots
+            alert["total_open_lots"] = _round_or_none(lots_map.get(lid))
+
+        # Calculate equity_per_lot using total open lots across all positions
+        total_lots = alert.get("total_open_lots")
+        equity = alert.get("equity")
+        if equity is not None and total_lots and total_lots > 0:
+            alert["equity_per_lot"] = round(float(equity) / float(total_lots), 2)
+
+    # Remove demo/test MT5 accounts that slipped through
+    alerts[:] = [a for a in alerts if not a.pop("_skip", False)]
+
+
+def _fill_mt4_account_info(
+    conn, alert: Dict[str, Any], server: str, login: int
+) -> None:
+    """Query mt4_users for a single MT4 account to fill equity/balance/etc."""
+    db_name = "mt4_live" if server == "MT4_Live" else "mt4_live2"
+    sql = f"""
+        SELECT `GROUP` AS `group`, EQUITY AS equity, BALANCE AS balance,
+               LEVERAGE AS leverage
+        FROM {db_name}.mt4_users WHERE LOGIN = %s
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, (login,))
+            row = cur.fetchone()
+        if row:
+            alert["equity"] = _round_or_none(row.get("equity"))
+            alert["balance"] = _round_or_none(row.get("balance"))
+            alert["leverage"] = int(row["leverage"]) if row.get("leverage") else None
+            alert["group"] = row.get("group", "")
+    except Exception:
+        logger.error("Failed to query %s user info for %s", db_name, login, exc_info=True)
+
+
+def _round_or_none(val: Any, ndigits: int = 2) -> float | None:
+    if val is None:
+        return None
+    return round(float(val), ndigits)

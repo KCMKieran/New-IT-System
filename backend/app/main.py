@@ -32,15 +32,20 @@ from app.core.config import get_settings
 from app.core.trace_middleware import TraceIDMiddleware
 from app.core.api_key_middleware import APIKeyMiddleware
 from app.core.database import init_db
+from app.core.risk_monitor_db import init_risk_monitor_db
 from app.core.scheduler import start_scheduler, stop_scheduler
+from app.core.burst_open_scheduler import start_burst_scheduler, stop_burst_scheduler
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage startup/shutdown lifecycle events."""
     init_db()
+    init_risk_monitor_db()
     start_scheduler()
+    start_burst_scheduler()
     yield
+    stop_burst_scheduler()
     stop_scheduler()
 
 

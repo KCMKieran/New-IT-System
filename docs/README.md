@@ -33,6 +33,7 @@ This is the documentation hub for the KCM IT System - an internal financial trad
 | Position Monitor | Real-time position monitoring | [position-monitor.md](features/position-monitor.md) |
 | IB Report | Broker commission reports | [ib-report.md](features/ib-report.md) |
 | IB Financial Monitor | IB fund monitoring & scheduled reports | [ib-financial-monitor.md](features/ib-financial-monitor.md) |
+| Trade Real-time Monitor | Batch order detection & risk alerts | [risk-monitor.md](features/risk-monitor.md) |
 
 ## Documentation Structure
 
@@ -70,6 +71,7 @@ docs/
 │   ├── profit-deep-analysis.md
 │   ├── pnl-monitor-integration.md
 │   ├── ib-financial-monitor.md  # IB Financial Monitor (replaces D08)
+│   ├── risk-monitor.md          # Trade Real-time Monitor (批量下单 + 缺口交易)
 │   └── filter-backend-integration.md
 ├── deployment/                  # ⭐ Deployment & DevOps
 │   ├── dev-prod-guide.md      # Dev/Prod workflow, Docker, Cloudflare Tunnel

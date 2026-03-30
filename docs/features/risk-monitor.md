@@ -285,7 +285,10 @@ RULES: list[RuleFunc] = [
 ]
 ```
 
-### 当前规则: 频繁开仓检测 (Frequent Opening Detection)
+### ~~当前规则~~ 重设计中: 频繁开仓检测 (Frequent Opening Detection)
+
+> **⚠️ 规则重设计中**: Risk team 反馈 5-8 分钟内 3 笔属正常交易。规则从"频率检测"重设计为"批量下单检测"。
+> **新设计见 §10**。以下旧规则文档保留供参考。
 
 **触发条件**: 最近 N 分钟内，同一账户开仓笔数 ≥ 阈值（不区分品种、不区分方向）。
 
@@ -903,7 +906,7 @@ if not redis.exists(key):
 | **缺口交易规则** | 检测休市前开仓、开市后平仓利用缺口获利 | Tab 占位已创建 |
 | **后端驱动定时扫描** | 上述架构升级 | 首期 demo 观察完成，确认规则有效 |
 | 批量平仓规则 | 同秒 ≥3 笔平仓检测，20min 已平仓数据源 | Tab 框架就绪 |
-| 爆发开仓规则 | 1-5s 内 3+ 笔 ≥5 手 | Tab 框架就绪 |
+| 批量开仓规则 | 1-5s 内 3+ 笔 ≥5 手 | Tab 框架就绪 |
 | Email 告警 | Redis 去重 + send_email()，收件人: kieran.xiang@kohleservices.com | **后端驱动扫描完成** |
 | Dashboard 组件 | SuspiciousClients.tsx 卡片 | 页面稳定 |
 
@@ -915,7 +918,7 @@ if not redis.exists(key):
 
 以下规则已设计但暂不实现，后续按需添加:
 
-- [ ] **爆发下单**: 5s 内 3+ 单, 每单 ≥ 5 手
+- [ ] **批量下单**: 5s 内 3+ 单, 每单 ≥ 5 手
 - [ ] **快速开平**: 大手数 + 持仓 ≤ 2 分钟
 - [ ] **频繁推仓**: 1s 内同方向 3+ 单
 - [ ] **大额敞口**: 单客户单品种未平仓总手数 > 阈值
@@ -1299,3 +1302,379 @@ UNION ALL
 SELECT 'MT5', Time
 FROM mt5_live.mt5_deals ORDER BY Timestamp DESC LIMIT 1;
 ```
+
+---
+
+## 10. 频繁开仓规则 v2 — 批量下单检测 (Burst Open Detection)
+
+> **状态**: ✅ 已实施 (2026-03-28)。
+>
+> **变更原因**: Risk team 反馈——5-8 分钟内开 3 笔属于正常交易行为，旧"频繁开仓"规则误报率太高。
+> 新规则聚焦于真正的 B-Book 风险行为：**短时间内同品种密集下大单**（典型 EA/算法行为）。
+
+### 10.1 旧规则 vs 新规则
+
+| | v1 频繁开仓 | v2 批量下单 |
+|--|--|--|
+| **检测逻辑** | N 分钟内开仓 ≥ 3 笔 | N 秒内同品种开仓 ≥ 3 笔，且每笔 ≥ 5 手 |
+| **分组** | (server, login) | **(server, login, symbol)** |
+| **品种** | 不区分 | **同品种** |
+| **方向** | 不区分 | 不区分（买卖都计入） |
+| **severity** | ALERT / WATCH 两级 | **统一"可疑用户"**，无分级 |
+| **equity_per_lot** | 触发条件 | **展示字段**（供风控参考，不作为触发条件） |
+| **典型误报** | 手工交易者 | 几乎无（人工不可能 3 秒 3 笔） |
+| **扫描驱动** | 前端 setInterval | **后端单一定时任务** |
+
+### 10.2 新规则参数 (4 个 Input)
+
+用户在前端可配置多条 Rule，每条 Rule 包含 3 个参数：
+
+| # | 参数 | 含义 | 默认值 | API 字段名 |
+|---|------|------|--------|-----------|
+| 1 | **时间窗口** | 几秒内的连续开仓算"批量" | 3 秒 | `burst_window_sec` |
+| 2 | **最少笔数** | 时间窗口内至少几笔订单 | 3 笔 | `min_order_count` |
+| 3 | **每笔最少手数** | 每笔订单的 lots 必须 ≥ | 5 手 | `min_lots_per_order` |
+
+全局参数（非 Rule 粒度）：
+
+| # | 参数 | 含义 | 默认值 | API 字段名 |
+|---|------|------|--------|-----------|
+| 4 | **扫描间隔** | 后端每隔几分钟执行一次扫描 | 10 分钟 | `scan_interval_min` |
+
+**全局约束**:
+- `scan_interval_min` 前端可调，最小 5 分钟，必须为整数
+- SQL 回溯窗口 `check_interval` = `scan_interval_min` + `max(burst_window_sec)`，无缝覆盖且处理边界 (见 §10.9)
+- Rules 上限: 10 条
+- Rules 持久化: SQLite (重启后恢复)
+- Config 更新: POST 整体替换 rules 数组 (last-write-wins)
+
+### 10.3 检测逻辑
+
+```
+后端定时任务 (每 scan_interval_min 分钟执行)
+│
+├── 1. SQL 采集 (一次，覆盖最近 scan_interval_min 分钟)
+│      MT4 Live:  OPEN_TIME >= NOW() - interval
+│      MT4 Live2: OPEN_TIME >= NOW() - interval
+│      MT5:       mt5_deals.Timestamp >= filetime(NOW() - interval), Entry=0
+│
+├── 2. Python: 按 (server, login, symbol) 分组
+│
+├── 3. 对每组，按 open_time 排序后执行滑动窗口:
+│      for each Rule in rules:
+│          for i in range(len(orders)):
+│              j = i
+│              while orders[j].time - orders[i].time <= burst_window_sec:
+│                  j++
+│              window = orders[i:j]
+│              if len(window) >= min_order_count:
+│                  if all(o.lots >= min_lots_per_order for o in window):
+│                      → 命中! 记录 burst 事件
+│
+├── 4. 去重: 同一 (server, login, symbol) 重叠窗口取最大的
+│
+├── 5. 对命中账户查询 equity/balance → 计算 equity_per_lot (展示用)
+│      equity_per_lot 使用该账户 **全部未平仓持仓的 total_lots**
+│
+├── 6. 组装结果 → 写入 latest_result (缓存供前端读取)
+│
+└── 7. 追加到 scan_history (历史日志)
+```
+
+**滑动窗口示例**（Rule: 3 秒 / 3 笔 / 5 手）:
+
+```
+账户 12345, XAUUSD, 最近 10 分钟开仓:
+
+14:20:01  Buy  10手
+14:20:02  Sell  8手
+14:20:02  Buy   6手
+14:25:30  Buy   2手   ← lots < 5, 即使在窗口内也不满足
+
+窗口 [14:20:01 ~ 14:20:03]:
+  3 笔, 每笔 ≥ 5 手 → ✅ 命中
+
+如果其中一笔只有 3 手:
+14:20:01  Buy  10手
+14:20:02  Sell  3手   ← 不满足 min_lots_per_order
+14:20:02  Buy   6手
+
+窗口 [14:20:01 ~ 14:20:03]:
+  3 笔, 但 Sell 3手 < 5手 → ✘ 不命中
+```
+
+### 10.4 多规则 (Multi-Rule) 支持
+
+用户可配置多条 Rule，SQL 只执行一次，Python 对同一数据集重复执行每条 Rule：
+
+| Rule | burst_window_sec | min_order_count | min_lots_per_order | 场景 |
+|------|-----|---|---|---|
+| Rule 1 | 3 | 3 | 5 | EA 瞬间大单 |
+| Rule 2 | 5 | 5 | 3 | 密集中等手数 |
+| Rule 3 | 1 | 3 | 10 | 极端：1秒内超大单 |
+
+**同一账户匹配多条 Rule**: 每条 Rule 独立一行。例如账户 12345 命中 Rule 1 和 Rule 3 → 表格显示 2 行。
+每条 Rule 有自动递增 ID (1, 2, 3...) 用于标识。
+
+### 10.5 后端驱动定时扫描架构
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                  后端 (FastAPI + Background Task)            │
+│                                                             │
+│  ┌─────────────────────────────────────────────────────┐    │
+│  │  BurstOpenScheduler (单例, FastAPI startup 启动)     │    │
+│  │                                                     │    │
+│  │  config (内存, 可持久化到 SQLite):                    │    │
+│  │  ┌──────────────────────────────────────────────┐   │    │
+│  │  │ scan_interval_min: 10                        │   │    │
+│  │  │ rules: [                                     │   │    │
+│  │  │   {burst_window_sec:3, min_orders:3, lots:5} │   │    │
+│  │  │   {burst_window_sec:5, min_orders:5, lots:3} │   │    │
+│  │  │ ]                                            │   │    │
+│  │  └──────────────────────────────────────────────┘   │    │
+│  │                                                     │    │
+│  │  循环: sleep(scan_interval) → scan() → 写缓存+日志  │    │
+│  └─────────────────────────────────────────────────────┘    │
+│                                                             │
+│  API:                                                       │
+│  GET  /burst-open              → 读 latest_result 缓存     │
+│  GET  /burst-open/config       → 读当前 rules + interval   │
+│  POST /burst-open/config       → 更新 config, 立即生效     │
+│  POST /burst-open/scan-now     → 立即触发一次扫描 (加锁)   │
+│  GET  /burst-open/history      → 分页读 scan_history       │
+└─────────────────────────────────────────────────────────────┘
+                       │
+                       ▼
+┌─────────────────────────────────────────────────────────────┐
+│                  前端 (只读缓存)                              │
+│                                                             │
+│  每 30s 轮询 GET /burst-open → 展示最新扫描结果              │
+│  参数面板: 展示/编辑 rules (读写 config API)                 │
+│  "立即扫描" → POST scan-now                                 │
+│  "查看历史" → GET history → 侧边抽屉/弹窗展示               │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**多用户冲突处理**:
+
+| 场景 | 策略 |
+|------|------|
+| 多人同时修改 config | Last-write-wins, 前端拉取后显示最新值 |
+| 多人同时点"立即扫描" | 后端加锁, 同一时刻只执行一次, 后续请求等待结果 |
+| 后端重启 | config 从 SQLite 读取恢复 (TODO: 见 Q4) |
+
+### 10.6 历史 Log 设计
+
+**推荐方案: SQLite 文件** (`data/risk_monitor_history.db`)
+
+- Python 内置 `sqlite3` 模块，无额外依赖
+- 写入频率极低 (每 10min 一条)，无并发问题
+- 支持 SQL 分页/过滤，前端 `?limit=50&offset=0`
+
+```sql
+CREATE TABLE scan_history (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    scanned_at      TEXT    NOT NULL,       -- ISO8601 时间戳
+    scan_interval   INTEGER NOT NULL,       -- 扫描间隔 (分钟)
+    check_interval  INTEGER NOT NULL,       -- SQL 回溯窗口 (分钟)
+    accounts_scanned INTEGER NOT NULL,      -- 扫描账户数
+    suspicious_count INTEGER NOT NULL,      -- 可疑用户数
+    scan_time_ms    INTEGER NOT NULL,       -- 扫描耗时
+    rules_config    TEXT    NOT NULL,       -- JSON: 本次使用的 rules
+    alerts          TEXT    NOT NULL        -- JSON: 完整告警列表
+);
+```
+
+**前端展示**: 点击"查看历史" → Drawer (宽版, web 端至少 60-70vw)，表格展示历史扫描记录。
+点击某条记录可展开查看完整 alerts。
+
+**保留策略**: 7 天。每次扫描后自动 `DELETE FROM scan_history WHERE scanned_at < datetime('now', '-7 days')`。
+
+### 10.7 可行性分析
+
+| 关注点 | 分析 | 结论 |
+|--------|------|------|
+| **SQL 对 DB load** | 10min 窗口的开仓查询使用 OPEN_TIME / Timestamp 索引，预估返回数百行，耗时 <10ms。后端单任务每 10min 查一次，Slave 零压力 | ✅ 可行 |
+| **Python 滑动窗口** | 按 (server, login, symbol) 分组后每组通常 <20 条。排序 O(N log N) + 滑动 O(N)，多条 rules 重复执行也在亚毫秒级 | ✅ 可行 |
+| **后端定时任务** | `asyncio.create_task()` 在 FastAPI startup 启动后台循环。单例 + asyncio.Lock 避免并发。无需 APScheduler 等额外依赖 | ✅ 可行 |
+| **多规则** | SQL 执行一次，Python 对同一数据集执行 3-5 条 rules，额外开销忽略不计 | ✅ 可行 |
+| **SQLite 历史日志** | 内置模块，单文件，写频率极低。每条记录 ~1-5KB (取决于 alerts 数量)，1000 条 ≈ 1-5MB | ✅ 可行 |
+| **前端改动量** | 参数面板从 3 个 input 改为多 rule 卡片式配置 + 新增"查看历史"按钮/抽屉。AG-Grid 列定义调整。改动适中 | ✅ 可行 |
+
+### 10.8 确认答案汇总
+
+| Q | 问题 | 确认结果 |
+|---|------|---------|
+| Q1 | scan_interval 前端可调？ | ✅ 可调，最小 5min，整数 |
+| Q2 | check_interval = scan_interval？ | ✅ 同意，回溯=扫描 |
+| Q3 | Rules 上限 | 10 条 |
+| Q4 | 持久化 | SQLite |
+| Q5 | Log 保留 | 7 天 |
+| Q6 | 多 Rule 命中展示 | 每条 Rule 一行 |
+| Q7 | equity_per_lot 的 total_lots | 全部未平仓持仓 |
+| Q8 | 历史 UI | Drawer (宽版) |
+| Q9 | API 路径 | `/burst-open` (新 endpoint) |
+
+### 10.9 架构审查 — 关键问题
+
+#### 🔴 Critical: 扫描窗口边界丢失 (Boundary Problem)
+
+**问题**: 如果 `check_interval` 严格等于 `scan_interval`，批量事件恰好跨越两次扫描的边界时会被**漏检**。
+
+```
+scan_interval = 10min
+
+扫描 A (14:00) 回溯范围: [13:50:00, 14:00:00)
+扫描 B (14:10) 回溯范围: [14:00:00, 14:10:00)
+
+账户在 13:59:59, 14:00:00, 14:00:01 各开 1 笔 10 手 XAUUSD (3 秒内 3 笔):
+
+→ 扫描 A 只看到 13:59:59 的 1 笔 → 不触发
+→ 扫描 B 只看到 14:00:00 和 14:00:01 的 2 笔 → 不触发
+→ 真实的 burst 被漏掉!
+```
+
+**解决方案**: SQL 回溯窗口加一个 buffer:
+
+```
+check_interval = scan_interval_min + max(burst_window_sec across all rules)
+```
+
+例如 scan_interval = 10min, 最大 burst_window = 5s → 回溯 10min + 5s = 605s。
+
+多出的 5s 可能产生重复检测 → 用 burst 的 `(server, login, symbol, first_open_time)` 做去重，
+如果上一次扫描已经报过同一个 burst（对比 latest_result），则不重复记录。
+
+> 回复:
+
+#### ⚠️ Important: Rule 参数合法性校验
+
+前端和后端都需要校验 Rule 参数的合理范围，防止误配置：
+
+| 参数 | 建议范围 | 理由 |
+|------|---------|------|
+| `burst_window_sec` | 1 ~ 30 秒 | <1 无意义，>30 接近旧规则的"频繁"而非"批量" |
+| `min_order_count` | 2 ~ 50 笔 | <2 没有"密集"概念，>50 不太现实 |
+| `min_lots_per_order` | 0.5 ~ 100 手 | <0.5 微型单无风险，>100 极端罕见 |
+| `scan_interval_min` | 5 ~ 60 分钟 | <5 对 DB 压力增加，>60 实时性太差 |
+
+> 回复 (范围是否合适？):
+
+#### ⚠️ Important: 服务启动行为
+
+后端启动时需要明确：
+1. 从 SQLite 读取上次 config（如首次运行则用代码默认值并写入 SQLite）
+2. **立即执行一次扫描**还是等待第一个 scan_interval 后再扫描？
+
+建议: 启动后立即执行一次首扫，不等待。这样部署/重启后不需要等 10 分钟才看到数据。
+
+> 回复:
+
+#### ⚠️ Important: 旧 API `/frequent-open` 的处理
+
+新 API 用 `/burst-open`。旧 `/frequent-open` 端点:
+- A) 保留但返回 HTTP 410 Gone + 提示信息（过渡期）
+- B) 直接删除
+
+建议 B (内部工具，无外部依赖方)。
+
+> 回复:
+
+#### 💡 Nice-to-have: Rule 展示名称
+
+Q6 确认每条 Rule 一行。前端表格需要标识"命中了哪条 Rule"。两种方案:
+- A) 用自动 ID 显示 (Rule 1, Rule 2, Rule 3...)
+- B) 允许用户给每条 Rule 起名 (如 "EA大单", "密集中单")
+
+A 最简单，B 可读性更好。建议 v1 用 A，后续按需加 B。
+
+> 回复:
+
+### 10.10 原始 Q&A 存档
+
+以下为原始问答记录，确认结果已汇总到 §10.8。
+
+---
+
+### ~~10.8~~ 原始待确认问题
+
+> 请在每个问题下方填写回复。
+
+**Q1: 扫描间隔 (scan_interval) 是否前端可调？**
+
+默认 10 分钟。是否允许前端用户修改为 5min / 15min / 30min？还是后端写死？
+
+> 回复: 允许前端用户修改, 最小是 5min, 要求输入是整数
+
+**Q2: check_interval 是否始终等于 scan_interval？**
+
+扫描间隔 10min → SQL 回溯 10min，无缝覆盖。是否同意？还是希望 check_interval 独立可调？
+
+> 回复: 同意, 回溯时间和扫描时间一致
+
+**Q3: Rules 上限？**
+
+建议最多 5 条。是否合适？
+
+> 回复: 这个rules上限的理由是什么? 如果rules都是在python检测是否没有影响? 设置limit为10条吧
+
+**Q4: Rules 和 config 持久化方式？**
+
+服务重启后：
+- A) 回到代码中的默认值（最简单，重启丢失用户修改）
+- B) 从 SQLite 读取上次配置（持久化）
+
+推荐 B。你的偏好？
+
+> 回复: 从sqlite读取上次配置, 我需要持久化
+
+**Q5: 历史 Log 保留策略？**
+
+- A) 保留最近 N 条（如 1000 条 × 每 10min = 约 7 天）
+- B) 保留最近 N 天（如 30 天）
+- C) 不自动清理，手动管理
+
+推荐 A (1000 条)。你的偏好？
+
+> 回复: 保留7天的数据 
+
+**Q6: 同一账户匹配多条 Rule 时如何展示？**
+
+例如账户 12345 在 XAUUSD 上同时命中 Rule 1 和 Rule 3：
+- A) 合并为 1 行，标注 "命中规则: Rule 1, Rule 3"
+- B) 分为 2 行（每条 Rule 一行）
+
+推荐 A（减少重复）。你的偏好？
+
+> 回复: 分为2行, 每条rule一行
+
+**Q7: equity_per_lot 中的 total_lots 用哪个值？**
+
+- A) 仅 burst 窗口内的 lots（和触发条件一致的那几笔）
+- B) 该账户**所有未平仓持仓**的 total lots（反映真实杠杆利用率）
+
+推荐 B（更有风控参考价值）。你的偏好？
+
+> 回复: 使用B吧
+
+**Q8: "查看历史" UI 形式？**
+
+- A) 侧边抽屉 (Drawer) — 不离开主页面
+- B) 弹窗 (Dialog/Modal)
+- C) 新页面 / 子路由 `/risk-monitor/history`
+
+推荐 A。你的偏好？
+
+> 回复: 使用drawer, 但是考虑移动端读区, web端的话 drawer要页面大一些
+
+**Q9: API 路径命名？**
+
+旧: `/api/v1/risk-monitor/frequent-open`
+新规则建议:
+- A) `/api/v1/risk-monitor/burst-open` (新 endpoint, 旧的保留/废弃)
+- B) 继续用 `/api/v1/risk-monitor/frequent-open` (原地改造)
+
+推荐 A (干净切换)。你的偏好？
+
+> 回复: 使用方案A

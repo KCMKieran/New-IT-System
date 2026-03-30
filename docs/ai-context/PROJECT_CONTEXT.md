@@ -135,7 +135,9 @@ New-IT-System/
 │   │   └── core/
 │   │       ├── config.py       # Settings from .env
 │   │       ├── database.py     # SQLite for IB Financial config
+│   │       ├── risk_monitor_db.py # SQLite for risk monitor config/history
 │   │       ├── scheduler.py    # APScheduler for daily reports
+│   │       ├── burst_open_scheduler.py # APScheduler for burst open scanning
 │   │       ├── logging_config.py
 │   │       ├── api_key_middleware.py # X-API-Key validation for /api/*
 │   │       └── singleflight.py # Request coalescing utility
@@ -322,26 +324,36 @@ New-IT-System/
 - `backend/app/core/scheduler.py` (APScheduler)
 
 ### 4.8 Trade Real-time Monitor (`RiskMonitor.tsx`)
-**Purpose**: Scan all MT servers for clients with high leverage / capital utilization. B-Book perspective: flags clients whose positions pose risk to company P&L.
+**Purpose**: Scan all MT servers for clients exhibiting suspicious batch ordering patterns. B-Book perspective: flags clients whose high-exposure rapid trading poses risk to company P&L.
 
 **Key Features**:
-- Tab-based UI: 频繁开仓 (active) / 缺口交易 (placeholder, 开发中)
-- Frequent Opening detection: N 分钟内频繁开仓的账户，按 equity_per_lot 分级 (ALERT / WATCH)
+- Tab-based UI: 批量下单 (active) / 缺口交易 (placeholder, 开发中)
+- Burst Open Detection (批量下单): sliding window algorithm detects N orders (each ≥ M lots) within T seconds on the same symbol
+- Backend-driven scanning via APScheduler (single background task, frontend reads cached result)
+- Multi-rule support: up to 10 configurable rules with independent parameters
+- Config persistence in SQLite (`backend/data/risk_monitor.db`)
+- Scan history log with 7-day retention and paginated history drawer
 - Cross-server scanning (MT4 Live + MT4 Live2 + MT5)
-- Tunable params: check_interval, min_order_count, equity_per_lot_threshold
-- Auto-refresh (interval = check_interval) + manual refresh
-- Client-side AG-Grid with severity row colors, P&L color inversion (B-Book view)
-- Server / account filters
+- 30s boundary buffer + deduplication to prevent missed/duplicate detections
+- All matched accounts labeled "可疑用户" (no ALERT/WATCH severity levels)
+- Frontend: 30s polling, Config Drawer (multi-rule), History Drawer (paginated)
 
-**API**: `GET /api/v1/risk-monitor/frequent-open`
+**APIs**:
+- `GET /api/v1/risk-monitor/burst-open` — Latest cached scan result
+- `GET /api/v1/risk-monitor/burst-open/config` — Current config from SQLite
+- `POST /api/v1/risk-monitor/burst-open/config` — Update config + reschedule scanner
+- `POST /api/v1/risk-monitor/burst-open/scan-now` — Trigger immediate scan
+- `GET /api/v1/risk-monitor/burst-open/history` — Paginated scan history
 
 **Data sources**: MySQL Slave (`mt4_live`, `mt4_live2`, `mt5_live`) — same DB_HOST config
 
 **Key Files**:
-- `frontend/src/pages/RiskMonitor.tsx`
-- `backend/app/api/v1/routes/risk_monitor.py`
-- `backend/app/services/risk_monitor_service.py`
-- `backend/app/schemas/risk_monitor.py`
+- `frontend/src/pages/RiskMonitor.tsx` (BurstOpenTab + ConfigDrawer + HistoryDrawer)
+- `backend/app/api/v1/routes/risk_monitor.py` (5 endpoints)
+- `backend/app/services/risk_monitor_service.py` (SQL + sliding window rule engine)
+- `backend/app/schemas/risk_monitor.py` (Pydantic models)
+- `backend/app/core/burst_open_scheduler.py` (APScheduler + in-memory cache)
+- `backend/app/core/risk_monitor_db.py` (SQLite config/history CRUD)
 
 **Docs**: [risk-monitor.md](../features/risk-monitor.md) | **Skill**: `.cursor/skills/risk-monitor/SKILL.md`
 

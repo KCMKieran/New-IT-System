@@ -40,6 +40,7 @@ export default function ConfigPlaceholder() {
         { title: "盈亏监控 (Preview)", url: "/client-pnl-analysis" },
         { title: t("nav.swapFreeControl"), url: "/swap-free-control" },
         { title: t("nav.profitAnalysis"), url: "/profit" },
+        { title: "交易实时监控", url: "/risk-monitor" },
       ],
     },
     {
