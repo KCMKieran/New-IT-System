@@ -27,3 +27,5 @@ backend/logs/*.log.*
 !backend/logs/.gitkeep
 backend/logs-prod/*.log.*
 *.log
+
+*.db

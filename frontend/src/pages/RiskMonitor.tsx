@@ -105,9 +105,42 @@ function fmtCurrency(v: number | null | undefined): string {
   return `${sign}$${Math.abs(v).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
+/** IANA zone for all monitor timestamps shown in the UI (backend scan time is UTC; DB open times are treated as UTC when naive). */
+const DISPLAY_TIME_ZONE = "Asia/Hong_Kong";
+
+/**
+ * Format a backend/DB timestamp string as Hong Kong local wall clock (YYYY-MM-DD HH:mm:ss).
+ * - `scanned_at`: ISO UTC ending in `Z` → convert to HKT.
+ * - MySQL-style `YYYY-MM-DD HH:mm:ss` with no zone → interpreted as UTC then shown in HKT
+ *   (typical for MT replicas; if your server stores another zone, adjust backend to send offset or ISO).
+ */
 function fmtTime(v: string | null | undefined): string {
   if (!v) return "—";
-  return String(v).replace("T", " ").slice(0, 19);
+  const raw = String(v).trim();
+  let iso = raw.replace(" ", "T");
+  const hasExplicitZone =
+    /Z$/i.test(iso) || /[+-]\d{2}:?\d{2}$/.test(iso);
+  if (!hasExplicitZone) {
+    const m = iso.match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})/);
+    if (m) iso = `${m[1]}T${m[2]}Z`;
+  }
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) {
+    return raw.replace("T", " ").slice(0, 19);
+  }
+  // sv-SE yields ISO-like ordering: 2026-04-15 16:00:00
+  return new Intl.DateTimeFormat("sv-SE", {
+    timeZone: DISPLAY_TIME_ZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  })
+    .format(d)
+    .replace("T", " ");
 }
 
 function crmLink(login: number, server?: string) {
@@ -200,7 +233,6 @@ function BurstOpenTab({ active }: { active: boolean }) {
   const gridStyle = useGridThemeStyle(isDarkMode);
 
   const [data, setData] = useState<BurstOpenScanResult | null>(null);
-  const [loading, setLoading] = useState(false);
   const [scanningNow, setScanningNow] = useState(false);
   const [lastRefresh, setLastRefresh] = useState<string | null>(null);
 

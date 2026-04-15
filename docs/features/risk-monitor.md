@@ -1489,6 +1489,11 @@ CREATE TABLE scan_history (
 **前端展示**: 点击"查看历史" → Drawer (宽版, web 端至少 60-70vw)，表格展示历史扫描记录。
 点击某条记录可展开查看完整 alerts。
 
+**时区约定（当前实现）**:
+- `scan_history.scanned_at` 由后端按 UTC 写入（ISO8601，结尾 `Z`）
+- 前端展示统一转换为 `Asia/Hong_Kong`（HKT，UTC+8）
+- 排查数据时建议：数据库筛选用 UTC 区间，页面阅读用 HKT
+
 **保留策略**: 7 天。每次扫描后自动 `DELETE FROM scan_history WHERE scanned_at < datetime('now', '-7 days')`。
 
 ### 10.7 可行性分析

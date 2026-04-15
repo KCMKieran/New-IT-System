@@ -336,6 +336,7 @@ New-IT-System/
 - Cross-server scanning (MT4 Live + MT4 Live2 + MT5)
 - 30s boundary buffer + deduplication to prevent missed/duplicate detections
 - All matched accounts labeled "可疑用户" (no ALERT/WATCH severity levels)
+- Timezone convention: backend stores `scanned_at` in UTC (`...Z`), frontend converts and displays monitor timestamps in `Asia/Hong_Kong` (HKT)
 - Frontend: 30s polling, Config Drawer (multi-rule), History Drawer (paginated)
 
 **APIs**:
