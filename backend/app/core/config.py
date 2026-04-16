@@ -52,6 +52,13 @@ class Settings:
     # Logging
     LOG_LEVEL: str
 
+    # Client Return Rate async export
+    CLIENT_RETURN_EXPORT_DIR: str | None
+    CLIENT_RETURN_EXPORT_EXPIRE_HOURS: int
+    CLIENT_RETURN_EXPORT_MAX_ROWS: int
+    CLIENT_RETURN_EXPORT_MAX_WORKERS: int
+    CLIENT_RETURN_EXPORT_CLEANUP_DAYS: int
+
     def __init__(self) -> None:
         self.DB_HOST = os.environ.get("DB_HOST")
         self.DB_USER = os.environ.get("DB_USER")
@@ -94,6 +101,21 @@ class Settings:
         # Logging configuration
         # Options: DEBUG, INFO, WARNING, ERROR, CRITICAL
         self.LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
+
+        # Client Return Rate async CSV export
+        self.CLIENT_RETURN_EXPORT_DIR = os.environ.get("CLIENT_RETURN_EXPORT_DIR")
+        self.CLIENT_RETURN_EXPORT_EXPIRE_HOURS = int(
+            os.environ.get("CLIENT_RETURN_EXPORT_EXPIRE_HOURS", "24")
+        )
+        self.CLIENT_RETURN_EXPORT_MAX_ROWS = int(
+            os.environ.get("CLIENT_RETURN_EXPORT_MAX_ROWS", "200000")
+        )
+        self.CLIENT_RETURN_EXPORT_MAX_WORKERS = int(
+            os.environ.get("CLIENT_RETURN_EXPORT_MAX_WORKERS", "1")
+        )
+        self.CLIENT_RETURN_EXPORT_CLEANUP_DAYS = int(
+            os.environ.get("CLIENT_RETURN_EXPORT_CLEANUP_DAYS", "7")
+        )
 
         # API Key for protecting /api/* endpoints (None = skip validation, for dev)
         self.API_KEY = os.environ.get("API_KEY")

@@ -8,7 +8,7 @@ Defines request/response models. Key business rules:
   - return_neg_adjusted only populated when net_deposit ≤ 0 and A > 0
 """
 
-from typing import Optional, List, Any, Dict
+from typing import Optional, List, Any, Dict, Literal
 from pydantic import BaseModel, Field
 
 
@@ -76,3 +76,54 @@ class ClientReturnRateResponse(BaseModel):
         default_factory=dict,
         description="Query statistics (query_time_ms, from_cache, etc.)"
     )
+
+
+class ClientReturnRateExportTaskCreateRequest(BaseModel):
+    """Create async CSV export task for client return rate."""
+
+    sort_by: Optional[str] = Field("month_trade_profit", description="Column to sort by")
+    sort_order: str = Field("desc", pattern="^(asc|desc)$", description="Sort direction")
+    search: Optional[str] = Field(None, description="Search by client_id")
+    deposit_bucket: Optional[str] = Field(
+        None,
+        pattern="^(0-2000|2000-5000|5000-50000|50000\\+)?$",
+        description="Filter by deposit bucket",
+    )
+    month_start: Optional[str] = Field(None, description="Month start date (YYYY-MM-DD)")
+    month_end: Optional[str] = Field(None, description="Month end date (YYYY-MM-DD)")
+    close_time_start: Optional[str] = Field(
+        None, description="Precise CLOSE_TIME filter (YYYY-MM-DD HH:MM:SS in HK time)"
+    )
+    include_avg_equity: bool = Field(
+        True, description="Include avg_daily_equity and return_on_avg_equity"
+    )
+    country_filter: Literal["all", "CN", "Global"] = Field(
+        "all", description="Country filter for export snapshot"
+    )
+    akcm_filter: Literal["all", "exclude", "only"] = Field(
+        "all", description="AKCM tag filter for export snapshot"
+    )
+
+
+class ClientReturnRateExportTaskCreateResponse(BaseModel):
+    """Task creation response."""
+
+    task_id: str
+    status: Literal["queued"]
+    created_at: str
+
+
+class ClientReturnRateExportTaskStatusResponse(BaseModel):
+    """Async export task status response."""
+
+    task_id: str
+    status: Literal["queued", "running", "succeeded", "failed", "expired"]
+    progress: int = Field(0, ge=0, le=100)
+    row_count: int = 0
+    file_size_bytes: Optional[int] = None
+    error_message: Optional[str] = None
+    created_at: str
+    started_at: Optional[str] = None
+    finished_at: Optional[str] = None
+    expires_at: Optional[str] = None
+    download_url: Optional[str] = None

@@ -309,6 +309,23 @@ ORDER BY tm.month_trade_profit IS NULL, tm.month_trade_profit DESC
 """
 
 
+def _sort_client_return_rows(
+    rows: list[dict[str, Any]],
+    sort_by: str,
+    sort_order: str,
+) -> list[dict[str, Any]]:
+    """Sort rows while keeping NULL values at the end for both directions."""
+    reverse = sort_order.lower() == "desc"
+    non_null = [r for r in rows if r.get(sort_by) is not None]
+    null_rows = [r for r in rows if r.get(sort_by) is None]
+    try:
+        non_null = sorted(non_null, key=lambda r: r.get(sort_by), reverse=reverse)
+    except TypeError:
+        # Fallback: mixed types -> compare as string for deterministic output.
+        non_null = sorted(non_null, key=lambda r: str(r.get(sort_by)), reverse=reverse)
+    return non_null + null_rows
+
+
 def get_client_return_rate_data(
     page: int = 1,
     page_size: int = 50,
@@ -320,6 +337,10 @@ def get_client_return_rate_data(
     month_end: Optional[str] = None,
     close_time_start: Optional[str] = None,
     include_avg_equity: bool = False,
+    country_filter: Optional[str] = None,
+    akcm_filter: Optional[str] = None,
+    return_all: bool = False,
+    use_cache: bool = True,
 ) -> Dict[str, Any]:
     """
     Two-phase MySQL query for client return rate data.
@@ -342,7 +363,8 @@ def get_client_return_rate_data(
     }
     if sort_by not in allowed_sort_columns:
         sort_by = "month_trade_profit"
-    sort_order_sql = "DESC" if sort_order.lower() == "desc" else "ASC"
+    if sort_order.lower() not in ("asc", "desc"):
+        sort_order = "desc"
 
     # Convert HK close_time_start to MT4 server time (UTC+2 winter / UTC+3 summer)
     close_time_mt4 = None
@@ -354,11 +376,16 @@ def get_client_return_rate_data(
             logger.warning(f"Invalid close_time_start format: {close_time_start}")
 
     # Redis cache
-    cache_params = f"client_return_v2_{month_start}_{month_end}_{search}_{deposit_bucket}_{sort_by}_{sort_order}_{page}_{page_size}_{close_time_start}_{include_avg_equity}"
+    cache_params = (
+        "client_return_v3_"
+        f"{month_start}_{month_end}_{search}_{deposit_bucket}_{sort_by}_{sort_order}_"
+        f"{page}_{page_size}_{close_time_start}_{include_avg_equity}_"
+        f"{country_filter}_{akcm_filter}_{return_all}"
+    )
     cache_key = f"app:client_return:cache:{hashlib.md5(cache_params.encode()).hexdigest()}"
 
     try:
-        if clickhouse_service.redis_client:
+        if use_cache and clickhouse_service.redis_client:
             cached_data = clickhouse_service.redis_client.get(cache_key)
             if cached_data:
                 logger.info(f"Redis cache hit for client return rate: {cache_key[:50]}...")
@@ -446,11 +473,25 @@ def get_client_return_rate_data(
         if deposit_bucket:
             all_data = [r for r in all_data if r.get("deposit_bucket") == deposit_bucket]
 
-        total = len(all_data)
-        total_pages = math.ceil(total / page_size) if total > 0 else 1
+        # Optional backend filtering for export snapshot parity.
+        if country_filter and country_filter != "all":
+            all_data = [r for r in all_data if r.get("country") == country_filter]
 
-        start_idx = (page - 1) * page_size
-        paginated_data = all_data[start_idx : start_idx + page_size]
+        if akcm_filter == "exclude":
+            all_data = [r for r in all_data if not bool(r.get("is_akcm"))]
+        elif akcm_filter == "only":
+            all_data = [r for r in all_data if bool(r.get("is_akcm"))]
+
+        all_data = _sort_client_return_rows(all_data, sort_by=sort_by, sort_order=sort_order)
+
+        total = len(all_data)
+        if return_all:
+            total_pages = 1
+            paginated_data = all_data
+        else:
+            total_pages = math.ceil(total / page_size) if total > 0 else 1
+            start_idx = (page - 1) * page_size
+            paginated_data = all_data[start_idx : start_idx + page_size]
 
         for row in paginated_data:
             row.pop("deposit_bucket", None)
@@ -473,7 +514,7 @@ def get_client_return_rate_data(
 
         # Save to Redis (TTL 3 hours)
         try:
-            if clickhouse_service.redis_client:
+            if use_cache and clickhouse_service.redis_client:
                 clickhouse_service.redis_client.setex(
                     cache_key, 10800, json.dumps(response, default=_json_default)
                 )

@@ -14,7 +14,7 @@
  *
  * Docs: docs/features/client-return-rate.md
  */
-import { useState, useCallback, useMemo, useRef } from "react";
+import { useState, useCallback, useMemo, useRef, useEffect } from "react";
 import { useTheme } from "@/components/theme-provider";
 import { apiFetch } from "@/lib/fetch";
 import { Button } from "@/components/ui/button";
@@ -33,6 +33,7 @@ import {
   Calendar as CalendarIcon,
   X,
   Trash2,
+  Download,
 } from "lucide-react";
 import { AgGridReact } from "ag-grid-react";
 import { ColDef, GridReadyEvent } from "ag-grid-community";
@@ -78,6 +79,16 @@ interface CachedState {
   timeRange: string;
   date: DateRange | undefined;
   timestamp: number;
+}
+
+interface ExportTaskStatus {
+  task_id: string;
+  status: "queued" | "running" | "succeeded" | "failed" | "expired";
+  progress: number;
+  row_count: number;
+  file_size_bytes: number | null;
+  error_message: string | null;
+  download_url: string | null;
 }
 
 const SESSION_KEY = "client_return_rate_cache";
@@ -162,6 +173,10 @@ export default function ClientReturnRate() {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [countryFilter, setCountryFilter] = useState<string>("all");
   const [akcmFilter, setAkcmFilter] = useState<string>("all");
+  const [exportTaskId, setExportTaskId] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
+  const [exportStatusText, setExportStatusText] = useState<string>("");
+  const [exportProgress, setExportProgress] = useState<number>(0);
 
   // Local filtering on already-fetched data (no backend round-trip)
   const filteredRows = useMemo(() => {
@@ -286,6 +301,174 @@ export default function ClientReturnRate() {
       setLoading(false);
     }
   }, [searchInput, timeRange, date, getDateRange]);
+
+  const parseFileNameFromDisposition = useCallback(
+    (disposition: string | null, fallback: string) => {
+      if (!disposition) return fallback;
+      const utf8Match = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+      if (utf8Match?.[1]) {
+        try {
+          return decodeURIComponent(utf8Match[1]);
+        } catch {
+          return utf8Match[1];
+        }
+      }
+      const plainMatch = disposition.match(/filename="?([^"]+)"?/i);
+      if (plainMatch?.[1]) return plainMatch[1];
+      return fallback;
+    },
+    [],
+  );
+
+  const downloadExportFile = useCallback(
+    async (taskId: string) => {
+      const res = await apiFetch(
+        `/api/v1/client-return-rate/export/tasks/${taskId}/download`,
+      );
+      if (!res.ok) {
+        let detail = `导出下载失败 (HTTP ${res.status})`;
+        const body = await res.json().catch(() => null);
+        if (typeof body?.detail === "string" && body.detail.trim()) {
+          detail = body.detail;
+        }
+        throw new Error(detail);
+      }
+
+      const fileName = parseFileNameFromDisposition(
+        res.headers.get("Content-Disposition"),
+        `client_return_rate_${taskId}.csv`,
+      );
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = fileName;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    },
+    [parseFileNameFromDisposition],
+  );
+
+  const handleExportCsv = useCallback(async () => {
+    setErrorMsg(null);
+    setExportStatusText("创建导出任务中...");
+    setExporting(true);
+    setExportProgress(0);
+    try {
+      const dr = getDateRange();
+      const payload = {
+        sort_by: "month_trade_profit",
+        sort_order: "desc",
+        search: searchInput.trim() || null,
+        month_start: dr?.from ? format(dr.from, "yyyy-MM-dd") : null,
+        month_end: dr?.to ? format(dr.to, "yyyy-MM-dd") : null,
+        close_time_start:
+          (timeRange === "1h" || timeRange === "6h") && dr?.from
+            ? format(dr.from, "yyyy-MM-dd HH:mm:ss")
+            : null,
+        include_avg_equity: true,
+        country_filter: countryFilter,
+        akcm_filter: akcmFilter,
+      };
+      const res = await apiFetch("/api/v1/client-return-rate/export/tasks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        let detail = `创建导出任务失败 (HTTP ${res.status})`;
+        const body = await res.json().catch(() => null);
+        if (typeof body?.detail === "string" && body.detail.trim()) {
+          detail = body.detail;
+        }
+        throw new Error(detail);
+      }
+      const created = await res.json();
+      setExportTaskId(created.task_id);
+      setExportStatusText("任务已创建，排队中...");
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "创建导出任务失败";
+      setErrorMsg(msg);
+      setExportStatusText("");
+      setExporting(false);
+      setExportTaskId(null);
+      setExportProgress(0);
+    }
+  }, [
+    getDateRange,
+    searchInput,
+    timeRange,
+    countryFilter,
+    akcmFilter,
+  ]);
+
+  useEffect(() => {
+    if (!exportTaskId) return;
+    let active = true;
+    let timer: number | null = null;
+    const controller = new AbortController();
+
+    // Keep polling until task reaches a terminal state.
+    const poll = async () => {
+      if (!active) return;
+      try {
+        const res = await apiFetch(
+          `/api/v1/client-return-rate/export/tasks/${exportTaskId}`,
+          { signal: controller.signal },
+        );
+        if (!res.ok) {
+          let detail = `获取导出状态失败 (HTTP ${res.status})`;
+          const body = await res.json().catch(() => null);
+          if (typeof body?.detail === "string" && body.detail.trim()) {
+            detail = body.detail;
+          }
+          throw new Error(detail);
+        }
+        const statusData: ExportTaskStatus = await res.json();
+        setExportProgress(statusData.progress ?? 0);
+
+        if (statusData.status === "queued") {
+          setExportStatusText(`排队中... ${statusData.progress ?? 0}%`);
+        } else if (statusData.status === "running") {
+          setExportStatusText(`生成中... ${statusData.progress ?? 0}%`);
+        } else if (statusData.status === "succeeded") {
+          setExportStatusText("生成完成，开始下载...");
+          await downloadExportFile(exportTaskId);
+          setExportStatusText(
+            `导出完成，已下载 ${statusData.row_count.toLocaleString()} 行`,
+          );
+          setExportTaskId(null);
+          setExporting(false);
+          return;
+        } else if (statusData.status === "failed") {
+          throw new Error(statusData.error_message || "导出任务失败");
+        } else if (statusData.status === "expired") {
+          throw new Error("导出文件已过期，请重新创建导出任务");
+        }
+      } catch (e) {
+        if (e instanceof DOMException && e.name === "AbortError") return;
+        const msg = e instanceof Error ? e.message : "导出状态轮询失败";
+        setErrorMsg(msg);
+        setExportStatusText("");
+        setExportTaskId(null);
+        setExporting(false);
+        setExportProgress(0);
+        return;
+      }
+
+      if (active) timer = window.setTimeout(poll, 2000);
+    };
+
+    poll();
+
+    return () => {
+      active = false;
+      controller.abort();
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [exportTaskId, downloadExportFile]);
 
   const handleSearchKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -618,8 +801,25 @@ export default function ClientReturnRate() {
                 )}
                 查询
               </Button>
+              <Button
+                variant="outline"
+                onClick={handleExportCsv}
+                disabled={loading || exporting}
+                className="w-full sm:w-[140px] h-9 gap-2"
+              >
+                {exporting ? (
+                  <RefreshCw className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Download className="h-4 w-4" />
+                )}
+                {exporting ? `${exportProgress}%` : "导出 CSV"}
+              </Button>
             </div>
           </div>
+
+          {exportStatusText && (
+            <div className="mt-2 text-xs text-muted-foreground">{exportStatusText}</div>
+          )}
 
           {/* Statistics row */}
           {total > 0 && (

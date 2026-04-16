@@ -19,6 +19,7 @@
 - **快速时间选择**: 过去 1 小时 / 过去 6 小时 / 今日 / 本周 / 过去 7 天 / 本月 / 过去 30 天
 - **客户 ID 搜索**: 精确匹配 client_id
 - **查询按钮**: 触发后端查询
+- **导出 CSV 按钮**: 创建异步导出任务，任务完成后自动下载 CSV
 
 ### 2.2 统计信息行
 - 客户总数统计
@@ -26,6 +27,7 @@
 - 查询时间（HK 时间 UTC+8，含 AM/PM）
 - 缓存状态标签（琥珀色"缓存数据" / 绿色"实时查询"）
 - 清除缓存按钮（仅缓存命中时显示）
+- 导出任务状态文本（排队中/生成中/导出完成）
 
 ### 2.3 数据表格 (AG-Grid)
 支持排序、分页（20/50/100/200）、文本选择。
@@ -96,6 +98,16 @@
 | Redis | 按查询参数 MD5 做 key | 3 小时 | `DELETE /api/v1/client-return-rate/cache` |
 | 前端 sessionStorage | 保存最后一次查询结果 | 3 小时 | 页面清除缓存按钮 / 手动清 |
 
+### 4.5 异步导出任务
+
+- 任务表：`backend/data/client_return_export.db`（SQLite），表名 `export_tasks`
+- 任务状态：`queued -> running -> succeeded/failed/expired`
+- 任务执行：`ThreadPoolExecutor`（默认单 worker），后台线程复用 `get_client_return_rate_data()`
+- 导出口径：固定使用“任务创建时参数快照”，并在后端应用 `country_filter` / `akcm_filter`
+- 文件目录：默认 `backend/data/exports/client-return-rate/`（可通过 `CLIENT_RETURN_EXPORT_DIR` 覆盖）
+- 过期策略：默认 24 小时可下载；状态查询/新建任务时触发 lazy cleanup
+- 安全：下载时校验任务状态 + 文件路径必须位于导出目录下，防止路径穿越
+
 ---
 
 ## 5. API 接口
@@ -118,6 +130,42 @@
 ### `DELETE /api/v1/client-return-rate/cache`
 
 清除所有 `app:client_return:cache:*` Redis 缓存。
+
+### `POST /api/v1/client-return-rate/export/tasks`
+
+创建异步导出任务（立即返回 `task_id`，不阻塞主请求）。
+
+| 参数 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `sort_by` | string | `month_trade_profit` | 排序字段 |
+| `sort_order` | string | `desc` | 排序方向 |
+| `search` | string | null | 按 client_id 精确搜索 |
+| `deposit_bucket` | string | null | 存款区间过滤 |
+| `month_start` | string | null | 开始日期 (YYYY-MM-DD) |
+| `month_end` | string | null | 结束日期 (YYYY-MM-DD) |
+| `close_time_start` | string | null | 精确时间过滤 (HK 时间) |
+| `include_avg_equity` | bool | true | 是否包含日均净值与 ROACE |
+| `country_filter` | enum | `all` | `all` / `CN` / `Global` |
+| `akcm_filter` | enum | `all` | `all` / `exclude` / `only` |
+
+### `GET /api/v1/client-return-rate/export/tasks/{task_id}`
+
+查询任务状态与进度。
+
+- `status`: `queued | running | succeeded | failed | expired`
+- 返回 `progress`、`row_count`、`file_size_bytes`、`error_message`、`expires_at`、`download_url`
+
+### `GET /api/v1/client-return-rate/export/tasks/{task_id}/download`
+
+下载导出文件（仅 `succeeded` 可下载）。
+
+| 场景 | 状态码 | 说明 |
+|---|---|---|
+| 未携带 API Key | 403 | API Key middleware 拦截 |
+| 任务不存在 | 404 | 无效 task_id |
+| 任务未完成/失败 | 409 | queued/running/failed |
+| 文件已过期 | 410 | expired |
+| 成功下载 | 200 | `text/csv` + `Content-Disposition` |
 
 ---
 

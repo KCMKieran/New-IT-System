@@ -29,6 +29,7 @@ This is the documentation hub for the KCM IT System - an internal financial trad
 | Module | Description | Docs |
 |--------|-------------|------|
 | Dashboard | Home page with system overview | [dashboard.md](features/dashboard.md) |
+| Client Return Rate | 客户回报率查询与异步 CSV 导出 | [client-return-rate.md](features/client-return-rate.md) |
 | Client PnL Analysis | Customer profit/loss analysis | [Features](features/) |
 | Position Monitor | Real-time position monitoring | [position-monitor.md](features/position-monitor.md) |
 | IB Report | Broker commission reports | [ib-report.md](features/ib-report.md) |
@@ -66,6 +67,8 @@ docs/
 │   ├── ib-net-deposit-summary.md
 │   ├── open-positions-reform.md
 │   ├── dashboard-pnl-by-group.md
+│   ├── client-return-rate.md
+│   ├── roace-return-rate.md
 │   ├── client-pnl-local-filtering.md
 │   ├── client-pnl-column-toggle.md
 │   ├── profit-deep-analysis.md

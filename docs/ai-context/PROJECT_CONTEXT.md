@@ -129,6 +129,7 @@ New-IT-System/
 │   │   ├── services/           # Business logic
 │   │   │   ├── clickhouse_service.py
 │   │   │   ├── client_pnl_service.py
+│   │   │   ├── client_return_export_service.py # Async CSV export worker
 │   │   │   ├── ib_financial_service.py  # IB Financial Monitor
 │   │   │   ├── email_service.py  # SMTP email sending
 │   │   │   └── ...
@@ -136,6 +137,7 @@ New-IT-System/
 │   │       ├── config.py       # Settings from .env
 │   │       ├── database.py     # SQLite for IB Financial config
 │   │       ├── risk_monitor_db.py # SQLite for risk monitor config/history
+│   │       ├── client_return_export_db.py # SQLite for client return export tasks
 │   │       ├── scheduler.py    # APScheduler for daily reports
 │   │       ├── burst_open_scheduler.py # APScheduler for burst open scanning
 │   │       ├── logging_config.py
@@ -278,11 +280,16 @@ New-IT-System/
 - Demo account exclusion
 - sessionStorage caching for page navigation restore
 - Redis 3-hour server-side cache with frontend clear cache button
+- Async CSV export flow (create task -> poll status -> download)
+- Export task persistence in SQLite with file expiration cleanup
 - Dedicated `MYSQL_HOST_PRIMARY` config (can override independently from global MYSQL_HOST)
 
 **APIs**:
 - `GET /api/v1/client-return-rate/query` - Query with optional `close_time_start` for precise filtering, optional `include_avg_equity` for ROACE calculation
 - `DELETE /api/v1/client-return-rate/cache` - Clear all Redis cache for this page
+- `POST /api/v1/client-return-rate/export/tasks` - Create async CSV export task
+- `GET /api/v1/client-return-rate/export/tasks/{task_id}` - Query export task status and progress
+- `GET /api/v1/client-return-rate/export/tasks/{task_id}/download` - Download generated CSV file
 
 **Tables**: `fxbackoffice.mt4_trades`, `fxbackoffice.mt4_users`, `fxbackoffice.stats_transactions`, `fxbackoffice.stats_balances` (ROACE)
 
