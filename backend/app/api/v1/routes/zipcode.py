@@ -48,9 +48,10 @@ def zipcode_changes(
 @router.get("/exclusions")
 def zipcode_exclusions(
 	is_active: bool | None = Query(default=None, description="Filter by active flag"),
+	limit: int = Query(default=100, ge=1, le=10000, description="Limit rows returned"),
 ):
 	try:
-		rows = get_exclusions(is_active=is_active)
+		rows = get_exclusions(is_active=is_active, limit=limit)
 		return {"ok": True, "rows": len(rows), "data": rows}
 	except Exception as e:
 		return {"ok": False, "rows": 0, "data": [], "error": str(e)}

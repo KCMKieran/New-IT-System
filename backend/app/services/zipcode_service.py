@@ -144,7 +144,7 @@ def get_zipcode_changes(
 			return {"rows": total, "page": page, "page_size": page_size, "data": data}
 
 
-def get_exclusions(is_active: bool | None = None) -> List[Dict[str, Any]]:
+def get_exclusions(is_active: bool | None = None, limit: int = 100) -> List[Dict[str, Any]]:
 	"""
 	List exclusions; optional is_active filter.
 	Returns [{ id, client_id, reason_code, note, added_by, added_at, expires_at, is_active }]
@@ -158,7 +158,9 @@ def get_exclusions(is_active: bool | None = None) -> List[Dict[str, Any]]:
 					SELECT id, client_id, reason_code, note, added_by, added_at, expires_at, is_active
 					FROM public.swapfree_exclusions
 					ORDER BY is_active DESC, added_at DESC, id DESC
-					"""
+					LIMIT %s
+					""",
+					(limit,)
 				)
 				rows = cur.fetchall()
 			else:
@@ -168,8 +170,9 @@ def get_exclusions(is_active: bool | None = None) -> List[Dict[str, Any]]:
 					FROM public.swapfree_exclusions
 					WHERE is_active = %s
 					ORDER BY added_at DESC, id DESC
+					LIMIT %s
 					""",
-					(is_active,),
+					(is_active, limit)
 				)
 				rows = cur.fetchall()
 			return [dict(r) for r in rows]
