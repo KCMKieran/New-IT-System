@@ -89,6 +89,10 @@ interface AlertEvent {
   total_open_lots: number | null;
   leverage: number | null;
   group: string | null;
+  /** Account base currency. "USD" | "CEN"; equity/balance are already in USD (CEN already ÷100 on backend). */
+  currency: string | null;
+  /** Client zipcode from fxbackoffice.mt4_users; null when CRM has no value. Backend supports LIKE substring filter. */
+  zipcode: string | null;
 }
 
 interface AlertsResponse {
@@ -362,6 +366,18 @@ function BurstOpenTab({ active }: { active: boolean }) {
   const [serverFilter, setServerFilter] = useState("all");
   const [loginSearch, setLoginSearch] = useState("");
 
+  // Zipcode filter goes to the **backend** (`?zipcode=` LIKE %x%), not
+  // AG-Grid — so the hits come from all pages within the time range,
+  // not just the currently rendered 50 rows. Raw user input is kept in
+  // `zipcodeInput`; `zipcodeQuery` is the debounced value actually sent
+  // to the API so fast typing doesn't spam the server.
+  const [zipcodeInput, setZipcodeInput] = useState("");
+  const [zipcodeQuery, setZipcodeQuery] = useState("");
+  useEffect(() => {
+    const t = setTimeout(() => setZipcodeQuery(zipcodeInput.trim()), 300);
+    return () => clearTimeout(t);
+  }, [zipcodeInput]);
+
   // Resolve the effective (since, until) for the current selection.
   // Memoized so we don't build a new range object on every render.
   const effectiveRange = useMemo(
@@ -380,6 +396,9 @@ function BurstOpenTab({ active }: { active: boolean }) {
           until: effectiveRange.until,
           limit: "1000",
         });
+        if (zipcodeQuery) {
+          qs.set("zipcode", zipcodeQuery);
+        }
         const [alertsRes, statsRes, latestRes] = await Promise.all([
           apiFetch(`/api/v1/risk-monitor/burst-open/alerts?${qs}`, { signal }),
           apiFetch(`/api/v1/risk-monitor/burst-open/alerts/stats?${qs}`, { signal }),
@@ -421,7 +440,7 @@ function BurstOpenTab({ active }: { active: boolean }) {
         setLoading(false);
       }
     },
-    [effectiveRange],
+    [effectiveRange, zipcodeQuery],
   );
 
   /** Fetch config separately so the drawer can open before first scan finishes. */
@@ -570,11 +589,50 @@ function BurstOpenTab({ active }: { active: boolean }) {
       },
       { headerName: "服务器", field: "server", colId: "server", width: 110 },
       {
+        headerName: "Zipcode",
+        field: "zipcode",
+        colId: "zipcode",
+        width: 120,
+        // NULL means CRM has no value (~4% of accounts). Render as a
+        // muted em-dash so rows aren't silently blank and analysts can
+        // still tell the filter didn't match them.
+        cellRenderer: (p: { value: string | null }) =>
+          p.value ? (
+            <span className="font-mono text-sm">{p.value}</span>
+          ) : (
+            <span className="text-muted-foreground">—</span>
+          ),
+      },
+      {
         headerName: "账户",
         field: "login",
         colId: "login",
         width: 110,
         cellRenderer: LoginCell,
+      },
+      {
+        headerName: "币种",
+        field: "currency",
+        colId: "currency",
+        width: 80,
+        // CEN accounts behave differently from USD (small balance, high
+        // turnover); surfacing the currency helps risk analysts read
+        // patterns. Backend already converts amounts to USD.
+        cellRenderer: (p: { value: string | null }) => {
+          const v = p.value || "USD";
+          const isCen = v === "CEN";
+          return (
+            <span
+              className={
+                isCen
+                  ? "text-amber-600 dark:text-amber-400 font-medium"
+                  : "text-muted-foreground"
+              }
+            >
+              {v}
+            </span>
+          );
+        },
       },
       { headerName: "品种", field: "symbol", colId: "symbol", width: 110 },
       {
@@ -602,7 +660,7 @@ function BurstOpenTab({ active }: { active: boolean }) {
           p.data?.orders?.map((o) => `${o.direction} ${o.lots}`).join(", ") ?? "",
       },
       {
-        headerName: "净值(Equity)",
+        headerName: "净值 (USD)",
         field: "equity",
         colId: "equity",
         width: 130,
@@ -625,7 +683,7 @@ function BurstOpenTab({ active }: { active: boolean }) {
         },
       },
       {
-        headerName: "每手净值",
+        headerName: "每手净值 (USD)",
         field: "equity_per_lot",
         colId: "equity_per_lot",
         width: 120,
@@ -810,6 +868,17 @@ function BurstOpenTab({ active }: { active: boolean }) {
             <SelectItem value="MT5">MT5</SelectItem>
           </SelectContent>
         </Select>
+
+        {/* Zipcode filter — backend LIKE '%x%' across the whole time range */}
+        <div className="relative w-[180px]">
+          <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+          <Input
+            placeholder="搜索 zipcode（模糊）"
+            value={zipcodeInput}
+            onChange={(e) => setZipcodeInput(e.target.value)}
+            className="pl-8"
+          />
+        </div>
 
         {/* Login search */}
         <div className="relative w-[180px]">

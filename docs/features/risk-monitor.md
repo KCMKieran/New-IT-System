@@ -1508,7 +1508,9 @@ CREATE TABLE alert_events (
     total_open_lots REAL,
     leverage        INTEGER,
     account_group   TEXT,
-    orders_json     TEXT                 -- 订单明细 JSON
+    orders_json     TEXT,                -- 订单明细 JSON
+    currency        TEXT,                -- "USD" / "CEN"（2026-04-17 新增，equity/balance 已是 USD）
+    zipcode         TEXT                 -- 客户 zipcode（2026-04-17 新增，来自 fxbackoffice.mt4_users）
 );
 
 CREATE INDEX idx_alert_events_scanned_at   ON alert_events(scanned_at DESC);
@@ -1528,6 +1530,49 @@ CREATE INDEX idx_alert_events_server_sym   ON alert_events(server, symbol, scann
 - CSV 导出时同样按 HKT 展示
 
 **保留策略**: **30 天**。每次扫描后同步 `DELETE FROM scan_history / alert_events WHERE scanned_at < datetime('now', '-30 days')`。
+
+#### 币种处理（2026-04-17 上线）
+
+MT 服务器上 CEN（美分）账户的 `equity` / `balance` 是美分单位（100 倍膨胀），CRM 侧权威来源是 `fxbackoffice.mt4_users`，按 `loginsid` (`{sid}-{login}`) 查询：
+
+| server | sid |
+|--------|-----|
+| MT4_Live | 1 |
+| MT4_Live2 | 6 |
+| MT5 | 5 |
+
+处理流程（`risk_monitor_service._enrich_account_info`）：
+
+1. `_get_currency_map` 一次批量查 `fxbackoffice.mt4_users` 拿到所有 alert 的 `loginsid → CURRENCY`
+2. `CURRENCY='CEN'` 的 alert：`equity /= 100`、`balance /= 100`
+3. `equity_per_lot` 用调整后的 equity 重算，保持三者单位一致
+4. `alert.currency` 字段写 USD / CEN 供前端"币种"列展示（未知默认 USD，绝不把 USD 账户误当 CEN 除 100）
+5. `total_lots` / `total_open_lots` 不动（合约规格 CEN/USD 一致）
+
+**一次性回填迁移**: `backend/scripts/backfill_alert_events_currency.py` — 针对 currency 列上线前已写入的旧行，幂等可重跑，默认 dry-run，`--apply` 才写 DB。2026-04-17 首次执行回填 9871 行（CEN 7424 / USD 2447），0 缺失。
+
+#### Zipcode 筛选（2026-04-17 上线）
+
+`fxbackoffice.mt4_users.ZIPCODE` 作为同一客户多账户的识别特征（同 zipcode + 批量下单 = 刷单农场强信号）。和 currency 共用 `_get_account_info_map`，**单次 SQL 同时捞出 CURRENCY + ZIPCODE**，无额外 DB load。
+
+**后端 API**：
+
+```
+GET /burst-open/alerts?zipcode=<substr>&...
+GET /burst-open/alerts/stats?zipcode=<substr>&...
+```
+
+- 子串模糊匹配（`WHERE zipcode LIKE '%x%' ESCAPE '\\'`，用户的 `%` `_` `\` 会被转义）
+- 空字符串/纯空格视为"不筛选"
+- NULL 行永不命中（CRM 未填 zipcode 的账户会被筛走，这是预期行为）
+
+**前端**：
+- 列顺序：服务器 → **Zipcode** → 账户 → 币种 → 品种 → ...
+- Zipcode 列 NULL 值以灰色 `—` 显示
+- Toolbar 独立输入框（300ms debounce），和时间范围、服务器下拉同级
+- `stats` 接口同步带 zipcode 参数 → "可疑账户 / 告警事件"卡片与表格数据一致
+
+**不做回填**：2026-04-17 起新数据带 zipcode；历史 9871 行 zipcode 永远 NULL，不在筛选结果中。若未来需要，可仿 `backfill_alert_events_currency.py` 写同款脚本。
 
 ### 10.7 可行性分析
 

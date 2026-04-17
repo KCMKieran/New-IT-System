@@ -59,6 +59,11 @@ _SERVERS = [
     {"key": "mt5",       "type": "mt5", "db": "mt5_live",  "label": "MT5"},
 ]
 
+# server label → sid used as prefix in fxbackoffice.mt4_users.loginsid
+# (e.g. MT5 login 67035933 → loginsid "5-67035933"). sid=2 is IB wallet,
+# which never appears in trading data so it's not included here.
+_SID_MAP = {"MT4_Live": 1, "MT4_Live2": 6, "MT5": 5}
+
 
 def _query_mt4_recent_opens(
     conn,
@@ -270,6 +275,8 @@ def rule_burst_open_detect(
                     "total_open_lots": None,
                     "leverage": None,
                     "group": None,
+                    "currency": None,
+                    "zipcode": None,
                 })
 
     return alerts
@@ -408,11 +415,76 @@ def scan_burst_open(
         conn.close()
 
 
+def _get_account_info_map(
+    conn, alerts: List[Dict[str, Any]]
+) -> Dict[str, Dict[str, Any]]:
+    """Look up CRM-side account metadata (currency, zipcode) from
+    fxbackoffice.mt4_users in a single roundtrip.
+
+    Returns a dict keyed by `{sid}-{login}`:
+        {
+            "5-67036965": {"currency": "CEN", "zipcode": "111 90"},
+            ...
+        }
+
+    Callers treat a missing loginsid as "USD + no zipcode" so an absent
+    account never gets accidentally treated as CEN or fake-matched by a
+    zipcode filter.
+    """
+    loginsids: set[str] = set()
+    for a in alerts:
+        sid = _SID_MAP.get(a["server"])
+        if sid is None:
+            continue
+        loginsids.add(f"{sid}-{a['login']}")
+
+    if not loginsids:
+        return {}
+
+    placeholders = ",".join(["%s"] * len(loginsids))
+    sql = f"""
+        SELECT loginsid,
+               UPPER(CURRENCY) AS currency,
+               ZIPCODE         AS zipcode
+        FROM fxbackoffice.mt4_users
+        WHERE loginsid IN ({placeholders})
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, tuple(loginsids))
+            rows = cur.fetchall()
+        result: Dict[str, Dict[str, Any]] = {}
+        for r in rows:
+            # Normalise empty string zipcode to None so downstream can
+            # distinguish "not filled in CRM" from a real zipcode.
+            zipcode = (r.get("zipcode") or "").strip() or None
+            result[r["loginsid"]] = {
+                "currency": r.get("currency") or None,
+                "zipcode": zipcode,
+            }
+        return result
+    except Exception:
+        logger.error(
+            "Failed to query account info from fxbackoffice.mt4_users",
+            exc_info=True,
+        )
+        return {}
+
+
 def _enrich_account_info(
     conn, alerts: List[Dict[str, Any]]
 ) -> None:
-    """Fill in equity, balance, leverage, group, total_open_lots, equity_per_lot
-    for each alert row. Modifies alerts in place.
+    """Fill in equity, balance, leverage, group, total_open_lots,
+    equity_per_lot, currency and zipcode for each alert row. Modifies
+    alerts in place.
+
+    For CEN accounts, raw equity/balance stored on the MT server are in
+    cents — we divide by 100 here so the frontend always receives USD.
+    Lots are NOT adjusted (contract size is the same for USD and CEN).
+
+    zipcode comes from fxbackoffice.mt4_users and is used by the
+    frontend zipcode column + toolbar LIKE filter to spot same-address
+    account clusters (e.g. farming rings registered under one zipcode).
     """
     if not alerts:
         return
@@ -444,6 +516,9 @@ def _enrich_account_info(
         except Exception:
             logger.error("Failed to query MT4_Live2 total lots", exc_info=True)
 
+    # CRM-side enrichment: currency + zipcode, single roundtrip.
+    account_info_map = _get_account_info_map(conn, alerts)
+
     for alert in alerts:
         srv = alert["server"]
         lid = int(alert["login"])
@@ -460,19 +535,29 @@ def _enrich_account_info(
             if "demo" in grp or "test" in grp:
                 alert["_skip"] = True
         else:
-            # MT4: equity/balance/leverage/group come from the first order row
-            # (already joined in SQL). Find any alert order for this login
-            # to extract account info. The SQL query already excluded demo/test.
-            first_order = alert["orders"][0] if alert["orders"] else {}
-            # For MT4, account info was in the original SQL row — but our
-            # burst detection only stored order details. We need to look
-            # back at the raw opens. Instead, we query mt4_users directly.
+            # MT4: we query mt4_users directly since burst detection only
+            # kept order-level fields from the original join.
             _fill_mt4_account_info(conn, alert, srv, lid)
 
             lots_map = mt4_live_lots if srv == "MT4_Live" else mt4_live2_lots
             alert["total_open_lots"] = _round_or_none(lots_map.get(lid))
 
-        # Calculate equity_per_lot using total open lots across all positions
+        # Resolve currency + zipcode and apply CEN → USD conversion
+        # before deriving equity_per_lot, so the ratio is expressed in
+        # the same unit as the displayed equity.
+        sid = _SID_MAP.get(srv)
+        loginsid = f"{sid}-{lid}" if sid is not None else None
+        info = account_info_map.get(loginsid, {}) if loginsid else {}
+        currency = info.get("currency") or "USD"
+        alert["currency"] = currency
+        alert["zipcode"] = info.get("zipcode")  # None when CRM has no value
+
+        if currency == "CEN":
+            if alert.get("equity") is not None:
+                alert["equity"] = round(float(alert["equity"]) / 100, 2)
+            if alert.get("balance") is not None:
+                alert["balance"] = round(float(alert["balance"]) / 100, 2)
+
         total_lots = alert.get("total_open_lots")
         equity = alert.get("equity")
         if equity is not None and total_lots and total_lots > 0:

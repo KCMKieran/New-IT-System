@@ -80,7 +80,9 @@ CREATE TABLE IF NOT EXISTS alert_events (
     total_open_lots   REAL,
     leverage          INTEGER,
     account_group     TEXT,
-    orders_json       TEXT
+    orders_json       TEXT,
+    currency          TEXT,                -- "USD" or "CEN" (for display; equity/balance already USD)
+    zipcode           TEXT                 -- client zipcode from fxbackoffice.mt4_users
 );
 
 CREATE INDEX IF NOT EXISTS idx_alert_events_scanned_at
@@ -113,12 +115,31 @@ def init_risk_monitor_db() -> None:
             conn.execute(_SEED_RULE_SQL)
             conn.commit()
 
+        # Lightweight column migrations for installations created before
+        # newer fields were introduced. SQLite ignores ALTER TABLE ... ADD
+        # COLUMN if the column already exists via a PRAGMA check.
+        _migrate_alert_events_columns(conn)
+
         # One-time backfill: if alert_events is empty but scan_history has
         # rows, flatten their JSON alerts into the event table so existing
         # history is queryable under the new view.
         _backfill_alert_events_if_needed(conn)
 
     logger.info("Risk monitor SQLite database initialized at %s", _DB_PATH)
+
+
+def _migrate_alert_events_columns(conn: sqlite3.Connection) -> None:
+    """Add any alert_events columns introduced after the initial schema.
+
+    Keeps old installations forward-compatible without requiring a manual
+    wipe of the SQLite file.
+    """
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(alert_events)")}
+    if "currency" not in cols:
+        conn.execute("ALTER TABLE alert_events ADD COLUMN currency TEXT")
+    if "zipcode" not in cols:
+        conn.execute("ALTER TABLE alert_events ADD COLUMN zipcode TEXT")
+    conn.commit()
 
 
 def _backfill_alert_events_if_needed(conn: sqlite3.Connection) -> None:
@@ -147,8 +168,8 @@ def _backfill_alert_events_if_needed(conn: sqlite3.Connection) -> None:
                      server, login, symbol, order_count, total_lots,
                      first_open, last_open,
                      equity, balance, equity_per_lot, total_open_lots,
-                     leverage, account_group, orders_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     leverage, account_group, orders_json, currency, zipcode)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     batch_id,
@@ -169,6 +190,8 @@ def _backfill_alert_events_if_needed(conn: sqlite3.Connection) -> None:
                     alert.get("leverage"),
                     alert.get("group"),
                     json.dumps(alert.get("orders", [])),
+                    alert.get("currency"),
+                    alert.get("zipcode"),
                 ),
             )
             inserted += 1
@@ -280,8 +303,8 @@ def append_scan_and_events(
                      server, login, symbol, order_count, total_lots,
                      first_open, last_open,
                      equity, balance, equity_per_lot, total_open_lots,
-                     leverage, account_group, orders_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     leverage, account_group, orders_json, currency, zipcode)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     batch_id,
@@ -302,6 +325,8 @@ def append_scan_and_events(
                     alert.get("leverage"),
                     alert.get("group"),
                     json.dumps(alert.get("orders", [])),
+                    alert.get("currency"),
+                    alert.get("zipcode"),
                 ),
             )
 
@@ -331,6 +356,17 @@ def _row_to_alert_dict(row: sqlite3.Row) -> dict[str, Any]:
     return d
 
 
+def _escape_like(text: str) -> str:
+    """Escape LIKE wildcards so user input is treated literally.
+
+    `_` and `%` in the user's zipcode input must not act as wildcards,
+    otherwise typing "_" would match every row. We escape both using
+    a backslash and let the caller append the literal surrounding `%`
+    for substring matching, and pair the query with `ESCAPE '\\'`.
+    """
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def query_alert_events(
     since: str,
     until: str,
@@ -338,6 +374,7 @@ def query_alert_events(
     login: int | None = None,
     symbol: str | None = None,
     rule_id: int | None = None,
+    zipcode: str | None = None,
     limit: int = 200,
     offset: int = 0,
 ) -> tuple[list[dict], int]:
@@ -345,7 +382,10 @@ def query_alert_events(
 
     Args:
         since / until: UTC ISO8601 strings (inclusive / exclusive).
-        server / login / symbol / rule_id: optional filters.
+        server / login / symbol / rule_id: optional equality filters.
+        zipcode: substring match (`%x%`), case-insensitive. NULLs never
+            match so rows without CRM zipcode are silently excluded
+            when this filter is active.
         limit / offset: pagination.
 
     Returns:
@@ -366,6 +406,9 @@ def query_alert_events(
     if rule_id is not None:
         where.append("rule_id = ?")
         params.append(rule_id)
+    if zipcode:
+        where.append("zipcode LIKE ? ESCAPE '\\'")
+        params.append(f"%{_escape_like(zipcode)}%")
 
     where_sql = " AND ".join(where)
 
@@ -381,7 +424,7 @@ def query_alert_events(
                    server, login, symbol, order_count, total_lots,
                    first_open, last_open,
                    equity, balance, equity_per_lot, total_open_lots,
-                   leverage, account_group, orders_json
+                   leverage, account_group, orders_json, currency, zipcode
             FROM alert_events
             WHERE {where_sql}
             ORDER BY scanned_at DESC, id DESC
@@ -393,31 +436,46 @@ def query_alert_events(
     return [_row_to_alert_dict(r) for r in rows], total
 
 
-def alert_events_stats(since: str, until: str) -> dict[str, Any]:
+def alert_events_stats(
+    since: str,
+    until: str,
+    zipcode: str | None = None,
+) -> dict[str, Any]:
     """Aggregate stats over the time range for the summary cards.
+
+    Keeps the zipcode filter in sync with query_alert_events so the
+    "可疑账户 / 告警事件" numbers on the page match whatever the user
+    filtered in the toolbar.
 
     Returns:
         suspicious_count: distinct login count in range
         event_count:      total alert row count in range
         servers:          distinct servers touched (for UI hint)
     """
+    where = ["scanned_at >= ?", "scanned_at < ?"]
+    params: list[Any] = [since, until]
+    if zipcode:
+        where.append("zipcode LIKE ? ESCAPE '\\'")
+        params.append(f"%{_escape_like(zipcode)}%")
+    where_sql = " AND ".join(where)
+
     with get_risk_monitor_db() as conn:
         row = conn.execute(
-            """
+            f"""
             SELECT COUNT(DISTINCT login) AS suspicious_count,
                    COUNT(*)              AS event_count
             FROM alert_events
-            WHERE scanned_at >= ? AND scanned_at < ?
+            WHERE {where_sql}
             """,
-            (since, until),
+            params,
         ).fetchone()
 
         server_rows = conn.execute(
-            """
+            f"""
             SELECT DISTINCT server FROM alert_events
-            WHERE scanned_at >= ? AND scanned_at < ?
+            WHERE {where_sql}
             """,
-            (since, until),
+            params,
         ).fetchall()
 
     return {

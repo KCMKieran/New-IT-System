@@ -339,19 +339,19 @@ New-IT-System/
 - Backend-driven scanning via APScheduler (single background task, frontend reads cached result)
 - Multi-rule support: up to 10 configurable rules with independent parameters
 - Config persistence in SQLite (`backend/data/risk_monitor.db`)
-- Scan history log with 7-day retention and paginated history drawer
 - Cross-server scanning (MT4 Live + MT4 Live2 + MT5)
 - 30s boundary buffer + deduplication to prevent missed/duplicate detections
 - All matched accounts labeled "可疑用户" (no ALERT/WATCH severity levels)
+- CEN (cent) account handling: equity/balance from MT are cents — backend looks up `fxbackoffice.mt4_users` by `loginsid` ({sid}-{login}), divides by 100 for CEN, and tags `currency` on every alert so the frontend "币种" column shows USD / CEN correctly (equity/balance columns labeled "(USD)")
+- Zipcode enrichment (same `fxbackoffice.mt4_users` query as currency): `alert_events.zipcode` stored; frontend has a toolbar LIKE filter to cluster same-address accounts
 - Timezone convention: backend stores `scanned_at` in UTC (`...Z`), frontend converts and displays monitor timestamps in `Asia/Hong_Kong` (HKT)
-- Frontend: 30s polling, Config Drawer (multi-rule), History Drawer (paginated)
 
-**Frontend view**: Time-range alert view (default last 4h, presets: 1h/4h/1d/7d/30d/custom). Events persisted 30 days. CSV export via AG-Grid.
+**Frontend view**: Time-range alert view (default last 4h, presets: 1h/4h/1d/7d/30d/custom). 30 days retention. Config Drawer (multi-rule) + CSV export via AG-Grid. No history drawer (time-range picker replaces it).
 
 **APIs**:
 - `GET /api/v1/risk-monitor/burst-open` — Latest cached scan result (scan metadata + immediate-scan refresh)
-- `GET /api/v1/risk-monitor/burst-open/alerts?since=&until=...` — Time-range alert events view (primary data source)
-- `GET /api/v1/risk-monitor/burst-open/alerts/stats` — Time-range aggregates for summary cards
+- `GET /api/v1/risk-monitor/burst-open/alerts?since=&until=&zipcode=...` — Time-range alert events view (primary data source); `zipcode` is a LIKE '%x%' substring filter
+- `GET /api/v1/risk-monitor/burst-open/alerts/stats?since=&until=&zipcode=...` — Time-range aggregates for summary cards, honours same zipcode filter
 - `GET /api/v1/risk-monitor/burst-open/config` — Current config from SQLite
 - `POST /api/v1/risk-monitor/burst-open/config` — Update config + reschedule scanner
 - `POST /api/v1/risk-monitor/burst-open/scan-now` — Trigger immediate scan
@@ -359,12 +359,13 @@ New-IT-System/
 **Data sources**: MySQL Slave (`mt4_live`, `mt4_live2`, `mt5_live`) — same DB_HOST config
 
 **Key Files**:
-- `frontend/src/pages/RiskMonitor.tsx` (BurstOpenTab + ConfigDrawer + HistoryDrawer)
-- `backend/app/api/v1/routes/risk_monitor.py` (5 endpoints)
-- `backend/app/services/risk_monitor_service.py` (SQL + sliding window rule engine)
+- `frontend/src/pages/RiskMonitor.tsx` (BurstOpenTab + ConfigDrawer, AG-Grid time-range view)
+- `backend/app/api/v1/routes/risk_monitor.py` (alert/stats/config/scan-now endpoints)
+- `backend/app/services/risk_monitor_service.py` (SQL + sliding window rule engine + CEN currency enrichment)
 - `backend/app/schemas/risk_monitor.py` (Pydantic models)
 - `backend/app/core/burst_open_scheduler.py` (APScheduler + in-memory cache)
-- `backend/app/core/risk_monitor_db.py` (SQLite config/history CRUD)
+- `backend/app/core/risk_monitor_db.py` (SQLite config/history CRUD, `alert_events` event-level table)
+- `backend/scripts/backfill_alert_events_currency.py` (one-off migration for legacy currency=NULL rows)
 
 **Docs**: [risk-monitor.md](../features/risk-monitor.md) | [Roadmap](../features/risk-monitor-roadmap.md) | **Skill**: `.cursor/skills/risk-monitor/SKILL.md`
 

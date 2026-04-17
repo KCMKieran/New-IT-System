@@ -11,6 +11,8 @@
 > **更新历史**：
 > - 2026-04-17 初建：中期架构、5 条新规则、实施路线、分级决策
 > - 2026-04-17 追加：§7 CEN/USD 调研归档（暂缓实施）、§8 Profit 方案 C 归档（暂缓实施）、§9 MT4 vs MT5 命中数差异结论
+> - 2026-04-17 §7 转为已实施（currency 列 + CEN ÷100）；§7.7 记录一次性回填脚本（9871 行）
+> - 2026-04-17 新增 §10：zipcode enrichment + 后端 LIKE 模糊筛选上线
 
 ---
 
@@ -256,9 +258,9 @@ SQL 模板参考 [docs/features/risk-monitor.md §9.5](./risk-monitor.md)（"完
 
 ---
 
-## 七、CEN / USD 账户处理（2026-04-17 调研，暂缓实施）
+## 七、CEN / USD 账户处理（2026-04-17 已实施）
 
-> **状态**：调研完成，确认是历史遗留问题。**决定暂不实施**（需先与同事对齐 CEN 单位约定），调研结论归档于此作为未来实施的参考。
+> **状态**：✅ 已实施。与同事沟通后确认 CEN 单位约定（equity/balance 除 100，lots 不变），落代码 + 前端加"币种"列。
 
 ### 7.1 问题
 
@@ -299,45 +301,67 @@ USD  2-9001747    # IB wallet, 忽略
 CEN  5-67036541   # MT5 CEN
 ```
 
-### 7.3 实施方案（未来用）
+### 7.3 已实施方案
 
-**推荐方案**：独立 enrichment 查询，不碰现有扫描 SQL。
+独立 enrichment 查询，不碰现有扫描 SQL。
 
-在 `_enrich_account_info` 里加一步：收集所有 alert 的 `(server, login)` → 组 loginsid 列表 → 一次查 `fxbackoffice.mt4_users` → 建 `loginsid → CURRENCY` 字典 → 对 `CURRENCY='CEN'` 的 alert 把 `equity` / `balance` ÷ 100，`equity_per_lot` 因派生自 equity 自动正确。
+在 `backend/app/services/risk_monitor_service.py` 里：
 
-```python
-# 伪代码
-loginsids = [f"{SID_MAP[a['server']]}-{a['login']}" for a in alerts]
-currency_map = query_currency(loginsids)  # fxbackoffice.mt4_users
-for a in alerts:
-    key = f"{SID_MAP[a['server']]}-{a['login']}"
-    if currency_map.get(key) == "CEN":
-        if a["equity"] is not None:  a["equity"]  /= 100
-        if a["balance"] is not None: a["balance"] /= 100
-        a["currency"] = "CEN"
-    else:
-        a["currency"] = currency_map.get(key, "USD")  # 查不到默认 USD
-```
+- `_SID_MAP = {"MT4_Live": 1, "MT4_Live2": 6, "MT5": 5}` —— server 到 fxbackoffice sid 的映射
+- `_get_currency_map(conn, alerts)` —— 收集所有 alert 的 loginsid，一次查 `fxbackoffice.mt4_users`，返回 `{loginsid: 'USD' | 'CEN'}`。查询失败 / 记录缺失 → 默认 USD
+- `_enrich_account_info` 中：在 MT4/MT5 原始 equity/balance 填充完之后、计算 `equity_per_lot` 之前，对 `CURRENCY='CEN'` 的 alert 把 `equity` 和 `balance` 除 100；`equity_per_lot` 因派生自 equity 自动正确
+- alert 对象新增 `currency` 字段（`"USD" | "CEN"`）
 
-**不选 JOIN 方案**的原因：扫描阶段保持窄而快，enrichment 阶段统一补齐，架构清晰。
+数据库：
 
-### 7.4 前端配合（未来用）
+- `alert_events` 表新增 `currency TEXT` 列，`init_risk_monitor_db` 增加轻量迁移 `_migrate_alert_events_columns`（幂等 `ALTER TABLE ... ADD COLUMN`），旧数据库文件无需重建
+- `append_scan_and_events` / `query_alert_events` / backfill 路径同步写入 / 读出 currency
 
-- 列头 `净值` → `净值 (USD)`、`每手净值` → `每手净值 (USD)`
-- **新增"币种"列**展示 `USD` / `CEN`（CEN 账户行为特征和 USD 不同，风控人员需要此上下文）
-- CSV 导出同步带币种列
+Pydantic schemas：`BurstOpenAlert` 和 `AlertEvent` 新增 `currency: Optional[str] = None`。
 
-### 7.5 实施前必须和同事确认的 5 件事
+### 7.4 已实施前端
 
-- [ ] **CURRENCY 覆盖率**：`SELECT CURRENCY, COUNT(*) FROM fxbackoffice.mt4_users WHERE sid IN (1,5,6) GROUP BY CURRENCY;` 值域是否只有 `{USD, CEN}`、是否有 NULL
-- [ ] **equity / balance 美分约定**：`mt4_live.mt4_users.EQUITY` / `mt5_live.mt5_users.Balance` 对 CEN 账户是否都是美分单位
-- [ ] **profit 美分约定**：`mt4_trades.PROFIT` / `mt5_deals.Profit` 对 CEN 账户是否都是美分单位（方案 C profit 展示会用到）
-- [ ] **lot 合约规格**：CEN 账户 1 手是否和 USD 账户等同（1 手 EURUSD = 100k base），还是 mini lot
-- [ ] **UI 决策**：要不要加"币种"列（方案 a：只改列头；方案 b：改列头 + 加币种列 —— 推荐 b）
+- 列头 `净值(Equity)` → `净值 (USD)`、`每手净值` → `每手净值 (USD)`
+- **新增"币种"列**（colId=`currency`）在账户列后、品种列前。CEN 用琥珀色高亮，USD 用淡灰
+- CSV 导出自动带币种列（AG-Grid `allColumns` 默认行为）
+
+### 7.5 约定与边界
+
+- **lots 类字段不变**：`total_lots` / `order_count` / `total_open_lots` 在 CEN 和 USD 口径一致，合约规格相同
+- **未知 currency 默认 USD**：查不到记录或字段为空时不做除法，避免把 USD 账户错误显示成 0.01 倍
+- **sid=2（IB wallet）** 不参与风控，且 MT 服务器的 trading tables 里本就没这些账户，不会进入扫描流水
 
 ### 7.6 与 profit 方案 C 的耦合
 
-未来若实施方案 C（批量订单最终 profit 回溯），profit 的 CEN 除法规则和 currency map 要复用同一份 `loginsid → CURRENCY` 字典。因此两项功能适合一起实施，避免重复查 `fxbackoffice.mt4_users`。
+未来实施方案 C（批量订单最终 profit 回溯）时，profit 的 CEN 除法规则和 currency map 要复用 `_get_currency_map`。建议将 currency 查询上提为 enrichment 公共步骤，profit-refresh 接口内部直接读 `alert_events.currency` 即可，不必重复查 fxbackoffice。
+
+### 7.7 历史数据回填迁移（2026-04-17 执行）
+
+`currency` 字段上线前 `alert_events` 已累计 9871 条旧行，这些行 `currency=NULL` 且 CEN 账户的 `equity` / `balance` 仍是美分原始值。写了一次性迁移脚本 `backend/scripts/backfill_alert_events_currency.py` 做统一修复。
+
+**脚本设计**：
+
+- 只扫 `WHERE currency IS NULL` 的行 → 幂等，重跑无害
+- 默认 dry-run，`--apply` 才写
+- 按 `_SID_MAP` 构造 loginsid 集 → 一次批量查 `fxbackoffice.mt4_users` → 建 `{loginsid: CURRENCY}` 字典
+- CEN 行：`UPDATE currency='CEN', equity=equity/100, balance=balance/100, equity_per_lot=重算`
+- USD 行：只 `UPDATE currency='USD'`，数值不动
+- 未知 server 或 loginsid 查不到 → 默认 USD（保守不除 100）
+
+**执行结果**：
+
+| 项 | 数量 |
+|----|------|
+| 待处理行 | 9871 |
+| 唯一 loginsid | 444 |
+| fxbackoffice 命中率 | 444/444（100%） |
+| CEN（÷100 + 打标） | 7424 |
+| USD（仅打标） | 2447 |
+| 缺失 / unknown server | 0 |
+
+执行前 `cp risk_monitor.db risk_monitor.db.bak_20260417_160927` 备份（23M）。执行后抽检账户 67036965（CEN）：`equity 195818.0 → 1958.18`，符合预期。
+
+**未来何时再用**：正常情况下新代码会把 currency 填好，脚本应为一次性。但若 currency 查询失败（MySQL 不可用）导致新增 NULL 行，可再跑一次补齐；幂等且不会对已标注 USD/CEN 的行做二次除法。
 
 ---
 
@@ -444,7 +468,64 @@ hover tooltip 展示每笔订单的 `ticket / 开仓价 / 平仓价 / profit`，
 
 ---
 
-## 十、引用文档
+## 十、Zipcode enrichment + 后端模糊筛选（2026-04-17 已实施）
+
+> **状态**：✅ 已实施。同一客户多账户（同 zipcode）是批量下单检测后非常关键的二次信号，复用 §7 的 enrichment 通道，零额外 DB load 落地。
+
+### 10.1 动机
+
+Burst open 规则只看"同账户短时间多单"，但**同一自然人通过多个账户联动下单**会被拆分到不同 alert 行。风控同事需要一个维度把它们聚起来 —— 客户注册 zipcode 是最直接的信号（尤其越南的 "111 90" 这种大量复用的 zipcode）。
+
+### 10.2 数据源
+
+`fxbackoffice.mt4_users.ZIPCODE`，以 `loginsid = {sid}-{login}` 关联：
+
+| server | sid |
+|---|---|
+| MT4_Live | 1 |
+| MT4_Live2 | 6 |
+| MT5 | 5 |
+
+覆盖率：73,776 条账户中 2,903 条（~4%）为空。
+
+### 10.3 后端实现
+
+1. `_get_currency_map` 升级为 `_get_account_info_map`，**同一次 SQL 同时 SELECT CURRENCY + ZIPCODE** —— 不引入新查询
+2. `alerts[i].zipcode` 随 `currency` 一起写入；空串归一化为 None
+3. `alert_events` 表新增 `zipcode TEXT` 列，`_migrate_alert_events_columns` 加幂等 `ALTER TABLE`
+4. `query_alert_events` / `alert_events_stats` 新增 `zipcode` 参数：
+   ```sql
+   AND zipcode LIKE ? ESCAPE '\\'   -- 参数: "%<input>%"
+   ```
+5. `_escape_like()` 把 `%` / `_` / `\\` 转义，防用户输入误通配
+6. `GET /burst-open/alerts` + `/alerts/stats` 新增 `zipcode` query param（max 64 字符，空格归一化，空字符串 = 不筛）
+
+### 10.4 前端实现
+
+- `AlertEvent` 类型加 `zipcode: string | null`
+- Toolbar 加独立输入框（服务器下拉右侧），**300ms debounce** 避免打字抖动
+- 列顺序：服务器 → **Zipcode** → 账户 → 币种 → 品种 → ...
+- NULL 值显示灰色 `—`；非 NULL 用 mono 字体
+- `stats` 请求同步带 zipcode 参数 → 卡片数字与表格数字一致
+- CSV 导出自动带该列
+
+### 10.5 设计决策
+
+| 决策 | 选择 | 理由 |
+|---|---|---|
+| 筛选位置 | 后端全局（不是 AG-Grid 前端列筛） | 跨页精确查；分页 1000 cap 也不会漏数据 |
+| 匹配算法 | 简单 `LIKE '%x%'` 子串 | `"111" → "111 90"` 够用；不做去空格规则简化心智 |
+| 空值策略 | NULL 永不命中 LIKE | CRM 未填 zipcode 的账户天然应被筛走 |
+| 旧数据回填 | **不做** | 用户决策：旧 9888 行 zipcode 永远 NULL，只看新数据 |
+| UI 位置 | Toolbar 独立输入框，不是列头筛 | 和"时间范围"、"服务器下拉"同层级，行为可预期 |
+
+### 10.6 和后续 Profit 方案 C 的耦合
+
+未来 Profit 方案 C 落地时，复用 `_get_account_info_map`（或直接读 `alert_events.currency` / `zipcode`），不必再查 fxbackoffice。
+
+---
+
+## 十一、引用文档
 
 - [docs/features/risk-monitor.md](./risk-monitor.md) — 主设计文档（§9 探索 SQL、§10 Burst Open v2）
 - [docs/ai-context/PROJECT_CONTEXT.md](../ai-context/PROJECT_CONTEXT.md) §4.8 — 项目全景

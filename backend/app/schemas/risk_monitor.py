@@ -54,6 +54,15 @@ class BurstOpenAlert(BaseModel):
     total_open_lots: Optional[float] = None
     leverage: Optional[int] = None
     group: Optional[str] = None
+    # Account base currency from fxbackoffice.mt4_users. "USD" or "CEN".
+    # equity/balance above are already converted to USD (CEN values are
+    # divided by 100 in the service layer), so this field is only for
+    # display/debugging context.
+    currency: Optional[str] = None
+    # Client zipcode from fxbackoffice.mt4_users. Null when CRM has no
+    # value. Used by the frontend zipcode column and toolbar LIKE filter
+    # to surface account clusters sharing the same registration address.
+    zipcode: Optional[str] = None
 
 
 class BurstOpenSummary(BaseModel):
@@ -97,6 +106,8 @@ class AlertEvent(BaseModel):
     total_open_lots: Optional[float] = None
     leverage: Optional[int] = None
     group: Optional[str] = None
+    currency: Optional[str] = None
+    zipcode: Optional[str] = None
 
 
 class AlertsResponse(BaseModel):

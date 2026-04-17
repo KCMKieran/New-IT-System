@@ -194,11 +194,21 @@ async def burst_open_alerts(
     login: Optional[int] = Query(default=None),
     symbol: Optional[str] = Query(default=None),
     rule_id: Optional[int] = Query(default=None),
+    zipcode: Optional[str] = Query(
+        default=None,
+        max_length=64,
+        description="Substring match on client zipcode (case-insensitive)",
+    ),
     limit: int = Query(default=200, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
 ):
     """Return alert events in a time range with optional filters."""
     since_iso, until_iso = _default_since_until(since, until)
+    # Treat whitespace-only zipcode as "no filter" so the frontend can
+    # bind the raw input value without extra null-coalescing logic.
+    zipcode_clean = zipcode.strip() if zipcode else None
+    if not zipcode_clean:
+        zipcode_clean = None
     try:
         entries, total = query_alert_events(
             since=since_iso,
@@ -207,6 +217,7 @@ async def burst_open_alerts(
             login=login,
             symbol=symbol,
             rule_id=rule_id,
+            zipcode=zipcode_clean,
             limit=limit,
             offset=offset,
         )
@@ -232,11 +243,19 @@ async def burst_open_alerts(
 async def burst_open_alerts_stats(
     since: Optional[str] = Query(default=None),
     until: Optional[str] = Query(default=None),
+    zipcode: Optional[str] = Query(default=None, max_length=64),
 ):
     """Return aggregate counts for the summary cards."""
     since_iso, until_iso = _default_since_until(since, until)
+    zipcode_clean = zipcode.strip() if zipcode else None
+    if not zipcode_clean:
+        zipcode_clean = None
     try:
-        stats = alert_events_stats(since=since_iso, until=until_iso)
+        stats = alert_events_stats(
+            since=since_iso,
+            until=until_iso,
+            zipcode=zipcode_clean,
+        )
         return AlertsStats(**stats)
     except HTTPException:
         raise
