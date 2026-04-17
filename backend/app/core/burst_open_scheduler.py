@@ -36,7 +36,7 @@ def _run_scan() -> None:
     global _latest_result
 
     from ..core.config import get_settings
-    from ..core.risk_monitor_db import append_scan_history, load_config
+    from ..core.risk_monitor_db import append_scan_and_events, load_config
     from ..services.risk_monitor_service import scan_burst_open
 
     try:
@@ -55,7 +55,10 @@ def _run_scan() -> None:
 
         _latest_result = result
 
-        append_scan_history(
+        # Persist both the scan batch metadata and each alert as an
+        # event row. The alert_events table is what the new time-range
+        # view on the frontend reads from.
+        append_scan_and_events(
             scanned_at=result["scanned_at"],
             scan_interval_min=config["scan_interval_min"],
             accounts_scanned=result["summary"]["total_accounts_scanned"],

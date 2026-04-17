@@ -1442,7 +1442,8 @@ FROM mt5_live.mt5_deals ORDER BY Timestamp DESC LIMIT 1;
 │  GET  /burst-open/config       → 读当前 rules + interval   │
 │  POST /burst-open/config       → 更新 config, 立即生效     │
 │  POST /burst-open/scan-now     → 立即触发一次扫描 (加锁)   │
-│  GET  /burst-open/history      → 分页读 scan_history       │
+│  GET  /burst-open/alerts        → 时间范围查询 alert_events │
+│  GET  /burst-open/alerts/stats  → 时间范围聚合 stats        │
 └─────────────────────────────────────────────────────────────┘
                        │
                        ▼
@@ -1464,37 +1465,69 @@ FROM mt5_live.mt5_deals ORDER BY Timestamp DESC LIMIT 1;
 | 多人同时点"立即扫描" | 后端加锁, 同一时刻只执行一次, 后续请求等待结果 |
 | 后端重启 | config 从 SQLite 读取恢复 (TODO: 见 Q4) |
 
-### 10.6 历史 Log 设计
+### 10.6 历史 Log 设计 (v2: 批次 + 事件双表)
 
-**推荐方案: SQLite 文件** (`data/risk_monitor_history.db`)
+> **2026-04-17 更新**：为支持时间范围查询视图（短期优化 P1），从"单表 JSON 数组"升级为"批次 + 事件两表"结构。`scan_history` 保留批次元数据，`alert_events` 拍平每条告警到独立行方便时间范围/账户/服务器筛选。
 
-- Python 内置 `sqlite3` 模块，无额外依赖
-- 写入频率极低 (每 10min 一条)，无并发问题
-- 支持 SQL 分页/过滤，前端 `?limit=50&offset=0`
+**存储位置**: SQLite 文件 `data/risk_monitor.db`（Python 内置 `sqlite3`，无额外依赖）。
+
+#### 表 1: `scan_history`（每次扫描一行，批次元数据）
 
 ```sql
 CREATE TABLE scan_history (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    scanned_at      TEXT    NOT NULL,       -- ISO8601 时间戳
-    scan_interval   INTEGER NOT NULL,       -- 扫描间隔 (分钟)
-    check_interval  INTEGER NOT NULL,       -- SQL 回溯窗口 (分钟)
-    accounts_scanned INTEGER NOT NULL,      -- 扫描账户数
-    suspicious_count INTEGER NOT NULL,      -- 可疑用户数
-    scan_time_ms    INTEGER NOT NULL,       -- 扫描耗时
-    rules_config    TEXT    NOT NULL,       -- JSON: 本次使用的 rules
-    alerts          TEXT    NOT NULL        -- JSON: 完整告警列表
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    scanned_at        TEXT    NOT NULL,   -- UTC ISO8601
+    scan_interval_min INTEGER NOT NULL,
+    accounts_scanned  INTEGER NOT NULL,
+    suspicious_count  INTEGER NOT NULL,
+    scan_time_ms      INTEGER NOT NULL,
+    rules_config      TEXT    NOT NULL,   -- JSON 本次 rules 快照
+    alerts            TEXT    NOT NULL    -- JSON 完整 alerts（冗余，便于审计回放）
 );
 ```
 
-**前端展示**: 点击"查看历史" → Drawer (宽版, web 端至少 60-70vw)，表格展示历史扫描记录。
-点击某条记录可展开查看完整 alerts。
+#### 表 2: `alert_events`（每条告警一行，时间范围视图的主数据源）
 
-**时区约定（当前实现）**:
-- `scan_history.scanned_at` 由后端按 UTC 写入（ISO8601，结尾 `Z`）
+```sql
+CREATE TABLE alert_events (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    scan_batch_id   INTEGER NOT NULL,   -- FK → scan_history.id
+    scanned_at      TEXT    NOT NULL,   -- 冗余存储 UTC 时间用于快速 range 查询
+    rule_id         INTEGER NOT NULL,
+    rule_label      TEXT    NOT NULL,
+    server          TEXT    NOT NULL,
+    login           INTEGER NOT NULL,
+    symbol          TEXT    NOT NULL,
+    order_count     INTEGER NOT NULL,
+    total_lots      REAL    NOT NULL,
+    first_open      TEXT,                -- burst 首笔开仓时间 (UTC)
+    last_open       TEXT,                -- burst 末笔开仓时间 (UTC)
+    equity          REAL,
+    balance         REAL,
+    equity_per_lot  REAL,
+    total_open_lots REAL,
+    leverage        INTEGER,
+    account_group   TEXT,
+    orders_json     TEXT                 -- 订单明细 JSON
+);
+
+CREATE INDEX idx_alert_events_scanned_at   ON alert_events(scanned_at DESC);
+CREATE INDEX idx_alert_events_login_scan   ON alert_events(login, scanned_at DESC);
+CREATE INDEX idx_alert_events_server_sym   ON alert_events(server, symbol, scanned_at DESC);
+```
+
+**前端展示**: 页面主视图直接查询 `alert_events`（默认最近 4 小时）。时间范围支持快捷预设（1h / 4h / 1d / 7d / 30d）+ 自定义日期范围 picker，支持服务器/账户筛选和 CSV 导出。不再需要"查看历史" Drawer。
+
+**写入路径**: `burst_open_scheduler._run_scan()` → `append_scan_and_events()` 在单事务内写入批次行 + 所有告警事件行。
+
+**迁移逻辑**: `init_risk_monitor_db()` 在首次升级时（`alert_events` 为空且 `scan_history` 非空）自动把旧批次的 JSON alerts 拍平回填到 `alert_events`，不丢失历史。
+
+**时区约定**:
+- 所有 `scanned_at` / `first_open` / `last_open` 后端按 UTC 存
 - 前端展示统一转换为 `Asia/Hong_Kong`（HKT，UTC+8）
-- 排查数据时建议：数据库筛选用 UTC 区间，页面阅读用 HKT
+- CSV 导出时同样按 HKT 展示
 
-**保留策略**: 7 天。每次扫描后自动 `DELETE FROM scan_history WHERE scanned_at < datetime('now', '-7 days')`。
+**保留策略**: **30 天**。每次扫描后同步 `DELETE FROM scan_history / alert_events WHERE scanned_at < datetime('now', '-30 days')`。
 
 ### 10.7 可行性分析
 
@@ -1515,7 +1548,7 @@ CREATE TABLE scan_history (
 | Q2 | check_interval = scan_interval？ | ✅ 同意，回溯=扫描 |
 | Q3 | Rules 上限 | 10 条 |
 | Q4 | 持久化 | SQLite |
-| Q5 | Log 保留 | 7 天 |
+| Q5 | Log 保留 | 30 天（2026-04-17 调整，配合时间范围视图，详见 §10.6） |
 | Q6 | 多 Rule 命中展示 | 每条 Rule 一行 |
 | Q7 | equity_per_lot 的 total_lots | 全部未平仓持仓 |
 | Q8 | 历史 UI | Drawer (宽版) |

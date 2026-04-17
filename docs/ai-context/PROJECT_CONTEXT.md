@@ -346,12 +346,15 @@ New-IT-System/
 - Timezone convention: backend stores `scanned_at` in UTC (`...Z`), frontend converts and displays monitor timestamps in `Asia/Hong_Kong` (HKT)
 - Frontend: 30s polling, Config Drawer (multi-rule), History Drawer (paginated)
 
+**Frontend view**: Time-range alert view (default last 4h, presets: 1h/4h/1d/7d/30d/custom). Events persisted 30 days. CSV export via AG-Grid.
+
 **APIs**:
-- `GET /api/v1/risk-monitor/burst-open` — Latest cached scan result
+- `GET /api/v1/risk-monitor/burst-open` — Latest cached scan result (scan metadata + immediate-scan refresh)
+- `GET /api/v1/risk-monitor/burst-open/alerts?since=&until=...` — Time-range alert events view (primary data source)
+- `GET /api/v1/risk-monitor/burst-open/alerts/stats` — Time-range aggregates for summary cards
 - `GET /api/v1/risk-monitor/burst-open/config` — Current config from SQLite
 - `POST /api/v1/risk-monitor/burst-open/config` — Update config + reschedule scanner
 - `POST /api/v1/risk-monitor/burst-open/scan-now` — Trigger immediate scan
-- `GET /api/v1/risk-monitor/burst-open/history` — Paginated scan history
 
 **Data sources**: MySQL Slave (`mt4_live`, `mt4_live2`, `mt5_live`) — same DB_HOST config
 
@@ -363,7 +366,7 @@ New-IT-System/
 - `backend/app/core/burst_open_scheduler.py` (APScheduler + in-memory cache)
 - `backend/app/core/risk_monitor_db.py` (SQLite config/history CRUD)
 
-**Docs**: [risk-monitor.md](../features/risk-monitor.md) | **Skill**: `.cursor/skills/risk-monitor/SKILL.md`
+**Docs**: [risk-monitor.md](../features/risk-monitor.md) | [Roadmap](../features/risk-monitor-roadmap.md) | **Skill**: `.cursor/skills/risk-monitor/SKILL.md`
 
 ---
 

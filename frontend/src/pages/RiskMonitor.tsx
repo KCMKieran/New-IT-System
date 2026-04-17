@@ -5,12 +5,16 @@
  * large-lot orders within seconds — typical EA/algorithm behavior that
  * creates instant exposure risk for B-book.
  *
- * Backend runs a scheduled scan; frontend reads cached results.
+ * Backend runs a scheduled scan and persists every alert as an event row
+ * in `alert_events`. The frontend reads a **time-range view** of those
+ * events (default last 4 hours, up to 30 days retention). This replaces
+ * the old "latest snapshot" view that only showed the most recent scan.
  *
  * Docs: docs/features/risk-monitor.md
+ * Roadmap: docs/features/risk-monitor-roadmap.md
  * Skill: .cursor/skills/risk-monitor/SKILL.md
  */
-import { useEffect, useState, useRef, useCallback } from "react";
+import { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { useTheme } from "@/components/theme-provider";
 import { apiFetch } from "@/lib/fetch";
 import { Card, CardContent } from "@/components/ui/card";
@@ -32,9 +36,22 @@ import {
   DrawerTitle,
   DrawerClose,
 } from "@/components/ui/drawer";
-import { RefreshCw, Search, History, Plus, Trash2, Save, Settings2 } from "lucide-react";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Calendar } from "@/components/ui/calendar";
+import {
+  RefreshCw,
+  Search,
+  Plus,
+  Trash2,
+  Save,
+  Settings2,
+  Calendar as CalendarIcon,
+  Download,
+} from "lucide-react";
 import { AgGridReact } from "ag-grid-react";
-import { ColDef } from "ag-grid-community";
+import { ColDef, GridApi } from "ag-grid-community";
+import { DateRange } from "react-day-picker";
+import { format } from "date-fns";
 import { cn } from "@/lib/utils";
 import { useIsMobile } from "@/hooks/use-mobile";
 
@@ -47,7 +64,15 @@ interface BurstOrderDetail {
   symbol: string;
 }
 
-interface BurstOpenAlert {
+/**
+ * AlertEvent mirrors the backend `alert_events` row. Each row is one
+ * rule hit — a single account may appear multiple times in the range
+ * if it was flagged on multiple scans or by multiple rules.
+ */
+interface AlertEvent {
+  id: number;
+  scan_batch_id: number;
+  scanned_at: string;         // UTC ISO — shown as "被发现时间段"
   rule_id: number;
   rule_label: string;
   server: string;
@@ -56,14 +81,27 @@ interface BurstOpenAlert {
   order_count: number;
   total_lots: number;
   orders: BurstOrderDetail[];
-  first_open: string;
-  last_open: string;
+  first_open: string | null;  // UTC — "具体时间" start
+  last_open: string | null;   // UTC — "具体时间" end
   equity: number | null;
   balance: number | null;
   equity_per_lot: number | null;
   total_open_lots: number | null;
   leverage: number | null;
   group: string | null;
+}
+
+interface AlertsResponse {
+  entries: AlertEvent[];
+  total: number;
+  since: string;
+  until: string;
+}
+
+interface AlertsStats {
+  suspicious_count: number;
+  event_count: number;
+  servers: string[];
 }
 
 interface BurstOpenRule {
@@ -78,24 +116,26 @@ interface BurstOpenConfig {
   rules: BurstOpenRule[];
 }
 
-interface BurstOpenScanResult {
-  alerts: BurstOpenAlert[];
-  summary: { suspicious_count: number; total_accounts_scanned: number };
-  config: BurstOpenConfig;
+/** Latest scan snapshot — only used to show scan metadata (time + duration) */
+interface LatestScanMeta {
   scan_time_ms: number;
   scanned_at: string;
+  total_accounts_scanned: number;
+  config: BurstOpenConfig;
 }
 
-interface ScanHistoryEntry {
-  id: number;
-  scanned_at: string;
-  scan_interval_min: number;
-  accounts_scanned: number;
-  suspicious_count: number;
-  scan_time_ms: number;
-  rules_config: Record<string, any>[];
-  alerts: Record<string, any>[];
-}
+// ── Time range presets ─────────────────────────────────────
+
+type RangePresetKey = "1h" | "4h" | "1d" | "7d" | "30d" | "custom";
+
+const RANGE_PRESETS: { key: RangePresetKey; label: string; hours: number | null }[] = [
+  { key: "1h", label: "最近 1 小时", hours: 1 },
+  { key: "4h", label: "最近 4 小时", hours: 4 },
+  { key: "1d", label: "最近 1 天", hours: 24 },
+  { key: "7d", label: "最近 7 天", hours: 24 * 7 },
+  { key: "30d", label: "最近 30 天", hours: 24 * 30 },
+  { key: "custom", label: "自定义范围", hours: null },
+];
 
 // ── Helpers ───────────────────────────────────────────────
 
@@ -108,27 +148,24 @@ function fmtCurrency(v: number | null | undefined): string {
 /** IANA zone for all monitor timestamps shown in the UI (backend scan time is UTC; DB open times are treated as UTC when naive). */
 const DISPLAY_TIME_ZONE = "Asia/Hong_Kong";
 
-/**
- * Format a backend/DB timestamp string as Hong Kong local wall clock (YYYY-MM-DD HH:mm:ss).
- * - `scanned_at`: ISO UTC ending in `Z` → convert to HKT.
- * - MySQL-style `YYYY-MM-DD HH:mm:ss` with no zone → interpreted as UTC then shown in HKT
- *   (typical for MT replicas; if your server stores another zone, adjust backend to send offset or ISO).
- */
-function fmtTime(v: string | null | undefined): string {
-  if (!v) return "—";
+/** Parse a backend timestamp (ISO with Z, or naive `YYYY-MM-DD HH:mm:ss`) into a Date. Returns null on failure. */
+function parseBackendTime(v: string | null | undefined): Date | null {
+  if (!v) return null;
   const raw = String(v).trim();
   let iso = raw.replace(" ", "T");
-  const hasExplicitZone =
-    /Z$/i.test(iso) || /[+-]\d{2}:?\d{2}$/.test(iso);
+  const hasExplicitZone = /Z$/i.test(iso) || /[+-]\d{2}:?\d{2}$/.test(iso);
   if (!hasExplicitZone) {
     const m = iso.match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})/);
     if (m) iso = `${m[1]}T${m[2]}Z`;
   }
   const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) {
-    return raw.replace("T", " ").slice(0, 19);
-  }
-  // sv-SE yields ISO-like ordering: 2026-04-15 16:00:00
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+/** Full HKT timestamp "YYYY-MM-DD HH:mm:ss" */
+function fmtTime(v: string | null | undefined): string {
+  const d = parseBackendTime(v);
+  if (!d) return v ? String(v).replace("T", " ").slice(0, 19) : "—";
   return new Intl.DateTimeFormat("sv-SE", {
     timeZone: DISPLAY_TIME_ZONE,
     year: "numeric",
@@ -143,6 +180,32 @@ function fmtTime(v: string | null | undefined): string {
     .replace("T", " ");
 }
 
+/** HH:mm:ss only (HKT), for compact per-order time display */
+function fmtTimeShort(v: string | null | undefined): string {
+  const d = parseBackendTime(v);
+  if (!d) return "—";
+  return new Intl.DateTimeFormat("en-GB", {
+    timeZone: DISPLAY_TIME_ZONE,
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  }).format(d);
+}
+
+/** Render first_open ~ last_open. Collapse to single time if identical. */
+function fmtBurstWindow(
+  firstOpen: string | null,
+  lastOpen: string | null,
+): string {
+  const a = fmtTimeShort(firstOpen);
+  const b = fmtTimeShort(lastOpen);
+  if (a === "—" && b === "—") return "—";
+  if (a === b || b === "—") return a;
+  if (a === "—") return b;
+  return `${a} ~ ${b}`;
+}
+
 function crmLink(login: number, server?: string) {
   let prefix = "1";
   if (server === "MT5") prefix = "5";
@@ -150,7 +213,7 @@ function crmLink(login: number, server?: string) {
   return `https://mt4.kohleglobal.com/crm/accounts/${prefix}-${login}`;
 }
 
-function LoginCell(params: { value: number; data?: BurstOpenAlert }) {
+function LoginCell(params: { value: number; data?: AlertEvent }) {
   if (!params.value) return null;
   return (
     <a
@@ -163,6 +226,44 @@ function LoginCell(params: { value: number; data?: BurstOpenAlert }) {
       {params.value}
     </a>
   );
+}
+
+/** Build [since, until] ISO UTC strings from the current selector state. */
+function buildRangeIso(
+  preset: RangePresetKey,
+  custom: DateRange | undefined,
+): { since: string; until: string } | null {
+  if (preset === "custom") {
+    if (!custom?.from) return null;
+    const from = new Date(custom.from);
+    from.setHours(0, 0, 0, 0);
+    const to = custom.to ? new Date(custom.to) : new Date(custom.from);
+    // include the full end day
+    to.setHours(23, 59, 59, 999);
+    return { since: from.toISOString(), until: to.toISOString() };
+  }
+  const hours = RANGE_PRESETS.find((p) => p.key === preset)?.hours ?? 4;
+  const until = new Date();
+  const since = new Date(until.getTime() - hours * 3600 * 1000);
+  return { since: since.toISOString(), until: until.toISOString() };
+}
+
+/** Filename-safe local timestamp `YYYY-MM-DD_HH-mm` */
+function fmtFilenameStamp(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "unknown";
+  return new Intl.DateTimeFormat("sv-SE", {
+    timeZone: DISPLAY_TIME_ZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  })
+    .format(d)
+    .replace(" ", "_")
+    .replace(":", "-");
 }
 
 // ── AG-Grid theme ─────────────────────────────────────────
@@ -229,10 +330,25 @@ export default function RiskMonitor() {
 function BurstOpenTab({ active }: { active: boolean }) {
   const { theme } = useTheme();
   const isDarkMode = theme === "dark";
-  const gridRef = useRef<AgGridReact>(null);
+  const gridRef = useRef<AgGridReact<AlertEvent>>(null);
+  const gridApiRef = useRef<GridApi<AlertEvent> | null>(null);
   const gridStyle = useGridThemeStyle(isDarkMode);
 
-  const [data, setData] = useState<BurstOpenScanResult | null>(null);
+  // Time range state
+  const [rangePreset, setRangePreset] = useState<RangePresetKey>("4h");
+  const [customRange, setCustomRange] = useState<DateRange | undefined>();
+  const [datePickerOpen, setDatePickerOpen] = useState(false);
+
+  // Data state
+  const [alerts, setAlerts] = useState<AlertEvent[]>([]);
+  const [total, setTotal] = useState(0);
+  const [stats, setStats] = useState<AlertsStats>({
+    suspicious_count: 0,
+    event_count: 0,
+    servers: [],
+  });
+  const [latestMeta, setLatestMeta] = useState<LatestScanMeta | null>(null);
+  const [loading, setLoading] = useState(false);
   const [scanningNow, setScanningNow] = useState(false);
   const [lastRefresh, setLastRefresh] = useState<string | null>(null);
 
@@ -242,32 +358,73 @@ function BurstOpenTab({ active }: { active: boolean }) {
   const [configOpen, setConfigOpen] = useState(false);
   const [savingConfig, setSavingConfig] = useState(false);
 
-  // Filters
+  // Filters (client-side; server-side filters not needed at 1000-row cap)
   const [serverFilter, setServerFilter] = useState("all");
   const [loginSearch, setLoginSearch] = useState("");
 
-  // History drawer
-  const [historyOpen, setHistoryOpen] = useState(false);
+  // Resolve the effective (since, until) for the current selection.
+  // Memoized so we don't build a new range object on every render.
+  const effectiveRange = useMemo(
+    () => buildRangeIso(rangePreset, customRange),
+    [rangePreset, customRange],
+  );
 
-  // Fetch latest scan result (reads in-memory cache, no DB hit)
-  const fetchResult = useCallback(async (signal?: AbortSignal) => {
-    try {
-      const res = await apiFetch("/api/v1/risk-monitor/burst-open", { signal });
-      if (!res.ok) {
-        if (res.status === 503) return; // scanner still initializing
-        throw new Error(`HTTP ${res.status}`);
+  /** Fetch alerts + stats for the current range. */
+  const fetchAlerts = useCallback(
+    async (signal?: AbortSignal) => {
+      if (!effectiveRange) return;
+      setLoading(true);
+      try {
+        const qs = new URLSearchParams({
+          since: effectiveRange.since,
+          until: effectiveRange.until,
+          limit: "1000",
+        });
+        const [alertsRes, statsRes, latestRes] = await Promise.all([
+          apiFetch(`/api/v1/risk-monitor/burst-open/alerts?${qs}`, { signal }),
+          apiFetch(`/api/v1/risk-monitor/burst-open/alerts/stats?${qs}`, { signal }),
+          // latest snapshot is tiny; used only for scan metadata footer.
+          // 503 (scanner still initializing) is tolerated here.
+          apiFetch(`/api/v1/risk-monitor/burst-open`, { signal }).catch(() => null),
+        ]);
+
+        if (alertsRes.ok) {
+          const json: AlertsResponse = await alertsRes.json();
+          setAlerts(json.entries);
+          setTotal(json.total);
+        }
+        if (statsRes.ok) {
+          const json: AlertsStats = await statsRes.json();
+          setStats(json);
+        }
+        if (latestRes && latestRes.ok) {
+          const json = await latestRes.json();
+          setLatestMeta({
+            scan_time_ms: json.scan_time_ms,
+            scanned_at: json.scanned_at,
+            total_accounts_scanned: json.summary?.total_accounts_scanned ?? 0,
+            config: json.config,
+          });
+          setConfig(json.config);
+        }
+        setLastRefresh(
+          new Date().toLocaleTimeString("zh-CN", {
+            hour: "2-digit",
+            minute: "2-digit",
+            second: "2-digit",
+          }),
+        );
+      } catch (err) {
+        if (err instanceof DOMException && err.name === "AbortError") return;
+        console.error("Alerts fetch failed:", err);
+      } finally {
+        setLoading(false);
       }
-      const json: BurstOpenScanResult = await res.json();
-      setData(json);
-      setConfig(json.config);
-      setLastRefresh(new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
-    } catch (err) {
-      if (err instanceof DOMException && err.name === "AbortError") return;
-      console.error("Burst open fetch failed:", err);
-    }
-  }, []);
+    },
+    [effectiveRange],
+  );
 
-  // Fetch config separately (for initial load before first scan completes)
+  /** Fetch config separately so the drawer can open before first scan finishes. */
   const fetchConfig = useCallback(async () => {
     try {
       const res = await apiFetch("/api/v1/risk-monitor/burst-open/config");
@@ -280,29 +437,33 @@ function BurstOpenTab({ active }: { active: boolean }) {
     }
   }, []);
 
-  // Poll every 30s for latest result
+  // Fetch on mount, when range changes, and periodically for relative ranges.
+  // Absolute (custom) ranges don't auto-refresh since the end time is fixed.
   useEffect(() => {
     if (!active) return;
     const controller = new AbortController();
-    fetchResult(controller.signal);
+    fetchAlerts(controller.signal);
     fetchConfig();
-    const timer = setInterval(() => fetchResult(), 30_000);
-    return () => {
-      controller.abort();
-      clearInterval(timer);
-    };
-  }, [fetchResult, fetchConfig, active]);
 
-  // Trigger immediate scan
+    if (rangePreset !== "custom") {
+      const timer = setInterval(() => fetchAlerts(), 30_000);
+      return () => {
+        controller.abort();
+        clearInterval(timer);
+      };
+    }
+    return () => controller.abort();
+  }, [fetchAlerts, fetchConfig, active, rangePreset]);
+
+  /** Trigger an immediate scan, then re-pull alerts so the new event is visible. */
   const handleScanNow = async () => {
     setScanningNow(true);
     try {
-      const res = await apiFetch("/api/v1/risk-monitor/burst-open/scan-now", { method: "POST" });
+      const res = await apiFetch("/api/v1/risk-monitor/burst-open/scan-now", {
+        method: "POST",
+      });
       if (res.ok) {
-        const json: BurstOpenScanResult = await res.json();
-        setData(json);
-        setConfig(json.config);
-        setLastRefresh(new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
+        await fetchAlerts();
       }
     } catch (err) {
       console.error("Scan-now failed:", err);
@@ -311,7 +472,7 @@ function BurstOpenTab({ active }: { active: boolean }) {
     }
   };
 
-  // Save config
+  /** Save config. */
   const handleSaveConfig = async () => {
     if (!editConfig) return;
     setSavingConfig(true);
@@ -335,137 +496,207 @@ function BurstOpenTab({ active }: { active: boolean }) {
   };
 
   const openConfigPanel = () => {
-    setEditConfig(config ? JSON.parse(JSON.stringify(config)) : {
-      scan_interval_min: 10,
-      rules: [{ burst_window_sec: 3, min_order_count: 3, min_lots_per_order: 5 }],
-    });
+    setEditConfig(
+      config
+        ? JSON.parse(JSON.stringify(config))
+        : {
+            scan_interval_min: 10,
+            rules: [{ burst_window_sec: 3, min_order_count: 3, min_lots_per_order: 5 }],
+          },
+    );
     setConfigOpen(true);
   };
 
-  // Filter alerts
-  const filteredAlerts = (data?.alerts ?? []).filter((a) => {
-    if (serverFilter !== "all" && a.server !== serverFilter) return false;
-    if (loginSearch && !String(a.login).includes(loginSearch)) return false;
-    return true;
-  });
-
-  const columnDefs: ColDef<BurstOpenAlert>[] = [
-    {
-      headerName: "规则",
-      field: "rule_label",
-      width: 90,
-      pinned: "left",
-    },
-    { headerName: "服务器", field: "server", width: 110 },
-    { headerName: "账户", field: "login", width: 110, cellRenderer: LoginCell },
-    { headerName: "品种", field: "symbol", width: 110 },
-    {
-      headerName: "批量笔数",
-      field: "order_count",
-      width: 100,
-      cellClass: "ag-right-aligned-cell",
-      filter: "agNumberColumnFilter",
-    },
-    {
-      headerName: "批量总手数",
-      field: "total_lots",
-      width: 110,
-      cellClass: "ag-right-aligned-cell",
-      filter: "agNumberColumnFilter",
-      valueFormatter: (p) => p.value?.toFixed(2) ?? "",
-    },
-    {
-      headerName: "订单明细",
-      width: 200,
-      valueGetter: (p) =>
-        p.data?.orders
-          ?.map((o) => `${o.direction} ${o.lots}`)
-          .join(", ") ?? "",
-    },
-    {
-      headerName: "首笔时间",
-      field: "first_open",
-      width: 160,
-      valueFormatter: (p) => fmtTime(p.value),
-    },
-    {
-      headerName: "末笔时间",
-      field: "last_open",
-      width: 160,
-      valueFormatter: (p) => fmtTime(p.value),
-    },
-    {
-      headerName: "净值(Equity)",
-      field: "equity",
-      width: 130,
-      cellClass: "ag-right-aligned-cell",
-      filter: "agNumberColumnFilter",
-      cellRenderer: (p: { value: number | null }) => {
-        const v = p.value;
-        if (v === null || v === undefined) return "—";
-        return (
-          <span className={v >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-red-600 dark:text-red-400"}>
-            {fmtCurrency(v)}
-          </span>
-        );
+  /** Export current (filtered) rows to CSV via AG-Grid's built-in helper. */
+  const handleExportCsv = () => {
+    if (!gridApiRef.current || !effectiveRange) return;
+    const stamp = `${fmtFilenameStamp(effectiveRange.since)}_to_${fmtFilenameStamp(effectiveRange.until)}`;
+    gridApiRef.current.exportDataAsCsv({
+      fileName: `risk-monitor_${stamp}.csv`,
+      allColumns: true,
+      // Backend stores UTC; users expect HKT in spreadsheets.
+      processCellCallback: (params) => {
+        const colId = params.column.getColId();
+        if (colId === "scanned_at") return fmtTime(params.value);
+        if (colId === "burst_window") {
+          const row = params.node?.data as AlertEvent | undefined;
+          return row ? fmtBurstWindow(row.first_open, row.last_open) : "";
+        }
+        if (colId === "orders") {
+          const row = params.node?.data as AlertEvent | undefined;
+          return row
+            ? row.orders.map((o) => `${o.direction} ${o.lots}`).join("; ")
+            : "";
+        }
+        return params.value ?? "";
       },
-    },
-    {
-      headerName: "每手净值",
-      field: "equity_per_lot",
-      width: 120,
-      cellClass: "ag-right-aligned-cell",
-      filter: "agNumberColumnFilter",
-      valueFormatter: (p) => fmtCurrency(p.value),
-    },
-    {
-      headerName: "总持仓手数",
-      field: "total_open_lots",
-      width: 120,
-      cellClass: "ag-right-aligned-cell",
-      filter: "agNumberColumnFilter",
-      valueFormatter: (p) => p.value?.toFixed(2) ?? "—",
-    },
-    {
-      headerName: "杠杆",
-      field: "leverage",
-      width: 80,
-      cellClass: "ag-right-aligned-cell",
-      valueFormatter: (p) => (p.value ? `1:${p.value}` : "—"),
-    },
-    {
-      headerName: "账户组",
-      field: "group",
-      width: 150,
-    },
-  ];
+    });
+  };
 
-  const summary = data?.summary;
+  // Client-side server + login filter applied on top of the range-scoped rows.
+  const filteredAlerts = useMemo(
+    () =>
+      alerts.filter((a) => {
+        if (serverFilter !== "all" && a.server !== serverFilter) return false;
+        if (loginSearch && !String(a.login).includes(loginSearch)) return false;
+        return true;
+      }),
+    [alerts, serverFilter, loginSearch],
+  );
+
+  const columnDefs: ColDef<AlertEvent>[] = useMemo(
+    () => [
+      {
+        headerName: "规则",
+        field: "rule_label",
+        colId: "rule_label",
+        width: 90,
+        pinned: "left",
+      },
+      {
+        headerName: "被发现时间",
+        field: "scanned_at",
+        colId: "scanned_at",
+        width: 165,
+        sort: "desc",
+        valueFormatter: (p) => fmtTime(p.value),
+      },
+      {
+        headerName: "具体时间(开仓)",
+        colId: "burst_window",
+        width: 160,
+        valueGetter: (p) =>
+          p.data ? fmtBurstWindow(p.data.first_open, p.data.last_open) : "",
+      },
+      { headerName: "服务器", field: "server", colId: "server", width: 110 },
+      {
+        headerName: "账户",
+        field: "login",
+        colId: "login",
+        width: 110,
+        cellRenderer: LoginCell,
+      },
+      { headerName: "品种", field: "symbol", colId: "symbol", width: 110 },
+      {
+        headerName: "批量笔数",
+        field: "order_count",
+        colId: "order_count",
+        width: 100,
+        cellClass: "ag-right-aligned-cell",
+        filter: "agNumberColumnFilter",
+      },
+      {
+        headerName: "批量总手数",
+        field: "total_lots",
+        colId: "total_lots",
+        width: 110,
+        cellClass: "ag-right-aligned-cell",
+        filter: "agNumberColumnFilter",
+        valueFormatter: (p) => p.value?.toFixed(2) ?? "",
+      },
+      {
+        headerName: "订单明细",
+        colId: "orders",
+        width: 200,
+        valueGetter: (p) =>
+          p.data?.orders?.map((o) => `${o.direction} ${o.lots}`).join(", ") ?? "",
+      },
+      {
+        headerName: "净值(Equity)",
+        field: "equity",
+        colId: "equity",
+        width: 130,
+        cellClass: "ag-right-aligned-cell",
+        filter: "agNumberColumnFilter",
+        cellRenderer: (p: { value: number | null }) => {
+          const v = p.value;
+          if (v === null || v === undefined) return "—";
+          return (
+            <span
+              className={
+                v >= 0
+                  ? "text-emerald-600 dark:text-emerald-400"
+                  : "text-red-600 dark:text-red-400"
+              }
+            >
+              {fmtCurrency(v)}
+            </span>
+          );
+        },
+      },
+      {
+        headerName: "每手净值",
+        field: "equity_per_lot",
+        colId: "equity_per_lot",
+        width: 120,
+        cellClass: "ag-right-aligned-cell",
+        filter: "agNumberColumnFilter",
+        valueFormatter: (p) => fmtCurrency(p.value),
+      },
+      {
+        headerName: "总持仓手数",
+        field: "total_open_lots",
+        colId: "total_open_lots",
+        width: 120,
+        cellClass: "ag-right-aligned-cell",
+        filter: "agNumberColumnFilter",
+        valueFormatter: (p) => p.value?.toFixed(2) ?? "—",
+      },
+      {
+        headerName: "杠杆",
+        field: "leverage",
+        colId: "leverage",
+        width: 80,
+        cellClass: "ag-right-aligned-cell",
+        valueFormatter: (p) => (p.value ? `1:${p.value}` : "—"),
+      },
+      { headerName: "账户组", field: "group", colId: "group", width: 150 },
+    ],
+    [],
+  );
+
+  const rangeLabel =
+    rangePreset === "custom" && customRange?.from
+      ? customRange.to
+        ? `${format(customRange.from, "yyyy-MM-dd")} ~ ${format(customRange.to, "yyyy-MM-dd")}`
+        : format(customRange.from, "yyyy-MM-dd")
+      : (RANGE_PRESETS.find((p) => p.key === rangePreset)?.label ?? "最近 4 小时");
 
   return (
     <div className="flex flex-col gap-4">
       {/* Header */}
-      <div className="flex items-center justify-between flex-wrap gap-2">
+      <div className="flex items-start justify-between flex-wrap gap-2">
         <div>
           <p className="text-sm text-muted-foreground">
             检测短时间内同品种密集下大单的可疑交易行为（EA / 算法交易特征）
           </p>
           <p className="text-sm text-muted-foreground">
-            {lastRefresh ? `上次获取: ${lastRefresh}` : "加载中..."}
-            {data && ` · 扫描耗时 ${data.scan_time_ms}ms`}
+            当前范围: <span className="font-medium text-foreground">{rangeLabel}</span>
+            {lastRefresh && ` · 上次刷新 ${lastRefresh}`}
+            {latestMeta && ` · 最近扫描 ${fmtTime(latestMeta.scanned_at)} · 耗时 ${latestMeta.scan_time_ms}ms`}
             {config && ` · 每 ${config.scan_interval_min} 分钟自动扫描`}
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" onClick={() => setHistoryOpen(true)}>
-            <History className="h-4 w-4 mr-1.5" />
-            查看历史
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleExportCsv}
+            disabled={filteredAlerts.length === 0}
+          >
+            <Download className="h-4 w-4 mr-1.5" />
+            导出 CSV
           </Button>
           <Button variant="outline" size="sm" onClick={openConfigPanel}>
             <Settings2 className="h-4 w-4 mr-1.5" />
             规则配置
           </Button>
-          <Button variant="outline" size="sm" onClick={handleScanNow} disabled={scanningNow}>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleScanNow}
+            disabled={scanningNow}
+          >
             <RefreshCw className={cn("h-4 w-4 mr-1.5", scanningNow && "animate-spin")} />
             {scanningNow ? "扫描中..." : "立即扫描"}
           </Button>
@@ -478,7 +709,8 @@ function BurstOpenTab({ active }: { active: boolean }) {
           <span className="text-xs text-muted-foreground">当前规则:</span>
           {config.rules.map((r, i) => (
             <Badge key={r.id ?? i} variant="secondary" className="text-xs font-normal">
-              Rule {r.id ?? i + 1}: {r.burst_window_sec}秒 / {r.min_order_count}笔 / ≥{r.min_lots_per_order}手
+              Rule {r.id ?? i + 1}: {r.burst_window_sec}秒 / {r.min_order_count}笔 / ≥
+              {r.min_lots_per_order}手
             </Badge>
           ))}
         </div>
@@ -487,21 +719,86 @@ function BurstOpenTab({ active }: { active: boolean }) {
       {/* Summary cards */}
       <div className="grid grid-cols-2 gap-3">
         <SummaryCard
-          label="可疑用户"
-          value={summary?.suspicious_count ?? 0}
+          label="可疑账户（范围内去重）"
+          value={stats.suspicious_count}
           dotColor="bg-red-500"
           textColor="text-red-600 dark:text-red-400"
         />
         <SummaryCard
-          label="扫描账户数"
-          value={summary?.total_accounts_scanned ?? 0}
-          dotColor="bg-blue-500"
-          textColor="text-blue-600 dark:text-blue-400"
+          label="告警事件（范围内总数）"
+          value={stats.event_count}
+          dotColor="bg-amber-500"
+          textColor="text-amber-600 dark:text-amber-400"
         />
       </div>
 
-      {/* Filters */}
+      {/* Filters + range selector */}
       <div className="flex items-center gap-3 flex-wrap">
+        {/* Time range */}
+        <Select
+          value={rangePreset}
+          onValueChange={(v) => {
+            setRangePreset(v as RangePresetKey);
+            if (v === "custom" && !customRange?.from) {
+              // Auto-open the picker when user first switches to custom
+              setDatePickerOpen(true);
+            }
+          }}
+        >
+          <SelectTrigger className="w-[160px]">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {RANGE_PRESETS.map((p) => (
+              <SelectItem key={p.key} value={p.key}>
+                {p.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+
+        {/* Custom date range picker */}
+        {rangePreset === "custom" && (
+          <Popover open={datePickerOpen} onOpenChange={setDatePickerOpen}>
+            <PopoverTrigger asChild>
+              <Button
+                variant="outline"
+                className={cn(
+                  "w-[240px] justify-start text-left font-normal h-9",
+                  !customRange?.from && "text-muted-foreground",
+                )}
+              >
+                <CalendarIcon className="mr-2 h-4 w-4" />
+                {customRange?.from ? (
+                  customRange.to ? (
+                    <>
+                      {format(customRange.from, "yyyy-MM-dd")} ~{" "}
+                      {format(customRange.to, "yyyy-MM-dd")}
+                    </>
+                  ) : (
+                    format(customRange.from, "yyyy-MM-dd")
+                  )
+                ) : (
+                  <span>选择日期范围</span>
+                )}
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent className="w-auto p-0" align="start">
+              <Calendar
+                initialFocus
+                mode="range"
+                defaultMonth={customRange?.from}
+                selected={customRange}
+                onSelect={setCustomRange}
+                numberOfMonths={2}
+                // 30-day retention = no data older than that, so disable past it
+                disabled={{ before: new Date(Date.now() - 30 * 24 * 3600 * 1000) }}
+              />
+            </PopoverContent>
+          </Popover>
+        )}
+
+        {/* Server filter */}
         <Select value={serverFilter} onValueChange={setServerFilter}>
           <SelectTrigger className="w-[150px]">
             <SelectValue />
@@ -514,6 +811,7 @@ function BurstOpenTab({ active }: { active: boolean }) {
           </SelectContent>
         </Select>
 
+        {/* Login search */}
         <div className="relative w-[180px]">
           <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
           <Input
@@ -525,7 +823,11 @@ function BurstOpenTab({ active }: { active: boolean }) {
         </div>
 
         <span className="text-sm text-muted-foreground ml-auto">
-          {filteredAlerts.length} 条可疑记录
+          {loading
+            ? "加载中..."
+            : total >= 1000
+              ? `已展示 ${filteredAlerts.length} / 1000+ 条（请缩小范围或添加筛选）`
+              : `${filteredAlerts.length} / ${total} 条告警`}
         </span>
       </div>
 
@@ -537,7 +839,7 @@ function BurstOpenTab({ active }: { active: boolean }) {
         )}
         style={gridStyle}
       >
-        <AgGridReact<BurstOpenAlert>
+        <AgGridReact<AlertEvent>
           ref={gridRef}
           rowData={filteredAlerts}
           columnDefs={columnDefs}
@@ -546,7 +848,13 @@ function BurstOpenTab({ active }: { active: boolean }) {
           animateRows={false}
           enableCellTextSelection
           suppressCellFocus
-          getRowId={(p) => `bo-${p.data.rule_id}-${p.data.server}-${p.data.login}-${p.data.symbol}`}
+          pagination
+          paginationPageSize={50}
+          paginationPageSizeSelector={[25, 50, 100, 200]}
+          onGridReady={(e) => {
+            gridApiRef.current = e.api;
+          }}
+          getRowId={(p) => `evt-${p.data.id}`}
         />
       </div>
 
@@ -559,9 +867,6 @@ function BurstOpenTab({ active }: { active: boolean }) {
         onSave={handleSaveConfig}
         saving={savingConfig}
       />
-
-      {/* History Drawer */}
-      <HistoryDrawer open={historyOpen} onOpenChange={setHistoryOpen} />
     </div>
   );
 }
@@ -612,7 +917,7 @@ function ConfigDrawer({
         className={cn(
           isMobile
             ? "max-h-[85vh]"
-            : "ml-auto h-full w-[480px] max-w-[90vw] rounded-l-xl rounded-r-none"
+            : "ml-auto h-full w-[480px] max-w-[90vw] rounded-l-xl rounded-r-none",
         )}
       >
         <DrawerHeader className="border-b px-6">
@@ -628,17 +933,26 @@ function ConfigDrawer({
               min={5}
               max={60}
               value={config.scan_interval_min}
-              onChange={(e) => setConfig({ ...config, scan_interval_min: Number(e.target.value) || 10 })}
+              onChange={(e) =>
+                setConfig({ ...config, scan_interval_min: Number(e.target.value) || 10 })
+              }
               className="w-32"
             />
-            <p className="text-xs text-muted-foreground">后端每隔 N 分钟自动执行一次扫描，最小 5 分钟</p>
+            <p className="text-xs text-muted-foreground">
+              后端每隔 N 分钟自动执行一次扫描，最小 5 分钟
+            </p>
           </div>
 
           {/* Rules */}
           <div className="space-y-3">
             <div className="flex items-center justify-between">
               <label className="text-sm font-medium">检测规则（最多 10 条）</label>
-              <Button variant="outline" size="sm" onClick={addRule} disabled={config.rules.length >= 10}>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={addRule}
+                disabled={config.rules.length >= 10}
+              >
                 <Plus className="h-3.5 w-3.5 mr-1" />
                 添加规则
               </Button>
@@ -697,7 +1011,8 @@ function ConfigDrawer({
                 </div>
 
                 <p className="text-xs text-muted-foreground">
-                  {rule.burst_window_sec}秒内 ≥{rule.min_order_count}笔，每笔 ≥{rule.min_lots_per_order}手
+                  {rule.burst_window_sec}秒内 ≥{rule.min_order_count}笔，每笔 ≥
+                  {rule.min_lots_per_order}手
                 </p>
               </div>
             ))}
@@ -712,133 +1027,6 @@ function ConfigDrawer({
             <Save className="h-4 w-4 mr-1.5" />
             {saving ? "保存中..." : "保存配置"}
           </Button>
-        </div>
-      </DrawerContent>
-    </Drawer>
-  );
-}
-
-// ── History Drawer ────────────────────────────────────────
-
-function HistoryDrawer({
-  open,
-  onOpenChange,
-}: {
-  open: boolean;
-  onOpenChange: (v: boolean) => void;
-}) {
-  const isMobile = useIsMobile();
-  const [entries, setEntries] = useState<ScanHistoryEntry[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [expandedId, setExpandedId] = useState<number | null>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    setLoading(true);
-    apiFetch("/api/v1/risk-monitor/burst-open/history?limit=100")
-      .then((r) => r.json())
-      .then((json) => setEntries(json.entries ?? []))
-      .catch(console.error)
-      .finally(() => setLoading(false));
-  }, [open]);
-
-  return (
-    <Drawer open={open} onOpenChange={onOpenChange} direction={isMobile ? "bottom" : "right"}>
-      <DrawerContent
-        className={cn(
-          isMobile
-            ? "max-h-[90vh]"
-            : "ml-auto h-full w-[65vw] max-w-[900px] rounded-l-xl rounded-r-none"
-        )}
-      >
-        <DrawerHeader className="border-b px-6">
-          <DrawerTitle>扫描历史（最近 7 天）</DrawerTitle>
-        </DrawerHeader>
-
-        <div className="flex-1 overflow-y-auto p-4">
-          {loading ? (
-            <p className="text-center text-muted-foreground py-8">加载中...</p>
-          ) : entries.length === 0 ? (
-            <p className="text-center text-muted-foreground py-8">暂无历史记录</p>
-          ) : (
-            <div className="space-y-2">
-              {entries.map((entry) => (
-                <div key={entry.id} className="rounded-lg border">
-                  <button
-                    className="w-full text-left p-3 hover:bg-muted/50 transition-colors"
-                    onClick={() => setExpandedId(expandedId === entry.id ? null : entry.id)}
-                  >
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-3">
-                        <span className="text-sm font-medium">{fmtTime(entry.scanned_at)}</span>
-                        {entry.suspicious_count > 0 ? (
-                          <Badge variant="destructive" className="text-xs">
-                            {entry.suspicious_count} 可疑
-                          </Badge>
-                        ) : (
-                          <Badge variant="secondary" className="text-xs">正常</Badge>
-                        )}
-                      </div>
-                      <div className="flex items-center gap-4 text-xs text-muted-foreground">
-                        <span>{entry.accounts_scanned} 账户</span>
-                        <span>{entry.scan_time_ms}ms</span>
-                      </div>
-                    </div>
-                  </button>
-
-                  {expandedId === entry.id && (
-                    <div className="border-t p-3 bg-muted/20">
-                      {entry.alerts.length === 0 ? (
-                        <p className="text-sm text-muted-foreground">本次扫描未发现可疑用户</p>
-                      ) : (
-                        <div className="space-y-2">
-                          <p className="text-xs text-muted-foreground mb-2">
-                            规则配置: {entry.rules_config.map((r: any, i: number) =>
-                              `Rule ${i + 1}: ${r.burst_window_sec}s/${r.min_order_count}笔/${r.min_lots_per_order}手`
-                            ).join("  |  ")}
-                          </p>
-                          <div className="overflow-x-auto">
-                            <table className="w-full text-sm">
-                              <thead>
-                                <tr className="text-left text-xs text-muted-foreground border-b">
-                                  <th className="py-1 pr-3">规则</th>
-                                  <th className="py-1 pr-3">服务器</th>
-                                  <th className="py-1 pr-3">账户</th>
-                                  <th className="py-1 pr-3">品种</th>
-                                  <th className="py-1 pr-3">笔数</th>
-                                  <th className="py-1 pr-3">手数</th>
-                                  <th className="py-1 pr-3">时间</th>
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {entry.alerts.map((a: any, i: number) => (
-                                  <tr key={i} className="border-b border-border/50 last:border-0">
-                                    <td className="py-1.5 pr-3">{a.rule_label}</td>
-                                    <td className="py-1.5 pr-3">{a.server}</td>
-                                    <td className="py-1.5 pr-3 font-medium">{a.login}</td>
-                                    <td className="py-1.5 pr-3">{a.symbol}</td>
-                                    <td className="py-1.5 pr-3">{a.order_count}</td>
-                                    <td className="py-1.5 pr-3">{a.total_lots}</td>
-                                    <td className="py-1.5 pr-3 text-xs">{fmtTime(a.first_open)}</td>
-                                  </tr>
-                                ))}
-                              </tbody>
-                            </table>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        <div className="border-t p-4 flex justify-end">
-          <DrawerClose asChild>
-            <Button variant="outline">关闭</Button>
-          </DrawerClose>
         </div>
       </DrawerContent>
     </Drawer>

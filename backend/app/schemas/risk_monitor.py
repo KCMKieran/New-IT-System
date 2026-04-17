@@ -69,19 +69,44 @@ class BurstOpenScanResult(BaseModel):
     scanned_at: str
 
 
-# ── History ────────────────────────────────────────────────
+# ── Alert Events (time-range view) ─────────────────────────
 
-class ScanHistoryEntry(BaseModel):
+class AlertEvent(BaseModel):
+    """One alert row as persisted in the alert_events table.
+
+    Mirrors BurstOpenAlert but adds DB-level fields (scanned_at,
+    scan_batch_id) so the frontend can render the "被发现时间段" column
+    and trace back to the originating scan batch if needed.
+    """
     id: int
+    scan_batch_id: int
     scanned_at: str
-    scan_interval_min: int
-    accounts_scanned: int
-    suspicious_count: int
-    scan_time_ms: int
-    rules_config: List[Dict[str, Any]]
-    alerts: List[Dict[str, Any]]
+    rule_id: int
+    rule_label: str
+    server: str
+    login: int
+    symbol: str
+    order_count: int
+    total_lots: float
+    orders: List[BurstOrderDetail]
+    first_open: Optional[str] = None
+    last_open: Optional[str] = None
+    equity: Optional[float] = None
+    balance: Optional[float] = None
+    equity_per_lot: Optional[float] = None
+    total_open_lots: Optional[float] = None
+    leverage: Optional[int] = None
+    group: Optional[str] = None
 
 
-class ScanHistoryResponse(BaseModel):
-    entries: List[ScanHistoryEntry]
-    total: Optional[int] = None
+class AlertsResponse(BaseModel):
+    entries: List[AlertEvent]
+    total: int
+    since: str
+    until: str
+
+
+class AlertsStats(BaseModel):
+    suspicious_count: int = 0   # distinct logins in range
+    event_count: int = 0        # total alert rows in range
+    servers: List[str] = []     # servers touched in range
