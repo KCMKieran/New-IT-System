@@ -344,7 +344,7 @@ New-IT-System/
 - All matched accounts labeled "可疑用户" (no ALERT/WATCH severity levels)
 - CEN (cent) account handling: equity/balance from MT are cents — backend looks up `fxbackoffice.mt4_users` by `loginsid` ({sid}-{login}), divides by 100 for CEN, and tags `currency` on every alert so the frontend "币种" column shows USD / CEN correctly (equity/balance columns labeled "(USD)")
 - Zipcode enrichment (same `fxbackoffice.mt4_users` query as currency): `alert_events.zipcode` stored; frontend has a toolbar LIKE filter to cluster same-address accounts
-- Timezone convention: backend stores `scanned_at` in UTC (`...Z`), frontend converts and displays monitor timestamps in `Asia/Hong_Kong` (HKT)
+- Timezone convention: backend stores `scanned_at` / `first_open` / `last_open` / `orders[].open_time` all in UTC (`...Z`). Broker MT4/MT5 servers run in UTC+3 (Indian/Antananarivo, no DST), so SQL queries wrap `OPEN_TIME` / `Time` with `CONVERT_TZ(..., '+03:00', '+00:00')` + `DATE_FORMAT(..., '%Y-%m-%dT%TZ')` to normalize before persisting. Frontend renders in `Asia/Hong_Kong` (HKT).
 
 **Frontend view**: Time-range alert view (default last 4h, presets: 1h/4h/1d/7d/30d/custom). 30 days retention. Config Drawer (multi-rule) + CSV export via AG-Grid. No history drawer (time-range picker replaces it).
 
@@ -366,6 +366,7 @@ New-IT-System/
 - `backend/app/core/burst_open_scheduler.py` (APScheduler + in-memory cache)
 - `backend/app/core/risk_monitor_db.py` (SQLite config/history CRUD, `alert_events` event-level table)
 - `backend/scripts/backfill_alert_events_currency.py` (one-off migration for legacy currency=NULL rows)
+- `backend/scripts/backfill_alert_events_open_time.py` (one-off migration: broker UTC+3 naive timestamps → UTC ISO8601 in `first_open`/`last_open`/`orders_json`)
 
 **Docs**: [risk-monitor.md](../features/risk-monitor.md) | [Roadmap](../features/risk-monitor-roadmap.md) | **Skill**: `.cursor/skills/risk-monitor/SKILL.md`
 

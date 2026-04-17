@@ -13,6 +13,7 @@
 > - 2026-04-17 追加：§7 CEN/USD 调研归档（暂缓实施）、§8 Profit 方案 C 归档（暂缓实施）、§9 MT4 vs MT5 命中数差异结论
 > - 2026-04-17 §7 转为已实施（currency 列 + CEN ÷100）；§7.7 记录一次性回填脚本（9871 行）
 > - 2026-04-17 新增 §10：zipcode enrichment + 后端 LIKE 模糊筛选上线
+> - 2026-04-17 新增 §11：broker `OPEN_TIME` / `Time` 从 UTC+3 naive 转 UTC ISO8601（SQL 端 `CONVERT_TZ`），10142 行旧数据一次性回填
 
 ---
 
@@ -525,7 +526,58 @@ Burst open 规则只看"同账户短时间多单"，但**同一自然人通过�
 
 ---
 
-## 十一、引用文档
+## 十一、Broker 时间 UTC 统一（2026-04-17 已实施）
+
+### 11.1 问题
+
+前端页面上同一行记录，"被发现时间" (`scanned_at`) 和 "具体时间（开仓）" (`first_open` / `last_open`) 差 3 小时，甚至出现 "开仓在被发现之前" 的反直觉画面。
+
+根因链路：
+
+| 字段 | 来源 | 时区 | 存储格式 |
+|------|------|------|---------|
+| `scanned_at` | Python `datetime.now(UTC).strftime(...Z)` | UTC | `2026-04-17T08:52:26Z` |
+| `first_open` / `last_open` | MySQL `t.OPEN_TIME` / `d.Time` 直读 | broker local（UTC+3，Indian/Antananarivo，无 DST） | `2026-04-17 11:48:20`（naive） |
+
+前端 `parseBackendTime`：naive 字符串会被打上 `Z` 当 UTC 解析，再按 HKT（UTC+8）渲染。结果 `first_open` 实际被 +6 小时（先被误当作 UTC，再从 UTC 转 HKT +8；正确逻辑应该是从 UTC+3 转 HKT 仅 +5），和正确 `scanned_at` 渲染对不齐。
+
+### 11.2 方案 A（选定）：SQL 端 CONVERT_TZ
+
+在 `_query_mt4_recent_opens` / `_query_mt5_recent_opens` 的 SELECT 子句里：
+
+```sql
+DATE_FORMAT(
+    CONVERT_TZ(t.OPEN_TIME, '+03:00', '+00:00'),
+    '%Y-%m-%dT%TZ'
+) AS open_time
+```
+
+- **broker 时区写死 `'+03:00'`** —— 不依赖 `@@session.time_zone`（sudo / systemd 重启等路径不一定一致），broker 多年无 DST，写死更稳；`CONVERT_TZ` 使用字面 offset 也比查命名时区表快
+- **WHERE 子句保持 `t.OPEN_TIME >= DATE_SUB(NOW(), ...)`** —— `t.OPEN_TIME` 和 `NOW()` 都是 broker local，比较仍正确，不必改
+- **`DATE_FORMAT(..., '%Y-%m-%dT%TZ')`** —— 生成 `2026-04-17T08:48:20Z` 字面值，完全等同 Python 那边 `strftime` 出的格式；前端 `parseBackendTime` 已支持 `Z` 后缀，一次统一到底
+
+### 11.3 历史数据回填
+
+- 脚本：`backend/scripts/backfill_alert_events_open_time.py`
+- 输入：`alert_events.first_open` / `last_open` + `orders_json[i].open_time`
+- 逻辑：匹配 `^YYYY-MM-DD[T ]HH:MM:SS(\.\d+)?$` 这种 naive 串 → 减 3 小时 → 加 `Z`；已带 `Z` 或显式 offset 的值跳过（幂等）
+- 执行结果（2026-04-17）：
+  - `alert_events` 总行数 10165，回填 **10142 行**（8 行是 prod 重启前由 dev 容器用新代码写的，已经 Z 后缀）
+  - `orders_json` 子数组里 **73960 笔 order.open_time** 一并修正
+- 日后可再跑：脚本 idempotent，`--apply` 二次运行会打印 "Nothing to do"
+
+### 11.4 为什么不同时修 `scanned_at`
+
+`scanned_at` 一直是 Python `datetime.now(timezone.utc).strftime(...Z)` 生成，从来就是正确 UTC，无需改动。
+
+### 11.5 未来相关动作
+
+- 新增任何涉及 broker 时间字段（如 Rule C 的 `close_time`）时，**SQL SELECT 必须走同样的 `CONVERT_TZ('+03:00','+00:00')` + `DATE_FORMAT` 壳**，把"时区转换"内聚到 SQL 层，不要让 Python / 前端再做一次
+- 若以后有多家 broker 加入且时区不同，再引入 `BROKER_TIMEZONE_MAP` 配置，而不是去查 `@@session.time_zone`
+
+---
+
+## 十二、引用文档
 
 - [docs/features/risk-monitor.md](./risk-monitor.md) — 主设计文档（§9 探索 SQL、§10 Burst Open v2）
 - [docs/ai-context/PROJECT_CONTEXT.md](../ai-context/PROJECT_CONTEXT.md) §4.8 — 项目全景

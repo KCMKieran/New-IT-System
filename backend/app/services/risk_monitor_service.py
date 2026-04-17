@@ -87,7 +87,17 @@ def _query_mt4_recent_opens(
             CASE WHEN t.CMD = 0 THEN 'Buy'
                  ELSE 'Sell' END                        AS direction,
             t.VOLUME / 100                              AS lots,
-            t.OPEN_TIME                                 AS open_time,
+            -- Broker servers (MT4/MT5) store open times in UTC+3
+            -- (Indian/Antananarivo, no DST). Convert to UTC ISO8601
+            -- at SELECT time so every downstream field (first_open,
+            -- last_open, orders[].open_time, scanned_at) shares the
+            -- same UTC-with-Z contract. The WHERE clause keeps using
+            -- NOW() because t.OPEN_TIME is still UTC+3 on disk and
+            -- both sides of that comparison are broker-local.
+            DATE_FORMAT(
+                CONVERT_TZ(t.OPEN_TIME, '+03:00', '+00:00'),
+                '%%Y-%%m-%%dT%%TZ'
+            )                                           AS open_time,
             u.EQUITY                                    AS equity,
             u.BALANCE                                   AS balance,
             u.LEVERAGE                                  AS leverage
@@ -130,7 +140,11 @@ def _query_mt5_recent_opens(
             CASE WHEN d.Action = 0 THEN 'Buy'
                  ELSE 'Sell' END                        AS direction,
             d.Volume / 10000                            AS lots,
-            d.Time                                      AS open_time,
+            -- See MT4 query above for rationale (UTC+3 → UTC ISO8601).
+            DATE_FORMAT(
+                CONVERT_TZ(d.Time, '+03:00', '+00:00'),
+                '%%Y-%%m-%%dT%%TZ'
+            )                                           AS open_time,
             d.PositionID                                AS position_id
         FROM mt5_live.mt5_deals d
         WHERE d.Timestamp >= (UNIX_TIMESTAMP(DATE_SUB(NOW(), INTERVAL %s SECOND))

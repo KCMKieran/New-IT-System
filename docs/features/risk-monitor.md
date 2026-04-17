@@ -1525,9 +1525,14 @@ CREATE INDEX idx_alert_events_server_sym   ON alert_events(server, symbol, scann
 **迁移逻辑**: `init_risk_monitor_db()` 在首次升级时（`alert_events` 为空且 `scan_history` 非空）自动把旧批次的 JSON alerts 拍平回填到 `alert_events`，不丢失历史。
 
 **时区约定**:
-- 所有 `scanned_at` / `first_open` / `last_open` 后端按 UTC 存
+- 所有 `scanned_at` / `first_open` / `last_open` 后端按 UTC 存，字符串格式 `YYYY-MM-DDTHH:MM:SSZ`
 - 前端展示统一转换为 `Asia/Hong_Kong`（HKT，UTC+8）
 - CSV 导出时同样按 HKT 展示
+
+**Broker → UTC 转换（2026-04-17 修复）**:
+- 背景: MT4/MT5 服务器时区是 `Indian/Antananarivo`（UTC+3，无 DST），`t.OPEN_TIME` / `d.Time` 在 MySQL 里是 **UTC+3 的 naive datetime**。早期版本直接 `SELECT t.OPEN_TIME AS open_time`，写到 SQLite 时就变成 naive UTC+3 字符串，和 Python `datetime.now(UTC)` 生成的 `scanned_at` 差 3 小时。前端 `parseBackendTime` 对 naive 字符串按 UTC 解析，再叠一次 `+3h → HKT` 偏移，导致页面上 "被发现时间" 看起来比 "具体时间（开仓）" 还早。
+- 方案: 在 `_query_mt4_recent_opens` / `_query_mt5_recent_opens` 的 SELECT 子句里用 `DATE_FORMAT(CONVERT_TZ(t.OPEN_TIME, '+03:00', '+00:00'), '%Y-%m-%dT%TZ')` 直接在 MySQL 端转成 UTC ISO8601。broker 时区写死 `+03:00`（不依赖 `@@session.time_zone`，broker 多年稳定，CONVERT_TZ 也更快）。`WHERE t.OPEN_TIME >= DATE_SUB(NOW(), ...)` 保持原样，因为 `t.OPEN_TIME` 和 `NOW()` 两边都是 broker local，比较仍正确。
+- 回填: `backend/scripts/backfill_alert_events_open_time.py` 一次性把旧的 10142 行 `first_open` / `last_open` 以及 `orders_json` 里 73960 笔 `open_time` 统一减 3 小时并加 `Z` 后缀。脚本幂等（已带 `Z` 或带明确 offset 的值跳过），支持 dry-run，2026-04-17 已执行。
 
 **保留策略**: **30 天**。每次扫描后同步 `DELETE FROM scan_history / alert_events WHERE scanned_at < datetime('now', '-30 days')`。
 
