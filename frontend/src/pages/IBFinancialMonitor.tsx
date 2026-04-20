@@ -53,7 +53,15 @@ interface FinancialRecord {
   total_withdrawal: number;
   mt4_equity: number;
   ib_wallet_equity: number;
+  // Cumulative net deposit minus current equity at target_date D
   difference: number;
+  // Same formula evaluated 1 / 7 days before D — useful for trend comparison
+  difference_1d_ago: number;
+  difference_7d_ago: number;
+  // Convenience deltas computed in backend: positive = client losses grew
+  // (broker net-earned); negative = client made money over the period
+  delta_1d: number;
+  delta_7d: number;
 }
 
 interface ReportConfig {
@@ -77,6 +85,13 @@ interface AuditEntry {
 
 const fmt = (n: number) =>
   n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+// Color a delta cell: green when broker net-won (>0), red when client won (<0).
+const deltaColor = (n: number): string => {
+  if (n > 0) return "text-emerald-600";
+  if (n < 0) return "text-red-600";
+  return "text-muted-foreground";
+};
 
 function getYesterdayStr(): string {
   const d = new Date();
@@ -190,38 +205,62 @@ function QueryTab() {
         </div>
 
         {records.length > 0 && (
-          <div className="overflow-x-auto rounded-md border">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>IB</TableHead>
-                  <TableHead>Currency</TableHead>
-                  <TableHead className="text-right">今天入金</TableHead>
-                  <TableHead className="text-right">今天出金</TableHead>
-                  <TableHead className="text-right">总入金(含下级)</TableHead>
-                  <TableHead className="text-right">总出金(含下级)</TableHead>
-                  <TableHead className="text-right">MT4净值</TableHead>
-                  <TableHead className="text-right">IB钱包净值</TableHead>
-                  <TableHead className="text-right">差异</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {records.map((r, i) => (
-                  <TableRow key={`${r.ib_id}-${r.currency}-${i}`}>
-                    <TableCell className="font-medium">{r.ib_name || r.ib_id}</TableCell>
-                    <TableCell>{r.currency}</TableCell>
-                    <TableCell className="text-right">{fmt(r.today_deposit)}</TableCell>
-                    <TableCell className="text-right text-red-600">{fmt(r.today_withdrawal)}</TableCell>
-                    <TableCell className="text-right">{fmt(r.total_deposit)}</TableCell>
-                    <TableCell className="text-right text-red-600">{fmt(r.total_withdrawal)}</TableCell>
-                    <TableCell className="text-right">{fmt(r.mt4_equity)}</TableCell>
-                    <TableCell className="text-right">{fmt(r.ib_wallet_equity)}</TableCell>
-                    <TableCell className="text-right font-semibold">{fmt(r.difference)}</TableCell>
+          <>
+            <div className="rounded-md border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900 dark:border-blue-900/50 dark:bg-blue-950/30 dark:text-blue-100">
+              <div className="font-medium mb-1">字段说明</div>
+              <ul className="space-y-1 text-xs leading-relaxed">
+                <li>
+                  <span className="font-semibold">差异</span> = (累计入金 + 累计出金) − (MT4净值 + IB钱包净值) ≈ 累计净入金 − 当前账户总净值
+                </li>
+                <li>
+                  <span className="font-semibold">1天前差异</span>：1 天前 (target_date − 1) 那个时点的累计差异，用同样的公式但所有数据截止到 1 天前。
+                </li>
+                <li>
+                  <span className="font-semibold">7天前差异</span>：7 天前 (target_date − 7) 那个时点的累计差异。
+                </li>
+              </ul>
+            </div>
+            <div className="overflow-x-auto rounded-md border">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>IB</TableHead>
+                    <TableHead>Currency</TableHead>
+                    <TableHead className="text-right">今天入金</TableHead>
+                    <TableHead className="text-right">今天出金</TableHead>
+                    <TableHead className="text-right">总入金(含下级)</TableHead>
+                    <TableHead className="text-right">总出金(含下级)</TableHead>
+                    <TableHead className="text-right">MT4净值</TableHead>
+                    <TableHead className="text-right">IB钱包净值</TableHead>
+                    <TableHead className="text-right bg-amber-50 dark:bg-amber-950/30">差异</TableHead>
+                    <TableHead className="text-right">1天前差异</TableHead>
+                    <TableHead className="text-right">7天前差异</TableHead>
+                    <TableHead className="text-right bg-amber-50 dark:bg-amber-950/30">Δ1d</TableHead>
+                    <TableHead className="text-right bg-amber-50 dark:bg-amber-950/30">Δ7d</TableHead>
                   </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </div>
+                </TableHeader>
+                <TableBody>
+                  {records.map((r, i) => (
+                    <TableRow key={`${r.ib_id}-${r.currency}-${i}`}>
+                      <TableCell className="font-medium">{r.ib_name || r.ib_id}</TableCell>
+                      <TableCell>{r.currency}</TableCell>
+                      <TableCell className="text-right">{fmt(r.today_deposit)}</TableCell>
+                      <TableCell className="text-right text-red-600">{fmt(r.today_withdrawal)}</TableCell>
+                      <TableCell className="text-right">{fmt(r.total_deposit)}</TableCell>
+                      <TableCell className="text-right text-red-600">{fmt(r.total_withdrawal)}</TableCell>
+                      <TableCell className="text-right">{fmt(r.mt4_equity)}</TableCell>
+                      <TableCell className="text-right">{fmt(r.ib_wallet_equity)}</TableCell>
+                      <TableCell className="text-right font-semibold bg-amber-50 dark:bg-amber-950/30">{fmt(r.difference)}</TableCell>
+                      <TableCell className="text-right text-muted-foreground">{fmt(r.difference_1d_ago)}</TableCell>
+                      <TableCell className="text-right text-muted-foreground">{fmt(r.difference_7d_ago)}</TableCell>
+                      <TableCell className={`text-right font-medium bg-amber-50 dark:bg-amber-950/30 ${deltaColor(r.delta_1d)}`}>{fmt(r.delta_1d)}</TableCell>
+                      <TableCell className={`text-right font-medium bg-amber-50 dark:bg-amber-950/30 ${deltaColor(r.delta_7d)}`}>{fmt(r.delta_7d)}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          </>
         )}
       </CardContent>
     </Card>

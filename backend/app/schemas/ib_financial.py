@@ -44,7 +44,15 @@ class FinancialRecord(BaseModel):
     total_withdrawal: float = 0
     mt4_equity: float = 0
     ib_wallet_equity: float = 0
+    # Snapshot at target_date D (cumulative net deposit minus current equity)
     difference: float = 0
+    # Same formula but using point-in-time data 1 / 7 days before D
+    difference_1d_ago: float = 0
+    difference_7d_ago: float = 0
+    # Convenience deltas: positive = client losses grew over the period
+    # (i.e. the broker net-earned money from this group)
+    delta_1d: float = 0
+    delta_7d: float = 0
 
 
 class FinancialQueryResponse(BaseModel):

@@ -126,7 +126,22 @@ def remove_ib(ib_id: str, operator: str) -> None:
 
 # ── Financial Query (ported from D08) ─────────────────────
 
-# IB query: expand IB tree to include all downstream clients
+# IB query: expand IB tree to include all downstream clients.
+#
+# Each query returns three "difference" snapshots — at target_date D, D-1, and D-7 —
+# so the boss can see whether cumulative client losses are growing or shrinking.
+#
+# Note (vs the old version): the cumulative deposit/withdrawal sums are now
+# capped by `trans.date <= %s` so that snapshots at past dates are truly
+# point-in-time and comparable across D, D-1, D-7.
+#
+# Param order (17 dates after the IB id list):
+#   today flows  : D, D                     (today_deposit, today_withdrawal)
+#   total deposit: D, D-1, D-7              (3 snapshots)
+#   total wdraw  : D, D-1, D-7              (3 snapshots)
+#   mt4 equity   : D, D-1, D-7              (3 snapshots)
+#   wallet equity: D, D-1, D-7              (3 snapshots)
+#   balance WHERE: D, D-1, D-7              (date IN list)
 _IB_FINANCIAL_QUERY = """
 WITH Target_IB_List AS (
     SELECT
@@ -143,10 +158,18 @@ Transaction_Stats AS (
             THEN trans.amount ELSE 0 END) AS today_deposit,
         SUM(CASE WHEN trans.type IN ('withdrawal', 'ib withdrawal') AND trans.date = %s
             THEN trans.amount ELSE 0 END) AS today_withdrawal,
-        SUM(CASE WHEN trans.type = 'deposit'
+        SUM(CASE WHEN trans.type = 'deposit' AND trans.date <= %s
             THEN trans.amount ELSE 0 END) AS total_deposit,
-        SUM(CASE WHEN trans.type IN ('withdrawal', 'ib withdrawal')
-            THEN trans.amount ELSE 0 END) AS total_withdrawal
+        SUM(CASE WHEN trans.type = 'deposit' AND trans.date <= %s
+            THEN trans.amount ELSE 0 END) AS total_deposit_1d,
+        SUM(CASE WHEN trans.type = 'deposit' AND trans.date <= %s
+            THEN trans.amount ELSE 0 END) AS total_deposit_7d,
+        SUM(CASE WHEN trans.type IN ('withdrawal', 'ib withdrawal') AND trans.date <= %s
+            THEN trans.amount ELSE 0 END) AS total_withdrawal,
+        SUM(CASE WHEN trans.type IN ('withdrawal', 'ib withdrawal') AND trans.date <= %s
+            THEN trans.amount ELSE 0 END) AS total_withdrawal_1d,
+        SUM(CASE WHEN trans.type IN ('withdrawal', 'ib withdrawal') AND trans.date <= %s
+            THEN trans.amount ELSE 0 END) AS total_withdrawal_7d
     FROM fxbackoffice.stats_transactions trans
     INNER JOIN Target_IB_List map ON trans.userid = map.client_id
     WHERE trans.type IN ('deposit', 'withdrawal', 'ib withdrawal')
@@ -156,11 +179,21 @@ Balance_Snapshot AS (
     SELECT
         map.root_ib_id,
         bal.currency,
-        SUM(CASE WHEN bal.loginsid NOT LIKE '2-%%' THEN bal.endingEquity ELSE 0 END) AS mt4_equity,
-        SUM(CASE WHEN bal.loginsid LIKE '2-%%' THEN bal.endingEquity ELSE 0 END) AS ib_wallet_equity
+        SUM(CASE WHEN bal.date = %s AND bal.loginsid NOT LIKE '2-%%'
+            THEN bal.endingEquity ELSE 0 END) AS mt4_equity,
+        SUM(CASE WHEN bal.date = %s AND bal.loginsid NOT LIKE '2-%%'
+            THEN bal.endingEquity ELSE 0 END) AS mt4_equity_1d,
+        SUM(CASE WHEN bal.date = %s AND bal.loginsid NOT LIKE '2-%%'
+            THEN bal.endingEquity ELSE 0 END) AS mt4_equity_7d,
+        SUM(CASE WHEN bal.date = %s AND bal.loginsid LIKE '2-%%'
+            THEN bal.endingEquity ELSE 0 END) AS ib_wallet_equity,
+        SUM(CASE WHEN bal.date = %s AND bal.loginsid LIKE '2-%%'
+            THEN bal.endingEquity ELSE 0 END) AS ib_wallet_equity_1d,
+        SUM(CASE WHEN bal.date = %s AND bal.loginsid LIKE '2-%%'
+            THEN bal.endingEquity ELSE 0 END) AS ib_wallet_equity_7d
     FROM fxbackoffice.stats_balances bal
     INNER JOIN Target_IB_List map ON bal.userId = map.client_id
-    WHERE bal.date = %s
+    WHERE bal.date IN (%s, %s, %s)
     GROUP BY map.root_ib_id, bal.currency
 ),
 All_Keys AS (
@@ -178,7 +211,11 @@ SELECT
     COALESCE(b.mt4_equity, 0) AS mt4_equity,
     COALESCE(b.ib_wallet_equity, 0) AS ib_wallet_equity,
     (COALESCE(t.total_deposit, 0) + COALESCE(t.total_withdrawal, 0))
-        - (COALESCE(b.mt4_equity, 0) + COALESCE(b.ib_wallet_equity, 0)) AS difference
+        - (COALESCE(b.mt4_equity, 0) + COALESCE(b.ib_wallet_equity, 0)) AS difference,
+    (COALESCE(t.total_deposit_1d, 0) + COALESCE(t.total_withdrawal_1d, 0))
+        - (COALESCE(b.mt4_equity_1d, 0) + COALESCE(b.ib_wallet_equity_1d, 0)) AS difference_1d_ago,
+    (COALESCE(t.total_deposit_7d, 0) + COALESCE(t.total_withdrawal_7d, 0))
+        - (COALESCE(b.mt4_equity_7d, 0) + COALESCE(b.ib_wallet_equity_7d, 0)) AS difference_7d_ago
 FROM All_Keys k
 LEFT JOIN Transaction_Stats t ON k.root_ib_id = t.root_ib_id AND k.currency = t.currency
 LEFT JOIN Balance_Snapshot b ON k.root_ib_id = b.root_ib_id AND k.currency = b.currency
@@ -186,8 +223,13 @@ ORDER BY k.root_ib_id, k.currency
 """
 
 # Client query: no IB tree expansion, query the user's own data directly.
-# Param order: date×2 (Transaction SELECT) → client_ids (Transaction WHERE)
-#            → client_ids (Balance WHERE) → date (Balance WHERE)
+# Same 3-snapshot logic as the IB query, but `ib_wallet_equity` is always 0.
+#
+# Param order:
+#   Transaction_Stats SELECT : 8 dates (today×2, total_dep×3, total_wdraw×3)
+#   Transaction_Stats WHERE  : client_ids tuple
+#   Balance_Snapshot   SELECT: 3 dates (mt4 D/D-1/D-7)
+#   Balance_Snapshot   WHERE : client_ids tuple, then 3 dates (date IN list)
 _CLIENT_FINANCIAL_QUERY = """
 WITH Transaction_Stats AS (
     SELECT
@@ -197,10 +239,18 @@ WITH Transaction_Stats AS (
             THEN trans.amount ELSE 0 END) AS today_deposit,
         SUM(CASE WHEN trans.type IN ('withdrawal', 'ib withdrawal') AND trans.date = %s
             THEN trans.amount ELSE 0 END) AS today_withdrawal,
-        SUM(CASE WHEN trans.type = 'deposit'
+        SUM(CASE WHEN trans.type = 'deposit' AND trans.date <= %s
             THEN trans.amount ELSE 0 END) AS total_deposit,
-        SUM(CASE WHEN trans.type IN ('withdrawal', 'ib withdrawal')
-            THEN trans.amount ELSE 0 END) AS total_withdrawal
+        SUM(CASE WHEN trans.type = 'deposit' AND trans.date <= %s
+            THEN trans.amount ELSE 0 END) AS total_deposit_1d,
+        SUM(CASE WHEN trans.type = 'deposit' AND trans.date <= %s
+            THEN trans.amount ELSE 0 END) AS total_deposit_7d,
+        SUM(CASE WHEN trans.type IN ('withdrawal', 'ib withdrawal') AND trans.date <= %s
+            THEN trans.amount ELSE 0 END) AS total_withdrawal,
+        SUM(CASE WHEN trans.type IN ('withdrawal', 'ib withdrawal') AND trans.date <= %s
+            THEN trans.amount ELSE 0 END) AS total_withdrawal_1d,
+        SUM(CASE WHEN trans.type IN ('withdrawal', 'ib withdrawal') AND trans.date <= %s
+            THEN trans.amount ELSE 0 END) AS total_withdrawal_7d
     FROM fxbackoffice.stats_transactions trans
     WHERE trans.userid IN ({client_placeholders})
       AND trans.type IN ('deposit', 'withdrawal', 'ib withdrawal')
@@ -210,10 +260,12 @@ Balance_Snapshot AS (
     SELECT
         bal.userId AS client_id,
         bal.currency,
-        SUM(bal.endingEquity) AS mt4_equity
+        SUM(CASE WHEN bal.date = %s THEN bal.endingEquity ELSE 0 END) AS mt4_equity,
+        SUM(CASE WHEN bal.date = %s THEN bal.endingEquity ELSE 0 END) AS mt4_equity_1d,
+        SUM(CASE WHEN bal.date = %s THEN bal.endingEquity ELSE 0 END) AS mt4_equity_7d
     FROM fxbackoffice.stats_balances bal
     WHERE bal.userId IN ({client_placeholders})
-      AND bal.date = %s
+      AND bal.date IN (%s, %s, %s)
       AND bal.loginsid NOT LIKE '2-%%'
     GROUP BY bal.userId, bal.currency
 ),
@@ -232,7 +284,11 @@ SELECT
     COALESCE(b.mt4_equity, 0) AS mt4_equity,
     0 AS ib_wallet_equity,
     (COALESCE(t.total_deposit, 0) + COALESCE(t.total_withdrawal, 0))
-        - COALESCE(b.mt4_equity, 0) AS difference
+        - COALESCE(b.mt4_equity, 0) AS difference,
+    (COALESCE(t.total_deposit_1d, 0) + COALESCE(t.total_withdrawal_1d, 0))
+        - COALESCE(b.mt4_equity_1d, 0) AS difference_1d_ago,
+    (COALESCE(t.total_deposit_7d, 0) + COALESCE(t.total_withdrawal_7d, 0))
+        - COALESCE(b.mt4_equity_7d, 0) AS difference_7d_ago
 FROM All_Keys k
 LEFT JOIN Transaction_Stats t ON k.client_id = t.client_id AND k.currency = t.currency
 LEFT JOIN Balance_Snapshot b ON k.client_id = b.client_id AND k.currency = b.currency
@@ -258,18 +314,33 @@ def _classify_ids(
     return ib_ids, client_ids
 
 
+_NUMERIC_FIELDS = (
+    "today_deposit", "today_withdrawal",
+    "total_deposit", "total_withdrawal",
+    "mt4_equity", "ib_wallet_equity",
+    "difference", "difference_1d_ago", "difference_7d_ago",
+)
+
+
 def _enrich_rows(
     rows: List[dict], name_map: Dict[str, str],
 ) -> List[dict]:
-    """Convert numeric types and attach ib_name from watchlist."""
+    """Convert numeric types, attach ib_name, and compute delta_1d / delta_7d.
+
+    delta_Nd = current difference - difference N days ago.
+    Positive value means cumulative client losses grew over the period
+    (i.e. the broker net-earned money from this group).
+    """
     records = []
     for row in rows:
         row["ib_id"] = str(row["ib_id"])
         row["ib_name"] = name_map.get(row["ib_id"], row["ib_id"])
-        for key in ("today_deposit", "today_withdrawal", "total_deposit",
-                     "total_withdrawal", "mt4_equity", "ib_wallet_equity", "difference"):
+        for key in _NUMERIC_FIELDS:
             if key in row and row[key] is not None:
                 row[key] = float(row[key])
+        diff = row.get("difference") or 0.0
+        row["delta_1d"] = diff - (row.get("difference_1d_ago") or 0.0)
+        row["delta_7d"] = diff - (row.get("difference_7d_ago") or 0.0)
         records.append(row)
     return records
 
@@ -295,14 +366,36 @@ def query_financial_data(
     if target_date is None:
         target_date = _yesterday_hkt()
     date_str = str(target_date)
+    date_1d = str(target_date - timedelta(days=1))
+    date_7d = str(target_date - timedelta(days=7))
+
+    # Pre-build the date param block shared by both queries (see SQL comments
+    # for the exact slot ordering).
+    ib_date_params = (
+        date_str, date_str,                  # today_deposit, today_withdrawal
+        date_str, date_1d, date_7d,          # total_deposit × 3
+        date_str, date_1d, date_7d,          # total_withdrawal × 3
+        date_str, date_1d, date_7d,          # mt4_equity × 3
+        date_str, date_1d, date_7d,          # ib_wallet_equity × 3
+        date_str, date_1d, date_7d,          # Balance WHERE date IN (...)
+    )
+    # Client query has the same SELECT-clause date pattern but no wallet snapshot,
+    # so the SELECT block is 8 + 3 dates (skip the 3 wallet-equity slots).
+    client_select_dates = (
+        date_str, date_str,
+        date_str, date_1d, date_7d,
+        date_str, date_1d, date_7d,
+    )
+    client_balance_select_dates = (date_str, date_1d, date_7d)
+    client_balance_where_dates = (date_str, date_1d, date_7d)
 
     conn = _connect_fxbackoffice(settings)
     try:
         with conn.cursor() as cursor:
             ib_ids, client_ids = _classify_ids(cursor, all_ids)
             logger.info(
-                "IB Financial query date=%s, ibs=%s, clients=%s",
-                date_str, ib_ids, client_ids,
+                "IB Financial query date=%s (1d=%s, 7d=%s), ibs=%s, clients=%s",
+                date_str, date_1d, date_7d, ib_ids, client_ids,
             )
 
             records: List[dict] = []
@@ -311,7 +404,7 @@ def query_financial_data(
             if ib_ids:
                 ph = ", ".join(["%s"] * len(ib_ids))
                 query = _IB_FINANCIAL_QUERY.format(ib_placeholders=ph)
-                params = tuple(ib_ids) + (date_str, date_str, date_str)
+                params = tuple(ib_ids) + ib_date_params
                 cursor.execute(query, params)
                 records.extend(_enrich_rows(cursor.fetchall(), name_map))
 
@@ -319,11 +412,12 @@ def query_financial_data(
             if client_ids:
                 ph = ", ".join(["%s"] * len(client_ids))
                 query = _CLIENT_FINANCIAL_QUERY.format(client_placeholders=ph)
-                # Param order: date×2 (Trans SELECT) → client_ids (Trans WHERE)
-                #            → client_ids (Bal WHERE) → date (Bal WHERE)
                 params = (
-                    (date_str, date_str) + tuple(client_ids)
-                    + tuple(client_ids) + (date_str,)
+                    client_select_dates
+                    + tuple(client_ids)
+                    + client_balance_select_dates
+                    + tuple(client_ids)
+                    + client_balance_where_dates
                 )
                 cursor.execute(query, params)
                 records.extend(_enrich_rows(cursor.fetchall(), name_map))

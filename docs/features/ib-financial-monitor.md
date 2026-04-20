@@ -126,18 +126,43 @@ The service automatically classifies watchlist IDs into **IBs** and **plain clie
 CTE-based approach against MySQL `fxbackoffice`, expands IB tree to include all downstream clients:
 
 1. **Target_IB_List** — `ib_tree_with_self` to find all clients under each IB
-2. **Transaction_Stats** — `stats_transactions` for daily and all-time deposit/withdrawal sums
-3. **Balance_Snapshot** — `stats_balances` for MT4 equity and IB wallet equity on target date
+2. **Transaction_Stats** — `stats_transactions` for daily flows and **point-in-time cumulative** deposit/withdrawal sums at `D`, `D-1`, `D-7` (each capped by `trans.date <= snapshot_date`)
+3. **Balance_Snapshot** — `stats_balances` for MT4 equity and IB wallet equity at the same three dates (`bal.date IN (D, D-1, D-7)`)
 4. **All_Keys** — UNION to simulate FULL OUTER JOIN on (ib_id, currency)
-5. **Final output** — today deposit/withdrawal, total deposit/withdrawal, MT4 equity, IB wallet equity, difference
+5. **Final output** — today flows, latest cumulative deposit/withdrawal, MT4/IB-wallet equity, plus three differences (`difference`, `difference_1d_ago`, `difference_7d_ago`)
 
 ### 5b. Client Query (`_CLIENT_FINANCIAL_QUERY`)
 
 For IDs that are **not** IBs (not found in `ib_tree_with_self.ibid`), queries the user's own data directly without tree expansion:
 
-1. **Transaction_Stats** — same aggregation but filtered by `WHERE userid IN (...)` directly (no IB tree JOIN)
-2. **Balance_Snapshot** — only MT4 equity (`loginsid NOT LIKE '2-%'`); `ib_wallet_equity` is always 0
+1. **Transaction_Stats** — same point-in-time aggregation but filtered by `WHERE userid IN (...)` directly (no IB tree JOIN)
+2. **Balance_Snapshot** — only MT4 equity (`loginsid NOT LIKE '2-%'`) at D / D-1 / D-7; `ib_wallet_equity` is always 0
 3. **Final output** — same columns as IB query for API compatibility; `ib_wallet_equity` hardcoded to 0
+
+### 5c. Difference Formula & Comparison
+
+For each snapshot date `T ∈ {D, D-1, D-7}`:
+
+```
+difference(T) = (cumulative_deposit_as_of_T + cumulative_withdrawal_as_of_T)
+              - (mt4_equity_at_T + ib_wallet_equity_at_T)
+```
+
+Since `withdrawal.amount` is stored as a negative number, the first parenthesis equals **cumulative net deposit as of T**. Therefore:
+
+```
+difference(T) ≈ cumulative net deposit (as of T) − total equity (as of T)
+              = cumulative client net loss (≈ broker net revenue) up to T
+```
+
+The service also returns two convenience deltas computed in Python (`_enrich_rows`):
+
+```
+delta_1d = difference(D) − difference(D-1)   # past-1-day broker net revenue
+delta_7d = difference(D) − difference(D-7)   # past-7-day broker net revenue
+```
+
+Frontend & email render `delta_1d` / `delta_7d` in **green when positive** (client losses grew → broker net-won) and **red when negative** (clients made money over the period).
 
 ### Classification Logic (`_classify_ids`)
 
@@ -350,3 +375,4 @@ Dev 环境自动重载 (http://10.6.20.138:5173)
 | 2026-03-17 | 定时任务实际在 UTC 17:00（HKT 01:00）触发，而非预期的 HKT 17:00 | `scheduler.py`：`CronTrigger` 未传 `timezone` 参数，在 UTC 容器中默认按 UTC 解释。改用 `ZoneInfo("Asia/Hong_Kong")` 对象显式传入 `BackgroundScheduler` 和 `CronTrigger` 的 `timezone` 参数 |
 | 2026-03-17 | 表头"总入金/总出金"易与 CRM（仅 IB 自身）混淆 | 前端表头和邮件报表表头改为"总入金(含下级)"/"总出金(含下级)"，明确数据包含 IB 及其下级客户 |
 | 2026-03-27 | watchlist 中添加普通 client ID（非 IB）时查询无数据 | `query_financial_data()` 增加 `_classify_ids()` 自动分流：IB 走 `_IB_FINANCIAL_QUERY`（展开下级），client 走 `_CLIENT_FINANCIAL_QUERY`（仅查自身数据，`ib_wallet_equity` = 0）。前端无需改动 |
+| 2026-04-20 | 老板需要看差异趋势（1天前 / 7天前） | (1) 两个 SQL 同时在一次查询里输出 D / D-1 / D-7 三个时点的差异，并修复原 SQL 中 `total_deposit`/`total_withdrawal` 没有日期上限导致历史快照含未来数据的问题（现加上 `trans.date <= %s`）。(2) `FinancialRecord` 增加 `difference_1d_ago`、`difference_7d_ago`、`delta_1d`、`delta_7d` 4 个字段；delta 在前端表格和邮件 HTML 均按正/负上色（绿=公司净获利，红=客户赚钱）。(3) Client 查询同步处理 |

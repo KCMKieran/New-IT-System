@@ -225,36 +225,72 @@ async def list_whitelist():
 def _build_report_html(
     date_str: str, records: list[dict], *, is_scheduled: bool = False
 ) -> str:
-    """Build a simple HTML table for the email report body."""
+    """Build a simple HTML table for the email report body.
+
+    Columns include three difference snapshots (D, D-1, D-7) plus their
+    deltas, so recipients can see the trend without opening the dashboard.
+    Three "focus" columns (差异 / Δ1d / Δ7d) get a light amber background
+    to mirror the web UI.
+    """
     if not records:
         return f"<p>No data found for {date_str}.</p>"
 
-    header_map = {
-        "ib_name": "IB",
-        "currency": "Currency",
-        "today_deposit": "今天入金",
-        "today_withdrawal": "今天出金",
-        "total_deposit": "总入金(含下级)",
-        "total_withdrawal": "总出金(含下级)",
-        "mt4_equity": "MT4净值",
-        "ib_wallet_equity": "IB钱包净值",
-        "difference": "差异",
-    }
-    columns = list(header_map.keys())
+    # Inline color tokens (use inline styles since most email clients strip <style>)
+    HIGHLIGHT_BG = "#fef3c7"   # amber-100, draws the eye to the focus columns
+    GREEN = "#16a34a"
+    RED = "#dc2626"
+
+    # (column_key, header_label, is_delta, is_highlight)
+    columns = [
+        ("ib_name", "IB", False, False),
+        ("currency", "Currency", False, False),
+        ("today_deposit", "今天入金", False, False),
+        ("today_withdrawal", "今天出金", False, False),
+        ("total_deposit", "总入金(含下级)", False, False),
+        ("total_withdrawal", "总出金(含下级)", False, False),
+        ("mt4_equity", "MT4净值", False, False),
+        ("ib_wallet_equity", "IB钱包净值", False, False),
+        ("difference", "差异", False, True),
+        ("difference_1d_ago", "1天前差异", False, False),
+        ("difference_7d_ago", "7天前差异", False, False),
+        ("delta_1d", "Δ1d", True, True),
+        ("delta_7d", "Δ7d", True, True),
+    ]
+
+    def _fmt_num(v) -> str:
+        try:
+            return f"{float(v):,.2f}"
+        except (TypeError, ValueError):
+            return str(v) if v is not None else ""
 
     rows_html = ""
     for rec in records:
-        cells = "".join(
-            f"<td style='padding:6px 10px;border:1px solid #ddd;text-align:right;'>"
-            f"{rec.get(col, '')}</td>"
-            for col in columns
-        )
+        cells = ""
+        for col, _label, is_delta, is_highlight in columns:
+            value = rec.get(col, "")
+            if col in ("ib_name", "currency"):
+                display = str(value) if value is not None else ""
+                align = "left"
+                color = ""
+            else:
+                display = _fmt_num(value)
+                align = "right"
+                if is_delta and isinstance(value, (int, float)) and value:
+                    color = f"color:{GREEN};" if value > 0 else f"color:{RED};"
+                else:
+                    color = ""
+            bg = f"background:{HIGHLIGHT_BG};" if is_highlight else ""
+            cells += (
+                f"<td style='padding:6px 10px;border:1px solid #ddd;"
+                f"text-align:{align};{bg}{color}'>{display}</td>"
+            )
         rows_html += f"<tr>{cells}</tr>"
 
     headers_html = "".join(
-        f"<th style='padding:6px 10px;border:1px solid #ddd;background:#f5f5f5;"
-        f"text-align:center;'>{header_map[col]}</th>"
-        for col in columns
+        "<th style='padding:6px 10px;border:1px solid #ddd;"
+        f"background:{HIGHLIGHT_BG if is_highlight else '#f5f5f5'};"
+        f"text-align:center;'>{label}</th>"
+        for _key, label, _is_delta, is_highlight in columns
     )
 
     if is_scheduled:
@@ -262,9 +298,29 @@ def _build_report_html(
     else:
         footer = "此邮件由 KCM Analysis 系统手动发送"
 
+    # Field explanation block — mirrors the alert box on the web page
+    explanation_html = """
+    <div style="border:1px solid #bfdbfe;background:#eff6ff;color:#1e3a8a;
+                padding:10px 14px;border-radius:6px;margin:0 0 14px 0;font-size:12px;
+                line-height:1.7;max-width:880px;">
+        <div style="font-weight:600;margin-bottom:4px;">字段说明</div>
+        <ul style="margin:0;padding-left:18px;">
+            <li><b>差异</b> = (累计入金 + 累计出金) − (MT4净值 + IB钱包净值)
+                ≈ 累计净入金 − 当前账户总净值</li>
+            <li><b>1天前差异</b>：1 天前 (target_date − 1) 那个时点的累计差异，
+                用同样的公式但所有数据截止到 1 天前。</li>
+            <li><b>7天前差异</b>：7 天前 (target_date − 7) 那个时点的累计差异。</li>
+            <li><b>Δ1d / Δ7d</b>：差异在过去 1/7 天的变化。
+                <span style="color:#16a34a;">绿 (&gt;0)</span> = 客户群净亏扩大，公司净获利；
+                <span style="color:#dc2626;">红 (&lt;0)</span> = 客户群净赚，公司净亏损。</li>
+        </ul>
+    </div>
+    """
+
     return f"""
     <div style="font-family:Arial,sans-serif;">
-        <h3>IB Financial Report — {date_str}</h3>
+        <h3 style="margin:0 0 12px 0;">IB Financial Report — {date_str}</h3>
+        {explanation_html}
         <table style="border-collapse:collapse;font-size:13px;">
             <thead><tr>{headers_html}</tr></thead>
             <tbody>{rows_html}</tbody>
