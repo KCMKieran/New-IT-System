@@ -55,7 +55,7 @@ CLICKHOUSE_HOST=your-clickhouse-host.clickhouse.cloud
 CLICKHOUSE_PORT=8443
 CLICKHOUSE_USER=default
 CLICKHOUSE_PASSWORD=your_password
-CLICKHOUSE_DB=Fxbo_Trades
+CLICKHOUSE_DB=KCM_fxbackoffice
 ```
 
 **依赖安装**：

@@ -165,8 +165,9 @@ export default function PositionPage() {
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = React.useState<Date | null>(null);
+  // Default sort: by Total Profit in descending order (largest profit first)
   const [sorting, setSorting] = React.useState<SortingState>([
-    { id: "profit_total", desc: false },
+    { id: "profit_total", desc: true },
   ]);
   // Data source capsule toggle: 'mt4_live' | 'mt4_live2' | 'mt5'
   const [source, setSource] = React.useState<"mt4_live" | "mt4_live2" | "mt5">(
@@ -655,7 +656,7 @@ export default function PositionPage() {
         </CardContent>
       </Card>
 
-      {/* 表格：两行表头，默认按 Profit Total 升序 */}
+      {/* 表格：两行表头，默认按 Profit Total 降序 */}
       <Card>
         <CardContent className="pt-6">
           <div className="w-full">

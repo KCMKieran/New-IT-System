@@ -35,20 +35,22 @@ def _json_serializer(obj):
 
 class ClickHouseService:
     def __init__(self):
-        # 优先读取环境变量 (默认连接用于 PnL 分析等通用业务)
-        self.host = os.getenv("CLICKHOUSE_HOST", "dwsz2tfd9y.ap-northeast-1.aws.clickhouse.cloud")
+        # Default connection. After retiring the Tokyo/Fxbo_Trades cluster, this now
+        # points to the same prod CDC cluster (Singapore) / KCM_fxbackoffice DB that
+        # use_prod=True targets. Kept as a separate code path for backward compatibility
+        # (e.g. startup health check, future split of read-only analytical workloads).
+        self.host = os.getenv("CLICKHOUSE_HOST", "ny8bvfks7d.ap-southeast-1.aws.clickhouse.cloud")
         self.port = int(os.getenv("CLICKHOUSE_PORT", "8443"))
         self.username = os.getenv("CLICKHOUSE_USER", "default")
-        
-        # 处理密码 (去除可能存在的首尾空格)
+
         raw_password = os.getenv("CLICKHOUSE_PASSWORD")
         self.password = raw_password.strip() if raw_password else None
-        
-        # Default connection: used when use_prod=False (e.g. client_return). KCM_fxbackoffice lives on prod cluster.
-        self.database = os.getenv("CLICKHOUSE_DB", "Fxbo_Trades")
+
+        self.database = os.getenv("CLICKHOUSE_DB", "KCM_fxbackoffice")
         self.secure = True  # Force TLS
 
-        # Prod connection: CDC target cluster where KCM_fxbackoffice exists. Used by IB Report & Client PnL.
+        # Prod connection: CDC target cluster where KCM_fxbackoffice lives.
+        # Used explicitly by IB Report & Client PnL (use_prod=True).
         self.prod_host = os.getenv("CLICKHOUSE_prod_HOST")
         self.prod_user = os.getenv("CLICKHOUSE_prod_USER")
         self.prod_pass = os.getenv("CLICKHOUSE_prod_PASSWORD")
@@ -75,13 +77,16 @@ class ClickHouseService:
             logger.error(f"Redis initialization failed: {e}")
             self.redis_client = None
 
-        # [可选] 启动时尝试轻量连接测试
-        try:
-            with self.get_client() as client:
-                client.command('SELECT 1')
-            logger.info("ClickHouse default connection established")
-        except Exception as e:
-            logger.warning(f"ClickHouse connection warning: {e}")
+        # Startup connectivity probe is DISABLED by default to avoid waking
+        # ClickHouse Cloud (idle-auto-suspend) on every backend restart / deploy.
+        # To re-enable for local debugging, set CLICKHOUSE_STARTUP_PROBE=true.
+        if os.getenv("CLICKHOUSE_STARTUP_PROBE", "false").lower() == "true":
+            try:
+                with self.get_client() as client:
+                    client.command('SELECT 1')
+                logger.info("ClickHouse default connection established")
+            except Exception as e:
+                logger.warning(f"ClickHouse connection warning: {e}")
 
     def get_client(self, use_prod: bool = False):
         """

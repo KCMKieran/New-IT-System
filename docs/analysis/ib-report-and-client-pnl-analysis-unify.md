@@ -41,8 +41,8 @@ SELECT name FROM system.tables WHERE database = 'KCM_fxbackoffice' ORDER BY name
 
 - **默认连接（use_prod=False）**
   - Host/User/Password：`CLICKHOUSE_HOST` / `CLICKHOUSE_USER` / `CLICKHOUSE_PASSWORD`
-  - **Database**：`CLICKHOUSE_DB`，未设置时默认 **`Fxbo_Trades`**
-  - 用于：client_return 等
+  - **Database**：`CLICKHOUSE_DB`，未设置时默认 **`KCM_fxbackoffice`**（原 `Fxbo_Trades` 已下线）
+  - 用于：启动探活（`SELECT 1`）；单集群架构下此连接应与 prod 一致
 - **生产连接（use_prod=True）**
   - Host/User/Password：`CLICKHOUSE_prod_HOST` / `CLICKHOUSE_prod_USER` / `CLICKHOUSE_prod_PASSWORD`
   - **Database**：代码写死 **`KCM_fxbackoffice`**（CDC 目标库）

@@ -387,8 +387,9 @@ New-IT-System/
 | `fxbackoffice_stats_ib_commissions_by_login_sid` | KCM_fxbackoffice | Pre-aggregated IB commissions |
 
 ### ClickHouse connections (clickhouse_service.py)
-- **Default** (`get_client()`): `CLICKHOUSE_HOST` + `CLICKHOUSE_DB` (default `Fxbo_Trades`).
-- **Prod** (`get_client(use_prod=True)`): `CLICKHOUSE_prod_*` + database `KCM_fxbackoffice`. Used by IB Report (groups, search) and Client PnL Analysis (query). Deploy must set prod credentials to the CDC cluster.
+- Single prod cluster after decommissioning the Tokyo/`Fxbo_Trades` instance. All workloads target `KCM_fxbackoffice` on the Singapore CDC cluster.
+- **Default** (`get_client()`): `CLICKHOUSE_HOST` + `CLICKHOUSE_DB` (default `KCM_fxbackoffice`). Used by the startup health probe.
+- **Prod** (`get_client(use_prod=True)`): `CLICKHOUSE_prod_*` + database `KCM_fxbackoffice`. Used by IB Report (groups, search) and Client PnL Analysis (query). In single-cluster mode `CLICKHOUSE_prod_*` should mirror `CLICKHOUSE_*`.
 
 ### MySQL connections (client_return_service.py)
 - **Client Return Rate** uses `MYSQL_HOST_PRIMARY` (falls back to `MYSQL_HOST` if not set) + `MYSQL_DATABASE_FXBACKOFFICE=fxbackoffice` via pymysql.
