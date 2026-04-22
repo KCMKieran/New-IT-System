@@ -435,6 +435,9 @@ function WatchlistTab() {
           </div>
         </CardHeader>
         <CardContent>
+          <div className="mb-4 rounded-md border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900 dark:border-blue-900/50 dark:bg-blue-950/30 dark:text-blue-100">
+            如果需要批量操作, 请联系Kieran
+          </div>
           {loading ? (
             <p className="text-muted-foreground text-sm">加载中...</p>
           ) : items.length === 0 ? (
