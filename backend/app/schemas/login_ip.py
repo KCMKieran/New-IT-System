@@ -196,6 +196,17 @@ class SchedulerRunNowRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class AdminWhitelistResponse(BaseModel):
+    """Emails that are allowed to request a verification code.
+
+    Backed by the shared `admin_whitelist` SQLite table (single source of truth
+    for all risk-control modules), but exposed via a module-local endpoint so
+    the frontend doesn't need to cross-reference the IB Financial namespace.
+    """
+
+    emails: List[str]
+
+
 class RequestCodeRequest(BaseModel):
     email: str
     action: str  # must match the action used in verify-action below

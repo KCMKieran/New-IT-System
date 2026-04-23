@@ -178,8 +178,8 @@ export function WatchlistTab() {
     setWhitelistOpen(true);
     setWhitelistLoading(true);
     try {
-      // Reuse the existing whitelist endpoint already used by IB Financial.
-      const res = await apiFetch("/api/v1/ib-financial/whitelist");
+      // Module-local endpoint (same admin_whitelist table, but under our namespace).
+      const res = await apiFetch("/api/v1/login-ip/whitelist");
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       const emails = Array.isArray(data?.emails) ? data.emails : [];

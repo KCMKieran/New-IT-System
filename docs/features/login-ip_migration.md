@@ -230,6 +230,7 @@ backend/app/
 | POST   | `/api/v1/login-ip/export/tasks`               | 异步导出搜索结果 CSV                                  |
 | GET    | `/api/v1/login-ip/export/tasks/{id}`          | 导出任务进度                                          |
 | GET    | `/api/v1/login-ip/export/tasks/{id}/download` | 下载 CSV                                              |
+| GET    | `/api/v1/login-ip/whitelist`                  | 白名单邮箱只读列表（前端弹窗用；模块解耦入口）        |
 | POST   | `/api/v1/login-ip/request-code`               | 向白名单邮箱发 6 位验证码（300s TTL）                 |
 | POST   | `/api/v1/login-ip/verify-action`              | 核验验证码并执行 watchlist 写操作                     |
 
@@ -243,7 +244,7 @@ backend/app/
 
 验证码复用 IB Financial 的 **Redis** + **admin_whitelist 表**：
 - Redis key：`login_ip_verify:{email}:{sha256(action)[:16]}`（与 IB Financial 的 `ib_fin_verify:` 前缀隔离）
-- 白名单判断：`ib_financial_service.is_whitelisted(email)`（`admin_whitelist` 表由 IB Financial 维护；若运营需要 Login IP 独立管理员集，后续可复制一张 `login_ip_admin_whitelist` 表替换）
+- 白名单判断：内部 `ib_financial_service.is_whitelisted(email)`（共享 `admin_whitelist` 表）；对前端暴露独立入口 `GET /api/v1/login-ip/whitelist`，让 Login IP 模块不直接耦合 `/api/v1/ib-financial/*` 命名空间。若未来需要 Login IP 独立管理员集，复制一张 `login_ip_admin_whitelist` 表替换即可。
 
 ---
 
@@ -407,8 +408,9 @@ ENV:
 
 ### 提示词 Phase 6 — Routes + Schemas（已实现）
 
-> ⚠️ 本节已根据实际落地更新。共 13 个 endpoint 注册到 `/api/v1/login-ip/*`，
+> ⚠️ 本节已根据实际落地更新。共 14 个 endpoint 注册到 `/api/v1/login-ip/*`，
 > 全部通过本地冲烟测试（异步 CSV 导出端到端验证通过）。
+> 2026-04-23 补丁：新增 `GET /whitelist` 只读端点（前端白名单弹窗去耦合 IB Financial）。
 
 ```
 在 backend/app/ 新增 routes / schemas，暴露 §6.1 API 清单里的全部 endpoints。
@@ -457,7 +459,7 @@ ENV:
    api_v1_router.include_router(login_ip_router, tags=["login-ip"])
 ```
 
-**实际落地 13 个 endpoint**：
+**实际落地 14 个 endpoint**：
 
 ```
 GET    /api/v1/login-ip/available-dates        # 有 JSON 的日期列表（newest first；skip tmp/）
@@ -472,6 +474,7 @@ DELETE /api/v1/login-ip/mail/recipients/{id}   # 软删除收件人
 POST   /api/v1/login-ip/export/tasks           # 异步 CSV 导出：create
 GET    /api/v1/login-ip/export/tasks/{id}      # poll status
 GET    /api/v1/login-ip/export/tasks/{id}/download  # 下载 CSV（utf-8-sig，Excel 直开）
+GET    /api/v1/login-ip/whitelist              # 白名单邮箱只读列表（前端弹窗用）
 POST   /api/v1/login-ip/request-code           # 验证码基建：发码
 POST   /api/v1/login-ip/verify-action          # 验证码基建：执行 watchlist 写
 ```
@@ -488,40 +491,93 @@ POST   /api/v1/login-ip/verify-action          # 验证码基建：执行 watchl
 - **路径坑（已修）**：routes 文件在 `backend/app/api/v1/routes/`，要算到 `backend/` 需要 `parents[4]`，最初写成 `parents[3]` 落到 `app/` 导致 `available-dates` 返回 0 个。
 
 
-### 提示词 Phase 7 — 前端页面
+### 提示词 Phase 7 — 前端页面（已实现）
+
+> ⚠️ 本节已根据实际落地更新。最终文件结构是 `frontend/src/pages/LoginIPs.tsx`
+> (shell) + `frontend/src/pages/login-ip/` 子目录拆 4 个 Tab 组件，比提示词
+> 里的单文件方案更便于维护；中途把 Tab 1（日报告）和 Tab 2（监控账户）
+> 从 AG-Grid 改成 shadcn `<Table>`，原因是数据量 < 200 行且需要深度定制
+> 表头样式（黑底白字 + 圆角裁剪），AG-Grid 主题覆盖性价比低。
+> 只有 Tab 3（搜索结果）保留 AG-Grid，利用它的分页 + CSV 快速筛选能力。
 
 ```
-在 frontend/src/pages/LoginIPMonitor.tsx 实现 §4.x 描述的三 Tab 页面。
+页面入口: frontend/src/pages/LoginIPs.tsx
+  ├─ 4 个 Tab: 每日报告 / 监控账户 / 搜索 / 运维
+  └─ 内部 child: frontend/src/pages/login-ip/
+       ├── types.ts                ← 镜像 schemas/login_ip.py 的所有 interface
+       ├── useVerification.ts      ← 邮箱验证码 hook（request-code → verify-action）
+       ├── VerificationDialog.tsx  ← 验证码输入弹窗（UI 等价于 IBFinancialMonitor 内嵌）
+       ├── ReportTab.tsx           ← Tab 1：每日报告（shadcn Table）
+       ├── WatchlistTab.tsx        ← Tab 2：监控账户（shadcn Table + 白名单弹窗）
+       ├── SearchTab.tsx           ← Tab 3：账号/IP 搜索（AG-Grid + 异步 CSV 导出）
+       └── OperationsTab.tsx       ← Tab 4：调度审计 + 邮件收件人（无验证码）
 
-技术约束：
-- 所有 fetch 必须用 @/lib/fetch 的 apiFetch()
-- useEffect 必须 AbortController + 在 catch 里忽略 AbortError
-- 表格用 AG-Grid（ClientSide 即可，数据量不大）
-- UI 组件全部来自 @/components/ui（shadcn/ui），不要引新 UI 库
-- 日期选择器用现有 shadcn 组件
-- CSV 导出走异步任务流（参考 ClientReturnRate 的 export 逻辑）
-- 暗色主题自动适配（tailwind dark: 已全局生效）
+新增基础设施：
+- frontend/src/components/ui/textarea.tsx（项目原本缺这个 shadcn 组件）
 
-Tab 1（报告）：
-- 顶部：日期 Select（从 /available-dates 获取）
-- 主区：按 accounts 渲染 Card 列表；关联账户用 Badge / 小 Grid 展示
-- 空状态 / 无关联状态 / 加载 Skeleton 三种态要分别处理
-
-Tab 2（监控账户）：
-- AG-Grid 列：checkbox、account_id、server_name、remarks（可编辑）、操作
-- 顶部表单：textarea（账号 ID，一行一个） + Select(server) + Input(remarks) + 批量添加按钮
-- 删除 / 改备注走验证码流程（若 Phase 6 实现了）
-
-Tab 3（搜索）：
-- 表单：RadioGroup(搜索类型) + textarea(terms) + Select(days)
-- 提交 → /search → AG-Grid 渲染结果
-- 工具栏：清空 / 导出 CSV
-
-路由 & 导航：
-- 在 frontend/src/App.tsx 加 lazy 路由 /login-ip-monitor
-- app-sidebar.tsx 加菜单项（归到"风控"分组，图标用 Shield 或 Fingerprint）
-- site-header.tsx titleMap 加条目
+路由 & 导航（已经在早期 Phase 加好，本阶段无改动）：
+- App.tsx 的 lazy 路由 /login-ips
+- app-sidebar.tsx 菜单项（风控分组 + Fingerprint 图标）
+- site-header.tsx titleMap（i18n 零散补齐）
 ```
+
+**Tab 1（每日报告）关键落地**：
+
+- 列: MT 账号 / 服务器 / 是否登录 / 备注 / 登录次数 / IP 数 / IP 明细 / 关联账户（含姓名）
+- “是否登录” Badge 三态色（未登录灰 / 已登录绿 / 已登录 + 有关联红），文案简化为「已登录」或「未登录」
+- 表头黑底白字 (`bg-black [&_th]:text-white`)，通过父 `overflow-hidden` + `[&_th:first-child]:rounded-tl-xl` 修复圆角被裁剪问题（dark mode 下同样生效）
+- 「无关联账户」日不渲染绿色提示卡（用户反馈太抢眼），关联账户改为在表格单元格内红色粗体 inline 显示
+- 数据源：`GET /available-dates` + `GET /report?date=`
+
+**Tab 2（监控账户）关键落地**：
+
+- 批量新增表单：两行响应式布局
+  - 第 1 行 `<Textarea rows={4}>`（多账号，一行一个）
+  - 第 2 行 `grid md:grid-cols-2` — 左服务器 Select、右备注 Input（桌面 50/50，移动端堆叠）
+- 「新增（需邮箱验证）」按钮 → 唤起 `VerificationDialog` → `request-code` → `verify-action` (`action=add_monitored_account`)
+- 「白名单邮箱」按钮 → shadcn `<Dialog>` 展示允许收码的邮箱列表（当前请求 **`GET /api/v1/login-ip/whitelist`**；早期版本复用 IB Financial 端点，2026-04-23 已切换）
+- 列表区改用 shadcn `<Table>`（AG-Grid 换下）：每行有 Input + 「保存备注」按钮（同样走验证码），删除按钮走验证码
+- 表头样式与 Tab 1 对齐（黑底白字 + 圆角）
+
+**Tab 3（搜索）关键落地**：
+
+- 表单：RadioGroup (account_id / ip_address) + `<Textarea>` (terms，多行 → `terms: string[]`) + Select (days: 1/3/7/15/30)
+- 结果仍走 AG-Grid（支持列排序 + 客户端筛选）
+- CSV 导出是异步任务：`POST /export/tasks` → 轮询 `GET /export/tasks/{id}` → `GET /export/tasks/{id}/download` 拉 blob，前端触发下载（`ClientReturnRate.tsx` 同款模式）
+
+**Tab 4（运维）关键落地**：
+
+- 左：调度运行记录（展示最近 30 条 `login_ip_scheduler_runs`）+ 「立即运行」按钮（`POST /scheduler/run-now`，`job=download|analyze_report`）
+- 右：邮件收件人列表（`GET /mail/recipients`）+ 新增 + 软删除
+- 整个 Tab 不走验证码（读为主，写操作只是运维内部用；需要时后续再追加保护）
+
+**共享验证码流程**：
+
+- `useVerification(action, payload)` hook 统一管理 `stage`（idle / requesting / waiting_code / verifying / done）
+- 所有 watchlist 写操作（add / update remark / delete）复用同一个 `VerificationDialog`，只传入 `action` + `payload` 区分意图
+- Redis key 前缀：`login_ip_verify:` 与 IB Financial 的 `ib_fin_verify:` 完全隔离
+
+**前端-后端 schema 对齐踩坑**：
+
+- `SearchRequest` 后端要 `terms: List[str]` + `days: int`，前端最初按照提示词里的 `searchTerm` + 日期范围实现，上线前重写为 `<Textarea>` + `<Select>` 对齐后端契约
+- 异步导出 task 的 `row_count=0` 在后端被错误序列化成 `None` → 修 `_status_payload` 函数（见 Phase 6 踩坑记录）
+
+**本 Phase 修复 / 优化列表**：
+
+1. Tab 名称 `日报告` → `每日报告`
+2. 「日期 / 刷新」控件上下 padding 对齐（`px-4 py-4 md:px-6`）
+3. Tab 1 从 Card 列表重构为 Table
+4. Tab 1 删掉始终为空的「姓名」列
+5. Tab 1 黑色表头 + 白色文字 + 圆角修复（`overflow-hidden` + 首尾 `<TableHead>` 圆角）
+6. Tab 1 删掉「未发现关联账户」绿色大块状提示
+7. Tab 1 「是否登录」Badge 三色简化（未登录灰 / 绿 / 红）
+8. Tab 2 批量新增表单改为响应式两行
+9. Tab 2 按钮去掉 `IconPlus`
+10. Tab 2 刷新按钮迁到「监控账户列表」header（改名「刷新列表」）
+11. Tab 2 新增「白名单邮箱」弹窗
+12. Tab 2 AG-Grid → shadcn Table（与 Tab 1 风格一致）
+13. Tab 2 备注保存改为行内「保存备注」按钮（不再 inline edit）
+14. **2026-04-23**: 白名单弹窗改走独立端点 `/api/v1/login-ip/whitelist`（去耦 IB Financial）
 
 ### 提示词 Phase 8 — 文档 + 旧项目下线
 

@@ -34,6 +34,7 @@ from fastapi.responses import FileResponse
 from ....core import login_ip_db
 from ....core.login_ip_scheduler import trigger_download_now, trigger_report_now
 from ....schemas.login_ip import (
+    AdminWhitelistResponse,
     AvailableDatesResponse,
     ExportTaskCreateRequest,
     ExportTaskCreateResponse,
@@ -93,6 +94,18 @@ def _consume_code(email: str, code: str, action: str) -> None:
             detail="Invalid or expired verification code",
         )
     r.delete(key)
+
+
+@router.get("/whitelist", response_model=AdminWhitelistResponse)
+async def list_whitelist():
+    """Read-only list of whitelisted operator emails.
+
+    Module-local endpoint that internally delegates to IB Financial's service —
+    the underlying `admin_whitelist` table is shared across risk-control
+    modules, but exposing it here keeps the frontend's API surface decoupled
+    (Login IP doesn't need to know about `/api/v1/ib-financial/*`).
+    """
+    return AdminWhitelistResponse(emails=ib_financial_service.get_admin_whitelist())
 
 
 @router.post("/request-code", status_code=status.HTTP_200_OK)

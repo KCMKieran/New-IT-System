@@ -372,6 +372,44 @@ New-IT-System/
 
 ---
 
+### 4.9 Login IP Monitor (`LoginIPs.tsx`)
+**Purpose**: Daily correlation analysis of MT login IPs to surface accounts sharing public IPs with other real accounts. Migrated in 2026-04 from standalone `46-MT-Server-Login-Detect/` project.
+
+**Key Features**:
+- 4-tab UI: 每日报告 / 监控账户 / 搜索 / 运维
+- Scheduled ingestion via APScheduler (`Asia/Hong_Kong`): 02:00 download + parse FTP/FTPS logs; 08:30 correlation analysis + HTML email report
+- Correlation windows: same-day + previous 7 days (`login_history`)
+- Watchlist CRUD gated by email verification code (Redis TTL 300s, reuses shared `admin_whitelist` via module-local `GET /whitelist` endpoint)
+- Manual search (account_id / IP) with async CSV export (ThreadPoolExecutor + UTF-8-BOM)
+- Scheduler audit trail: `login_ip_scheduler_runs` table surfaced in ops tab
+- Failure alerts: ⚠️ email on job failure / partial success
+
+**APIs**: 14 endpoints under `/api/v1/login-ip/*`
+- `GET /available-dates`, `GET /report?date=`, `GET /watchlist`, `POST /search`
+- `GET /scheduler/runs`, `POST /scheduler/run-now`
+- `GET|POST /mail/recipients`, `DELETE /mail/recipients/{id}`
+- `POST /export/tasks`, `GET /export/tasks/{id}`, `GET /export/tasks/{id}/download`
+- `GET /whitelist`, `POST /request-code`, `POST /verify-action`
+
+**Data Sources**:
+- FTP/FTPS × 3 MT servers (MT4_Live / MT4_Live2 / MT5) for raw login logs
+- SQLite `backend/data/login_ip.db` (5 tables: monitored_accounts, login_history, mail_recipients, scheduler_runs, export_tasks)
+- MySQL Slave (`KCM_fxbackoffice.users`) for Chinese-name enrichment
+- Shared `admin_whitelist` (SQLite) for verification-code email gating
+
+**Key Files**:
+- `frontend/src/pages/LoginIPs.tsx` (tab shell) + `frontend/src/pages/login-ip/` (ReportTab, WatchlistTab, SearchTab, OperationsTab, useVerification, VerificationDialog, types.ts)
+- `backend/app/api/v1/routes/login_ip.py` (14 endpoints)
+- `backend/app/services/login_ip_{ftp,analyzer,report,search,export,enrichment}_service.py`
+- `backend/app/core/login_ip_db.py` + `backend/app/core/login_ip_scheduler.py`
+- `backend/scripts/migrate_login_ip_from_legacy.py` (one-off migration from legacy `monitoring.db`)
+
+**Env**: `LOGIN_IP_{MT4,MT5,MT4_LIVE2}_{HOST,PORT,USER,PASSWORD,REMOTE_DIR,USE_FTPS}` (18 vars). Passwords containing `$`/`!`/etc. MUST be single-quoted — see [dev-prod-guide.md](../deployment/dev-prod-guide.md) §环境变量特殊字符转义.
+
+**Docs**: [login-ip.md](../features/login-ip.md) | [Migration history](../features/login-ip_migration.md)
+
+---
+
 ## 5. Database Schema (ClickHouse)
 
 ### Key Tables

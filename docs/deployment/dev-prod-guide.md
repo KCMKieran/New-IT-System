@@ -230,3 +230,40 @@ sudo systemctl status cloudflared        # 确认服务正常运行
 | 通过 Cloudflare 访问 API 返回 502 | 后端容器没在运行 | 用 `docker logs new-it-backend-prod` 看日志，有问题就重启 |
 | Dashboard 首次加载正常，点刷新后 "Load failed" | Cloudflare Access 拦截了后续 fetch 请求 | 详见 [cloudflare-api-blocked.md](cloudflare-api-blocked.md)，需在 Access 中为 `/api/*` 添加 Bypass |
 | Docker 构建很慢（500MB+ 上下文） | 缺少 `.dockerignore` | 确认 `frontend/.dockerignore` 里有 `node_modules` |
+| FTP 密码改过之后任务 530 失败 | `.env` 里密码含 `$`/`!` 等 shell 特殊字符，但没用单引号包住，被 compose 当变量展开 | 见下一节「环境变量特殊字符转义」 |
+
+---
+
+## 环境变量特殊字符转义
+
+`backend/.env` 会被 `docker-compose.prod.yml` 的 `--env-file` 和 Python-dotenv
+共同读取。如果某个 value 含有以下字符：
+
+- `$`（最常踩坑 — 会被当变量展开，例如 `$abc` 读不到就变空字符串）
+- `!`（bash history 扩展）
+- `"`（和 compose 的双引号闭合冲突）
+- 反斜杠 `\`、反引号、`#`（行内注释）
+
+**必须用单引号把整段 value 包起来**。以 Login IP Monitor 为例：
+
+```bash
+# ✅ 正确：单引号包裹
+LOGIN_IP_MT4_PASSWORD='P@ssw0rd$with!special#chars'
+LOGIN_IP_MT5_PASSWORD='another$one'
+LOGIN_IP_MT4_LIVE2_PASSWORD='yet$another'
+
+# ❌ 错误：裸写或用双引号，`$with` 会被展开为空
+LOGIN_IP_MT4_PASSWORD=P@ssw0rd$with!special
+LOGIN_IP_MT4_PASSWORD="P@ssw0rd$with!special"
+```
+
+**排障流程**（FTP 抛 530 / scheduler 的 ⚠️ 告警邮件里显示密码认证失败）：
+
+1. `docker compose -f docker-compose.prod.yml --env-file backend/.env config | grep LOGIN_IP_MT4_PASSWORD`
+   看 compose 展开后拿到的真实值是不是原密码
+2. 确认 `.env` 里用了 **单引号**，不是双引号、不是裸写
+3. 重启容器让新的 env 生效：`docker compose -f docker-compose.prod.yml up -d --force-recreate backend`
+4. UI 运维 Tab → 「立即运行 download」验证
+
+> 涉及的变量：`LOGIN_IP_MT4_PASSWORD` / `LOGIN_IP_MT5_PASSWORD` / `LOGIN_IP_MT4_LIVE2_PASSWORD`，
+> 以及任何未来新增的密码类 env。SMTP / MySQL 密码同样适用这条规则。
