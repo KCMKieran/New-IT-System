@@ -1,42 +1,66 @@
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { Button } from "@/components/ui/button"
+/**
+ * Login IP Monitor — main page.
+ *
+ * Four tabs:
+ *   1. 日报告   — daily correlation report (read-only)
+ *   2. 监控账户  — watchlist CRUD (writes behind email verification)
+ *   3. 手动搜索  — on-demand search + async CSV export
+ *   4. 运维    — scheduler timeline + mail recipients
+ *
+ * Each Tab is a self-contained component in ./login-ip/. This file is just
+ * the shell — routing, sidebar, i18n are already wired up in App.tsx /
+ * app-sidebar.tsx / site-header.tsx for the existing `/login-ips` route.
+ */
 
-// 内网服务地址
-const TARGET_URL = "http://10.6.20.138:8000"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  IconReport,
+  IconUsers,
+  IconSearch,
+  IconSettings,
+} from "@tabler/icons-react";
+
+import { ReportTab } from "./login-ip/ReportTab";
+import { WatchlistTab } from "./login-ip/WatchlistTab";
+import { SearchTab } from "./login-ip/SearchTab";
+import { OperationsTab } from "./login-ip/OperationsTab";
 
 export default function LoginIPsPage() {
-  const handleRedirect = () => {
-    window.open(TARGET_URL, "_blank", "noopener,noreferrer")
-  }
-
   return (
-    <div className="relative min-h-[calc(100vh-6rem)] w-full overflow-hidden rounded-xl bg-background">
-      {/* 内容卡片 */}
-      <div className="relative z-10 flex min-h-[calc(100vh-6rem)] items-center justify-center p-6">
-        <Card className="w-full max-w-xl text-center shadow-lg border-none bg-background/80">
-          <CardHeader>
-            <CardTitle className="text-2xl font-semibold">Login IP监测</CardTitle>
-            <CardDescription>
-              访问 Login IP 监测分析系统
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="flex flex-col gap-6">
-            <div className="text-sm text-muted-foreground space-y-2">
-              <p>该服务运行在公司内网环境。</p>
-              <p>
-                目标地址: <span className="font-mono text-xs">{TARGET_URL}</span>
-              </p>
-              <p className="text-xs opacity-80">
-                (迁移服务器更换IP后, 会重新部署到此页面, ETA: 2026-03)
-              </p>
-            </div>
-            
-            <Button size="lg" className="mx-auto px-10" onClick={handleRedirect}>
-              前往访问
-            </Button>
-          </CardContent>
-        </Card>
-      </div>
+    <div className="flex-1 space-y-4 p-4 md:p-6">
+      <Tabs defaultValue="report" className="w-full">
+        <TabsList className="grid w-full max-w-2xl grid-cols-4">
+          <TabsTrigger value="report" className="gap-1.5">
+            <IconReport className="h-4 w-4" />
+            每日报告
+          </TabsTrigger>
+          <TabsTrigger value="watchlist" className="gap-1.5">
+            <IconUsers className="h-4 w-4" />
+            监控账户
+          </TabsTrigger>
+          <TabsTrigger value="search" className="gap-1.5">
+            <IconSearch className="h-4 w-4" />
+            手动搜索
+          </TabsTrigger>
+          <TabsTrigger value="ops" className="gap-1.5">
+            <IconSettings className="h-4 w-4" />
+            运维
+          </TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="report" className="mt-4">
+          <ReportTab />
+        </TabsContent>
+        <TabsContent value="watchlist" className="mt-4">
+          <WatchlistTab />
+        </TabsContent>
+        <TabsContent value="search" className="mt-4">
+          <SearchTab />
+        </TabsContent>
+        <TabsContent value="ops" className="mt-4">
+          <OperationsTab />
+        </TabsContent>
+      </Tabs>
     </div>
-  )
+  );
 }
