@@ -26,6 +26,17 @@ from typing import Any, Dict, List, Optional
 import pymysql
 
 from ..core.config import Settings
+from ..core.sql_helpers import (
+    FILETIME_EPOCH_OFFSET,
+    FILETIME_TICKS_PER_SEC,
+    SID_MAP,
+    broker_time_to_utc_iso,
+)
+from .account_enrichment import (
+    apply_cen_conversion,
+    get_account_info_map,
+    round_or_none,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,21 +59,12 @@ def _get_connection(settings: Settings):
 
 # ── Data Collectors ────────────────────────────────────────
 
-# MT5 Timestamp is Windows FILETIME (100-nanosecond intervals since 1601-01-01).
-_FILETIME_EPOCH_OFFSET = 11644473600
-_FILETIME_TICKS_PER_SEC = 10_000_000
-
 # Which servers to query
 _SERVERS = [
     {"key": "mt4_live",  "type": "mt4", "db": "mt4_live",  "label": "MT4_Live"},
     {"key": "mt4_live2", "type": "mt4", "db": "mt4_live2", "label": "MT4_Live2"},
     {"key": "mt5",       "type": "mt5", "db": "mt5_live",  "label": "MT5"},
 ]
-
-# server label → sid used as prefix in fxbackoffice.mt4_users.loginsid
-# (e.g. MT5 login 67035933 → loginsid "5-67035933"). sid=2 is IB wallet,
-# which never appears in trading data so it's not included here.
-_SID_MAP = {"MT4_Live": 1, "MT4_Live2": 6, "MT5": 5}
 
 
 def _query_mt4_recent_opens(
@@ -78,6 +80,7 @@ def _query_mt4_recent_opens(
     Does NOT filter by CLOSE_TIME — captures both still-open and already-closed.
     Uses INDEX_OPENTIME for fast range scan.
     """
+    open_time_col = broker_time_to_utc_iso("t.OPEN_TIME", "open_time")
     sql = f"""
         SELECT
             '{server_label}'                            AS server,
@@ -87,17 +90,7 @@ def _query_mt4_recent_opens(
             CASE WHEN t.CMD = 0 THEN 'Buy'
                  ELSE 'Sell' END                        AS direction,
             t.VOLUME / 100                              AS lots,
-            -- Broker servers (MT4/MT5) store open times in UTC+3
-            -- (Indian/Antananarivo, no DST). Convert to UTC ISO8601
-            -- at SELECT time so every downstream field (first_open,
-            -- last_open, orders[].open_time, scanned_at) shares the
-            -- same UTC-with-Z contract. The WHERE clause keeps using
-            -- NOW() because t.OPEN_TIME is still UTC+3 on disk and
-            -- both sides of that comparison are broker-local.
-            DATE_FORMAT(
-                CONVERT_TZ(t.OPEN_TIME, '+03:00', '+00:00'),
-                '%%Y-%%m-%%dT%%TZ'
-            )                                           AS open_time,
+            {open_time_col},
             u.EQUITY                                    AS equity,
             u.BALANCE                                   AS balance,
             u.LEVERAGE                                  AS leverage
@@ -132,7 +125,8 @@ def _query_mt5_recent_opens(
     Uses mt5_deals with Entry=0 (open) and the Timestamp index.
     Account info is fetched separately for matched accounts only.
     """
-    sql = """
+    open_time_col = broker_time_to_utc_iso("d.Time", "open_time")
+    sql = f"""
         SELECT
             'MT5'                                       AS server,
             d.Login                                     AS login,
@@ -140,18 +134,14 @@ def _query_mt5_recent_opens(
             CASE WHEN d.Action = 0 THEN 'Buy'
                  ELSE 'Sell' END                        AS direction,
             d.Volume / 10000                            AS lots,
-            -- See MT4 query above for rationale (UTC+3 → UTC ISO8601).
-            DATE_FORMAT(
-                CONVERT_TZ(d.Time, '+03:00', '+00:00'),
-                '%%Y-%%m-%%dT%%TZ'
-            )                                           AS open_time,
+            {open_time_col},
             d.PositionID                                AS position_id
         FROM mt5_live.mt5_deals d
         WHERE d.Timestamp >= (UNIX_TIMESTAMP(DATE_SUB(NOW(), INTERVAL %s SECOND))
-                              + {epoch}) * {ticks}
+                              + {FILETIME_EPOCH_OFFSET}) * {FILETIME_TICKS_PER_SEC}
           AND d.Entry = 0
           AND d.Action IN (0, 1)
-    """.format(epoch=_FILETIME_EPOCH_OFFSET, ticks=_FILETIME_TICKS_PER_SEC)
+    """
     params: list = [check_interval_sec]
     if login is not None:
         sql += " AND d.Login = %s"
@@ -429,62 +419,6 @@ def scan_burst_open(
         conn.close()
 
 
-def _get_account_info_map(
-    conn, alerts: List[Dict[str, Any]]
-) -> Dict[str, Dict[str, Any]]:
-    """Look up CRM-side account metadata (currency, zipcode) from
-    fxbackoffice.mt4_users in a single roundtrip.
-
-    Returns a dict keyed by `{sid}-{login}`:
-        {
-            "5-67036965": {"currency": "CEN", "zipcode": "111 90"},
-            ...
-        }
-
-    Callers treat a missing loginsid as "USD + no zipcode" so an absent
-    account never gets accidentally treated as CEN or fake-matched by a
-    zipcode filter.
-    """
-    loginsids: set[str] = set()
-    for a in alerts:
-        sid = _SID_MAP.get(a["server"])
-        if sid is None:
-            continue
-        loginsids.add(f"{sid}-{a['login']}")
-
-    if not loginsids:
-        return {}
-
-    placeholders = ",".join(["%s"] * len(loginsids))
-    sql = f"""
-        SELECT loginsid,
-               UPPER(CURRENCY) AS currency,
-               ZIPCODE         AS zipcode
-        FROM fxbackoffice.mt4_users
-        WHERE loginsid IN ({placeholders})
-    """
-    try:
-        with conn.cursor() as cur:
-            cur.execute(sql, tuple(loginsids))
-            rows = cur.fetchall()
-        result: Dict[str, Dict[str, Any]] = {}
-        for r in rows:
-            # Normalise empty string zipcode to None so downstream can
-            # distinguish "not filled in CRM" from a real zipcode.
-            zipcode = (r.get("zipcode") or "").strip() or None
-            result[r["loginsid"]] = {
-                "currency": r.get("currency") or None,
-                "zipcode": zipcode,
-            }
-        return result
-    except Exception:
-        logger.error(
-            "Failed to query account info from fxbackoffice.mt4_users",
-            exc_info=True,
-        )
-        return {}
-
-
 def _enrich_account_info(
     conn, alerts: List[Dict[str, Any]]
 ) -> None:
@@ -531,7 +465,7 @@ def _enrich_account_info(
             logger.error("Failed to query MT4_Live2 total lots", exc_info=True)
 
     # CRM-side enrichment: currency + zipcode, single roundtrip.
-    account_info_map = _get_account_info_map(conn, alerts)
+    account_info_map = get_account_info_map(conn, alerts)
 
     for alert in alerts:
         srv = alert["server"]
@@ -539,11 +473,11 @@ def _enrich_account_info(
 
         if srv == "MT5":
             acct = mt5_info.get(lid, {})
-            alert["equity"] = _round_or_none(acct.get("equity"))
-            alert["balance"] = _round_or_none(acct.get("balance"))
+            alert["equity"] = round_or_none(acct.get("equity"))
+            alert["balance"] = round_or_none(acct.get("balance"))
             alert["leverage"] = int(acct["leverage"]) if acct.get("leverage") else None
             alert["group"] = acct.get("group", "")
-            alert["total_open_lots"] = _round_or_none(acct.get("total_open_lots"))
+            alert["total_open_lots"] = round_or_none(acct.get("total_open_lots"))
             # Skip demo/test accounts
             grp = (alert["group"] or "").lower()
             if "demo" in grp or "test" in grp:
@@ -554,23 +488,19 @@ def _enrich_account_info(
             _fill_mt4_account_info(conn, alert, srv, lid)
 
             lots_map = mt4_live_lots if srv == "MT4_Live" else mt4_live2_lots
-            alert["total_open_lots"] = _round_or_none(lots_map.get(lid))
+            alert["total_open_lots"] = round_or_none(lots_map.get(lid))
 
         # Resolve currency + zipcode and apply CEN → USD conversion
         # before deriving equity_per_lot, so the ratio is expressed in
         # the same unit as the displayed equity.
-        sid = _SID_MAP.get(srv)
+        sid = SID_MAP.get(srv)
         loginsid = f"{sid}-{lid}" if sid is not None else None
         info = account_info_map.get(loginsid, {}) if loginsid else {}
         currency = info.get("currency") or "USD"
         alert["currency"] = currency
         alert["zipcode"] = info.get("zipcode")  # None when CRM has no value
 
-        if currency == "CEN":
-            if alert.get("equity") is not None:
-                alert["equity"] = round(float(alert["equity"]) / 100, 2)
-            if alert.get("balance") is not None:
-                alert["balance"] = round(float(alert["balance"]) / 100, 2)
+        apply_cen_conversion(alert, currency)
 
         total_lots = alert.get("total_open_lots")
         equity = alert.get("equity")
@@ -596,15 +526,9 @@ def _fill_mt4_account_info(
             cur.execute(sql, (login,))
             row = cur.fetchone()
         if row:
-            alert["equity"] = _round_or_none(row.get("equity"))
-            alert["balance"] = _round_or_none(row.get("balance"))
+            alert["equity"] = round_or_none(row.get("equity"))
+            alert["balance"] = round_or_none(row.get("balance"))
             alert["leverage"] = int(row["leverage"]) if row.get("leverage") else None
             alert["group"] = row.get("group", "")
     except Exception:
         logger.error("Failed to query %s user info for %s", db_name, login, exc_info=True)
-
-
-def _round_or_none(val: Any, ndigits: int = 2) -> float | None:
-    if val is None:
-        return None
-    return round(float(val), ndigits)

@@ -1,0 +1,513 @@
+# MT Login IP 监测项目 —— 迁移到 KCM IT System 的完整提示词手册
+
+> 这是一份**给 AI 助手（Cursor / Claude / ChatGPT）使用的迁移提示词文档**。
+> 你的目标是把独立项目 `46-MT-Server-Login-Detect`（基于 crontab + Jinja2 + SQLite 的
+> 单体 FastAPI 服务）整体并入 `New-IT-System`（React + FastAPI + ClickHouse/MySQL/Redis +
+> APScheduler 的分层 Web 平台）。
+>
+> 本文档包含：
+>
+> 1. 源项目全貌（业务 + 代码级细节）
+> 2. 源 → 目标的映射决策
+> 3. 新增页面 / API / 后台任务设计
+> 4. **分阶段可直接拷贝给 AI 的提示词**（§7）
+> 5. 数据迁移脚本草案
+> 6. 验收清单与已知坑
+
+---
+
+## 0. 一句话目标
+
+> **把"MT 服务器登录 IP 监测 + 关联账户告警"这条流水线
+> （FTP 下载 → 日志解析 → 关联分析 → 邮件告警 + Web 查询）
+> 从独立项目整体迁移到 KCM IT System，作为一个新业务模块存在**，
+> 原项目下线（crontab 任务删除、目录归档）。
+
+---
+
+## 1. 源项目（`46-MT-Server-Login-Detect`）全貌
+
+### 1.1 业务目的
+
+监控 MT4 / MT5 交易服务器上**被关注账户**的每日登录 IP，通过 7 天历史 IP 识别
+**共用 IP 的关联账户**（反小号 / 风控），命中则推送 HTML 邮件告警。
+另提供一个轻量 FastAPI Web 面板，用于维护监控账户列表、查看历史报告、
+按账号 / IP 手动搜索。
+
+### 1.2 数据流
+
+```
+06:00  log_download.py          ├─ FTP/FTPS 下载 3 台服务器昨日日志
+                                 └─ 清理 7 天前 .log + 30 天前 cron_*.log
+
+08:30  log_login_analyzer.py    ├─ 流式解析 .log（按 \t 切分）
+                                 ├─ 生成 3 个 JSON（ip_to_accounts / account_logins / raw_logins）
+                                 └─ 把被监控账户的登录写入 SQLite login_history
+
+08:35  send_report.py           ├─ 读 JSON + 近 7 天历史 IP 池
+                                 ├─ 关联分析（命中则发邮件）
+                                 └─ 通过 CRM MySQL 补中文名
+
+FastAPI (main.py)                ├─ CRUD 监控账户
+                                 ├─ 查看历史日期报告（复用 generate_html_report）
+                                 └─ 手动搜索账号 / IP + CSV 导出
+```
+
+### 1.3 py 文件逐个说明
+
+| 文件                                                | 作用                           | 关键细节                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| --------------------------------------------------- | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `log_download.py`                                   | FTP / FTPS 下载 + 清理         | 3 台服务器配置（MT4、MT5、MT4_Live2）。MT4_Live2 走 FTPS + `FTP_TLS_IgnoreHost`（复用 TLS session）。`cleanup_old_logs(7)` 删 `logs/YYYYMMDD/*.log` 并 rmdir 空目录。`cleanup_old_cron_logs(30)` 删 `cron_YYYYMMDD.log`。密码从 `.env` 读取（`MT4_PASSWORD` / `MT5_PASSWORD` / `MT4_LIVE2_PASSWORD`）。                                                                                                                                                                                                                               |
+| `log_login_analyzer.py`                             | **核心解析引擎**               | 按服务器切换编码与列索引：**MT4 / MT4_Live2** UTF-8，IP=`parts[2]`、账号=`parts[3]`；**MT5** UTF-16-LE，IP=`parts[4]`、账号=`parts[5]`。预过滤：只保留含 `login` 且匹配 `'<id>': login` 或 `:\tlogin` 的行。IP 校验：含 `.` 或 `:`（天然兼容 IPv6）。账号从 `'123456': login...` 抽数字。**发现非监控但共 IP 的账户后，会对文件做第二次扫描**补抓原始日志；每账户最多保留 `MAX_LOGS_TO_STORE = 10` 条。输出：`analysis_ip_to_accounts.json` / `analysis_account_logins.json` / `analysis_raw_logins.json`，落在 `logs/YYYYMMDD/` 下。 |
+| `send_report.py`                                    | 报告生成 + 邮件                | 从数据库取被监控账户 + 近 7 天 `login_history` 的 IP 池。遍历当日每个 IP → 若在历史 IP 池里 → 提取非监控的"关联账户"→ 映射回对应被监控账户。`generate_html_report()` 输出带 CSS 的 HTML：核心关联摘要 + 原始登录附录。邮件主题 `MT服务器关联账户登录警报 - YYYYMMDD`。**仅当 `any_correlation_found == True` 才发邮件。**                                                                                                                                                                                                             |
+| `database.py`                                       | SQLite 封装（`monitoring.db`） | 两张表：`monitored_accounts (id, account_id UNIQUE, server_name, remarks)` 和 `login_history (id, account_id, ip_address, login_date, server_name)`。`get_historical_ips(days=7)` 返回 `{ip: {'last_seen': 'YYYYMMDD', 'accounts': [id,...]}}`。每次分析前 `cleanup_old_login_history(7)`。                                                                                                                                                                                                                                           |
+| `search.py`                                         | 手动搜索 + CRM 补名            | `pymysql` 连 fxbackoffice MySQL（`.env` 中 `DB_HOST/DB_USER/DB_PASSWORD/DB_NAME`，与新平台**同库**）。SQL：`mt4_live.mt4_users u LEFT JOIN fxbackoffice.user_custom_fields cf ON u.ID=cf.userid AND cf.k='custom_chinese_name' WHERE u.LOGIN IN (...)`。按 `account_id` 搜索时**过滤掉"同 client_id 的相关账户"**（同一主体名下的自己账号不算关联）。按 `ip_address` 搜索不做过滤。                                                                                                                                                   |
+| `email_utils.py`                                    | SMTP 封装                      | 读 `SMTP_SERVER / SMTP_PORT / USERNAME_MAIL / PASSWORD_MAIL / MAIL_SEND_TOO / MAIL_CCC`。**不要迁移到新平台——直接复用新平台的 `app/services/email_service.py`。**                                                                                                                                                                                                                                                                                                                                                                     |
+| `main.py`                                           | 旧 FastAPI + Jinja2            | 路由：`/`（监控列表 + 近 7 日快速统计）、`POST /add`、`POST /delete/{id}`、`POST /update_remark/{id}`、`GET /search` / `POST /search`、`POST /export_csv`、`GET /history/{date_str}`。所有业务逻辑待迁移到新平台的 `routes/services`。                                                                                                                                                                                                                                                                                                |
+| `update_crontab.py` / `test_historical_ip_setup.py` | 一次性脚本                     | 不迁移，归档。                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+
+### 1.4 源目录数据（迁移时需要带走的）
+
+```
+monitoring.db                    # SQLite：配置 + 近 7 天登录历史
+logs/YYYYMMDD/                   # 按日期的原始日志 + 3 个 JSON 缓存
+archive/cron.log.*.gz            # 老 cron 归档（可丢）
+.env                             # MT 密码、SMTP、CRM DB —— SMTP/DB 与新平台有重叠
+crm-phone-monitor/               # 独立子项目，不属于本次迁移
+```
+
+### 1.5 环境变量（源 `.env`）
+
+```
+MT4_PASSWORD=...        # 必须迁移到新平台（新 key 名）
+MT5_PASSWORD=...
+MT4_LIVE2_PASSWORD=...
+DB_HOST / DB_USER / DB_PASSWORD / DB_NAME   # CRM MySQL（与新平台 MYSQL_* 可能同库）
+SMTP_SERVER / SMTP_PORT / USERNAME_MAIL / PASSWORD_MAIL
+MAIL_SEND_TOO / MAIL_CCC
+```
+
+---
+
+## 2. 目标平台（`New-IT-System`）架构约束
+
+> 迁移必须遵循以下约定，不得新增顶层目录或打破分层：
+
+- **分层**：`routes/` 只处理 HTTP；`schemas/` Pydantic；`services/` 业务逻辑 & DB；`core/` 配置 / 调度 / 中间件
+- **数据库**：
+  - **小型配置 + 状态** → 新建独立 SQLite（参照 `core/database.py`、`core/risk_monitor_db.py`、`core/client_return_export_db.py`）
+  - **CRM / MT 数据** → 复用 MySQL 连接
+  - 本模块**不需要** ClickHouse
+- **定时任务** → **APScheduler**，参考 `core/scheduler.py` / `core/burst_open_scheduler.py`
+- **邮件发送** → 复用 `app/services/email_service.py`
+- **前端** → React 19 + shadcn/ui + AG-Grid；所有 `/api/*` 必须用 `apiFetch()`（自动带 `X-API-Key`）；`useEffect` 里必须 `AbortController`
+- **侧边栏 / 标题** → `app-sidebar.tsx` + `site-header.tsx` titleMap 同步增加
+- **API 基础路径** → `/api/v1/login-ip/*`
+- **客户 / 员工过滤**：若后续要对"关联账户"附上客户画像，按平台规约排除 demo 账户（`GROUP NOT LIKE '%demo%'`）和员工（`users.isEmployee=0`）
+
+---
+
+## 3. 迁移总体方案（源 → 目标映射）
+
+| 源                                    | 目标                                                               | 说明                                                                       |
+| ------------------------------------- | ------------------------------------------------------------------ | -------------------------------------------------------------------------- |
+| crontab 06:00 `log_download.py` + 08:30 `log_login_analyzer.py` | APScheduler job `login_ip_download_job`（每日 **02:00 HKT**）       | 合并：下载 + parse + 写 login_history + 清理 tmp。时区 HKT（ZoneInfo('Asia/Hong_Kong')）         |
+| crontab 08:35 `send_report.py`        | APScheduler job `login_ip_analyze_report_job`（每日 **08:30 HKT**） | 用 `email_service` 发邮件；失败 / partial 都会发 ⚠️ 告警邮件                                     |
+| `main.py` Web UI                      | React 页面（§4）+ FastAPI routes `/api/v1/login-ip/*`              |                                                                            |
+| `monitoring.db`                       | `backend/data/login_ip.db`（两表结构不变）                         | 一次性迁移脚本见 §5                                                        |
+| `logs/YYYYMMDD/*.json`                | `backend/data/login_ip/YYYYMMDD/*.json`                            | 历史保留；新 JSON 按新路径写                                               |
+| `email_utils.py`                      | 删除，统一用 `email_service`                                       |                                                                            |
+| `search.py` 中 CRM 查询               | 合并到新 `login_ip_enrichment_service`，复用平台 MySQL             |                                                                            |
+| `.env` 新增                           | `LOGIN_IP_{MT4,MT5,MT4_LIVE2}_{HOST,PORT,USER,PASSWORD,REMOTE_DIR,USE_FTPS}` | 9 段 × 3 服务器；密码含 `$` 等特殊字符需用单引号包裹（见 §9.11）。与平台现有 `MYSQL_*` / SMTP 共用 |
+
+---
+
+## 4. 新增页面设计（前端）
+
+### 4.x Login IP Monitor（主页面，命名 `LoginIPMonitor.tsx`）
+
+**目的**：展示"被监控账户"的近 7 天登录情况与关联账户告警，并支持账户维护。
+
+**三个 Tab**
+
+1. **今日 / 指定日期报告**（默认选中）
+   - 顶部日期选择器（默认昨日，可选 log 存在的最近 30 天）
+   - 卡片式布局：每张卡片 = 一个被监控账户
+     - 头部：`账号 ID` + `备注` + `服务器` + 当日是否登录
+     - 当日总登录次数 / 使用 IP 数
+     - **关联账户列表**：每个关联账户一行（展示 `账号（中文名）`、共享 IP 数、共享 IP 列表，标注是"当日"还是"历史 YYYYMMDD"）
+   - 无关联时显示绿色"未发现关联账户"
+   - **实现**：后端已生成的 HTML 不再使用；前端直接渲染结构化 JSON
+
+2. **监控账户管理**
+   - AG-Grid：`account_id` / `server_name` / `remarks` / 操作
+   - 顶部表单：批量添加（账号 ID 支持多个，每行一个；服务器下拉 MT4 / MT5 / MT4_Live2；备注）
+   - 行内编辑备注 + 删除
+   - **考虑加入验证码**（参考 IB Financial 的 `request-code` / `verify-action` 流程），因为会改动风控白名单
+
+3. **手动搜索**
+   - 表单：搜索类型（账号 / IP）、搜索内容（支持多个，逗号 / 空格 / 换行分隔）、查询天数（1 / 3 / 7 / 14 / 30，默认 7）
+   - 结果 AG-Grid：
+     - 账号模式：`搜索账号` / `中文名` / `日期` / `服务器` / `登录 IP` / `登录次数` / `关联账号列表`
+     - IP 模式：`搜索 IP` / `日期` / `服务器` / `登录账号列表`
+   - CSV 导出（复用 Client Return Rate 的异步导出模式：create task → poll → download）
+
+### 4.y Dashboard Widget（可选，二期）
+
+在 `Home.tsx` 加一个"**近 7 天登录关联告警**"小部件，内容：
+
+- 过去 7 天每天有多少"关联账户被发现"
+- 点击跳转到 `LoginIPMonitor` 的对应日期
+
+---
+
+## 5. 数据迁移
+
+### 5.1 SQLite schema（目标 `backend/data/login_ip.db`）
+
+照搬源 schema（见 §1.3 `database.py`），再加索引：
+
+```sql
+CREATE INDEX IF NOT EXISTS idx_login_history_date ON login_history(login_date);
+CREATE INDEX IF NOT EXISTS idx_login_history_ip   ON login_history(ip_address);
+CREATE INDEX IF NOT EXISTS idx_login_history_acc  ON login_history(account_id);
+```
+
+### 5.2 一次性迁移脚本（草案）
+
+目标放 `backend/scripts/migrate_login_ip_from_legacy.py`：
+
+```python
+# 把 /opt/myproject/log_analysis/46-MT-Server-Login-Detect/monitoring.db
+# 的两张表原样复制到 backend/data/login_ip.db
+# 再把 logs/YYYYMMDD/ 下的 JSON 拷贝到 backend/data/login_ip/YYYYMMDD/
+```
+
+### 5.3 JSON 缓存目录
+
+原路径 `logs/YYYYMMDD/analysis_*.json`
+新路径 `backend/data/login_ip/YYYYMMDD/analysis_*.json`
+文件名保持不变：`analysis_ip_to_accounts.json` / `analysis_account_logins.json` / `analysis_raw_logins.json`
+
+---
+
+## 6. 后端实现清单（目录 & 文件）
+
+```
+backend/app/
+├── api/v1/routes/
+│   └── login_ip.py                    # 监控账户 CRUD / 报告 / 搜索 / 导出
+├── schemas/
+│   └── login_ip.py                    # MonitoredAccount / ReportResponse / SearchRequest 等
+├── services/
+│   ├── login_ip_ftp_service.py        # FTP/FTPS 下载（搬 log_download.py）
+│   ├── login_ip_analyzer_service.py   # 解析（搬 log_login_analyzer.py 核心函数）
+│   ├── login_ip_report_service.py     # 关联分析 + 渲染结构化结果（搬 send_report.py 逻辑，不再生 HTML）
+│   └── login_ip_enrichment_service.py # CRM MySQL 补 chinese_name / client_id
+├── core/
+│   ├── login_ip_db.py                 # SQLite CRUD（搬 database.py）
+│   └── login_ip_scheduler.py          # APScheduler 三个 job
+└── data/
+    ├── login_ip.db
+    └── login_ip/YYYYMMDD/*.json
+```
+
+启动时在 `main.py` 注册 scheduler（参考 `burst_open_scheduler`），并在 `api/v1/routers.py` 引入 `login_ip` 路由。
+
+### 6.1 API 清单（初版）
+
+| Method | Path                                                                | 作用                                                  |
+| ------ | ------------------------------------------------------------------- | ----------------------------------------------------- |
+| GET    | `/api/v1/login-ip/watchlist`                                        | 列出被监控账户                                        |
+| POST   | `/api/v1/login-ip/watchlist`                                        | 新增（支持批量）                                      |
+| PATCH  | `/api/v1/login-ip/watchlist/{id}`                                   | 修改 remarks                                          |
+| DELETE | `/api/v1/login-ip/watchlist/{id}`                                   | 删除                                                  |
+| GET    | `/api/v1/login-ip/report?date=YYYYMMDD`                             | 指定日期结构化报告（替代原 `history/{date}` 的 HTML） |
+| GET    | `/api/v1/login-ip/available-dates`                                  | 目前有 JSON 的日期列表                                |
+| POST   | `/api/v1/login-ip/search`                                           | 账号 / IP 搜索（返回 JSON）                           |
+| POST   | `/api/v1/login-ip/export/tasks`                                     | 异步导出 CSV（参考 client_return_export）             |
+| GET    | `/api/v1/login-ip/export/tasks/{id}`                                | 进度                                                  |
+| GET    | `/api/v1/login-ip/export/tasks/{id}/download`                       | 下载                                                  |
+| POST   | `/api/v1/login-ip/scheduler/run-now?step=download\|analyze\|report` | 管理端手动触发某一步                                  |
+
+---
+
+## 7. 分阶段 AI 提示词（直接拷贝使用）
+
+> 每段提示词**独立可用**；按顺序逐段丢给 Cursor / AI，并在上下文里附带源项目 `46-MT-Server-Login-Detect/`
+> 与目标项目 `New-IT-System/` 的路径（AI 可直接读文件）。
+
+### 提示词 Phase 1 — 数据库 & 一次性迁移脚本
+
+```
+在 New-IT-System 中新增 login_ip 模块的 SQLite 层。
+
+要求：
+1. 在 backend/app/core/login_ip_db.py 中实现：
+   - get_db_connection() 使用 sqlite3（参考 core/risk_monitor_db.py 模式）
+   - create_tables()：monitored_accounts(id, account_id UNIQUE, server_name, remarks)、
+     login_history(id, account_id, ip_address, login_date, server_name) + 3 个索引
+   - get_monitored_accounts() -> dict[server_name, list[{account_id, remarks, id}]]
+   - add_monitored_accounts(list[tuple])、delete_monitored_account(id)、
+     update_remark(id, remarks)
+   - add_login_history(list[tuple])、get_historical_ips(days=7)、cleanup_old_login_history(days=7)
+   语义与源文件 /opt/myproject/log_analysis/46-MT-Server-Login-Detect/database.py 保持一致。
+2. DB 文件路径：backend/data/login_ip.db（参考现有 risk_monitor.db 做法）
+3. 在 backend/app/main.py startup event 里调用 login_ip_db.create_tables()。
+4. 新增 backend/scripts/migrate_login_ip_from_legacy.py：
+   - 从 /opt/myproject/log_analysis/46-MT-Server-Login-Detect/monitoring.db 读两张表
+   - 写入 backend/data/login_ip.db（INSERT OR IGNORE）
+   - 把 /opt/myproject/log_analysis/46-MT-Server-Login-Detect/logs/YYYYMMDD/*.json
+     拷贝到 backend/data/login_ip/YYYYMMDD/*.json（只拷 analysis_* 的 3 个 JSON）
+   - 打印迁移摘要：账户数 / 历史登录条数 / 拷贝文件数
+
+完成后：写 python -m backend.scripts.migrate_login_ip_from_legacy 的运行说明到 docs/features/login-ip.md 的 §数据迁移 小节。
+```
+
+### 提示词 Phase 2 — FTP 下载 Service
+
+```
+把 /opt/myproject/log_analysis/46-MT-Server-Login-Detect/log_download.py 的下载能力
+迁移到 backend/app/services/login_ip_ftp_service.py。
+
+要求：
+1. 保留 FTP_TLS_IgnoreHost / ReusedSslSocket 两个自定义类（MT4_Live2 FTPS session 复用必要）。
+2. 对外暴露一个函数：
+   def download_daily_logs(target_date: str, base_dir: str) -> dict[server_name, bool]
+   - target_date 格式 YYYYMMDD
+   - 从环境变量读 MT4_FTP_PASSWORD / MT5_FTP_PASSWORD / MT4_LIVE2_FTP_PASSWORD
+     （在 backend/app/core/config.py 里加这三个字段）
+   - 输出目录：{base_dir}/{target_date}/{target_date}_{server_name}.log
+3. 再加一个 cleanup_old_log_dirs(base_dir: str, days_to_keep: int = 7):
+   - 删 base_dir 下名称为 YYYYMMDD 且早于 cutoff 的目录里的 *.log
+   - 目录清空后 os.rmdir
+   - 静默跳过不需要处理的目录（参考源文件最新实现，不要打印 Checking old directory）
+4. 用 logging.getLogger(__name__) 替换所有 print。
+
+不要再去搬 cleanup_old_cron_logs：新平台日志走 logging，不存在 cron_*.log 文件。
+```
+
+### 提示词 Phase 3 — 分析 Service
+
+```
+把 /opt/myproject/log_analysis/46-MT-Server-Login-Detect/log_login_analyzer.py 的核心
+analyze_log_file() 搬到 backend/app/services/login_ip_analyzer_service.py。
+
+关键语义（禁止丢失）：
+- MT4 / MT4_Live2：UTF-8 编码，IP=parts[2]、账号=parts[3]
+- MT5：UTF-16-LE 编码，IP=parts[4]、账号=parts[5]
+- 过滤条件：line 含 "login"，并且含 "': login" 或 ":\tlogin"
+- IP 校验：含 "." 或 ":"（兼容 IPv6）
+- 账号抽取：acc_part.split("':")[0].strip("'")，且 isdigit()
+- 发现非监控但共 IP 的账户后，需要对文件做第二次扫描补抓原始日志
+- 每账户 raw log 截断到 MAX_LOGS_TO_STORE=10
+
+对外暴露：
+def analyze_date(target_date: str, base_dir: str) -> dict
+ - 调 login_ip_db.get_monitored_accounts() 拿监控列表
+ - 解析 {base_dir}/{target_date}/ 下的所有 *.log
+ - 把 3 份结果写成 analysis_ip_to_accounts.json / analysis_account_logins.json / analysis_raw_logins.json
+ - 把当日被监控账户的 (account_id, ip, date, server) 写入 login_history
+ - 返回摘要 {server: {total_logins, monitored_logins, unique_ips}}
+
+不要自己实现 sys.exit / argparse，只暴露函数。日志用 logging。
+```
+
+### 提示词 Phase 4 — 关联分析 + 邮件
+
+```
+把 /opt/myproject/log_analysis/46-MT-Server-Login-Detect/send_report.py 的关联分析
+重构到 backend/app/services/login_ip_report_service.py。
+
+产出两个函数：
+1. build_report_data(target_date: str, base_dir: str) -> dict
+   - 载入当日 3 份 JSON
+   - 调 login_ip_db.get_historical_ips(7)
+   - 返回结构化 report：
+     {
+       'date': target_date,
+       'any_correlation_found': bool,
+       'accounts': [
+         {
+           'account_id': str, 'server_name': str, 'remarks': str,
+           'logged_in': bool, 'total_logins': int,
+           'logins_by_ip': {ip: count},
+           'correlated': [
+             {
+               'account_id': str, 'chinese_name': str | None, 'client_id': int | None,
+               'shared_ips': [{'ip': str, 'historical_date': str | None}]
+             }
+           ]
+         }
+       ]
+     }
+   - 用 login_ip_enrichment_service.get_account_details() 补中文名 / client_id
+   - 复用源 search.py 的"过滤同 client_id"逻辑：关联账户与被监控账户同 client_id 的要排除
+
+2. send_daily_report(target_date: str) -> None
+   - 调 build_report_data
+   - 若 any_correlation_found == False：直接返回，不发邮件
+   - 否则用 app/services/email_service.py 发 HTML
+   - HTML 渲染可以直接复用源 send_report.py 的 generate_html_report() 代码（CSS + 卡片结构），
+     但把输入改成新的结构化 dict
+   - 主题：MT服务器关联账户登录警报 - {target_date}
+   - 收件人从环境变量或新 SQLite 表读（参考 IB Financial Monitor 的 config 做法，允许 UI 配置）
+
+不要再新建 email_utils.py，必须复用 email_service.py。
+```
+
+### 提示词 Phase 5 — APScheduler 两个 Job（已实现）
+
+> ⚠️ 本节已根据实际落地更新。原始设计有 3 个 job（下载 / 分析 / 发报），最终
+> 实现合并为 2 个 job（下载阶段内联做 parse+写 login_history）。
+
+```
+在 backend/app/core/login_ip_scheduler.py 里用 APScheduler 注册 2 个 daily job，
+参考 core/scheduler.py 的 ZoneInfo('Asia/Hong_Kong') 用法。
+
+时区：HKT（与 docker-compose 的 TZ=Asia/Hong_Kong 一致）
+
+Jobs（target_date 默认 = HKT yesterday）:
+1. login_ip_download_job  每日 02:00 HKT
+   - 调 download_daily_logs(target_date, TMP_ROOT)
+   - 调 analyze_date(target_date, log_dir=TMP_ROOT, out_dir=DATA_DIR)
+     （顺便写 login_history）
+   - 调 cleanup_old_log_dirs(TMP_ROOT, days_to_keep=7)
+2. login_ip_analyze_report_job  每日 08:30 HKT
+   - 调 send_daily_report(target_date, dry_run=False)
+
+保障：
+- 每次运行在 login_ip_scheduler_runs 表插 1 行审计：
+  (job_name, target_date, started_at, finished_at, status, summary_json, error_msg)
+- 任何异常 → 立即发 ⚠️ 告警邮件给 login_ip_mail_recipients 里 active='to' 的收件人
+- "partial" 状态也发告警（比如 3 个 server 只下成功 2 个）
+- 每个 job 有独立 threading.Lock，避免 "run now" API 与 cron 重入
+- 对外暴露 trigger_download_now() / trigger_report_now() 供 Phase 6 API 调用
+
+ENV:
+- LOGIN_IP_SCHEDULER_ENABLED=false 可在 dev 环境关停（默认 true）
+
+在 backend/app/main.py lifespan 里调 start_login_ip_scheduler() / stop_login_ip_scheduler()。
+```
+
+### 提示词 Phase 6 — Routes + Schemas
+
+```
+在 backend/app/ 新增 routes / schemas，暴露 §6.1 API 清单里的全部 endpoints。
+
+要求：
+1. schemas/login_ip.py：
+   - MonitoredAccountOut / MonitoredAccountCreate(批量，accounts: list[int], server_name, remarks)
+   - ReportAccountCorrelation / ReportAccountItem / ReportResponse
+   - SearchRequest(search_type: Literal['account_id','ip_address'], terms: list[str], days: int)
+   - SearchResultItem(Union 账号模式 / IP 模式，用 Discriminator)
+2. api/v1/routes/login_ip.py：
+   - 所有写操作强制返回 200 或 201；错误走 HTTPException
+   - GET /report?date= 若没数据返回 404 + message
+   - /export/tasks 的异步任务 SQLite 参考 core/client_return_export_db.py
+3. 在 api/v1/routers.py 注册 prefix="/api/v1/login-ip", tags=["login-ip"]
+4. 若要加邮件验证码（建议 watchlist 改动需要），参考 IB Financial：
+   - POST /api/v1/login-ip/request-code
+   - POST /api/v1/login-ip/verify-action
+```
+
+### 提示词 Phase 7 — 前端页面
+
+```
+在 frontend/src/pages/LoginIPMonitor.tsx 实现 §4.x 描述的三 Tab 页面。
+
+技术约束：
+- 所有 fetch 必须用 @/lib/fetch 的 apiFetch()
+- useEffect 必须 AbortController + 在 catch 里忽略 AbortError
+- 表格用 AG-Grid（ClientSide 即可，数据量不大）
+- UI 组件全部来自 @/components/ui（shadcn/ui），不要引新 UI 库
+- 日期选择器用现有 shadcn 组件
+- CSV 导出走异步任务流（参考 ClientReturnRate 的 export 逻辑）
+- 暗色主题自动适配（tailwind dark: 已全局生效）
+
+Tab 1（报告）：
+- 顶部：日期 Select（从 /available-dates 获取）
+- 主区：按 accounts 渲染 Card 列表；关联账户用 Badge / 小 Grid 展示
+- 空状态 / 无关联状态 / 加载 Skeleton 三种态要分别处理
+
+Tab 2（监控账户）：
+- AG-Grid 列：checkbox、account_id、server_name、remarks（可编辑）、操作
+- 顶部表单：textarea（账号 ID，一行一个） + Select(server) + Input(remarks) + 批量添加按钮
+- 删除 / 改备注走验证码流程（若 Phase 6 实现了）
+
+Tab 3（搜索）：
+- 表单：RadioGroup(搜索类型) + textarea(terms) + Select(days)
+- 提交 → /search → AG-Grid 渲染结果
+- 工具栏：清空 / 导出 CSV
+
+路由 & 导航：
+- 在 frontend/src/App.tsx 加 lazy 路由 /login-ip-monitor
+- app-sidebar.tsx 加菜单项（归到"风控"分组，图标用 Shield 或 Fingerprint）
+- site-header.tsx titleMap 加条目
+```
+
+### 提示词 Phase 8 — 文档 + 旧项目下线
+
+```
+1. 新建 docs/features/login-ip.md，包含：
+   - 业务背景
+   - 数据流 & APScheduler 调度
+   - API 清单（引用 §6.1）
+   - SQLite schema
+   - .env 新增字段
+   - 数据迁移（§5）
+   - 对旧项目 46-MT-Server-Login-Detect 的废弃说明
+2. 在 docs/ai-context/project-context.md 的 §4 Core Business Modules 里
+   新增一节（照 §4.8 Trade Real-time Monitor 的格式）：Login IP Monitor。
+3. 在 .cursor/rules 目录增加（可选）一个 login-ip skill，列出解析关键规则
+   （MT4 vs MT5 列位置、过滤条件等）以方便后续 AI 调试。
+4. 旧项目下线步骤（写成运维 README）：
+   - crontab -e 删除 3 条 46-MT-Server-Login-Detect 的任务
+   - 确认新平台已连续跑 7 天
+   - 把 /opt/myproject/log_analysis/46-MT-Server-Login-Detect/ 打包归档
+   - 原子删除或移到 /opt/archive/
+```
+
+---
+
+## 8. 验收清单
+
+- [ ] `backend/data/login_ip.db` 已建表 + 索引，旧 `monitoring.db` 数据迁入
+- [ ] `backend/data/login_ip/YYYYMMDD/` 下有 JSON（迁移 + 新 job 生成）
+- [ ] `.env` 新增 `MT4_FTP_PASSWORD` / `MT5_FTP_PASSWORD` / `MT4_LIVE2_FTP_PASSWORD`
+- [ ] APScheduler 3 个 job 在启动时被注册（`/docs` 能看到 scheduler 状态或有日志）
+- [ ] 手动触发 `POST /api/v1/login-ip/scheduler/run-now?step=download` 成功
+- [ ] Tab 1 能看到昨日报告；关联账户中文名正确（verifying 搜一个已知客户）
+- [ ] Tab 2 能批量新增监控账户；删除 / 改备注正常
+- [ ] Tab 3 账号搜索排除了同 client_id 的自己账号；CSV 导出 UTF-8 + BOM 能直接 Excel 打开
+- [ ] 若无关联，邮件**不发送**；有关联则邮件格式与旧系统一致
+- [ ] 旧项目 crontab 三条任务已删除，`46-MT-Server-Login-Detect` 目录已归档
+- [ ] `docs/features/login-ip.md` + `project-context.md` 已更新
+
+---
+
+## 9. 已知坑 & 注意事项
+
+1. **MT5 日志编码**必须 `utf-16-le`，而且**列位置和 MT4 不同**，迁移时很容易漏 `MT5` 分支。测试前塞一条假 MT5 日志做单元测试。
+2. **关联分析的"历史 IP 池"依赖 `login_history` 表**，新平台首次运行时表是空的 → 需要迁移脚本把旧 `login_history` 带过来，否则头 7 天都告警不出。
+3. **第二次扫描（re-scan）补抓原始日志**是为了非监控账户，不要漏掉这一步，否则邮件附录里会出现 `N/A`。
+4. **CEN 账户**：本模块不涉及金额，无需 `/100`。但列 `chinese_name` 的 MySQL 查询 **跨库 JOIN**（`mt4_live.mt4_users` × `fxbackoffice.user_custom_fields`），确认新平台的 MySQL 用户有这两个库的权限。
+5. **"过滤同 client_id"**（源 `search.py` 特有）迁到新平台时**必须保留**，否则会误报同主体名下的账号。
+6. **APScheduler 的时区**：源 crontab 跑在服务器本地时区（UTC+8）。新平台的容器默认 UTC；已在 Phase 5 通过 ① docker-compose `TZ=Asia/Hong_Kong` 统一系统时间，② APScheduler 显式 `timezone=ZoneInfo('Asia/Hong_Kong')`，③ `target_date = now(HKT) - 1day` 的"昨天"口径。改过 MT 所在时区后要同步改这三处。
+7. **邮件验证码**：Watchlist 属于风控白名单，强烈建议加入验证码（参考 IB Financial Monitor 的 6 位码 + Redis 5 分钟 TTL + 管理员白名单机制）。
+8. **FTPS TLS session 复用**：`FTP_TLS_IgnoreHost` + `ReusedSslSocket` 是 MT4_Live2 独有需求，是因为对端 FTPS 实现不支持 session resume 的标准行为——不要"优化"成普通 `ftplib.FTP_TLS`。
+9. **.log 文件体积**：单日可达几百 MB（尤其 MT5），**必须流式读**（`for line in f`），不要 `f.read()`。
+10. **新旧并行期**：建议新平台先"只读不发邮件"跑 3 天，核对结果与旧系统一致后再切换收件人，最后下线老 crontab。
+11. **`.env` 密码里的 `$` / `#` / `)` 等特殊字符**：`python-dotenv` 对裸值会做变量展开，对双引号会做展开，**只有单引号包裹的值是字面量**。`LOGIN_IP_*_PASSWORD` 必须写成 `LOGIN_IP_MT5_PASSWORD='q^N5UcM&6$jSTy8e'`（实测 `$jSTy8e` 不加单引号会被当成未定义变量而截断）。
+12. **`login_history` 首日冷启动**：旧 `monitoring.db` 的 `login_history` 表**实际是空的**（旧项目从未持久化过登录历史）。§9.2 提到的"把旧表带过来"→ 换作 `backend/scripts/populate_login_history_from_json.py`：从 backfill 生成的 `analysis_account_logins.json` 里抽监控账户的登录条目回灌 `login_ip.db`，否则新系统头 7 天关联告警全为空。
+13. **定时任务失败可见性**：APScheduler job 只 log 是不够的，运维不会每天看。Phase 5 已实现：① 每次运行在 `login_ip_scheduler_runs` 表留一行审计（started_at/finished_at/status/summary/error）；② 任何异常或 partial 下载立刻发 ⚠️ 告警邮件给 `login_ip_mail_recipients`。Phase 6 的页面会展示最近 30 次运行时间线。
+
+---
+
+## 10. 使用本文档的建议
+
+- 把本文件放进 `New-IT-System/docs/ai-context/login-ip-migration.md`
+- 每次让 AI 执行迁移时，在 prompt 前附一句：
+  > "参考 `docs/ai-context/login-ip-migration.md` §<阶段编号>，并读取源项目 `/opt/myproject/log_analysis/46-MT-Server-Login-Detect/` 下对应文件后，开始执行。"
+- 一个阶段跑完，人工验收 + 跑对应 §8 清单里的几项，再进下一阶段
+- 所有阶段跑完 + 并行 3~7 天后，才执行 §7 Phase 8 的旧项目下线步骤

@@ -28,11 +28,15 @@ services:
       - PYTHONUNBUFFERED=1
       - REDIS_HOST=redis-prod
       - REDIS_PORT=6379
+      # Container system time = HKT so log timestamps & YYYYMMDD folder names
+      # match what the business sees; APScheduler explicitly uses ZoneInfo anyway.
+      - TZ=Asia/Hong_Kong
     restart: unless-stopped
     depends_on:
       - redis-prod
     volumes:
       - ./backend/logs-prod:/app/logs
+      - ./backend/logs_login_ip:/app/logs_login_ip
       - ./backend/data:/app/data
     logging:
       driver: "json-file"

@@ -34,6 +34,11 @@ from app.core.api_key_middleware import APIKeyMiddleware
 from app.core.database import init_db
 from app.core.risk_monitor_db import init_risk_monitor_db
 from app.core.client_return_export_db import init_client_return_export_db
+from app.core.login_ip_db import init_login_ip_db
+from app.core.login_ip_scheduler import (
+    start_login_ip_scheduler,
+    stop_login_ip_scheduler,
+)
 from app.core.scheduler import start_scheduler, stop_scheduler
 from app.core.burst_open_scheduler import start_burst_scheduler, stop_burst_scheduler
 
@@ -44,9 +49,12 @@ async def lifespan(app: FastAPI):
     init_db()
     init_risk_monitor_db()
     init_client_return_export_db()
+    init_login_ip_db()
     start_scheduler()
     start_burst_scheduler()
+    start_login_ip_scheduler()
     yield
+    stop_login_ip_scheduler()
     stop_burst_scheduler()
     stop_scheduler()
 
