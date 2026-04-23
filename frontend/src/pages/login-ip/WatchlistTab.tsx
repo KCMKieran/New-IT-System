@@ -209,7 +209,6 @@ export function WatchlistTab() {
                 id="accounts-input"
                 value={accountsText}
                 onChange={(e) => setAccountsText(e.target.value)}
-                placeholder="8521406&#10;7021025&#10;..."
                 rows={4}
                 className="font-mono text-sm"
               />
@@ -241,7 +240,6 @@ export function WatchlistTab() {
                   id="new-remarks"
                   value={newRemarks}
                   onChange={(e) => setNewRemarks(e.target.value)}
-                  placeholder="eg. 风控关注"
                 />
               </div>
             </div>
@@ -306,7 +304,6 @@ export function WatchlistTab() {
                             [row.id]: e.target.value,
                           }))
                         }
-                        placeholder="备注（可空）"
                       />
                     </TableCell>
                     <TableCell>

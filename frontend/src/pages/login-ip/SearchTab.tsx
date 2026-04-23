@@ -372,11 +372,6 @@ export function SearchTab() {
                 id="search-terms"
                 value={termsText}
                 onChange={(e) => setTermsText(e.target.value)}
-                placeholder={
-                  searchType === "account_id"
-                    ? "8521406\n7021025"
-                    : "203.0.113.42\n198.51.100.7"
-                }
                 rows={2}
                 className="font-mono text-sm"
               />
