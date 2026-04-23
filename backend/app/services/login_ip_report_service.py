@@ -33,8 +33,12 @@ from __future__ import annotations
 import json
 import logging
 from collections import defaultdict
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
+
+_HKT = ZoneInfo("Asia/Hong_Kong")
 
 from ..core import login_ip_db
 from ..services import email_service, login_ip_enrichment_service
@@ -227,6 +231,76 @@ def build_report_data(
         "raw_logins_all": raw_logins_all,
         "correlated_ids": correlated_ids,
         "any_correlation_found": any_correlation_found,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Structured report for frontend API (new in Phase 6)
+# ---------------------------------------------------------------------------
+
+
+def build_structured_report(
+    target_date: str,
+    data_base_dir: Path | str | None = None,
+) -> dict[str, Any]:
+    """Return a JSON-friendly report for the `GET /api/v1/login-ip/report` endpoint.
+
+    Internally calls `build_report_data` + `enrichment`, then flattens the
+    data structure into a shape that maps 1:1 to the `ReportResponse` schema:
+    - sets converted to lists (JSON can't serialize set)
+    - defaultdicts converted to plain dicts
+    - shared_ips_analysis turned from dict-of-IPs into a list so the frontend
+      can iterate it directly
+    - correlated accounts merged with their Chinese names
+    """
+    from ..services import login_ip_enrichment_service
+
+    built = build_report_data(target_date, data_base_dir=data_base_dir)
+    report_data = built["report_data"]
+    correlated_ids = built["correlated_ids"]
+
+    enrichment = (
+        login_ip_enrichment_service.get_account_details(correlated_ids)
+        if correlated_ids else {}
+    )
+
+    accounts: list[dict[str, Any]] = []
+    for acc_id, data in report_data.items():
+        shared: list[dict[str, Any]] = []
+        for ip, ip_data in data["shared_ips_analysis"].items():
+            corr_list = []
+            for entry in ip_data["correlated_accounts"]:
+                details = enrichment.get(entry["id"]) or {}
+                cn = details.get("chinese_name")
+                if cn:
+                    # Strip quotes the same way the email template does, so
+                    # the UI gets clean names without " wrapped around them.
+                    cn = str(cn).strip().strip('"“”').strip() or None
+                corr_list.append({
+                    "id": entry["id"],
+                    "historical_date": entry.get("historical_date"),
+                    "chinese_name": cn,
+                })
+            shared.append({"ip": ip, "correlated_accounts": corr_list})
+
+        accounts.append({
+            "account_id": acc_id,
+            "remarks": data.get("remarks"),
+            "server_name": data["server_name"],
+            "logged_in": data["logged_in"],
+            "total_logins": data["total_logins"],
+            "used_ips": sorted(data["used_ips"]),
+            "logins_by_ip": dict(data["logins_by_ip"]),
+            "shared_ips_analysis": shared,
+        })
+
+    return {
+        "target_date": target_date,
+        "generated_at": datetime.now(_HKT).strftime("%Y-%m-%d %H:%M:%S"),
+        "monitored_count": len(accounts),
+        "correlated_count": len(correlated_ids),
+        "any_correlation": built["any_correlation_found"],
+        "accounts": accounts,
     }
 
 

@@ -110,6 +110,28 @@ CREATE TABLE IF NOT EXISTS login_ip_scheduler_runs (
 -- Composite index: UI lists "last N runs of job X" / "history for target_date".
 CREATE INDEX IF NOT EXISTS idx_scheduler_runs_job_started
     ON login_ip_scheduler_runs(job_name, started_at DESC);
+
+-- Async CSV export tasks (Tab 3 "Export" button). Schema mirrors
+-- client_return_export_db.py so future cleanup/dashboard code can reuse the
+-- same mental model. Stored in the same DB to avoid an extra file.
+CREATE TABLE IF NOT EXISTS login_ip_export_tasks (
+    task_id          TEXT    PRIMARY KEY,
+    status           TEXT    NOT NULL,   -- queued|running|succeeded|failed|expired
+    params_json      TEXT    NOT NULL,   -- the SearchRequest the task re-runs
+    progress         INTEGER NOT NULL DEFAULT 0,
+    row_count        INTEGER NOT NULL DEFAULT 0,
+    file_path        TEXT,
+    file_size_bytes  INTEGER,
+    error_message    TEXT,
+    requested_ip     TEXT,
+    created_at       TEXT    NOT NULL,
+    started_at       TEXT,
+    finished_at      TEXT,
+    expires_at       TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_login_ip_export_status      ON login_ip_export_tasks(status);
+CREATE INDEX IF NOT EXISTS idx_login_ip_export_expires_at  ON login_ip_export_tasks(expires_at);
 """
 
 
@@ -473,6 +495,136 @@ def list_recent_runs(job_name: str | None = None, limit: int = 30) -> list[dict]
 
 # ---------------------------------------------------------------------------
 # Diagnostics helpers (used by migration scripts)
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# login_ip_export_tasks CRUD (Tab 3 async CSV export)
+# ---------------------------------------------------------------------------
+
+
+def create_export_task(
+    task_id: str,
+    params_json: str,
+    requested_ip: str | None,
+    created_at: str,
+) -> None:
+    """Insert a queued export task. Status transitions to 'running' when
+    the worker picks it up."""
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO login_ip_export_tasks (
+                task_id, status, params_json, progress, requested_ip, created_at
+            ) VALUES (?, 'queued', ?, 0, ?, ?)
+            """,
+            (task_id, params_json, requested_ip, created_at),
+        )
+        conn.commit()
+
+
+def get_export_task(task_id: str) -> dict | None:
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT task_id, status, params_json, progress, row_count, file_path,
+                   file_size_bytes, error_message, requested_ip, created_at,
+                   started_at, finished_at, expires_at
+            FROM login_ip_export_tasks WHERE task_id = ?
+            """,
+            (task_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def update_export_task_running(task_id: str, started_at: str) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE login_ip_export_tasks SET status='running', progress=5, "
+            "started_at=?, error_message=NULL WHERE task_id=?",
+            (started_at, task_id),
+        )
+        conn.commit()
+
+
+def update_export_task_progress(task_id: str, progress: int) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE login_ip_export_tasks SET progress=? WHERE task_id=?",
+            (max(0, min(100, progress)), task_id),
+        )
+        conn.commit()
+
+
+def update_export_task_succeeded(
+    task_id: str,
+    row_count: int,
+    file_path: str,
+    file_size_bytes: int,
+    finished_at: str,
+    expires_at: str,
+) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            """
+            UPDATE login_ip_export_tasks
+            SET status='succeeded', progress=100, row_count=?, file_path=?,
+                file_size_bytes=?, finished_at=?, expires_at=?, error_message=NULL
+            WHERE task_id=?
+            """,
+            (row_count, file_path, file_size_bytes, finished_at, expires_at, task_id),
+        )
+        conn.commit()
+
+
+def update_export_task_failed(task_id: str, error_message: str, finished_at: str) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE login_ip_export_tasks SET status='failed', progress=100, "
+            "error_message=?, finished_at=? WHERE task_id=?",
+            (error_message, finished_at, task_id),
+        )
+        conn.commit()
+
+
+def list_export_tasks_for_cleanup(
+    expired_before: str, finished_before: str
+) -> list[dict]:
+    """Rows to clean up: succeeded-but-expired, or terminal tasks older than
+    the retention window (created_at < finished_before)."""
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT task_id, status, file_path, expires_at, created_at, finished_at
+            FROM login_ip_export_tasks
+            WHERE (status = 'succeeded' AND expires_at IS NOT NULL AND expires_at < ?)
+               OR (status IN ('failed','expired','succeeded') AND created_at < ?)
+            """,
+            (expired_before, finished_before),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def delete_export_task(task_id: str) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            "DELETE FROM login_ip_export_tasks WHERE task_id = ?", (task_id,)
+        )
+        conn.commit()
+
+
+def update_export_task_expired(task_id: str, finished_at: str) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE login_ip_export_tasks SET status='expired', finished_at=?, "
+            "error_message=COALESCE(error_message,'Export file expired') WHERE task_id=?",
+            (finished_at, task_id),
+        )
+        conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Stats
 # ---------------------------------------------------------------------------
 
 

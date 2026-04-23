@@ -21,6 +21,7 @@ from .routes.client_return_rate import router as client_return_rate_router
 from .routes.dashboard import router as dashboard_router
 from .routes.ib_financial import router as ib_financial_router
 from .routes.risk_monitor import router as risk_monitor_router
+from .routes.login_ip import router as login_ip_router
 
 
 api_v1_router = APIRouter()
@@ -45,3 +46,4 @@ api_v1_router.include_router(client_return_rate_router, tags=["client-return-rat
 api_v1_router.include_router(dashboard_router, tags=["dashboard"])
 api_v1_router.include_router(ib_financial_router, tags=["ib-financial"])
 api_v1_router.include_router(risk_monitor_router, tags=["risk-monitor"])
+api_v1_router.include_router(login_ip_router, tags=["login-ip"])

@@ -216,19 +216,34 @@ backend/app/
 
 ### 6.1 API 清单（初版）
 
-| Method | Path                                                                | 作用                                                  |
-| ------ | ------------------------------------------------------------------- | ----------------------------------------------------- |
-| GET    | `/api/v1/login-ip/watchlist`                                        | 列出被监控账户                                        |
-| POST   | `/api/v1/login-ip/watchlist`                                        | 新增（支持批量）                                      |
-| PATCH  | `/api/v1/login-ip/watchlist/{id}`                                   | 修改 remarks                                          |
-| DELETE | `/api/v1/login-ip/watchlist/{id}`                                   | 删除                                                  |
-| GET    | `/api/v1/login-ip/report?date=YYYYMMDD`                             | 指定日期结构化报告（替代原 `history/{date}` 的 HTML） |
-| GET    | `/api/v1/login-ip/available-dates`                                  | 目前有 JSON 的日期列表                                |
-| POST   | `/api/v1/login-ip/search`                                           | 账号 / IP 搜索（返回 JSON）                           |
-| POST   | `/api/v1/login-ip/export/tasks`                                     | 异步导出 CSV（参考 client_return_export）             |
-| GET    | `/api/v1/login-ip/export/tasks/{id}`                                | 进度                                                  |
-| GET    | `/api/v1/login-ip/export/tasks/{id}/download`                       | 下载                                                  |
-| POST   | `/api/v1/login-ip/scheduler/run-now?step=download\|analyze\|report` | 管理端手动触发某一步                                  |
+| Method | Path                                          | 作用                                                  |
+| ------ | --------------------------------------------- | ----------------------------------------------------- |
+| GET    | `/api/v1/login-ip/available-dates`            | 目前有 JSON 的日期列表                                |
+| GET    | `/api/v1/login-ip/report?date=YYYYMMDD`       | 指定日期结构化报告（替代原 `history/{date}` 的 HTML） |
+| GET    | `/api/v1/login-ip/watchlist`                  | 列出被监控账户（仅读；写操作走验证码流）              |
+| POST   | `/api/v1/login-ip/search`                     | 账号 / IP 搜索（含同 client_id 过滤；返回 JSON）      |
+| GET    | `/api/v1/login-ip/scheduler/runs`             | 最近 N 次调度运行记录（默认 30，上限 200）            |
+| POST   | `/api/v1/login-ip/scheduler/run-now`          | 手动触发 `download` 或 `analyze_report`               |
+| GET    | `/api/v1/login-ip/mail/recipients`            | 列出邮件收件人                                        |
+| POST   | `/api/v1/login-ip/mail/recipients`            | 新增收件人                                            |
+| DELETE | `/api/v1/login-ip/mail/recipients/{id}`       | 软删除收件人                                          |
+| POST   | `/api/v1/login-ip/export/tasks`               | 异步导出搜索结果 CSV                                  |
+| GET    | `/api/v1/login-ip/export/tasks/{id}`          | 导出任务进度                                          |
+| GET    | `/api/v1/login-ip/export/tasks/{id}/download` | 下载 CSV                                              |
+| POST   | `/api/v1/login-ip/request-code`               | 向白名单邮箱发 6 位验证码（300s TTL）                 |
+| POST   | `/api/v1/login-ip/verify-action`              | 核验验证码并执行 watchlist 写操作                     |
+
+**验证码保护的写操作**（通过 `/verify-action` 的 `action` 字段区分）：
+
+| action                       | payload                                   | 说明                          |
+| ---------------------------- | ----------------------------------------- | ----------------------------- |
+| `add_monitored_account`      | `{account_ids: int[], server_name, remarks?}` | 批量新增被监控账户，INSERT OR IGNORE 去重 |
+| `update_monitored_account`   | `{id: int, remarks: string}`              | 仅改 remarks；account_id / server 不可变 |
+| `delete_monitored_account`   | `{id: int}`                               | 硬删除一行 monitored_accounts |
+
+验证码复用 IB Financial 的 **Redis** + **admin_whitelist 表**：
+- Redis key：`login_ip_verify:{email}:{sha256(action)[:16]}`（与 IB Financial 的 `ib_fin_verify:` 前缀隔离）
+- 白名单判断：`ib_financial_service.is_whitelisted(email)`（`admin_whitelist` 表由 IB Financial 维护；若运营需要 Login IP 独立管理员集，后续可复制一张 `login_ip_admin_whitelist` 表替换）
 
 ---
 
@@ -390,26 +405,88 @@ ENV:
 在 backend/app/main.py lifespan 里调 start_login_ip_scheduler() / stop_login_ip_scheduler()。
 ```
 
-### 提示词 Phase 6 — Routes + Schemas
+### 提示词 Phase 6 — Routes + Schemas（已实现）
+
+> ⚠️ 本节已根据实际落地更新。共 13 个 endpoint 注册到 `/api/v1/login-ip/*`，
+> 全部通过本地冲烟测试（异步 CSV 导出端到端验证通过）。
 
 ```
 在 backend/app/ 新增 routes / schemas，暴露 §6.1 API 清单里的全部 endpoints。
 
 要求：
 1. schemas/login_ip.py：
-   - MonitoredAccountOut / MonitoredAccountCreate(批量，accounts: list[int], server_name, remarks)
-   - ReportAccountCorrelation / ReportAccountItem / ReportResponse
+   - MonitoredAccountOut / MonitoredAccountBatchCreate(account_ids: list[int], server_name, remarks)
+   - MonitoredAccountUpdate（仅 remarks 可改）
+   - ReportCorrelationEntry / ReportIPSharedAnalysis / ReportAccountItem / ReportResponse
+   - AvailableDatesResponse
    - SearchRequest(search_type: Literal['account_id','ip_address'], terms: list[str], days: int)
-   - SearchResultItem(Union 账号模式 / IP 模式，用 Discriminator)
-2. api/v1/routes/login_ip.py：
-   - 所有写操作强制返回 200 或 201；错误走 HTTPException
-   - GET /report?date= 若没数据返回 404 + message
-   - /export/tasks 的异步任务 SQLite 参考 core/client_return_export_db.py
-3. 在 api/v1/routers.py 注册 prefix="/api/v1/login-ip", tags=["login-ip"]
-4. 若要加邮件验证码（建议 watchlist 改动需要），参考 IB Financial：
-   - POST /api/v1/login-ip/request-code
-   - POST /api/v1/login-ip/verify-action
+   - SearchResponse（results / not_found / error 三态合一，避免三种 shape 的 Union）
+   - MailRecipientOut / MailRecipientCreate
+   - SchedulerRunOut / SchedulerRunsResponse / SchedulerRunNowRequest
+   - RequestCodeRequest / VerifyActionRequest
+   - ExportTaskCreateRequest / ExportTaskCreateResponse / ExportTaskStatusResponse
+
+2. api/v1/routes/login_ip.py （单文件聚合，~380 行）：
+   - router = APIRouter(prefix="/login-ip")
+   - 所有读路径不保护；所有 watchlist 写路径只通过 /verify-action 暴露（见下方 4）
+   - GET /report?date= 无数据 → 404；date 非 YYYYMMDD → 400
+   - 路径计算：_DATA_BASE_DIR = Path(__file__).resolve().parents[4] / "data" / "login_ip"
+     （routes/ → v1/ → api/ → app/ → backend/，parents[4] 才是 backend）
+
+3. services + core 新增：
+   - services/login_ip_search_service.py     # 移植 legacy search.py；含同 client_id 过滤
+   - services/login_ip_export_service.py     # 异步 CSV 导出（ThreadPoolExecutor + 懒清理）
+   - core/login_ip_db.py                     # 新增 login_ip_export_tasks 表 + 7 个 CRUD 函数
+                                             # 并入既有 login_ip.db，不另开 DB 文件
+   - services/login_ip_report_service.py     # 新增 build_structured_report()：
+                                             # 把 build_report_data 的 defaultdict/set 结构
+                                             # 扁平成前端可直渲的 JSON，含中文名 enrichment
+
+4. 验证码保护（复用 IB Financial 的 Redis + admin_whitelist）：
+   - POST /request-code           {email, action} → 查 admin_whitelist → 403/200
+                                  Redis key: login_ip_verify:{email}:{sha256(action)[:16]}
+                                  TTL 300s；一次性消耗
+   - POST /verify-action          {email, code, action, payload?}
+                                  action 白名单：
+                                  - add_monitored_account    payload: MonitoredAccountBatchCreate
+                                  - update_monitored_account payload: {id: int, remarks: str}
+                                  - delete_monitored_account payload: {id: int}
+
+5. 在 api/v1/routers.py 注册：
+   from .routes.login_ip import router as login_ip_router
+   api_v1_router.include_router(login_ip_router, tags=["login-ip"])
 ```
+
+**实际落地 13 个 endpoint**：
+
+```
+GET    /api/v1/login-ip/available-dates        # 有 JSON 的日期列表（newest first；skip tmp/）
+GET    /api/v1/login-ip/report?date=YYYYMMDD   # 结构化报告（Tab 1）
+GET    /api/v1/login-ip/watchlist              # 被监控账户列表（Tab 2，只读）
+POST   /api/v1/login-ip/search                 # 手动搜索（Tab 3）
+GET    /api/v1/login-ip/scheduler/runs         # 调度审计时间线（ops 面板）
+POST   /api/v1/login-ip/scheduler/run-now      # 手动触发 download / analyze_report
+GET    /api/v1/login-ip/mail/recipients        # 收件人列表
+POST   /api/v1/login-ip/mail/recipients        # 新增收件人
+DELETE /api/v1/login-ip/mail/recipients/{id}   # 软删除收件人
+POST   /api/v1/login-ip/export/tasks           # 异步 CSV 导出：create
+GET    /api/v1/login-ip/export/tasks/{id}      # poll status
+GET    /api/v1/login-ip/export/tasks/{id}/download  # 下载 CSV（utf-8-sig，Excel 直开）
+POST   /api/v1/login-ip/request-code           # 验证码基建：发码
+POST   /api/v1/login-ip/verify-action          # 验证码基建：执行 watchlist 写
+```
+
+**关键决策与坑**：
+
+- **watchlist 写操作不单独开 endpoint**：不暴露 `POST/PATCH/DELETE /watchlist[/{id}]`，避免绕过验证码。所有写都走 `/verify-action`，路由层强制单点。
+- **admin_whitelist 表复用 IB Financial**：同一批风控管理员管多个模块；若未来需要 Login IP 独立白名单，复制一张 `login_ip_admin_whitelist` 即可替换。
+- **Redis key namespace**：`login_ip_verify:` vs IB Financial 的 `ib_fin_verify:` 隔离，两模块的验证码不会互相污染。
+- **export task DB 并入 login_ip.db**：加 `login_ip_export_tasks` 表而非新建 `login_ip_export.db`，减少磁盘 DB 文件数量；schema 字段与 `client_return_export_db` 对齐，便于将来统一清理策略。
+- **CSV 编码**：`utf-8-sig`（带 BOM），Excel 直接打开中文不乱码；`correlated_accounts` 列表用 `"; "` 拼接成单元格字符串。
+- **懒清理**：每次 create / status / download 都触发一次 `_cleanup()`，succeeded 过期任务 → `expired` 态 + 删文件；超保留窗口（默认 7 天）的 terminal 任务 → 删行。
+- **并发**：`ThreadPoolExecutor(max_workers=1)` 默认单线程，通过 `LOGIN_IP_EXPORT_MAX_WORKERS` 调；避免多导出同时打 MySQL 做 enrichment。
+- **路径坑（已修）**：routes 文件在 `backend/app/api/v1/routes/`，要算到 `backend/` 需要 `parents[4]`，最初写成 `parents[3]` 落到 `app/` 导致 `available-dates` 返回 0 个。
+
 
 ### 提示词 Phase 7 — 前端页面
 
@@ -494,7 +571,7 @@ Tab 3（搜索）：
 4. **CEN 账户**：本模块不涉及金额，无需 `/100`。但列 `chinese_name` 的 MySQL 查询 **跨库 JOIN**（`mt4_live.mt4_users` × `fxbackoffice.user_custom_fields`），确认新平台的 MySQL 用户有这两个库的权限。
 5. **"过滤同 client_id"**（源 `search.py` 特有）迁到新平台时**必须保留**，否则会误报同主体名下的账号。
 6. **APScheduler 的时区**：源 crontab 跑在服务器本地时区（UTC+8）。新平台的容器默认 UTC；已在 Phase 5 通过 ① docker-compose `TZ=Asia/Hong_Kong` 统一系统时间，② APScheduler 显式 `timezone=ZoneInfo('Asia/Hong_Kong')`，③ `target_date = now(HKT) - 1day` 的"昨天"口径。改过 MT 所在时区后要同步改这三处。
-7. **邮件验证码**：Watchlist 属于风控白名单，强烈建议加入验证码（参考 IB Financial Monitor 的 6 位码 + Redis 5 分钟 TTL + 管理员白名单机制）。
+7. **邮件验证码**：Watchlist 属于风控白名单，Phase 6 已实现 6 位码 + Redis 5 分钟 TTL + 管理员白名单机制，**复用 IB Financial 的 `admin_whitelist` 表**（同一批风控管理员管多个模块）。Redis key prefix 用 `login_ip_verify:` 与 IB Financial 的 `ib_fin_verify:` 隔离。所有 watchlist 写操作只通过 `POST /verify-action` 暴露，不开独立 `POST/PATCH/DELETE /watchlist` endpoint，防止绕过验证码。
 8. **FTPS TLS session 复用**：`FTP_TLS_IgnoreHost` + `ReusedSslSocket` 是 MT4_Live2 独有需求，是因为对端 FTPS 实现不支持 session resume 的标准行为——不要"优化"成普通 `ftplib.FTP_TLS`。
 9. **.log 文件体积**：单日可达几百 MB（尤其 MT5），**必须流式读**（`for line in f`），不要 `f.read()`。
 10. **新旧并行期**：建议新平台先"只读不发邮件"跑 3 天，核对结果与旧系统一致后再切换收件人，最后下线老 crontab。
