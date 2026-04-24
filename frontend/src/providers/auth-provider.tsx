@@ -1,4 +1,5 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react"
+import { clearAllLoginIpSearchCaches } from "@/lib/login-ip-search-cache"
 
 // Very small auth layer for demo purposes
 type AuthContextValue = {
@@ -42,6 +43,8 @@ export function AuthProvider({ children }: AuthProviderProps) {
     },
     logout() {
       localStorage.removeItem("auth_token")
+      // Avoid the next person (or the next in-app user with a new token) reading Tab 3 search data.
+      clearAllLoginIpSearchCaches()
       setIsAuthenticated(false)
     },
   }), [isAuthenticated])

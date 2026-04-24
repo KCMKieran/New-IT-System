@@ -254,6 +254,40 @@ def _locked_download_job(target_date: str | None = None) -> dict[str, Any] | Non
 # =============================================================================
 
 
+def _daily_housekeeping() -> None:
+    """Prune SQLite tables that would otherwise grow unbounded.
+
+    Runs once a day inside the report job's `finally` block so it fires
+    regardless of whether the report succeeded or failed. Wrapped in a
+    broad try/except because a housekeeping failure MUST NOT poison the
+    audit row of the main job — we'd rather keep stale data than lose the
+    run record.
+
+    Three sweeps:
+      1. `cleanup_old_login_history`       — drop rows outside the 7-day
+         correlation window; this function was defined in `login_ip_db`
+         since the migration but had no caller, so history grew forever.
+      2. `cleanup_old_scheduler_runs`      — drop audit rows older than
+         the retention window (default 90 days).
+      3. `reap_stuck_running_runs`         — force-close zombie rows left
+         in `status='running'` by a crashed process.
+    """
+    from ..core import login_ip_db
+
+    try:
+        removed_history = login_ip_db.cleanup_old_login_history()
+        removed_runs = login_ip_db.cleanup_old_scheduler_runs()
+        reaped = login_ip_db.reap_stuck_running_runs()
+        logger.info(
+            "[housekeeping] history_removed=%d runs_removed=%d runs_reaped=%d",
+            removed_history,
+            removed_runs,
+            reaped,
+        )
+    except Exception:
+        logger.exception("[housekeeping] failed (swallowed; non-fatal)")
+
+
 def _report_job(target_date: str | None = None) -> dict[str, Any]:
     """Build correlation for yesterday + send email (if any correlation)."""
     from ..core import login_ip_db
@@ -284,6 +318,12 @@ def _report_job(target_date: str | None = None) -> dict[str, Any]:
         )
         _send_failure_alert("analyze_report", target_date, str(exc))
         return {"error": str(exc)}
+
+    finally:
+        # Daily housekeeping piggy-backs on the report job because (a) it's
+        # the last cron of the day and (b) running here guarantees the main
+        # job's audit row is already finalized before we touch the table.
+        _daily_housekeeping()
 
 
 def _locked_report_job(target_date: str | None = None) -> dict[str, Any] | None:

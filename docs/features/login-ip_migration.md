@@ -155,6 +155,7 @@ MAIL_SEND_TOO / MAIL_CCC
      - 账号模式：`搜索账号` / `中文名` / `日期` / `服务器` / `登录 IP` / `登录次数` / `关联账号列表`
      - IP 模式：`搜索 IP` / `日期` / `服务器` / `登录账号列表`
    - CSV 导出（复用 Client Return Rate 的异步导出模式：create task → poll → download）
+   - 切走页面再回来仍保留**上一次成功搜索**的表单与表格：`sessionStorage` 缓存，分桶与登出行为见 [login-ip.md](./login-ip.md) §8.1
 
 ### 4.y Dashboard Widget（可选，二期）
 

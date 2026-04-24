@@ -163,7 +163,8 @@ def resolve_download_path(task_id: str) -> tuple[int, str | Path, str | None]:
 
 _CSV_HEADERS_ACCOUNT = [
     "search_term",
-    "search_term_chinese_name",
+    "search_term_first_name",
+    "search_term_last_name",
     "client_id",
     "date",
     "server",
@@ -210,16 +211,34 @@ def _run_task(task_id: str) -> None:
         else:
             headers = _CSV_HEADERS_IP
 
+        def _format_corr_for_csv(corr: object) -> str:
+            if not isinstance(corr, list):
+                return str(corr) if corr is not None else ""
+            parts: list[str] = []
+            for item in corr:
+                if isinstance(item, dict):
+                    acc = str(item.get("login", ""))
+                    fn = (item.get("first_name") or "").strip()
+                    ln = (item.get("last_name") or "").strip()
+                    if fn and ln:
+                        parts.append(f"{acc} ({ln}, {fn})")
+                    elif fn or ln:
+                        parts.append(f"{acc} ({ln or fn})")
+                    else:
+                        parts.append(acc)
+                else:
+                    parts.append(str(item))
+            return "; ".join(parts)
+
         with file_path.open("w", encoding="utf-8-sig", newline="") as f:
             # utf-8-sig so Excel opens Chinese names correctly without mojibake.
             w = csv.DictWriter(f, fieldnames=headers, extrasaction="ignore")
             w.writeheader()
             for r in rows:
-                # correlated_accounts is a list; join with "; " for CSV readability.
                 row = dict(r)
                 corr = row.get("correlated_accounts")
                 if isinstance(corr, list):
-                    row["correlated_accounts"] = "; ".join(str(x) for x in corr)
+                    row["correlated_accounts"] = _format_corr_for_csv(corr)
                 w.writerow(row)
 
         size = file_path.stat().st_size

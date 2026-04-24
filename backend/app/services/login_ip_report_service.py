@@ -260,8 +260,9 @@ def build_structured_report(
     correlated_ids = built["correlated_ids"]
 
     enrichment = (
-        login_ip_enrichment_service.get_account_details(correlated_ids)
-        if correlated_ids else {}
+        login_ip_enrichment_service.get_account_details(correlated_ids)[0]
+        if correlated_ids
+        else {}
     )
 
     accounts: list[dict[str, Any]] = []
@@ -534,7 +535,7 @@ def send_daily_report(
         return summary
 
     # Enrich with Chinese names (best-effort — empty dict on DB failure).
-    enrichment = login_ip_enrichment_service.get_account_details(correlated_ids)
+    enrichment, _ = login_ip_enrichment_service.get_account_details(correlated_ids)
 
     html_body = render_html_report(
         target_date=target_date,

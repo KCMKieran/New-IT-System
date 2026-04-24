@@ -7,9 +7,10 @@ platform. Backs the `POST /api/v1/login-ip/search` endpoint (Tab 3).
 Two search modes
 ----------------
 1. `account_id` — given account(s), find every IP they used per day and
-   every OTHER account on those IPs. **Same-client_id filter applied**:
-   if a correlated account shares the customer identity with the search
-   term, it's dropped. This is the legacy's anti-noise rule from `search.py`.
+   other accounts on those IPs. **Only if client_id (CRM `users.id`) differs**
+   from the search account is a peer shown — same `userId` as the search
+   login is skipped (one natural person, multiple MT logins is noise).
+   Legacy rule from `search.py`.
 
 2. `ip_address` — given IP(s), list the accounts seen on each IP per day.
    No same-client filter here (an IP can legitimately be used by multiple
@@ -142,9 +143,16 @@ def perform_search(
         return {"results": results_list}
 
     # --- account_id post-processing: MySQL enrichment + same-client filter ---
-    # Gather every unique id across search terms and correlated lists, fetch
-    # their client_id + chinese_name in one DB round-trip.
+    # Enrichment supplies client_id (CRM) + names. Filter: for each row,
+    # drop correlated accounts where corr["client_id"] == search["client_id"];
+    # only different CRM identities are listed (and labeled with name).
     from ..services import login_ip_enrichment_service
+
+    def _strip_name(v: object | None) -> str | None:
+        if v is None:
+            return None
+        s = str(v).strip().strip('"“”')
+        return s or None
 
     all_ids: set[str] = set()
     for r in results_list:
@@ -152,11 +160,10 @@ def perform_search(
         for acc in r.get("_raw_correlated", []):
             all_ids.add(str(acc))
 
-    details = login_ip_enrichment_service.get_account_details(all_ids)
-    if not details:
-        # Legacy behavior: if we can't enrich, we can't apply the filter
-        # safely, so surface an error rather than return possibly-noisy data.
-        return {"error": "无法从数据库获取账户详细信息，请检查数据库连接"}
+    details, db_ok = login_ip_enrichment_service.get_account_details(all_ids)
+    if not db_ok:
+        # MySQL unreachable — same-client filter requires client_id from DB.
+        return {"error": "无法从数据库获取账户详细信息，请检查数据库连接（DB_HOST / DB_USER / 从库权限）"}
 
     enriched: list[dict[str, Any]] = []
     for r in results_list:
@@ -166,22 +173,20 @@ def perform_search(
             continue
         search_client_id = search_info["client_id"]
 
-        # Filter correlated accounts: drop any sharing the same client_id.
-        filtered: list[str] = []
+        # Show only other CRM users (different userId / users.id) on the same IP.
+        filtered: list[dict[str, Any]] = []
         for acc in r["_raw_correlated"]:
             acc_str = str(acc)
             corr_info = details.get(acc_str)
             if not corr_info:
-                continue  # non-resolvable — legacy also drops these
+                continue
             if corr_info["client_id"] == search_client_id:
-                continue  # same customer — not "correlated" in the business sense
-            display = acc_str
-            cn = corr_info.get("chinese_name")
-            if cn:
-                cn = str(cn).strip().strip('"“”').strip()
-                if cn:
-                    display = f"{acc_str} ({cn})"
-            filtered.append(display)
+                continue
+            filtered.append({
+                "login": acc_str,
+                "first_name": _strip_name(corr_info.get("first_name")),
+                "last_name": _strip_name(corr_info.get("last_name")),
+            })
 
         if not filtered:
             continue  # nothing interesting for this row
@@ -189,7 +194,8 @@ def perform_search(
         enriched.append({
             "kind": "account_id",
             "search_term": r["search_term"],
-            "search_term_chinese_name": search_info.get("chinese_name"),
+            "search_term_first_name": _strip_name(search_info.get("first_name")),
+            "search_term_last_name": _strip_name(search_info.get("last_name")),
             "client_id": str(search_client_id) if search_client_id else None,
             "date": r["date"],
             "server": r["server"],

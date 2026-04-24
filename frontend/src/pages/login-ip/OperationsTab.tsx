@@ -128,8 +128,8 @@ function SchedulerPanel() {
   };
 
   return (
-    <Card>
-      <CardHeader className="pb-3">
+    <Card className="gap-3">
+      <CardHeader>
         <CardTitle className="text-base">调度任务运维</CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -162,7 +162,9 @@ function SchedulerPanel() {
               onChange={(e) => setTriggerDate(e.target.value)}
             />
           </div>
-          <div className="flex items-end gap-2">
+          {/* flex-wrap so the button group can drop to the next line on narrow
+              screens once each button is forced to ≥112px wide. */}
+          <div className="flex flex-wrap items-end gap-2 [&>button]:min-w-[112px]">
             <Button onClick={handleRunNow} disabled={submitting}>
               <IconPlayerPlay className="mr-1 h-4 w-4" />
               {submitting ? "提交中..." : "立即执行"}
@@ -180,9 +182,11 @@ function SchedulerPanel() {
           </div>
         </div>
 
-        <div className="rounded-md border">
+        {/* Same shell as ReportTab/WatchlistTab: rounded-xl border, hidden
+            overflow so the black header corners stay rounded. */}
+        <div className="overflow-hidden rounded-xl border bg-card">
           <Table>
-            <TableHeader>
+            <TableHeader className="bg-black [&_th]:font-semibold [&_th]:text-white [&_th:first-child]:rounded-tl-xl [&_th:last-child]:rounded-tr-xl">
               <TableRow>
                 <TableHead className="w-[160px]">任务</TableHead>
                 <TableHead className="w-[110px]">目标日期</TableHead>
@@ -310,8 +314,8 @@ function MailPanel() {
   };
 
   return (
-    <Card>
-      <CardHeader className="pb-3">
+    <Card className="gap-3">
+      <CardHeader>
         <CardTitle className="flex items-center gap-2 text-base">
           <IconMail className="h-4 w-4" />
           邮件收件人
@@ -353,7 +357,7 @@ function MailPanel() {
             />
           </div>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2 [&>button]:min-w-[112px]">
           <Button onClick={handleAdd}>
             <IconPlus className="mr-1 h-4 w-4" />
             添加
@@ -370,9 +374,9 @@ function MailPanel() {
           </Button>
         </div>
 
-        <div className="rounded-md border">
+        <div className="overflow-hidden rounded-xl border bg-card">
           <Table>
-            <TableHeader>
+            <TableHeader className="bg-black [&_th]:font-semibold [&_th]:text-white [&_th:first-child]:rounded-tl-xl [&_th:last-child]:rounded-tr-xl">
               <TableRow>
                 <TableHead>邮箱</TableHead>
                 <TableHead className="w-[80px]">角色</TableHead>
@@ -407,7 +411,7 @@ function MailPanel() {
                       variant="ghost"
                       size="sm"
                       onClick={() => handleDelete(r.id)}
-                      className="h-7 w-7 p-0 text-destructive hover:text-destructive"
+                      className="h-8 w-8 p-0 text-destructive hover:text-destructive"
                     >
                       <IconTrash className="h-4 w-4" />
                     </Button>

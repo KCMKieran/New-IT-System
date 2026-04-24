@@ -15,11 +15,19 @@
  * (2s setTimeout recursion, blob download).
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
 import { apiFetch } from "@/lib/fetch";
+import { crmAccountUrl, crmUserUrl } from "@/lib/crm-links";
 import { toast } from "sonner";
 import { AgGridReact } from "ag-grid-react";
-import type { ColDef } from "ag-grid-community";
+import type { ColDef, ICellRendererParams } from "ag-grid-community";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
@@ -42,13 +50,34 @@ import {
   IconRefresh,
 } from "@tabler/icons-react";
 import { cn } from "@/lib/utils";
+import {
+  loadLoginIpSearchCache,
+  saveLoginIpSearchCache,
+} from "@/lib/login-ip-search-cache";
 import { useTheme } from "@/components/theme-provider";
 import type {
+  CorrelatedAccountItem,
   SearchType,
   SearchResultRow,
   SearchResponse,
+  SearchResultAccountRow,
   ExportTaskStatus,
 } from "./types";
+
+const linkCls =
+  "text-blue-600 hover:underline dark:text-blue-400 font-mono text-sm";
+
+/** Plain label for tooltips / old string[] rows (IP 模式) */
+function formatCorrelatedEntry(
+  c: CorrelatedAccountItem | string,
+): string {
+  if (typeof c === "string") return c;
+  const fn = c.first_name?.trim();
+  const ln = c.last_name?.trim();
+  if (fn && ln) return `${c.login} (${ln}, ${fn})`;
+  if (fn || ln) return `${c.login} (${ln || fn})`;
+  return c.login;
+}
 
 // Parse user's multi-separator input ("123 456,789\n000") into a
 // deduplicated array of non-empty strings.
@@ -63,18 +92,40 @@ function parseTerms(raw: string): string[] {
   );
 }
 
+// FastAPI may return { detail: string } or { detail: [{ msg: string, ... }] }
+function formatApiDetail(detail: unknown): string {
+  if (detail == null) return "";
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) {
+    return detail
+      .map((x) =>
+        x && typeof x === "object" && "msg" in x
+          ? String((x as { msg: unknown }).msg)
+          : JSON.stringify(x),
+      )
+      .filter(Boolean)
+      .join("; ");
+  }
+  return JSON.stringify(detail);
+}
+
 const DAYS_OPTIONS = [1, 3, 7, 14, 30];
 
 export function SearchTab() {
   const { theme } = useTheme();
   const isDark = theme === "dark";
 
-  const [searchType, setSearchType] = useState<SearchType>("account_id");
-  const [termsText, setTermsText] = useState("");
-  const [days, setDays] = useState<number>(7);
+  // Restore last successful search when remounting after navigating away (same tab).
+  const boot = useMemo(() => loadLoginIpSearchCache(), []);
+  const [searchType, setSearchType] = useState<SearchType>(
+    () => boot?.searchType ?? "account_id",
+  );
+  const [termsText, setTermsText] = useState(() => boot?.termsText ?? "");
+  const [days, setDays] = useState<number>(() => boot?.days ?? 7);
+  const [rows, setRows] = useState<SearchResultRow[]>(() => boot?.rows ?? []);
+  const [statusMsg, setStatusMsg] = useState<string>(() => boot?.statusMsg ?? "");
+
   const [loading, setLoading] = useState(false);
-  const [rows, setRows] = useState<SearchResultRow[]>([]);
-  const [statusMsg, setStatusMsg] = useState<string>("");
 
   // Export task state (mirrors ClientReturnRate.tsx pattern)
   const [exporting, setExporting] = useState(false);
@@ -102,20 +153,39 @@ export function SearchTab() {
         body: JSON.stringify(body),
       });
       if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.detail || `HTTP ${res.status}`);
+        const err: { detail?: unknown } = await res.json().catch(() => ({}));
+        throw new Error(
+          formatApiDetail(err.detail) || `HTTP ${res.status}`,
+        );
       }
       const data: SearchResponse = await res.json();
+      // Compute next grid + status, persist so returning to this tab restores them.
+      let nextRows: SearchResultRow[] = [];
+      let nextStatus = "";
       if (data.error) {
+        nextStatus = data.error;
         setStatusMsg(data.error);
+        toast.error(data.error);
       } else if (data.not_found) {
+        nextStatus = data.not_found;
         setStatusMsg(data.not_found);
       } else if (data.results) {
+        nextRows = data.results;
         setRows(data.results);
         if (data.results.length === 0) {
+          nextStatus = "无匹配结果";
           setStatusMsg("无匹配结果");
+        } else {
+          setStatusMsg("");
         }
       }
+      saveLoginIpSearchCache({
+        searchType,
+        termsText,
+        days,
+        rows: nextRows,
+        statusMsg: nextStatus,
+      });
     } catch (e) {
       toast.error(`搜索失败: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
@@ -270,18 +340,66 @@ export function SearchTab() {
   const columnDefs = useMemo<ColDef<SearchResultRow>[]>(() => {
     if (searchType === "account_id") {
       return [
-        { headerName: "搜索账号", field: "search_term" as const, width: 130 },
         {
-          headerName: "中文名",
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          valueGetter: (p: any) => p.data?.search_term_chinese_name ?? "",
-          width: 140,
+          headerName: "搜索账号",
+          field: "search_term" as const,
+          width: 130,
+          cellRenderer: (p: ICellRendererParams<SearchResultRow>) => {
+            const d = p.data as SearchResultAccountRow | undefined;
+            if (!d || d.kind !== "account_id") return null;
+            const href = crmAccountUrl(d.server, d.search_term);
+            if (!href)
+              return <span className="font-mono text-sm">{d.search_term}</span>;
+            return (
+              <a
+                href={href}
+                target="_blank"
+                rel="noopener noreferrer"
+                className={linkCls}
+                onClick={(e) => e.stopPropagation()}
+              >
+                {d.search_term}
+              </a>
+            );
+          },
+        },
+        {
+          headerName: "Last name",
+          colId: "search_term_last_name",
+          width: 120,
+          valueGetter: (p) =>
+            p.data?.kind === "account_id" ? p.data.search_term_last_name : "",
+        },
+        {
+          headerName: "First name",
+          colId: "search_term_first_name",
+          width: 120,
+          valueGetter: (p) =>
+            p.data?.kind === "account_id" ? p.data.search_term_first_name : "",
         },
         {
           headerName: "Client ID",
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          valueGetter: (p: any) => p.data?.client_id ?? "",
+          field: "client_id" as const,
           width: 120,
+          cellRenderer: (p: ICellRendererParams<SearchResultRow>) => {
+            const d = p.data as SearchResultAccountRow | undefined;
+            if (!d || d.kind !== "account_id") return null;
+            const cid = d.client_id;
+            if (!cid) return <span>—</span>;
+            const href = crmUserUrl(cid);
+            if (!href) return <span>{cid}</span>;
+            return (
+              <a
+                href={href}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-blue-600 hover:underline dark:text-blue-400 text-sm"
+                onClick={(e) => e.stopPropagation()}
+              >
+                {cid}
+              </a>
+            );
+          },
         },
         { headerName: "日期", field: "date" as const, width: 110 },
         { headerName: "服务器", field: "server" as const, width: 120 },
@@ -294,13 +412,51 @@ export function SearchTab() {
         { headerName: "次数", field: "login_count" as const, width: 80 },
         {
           headerName: "关联账户",
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          valueGetter: (p: any) =>
-            (p.data?.correlated_accounts ?? []).join(", "),
           flex: 1,
-          tooltipValueGetter: (p) =>
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            ((p.data as any)?.correlated_accounts ?? []).join(", "),
+          minWidth: 220,
+          autoHeight: true,
+          wrapText: true,
+          cellRenderer: (p: ICellRendererParams<SearchResultRow>) => {
+            const d = p.data as SearchResultAccountRow | undefined;
+            if (!d || d.kind !== "account_id") return null;
+            const list = d.correlated_accounts;
+            if (!list?.length) return null;
+            return (
+              <div className="flex flex-wrap items-center gap-x-1 gap-y-0.5 py-1 text-sm">
+                {list.map((c, i) => {
+                  const item: CorrelatedAccountItem =
+                    typeof c === "string"
+                      ? { login: c, first_name: null, last_name: null }
+                      : c;
+                  const href = crmAccountUrl(d.server, item.login);
+                  const label = formatCorrelatedEntry(item);
+                  return (
+                    <span key={`${item.login}-${i}`}>
+                      {i > 0 ? <span className="text-muted-foreground">, </span> : null}
+                      {href ? (
+                        <a
+                          href={href}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className={linkCls}
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          {label}
+                        </a>
+                      ) : (
+                        <span className="font-mono">{label}</span>
+                      )}
+                    </span>
+                  );
+                })}
+              </div>
+            );
+          },
+          tooltipValueGetter: (p) => {
+            const d = p.data as SearchResultAccountRow | undefined;
+            if (!d?.correlated_accounts?.length) return "";
+            return d.correlated_accounts.map(formatCorrelatedEntry).join("; ");
+          },
         },
       ];
     }
@@ -338,11 +494,31 @@ export function SearchTab() {
     [],
   );
 
+  // Match ReportTab / WatchlistTab: black header, white text (not theme-dependent).
+  const gridThemeStyle = useMemo(
+    () =>
+      ({
+        ["--ag-header-background-color" as string]: "#000000",
+        ["--ag-header-foreground-color" as string]: "#ffffff",
+        ["--ag-header-column-separator-color" as string]: "rgba(255, 255, 255, 0.12)",
+        ["--ag-header-column-separator-width" as string]: "1px",
+        ["--ag-header-cell-hover-background-color" as string]: "#171717",
+        ["--ag-icon-color" as string]: "#ffffff",
+        ["--ag-background-color" as string]: "hsl(var(--card))",
+        ["--ag-foreground-color" as string]: "hsl(var(--foreground))",
+        ["--ag-row-border-color" as string]: "hsl(var(--border))",
+        ["--ag-odd-row-background-color" as string]: isDark
+          ? "rgba(255,255,255,0.04)"
+          : "rgba(0,0,0,0.03)",
+      }) satisfies CSSProperties,
+    [isDark],
+  );
+
   return (
     <div className="space-y-4">
       {/* Search form */}
-      <Card>
-        <CardHeader className="pb-3">
+      <Card className="gap-3">
+        <CardHeader>
           <CardTitle className="text-base">手动搜索</CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
@@ -396,7 +572,9 @@ export function SearchTab() {
             </div>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2">
+          {/* min-w-[112px] on direct button children → "搜索" / "导出 CSV"
+              render at the same width, even though their text differs in length. */}
+          <div className="flex flex-wrap items-center gap-2 [&>button]:min-w-[112px]">
             <Button onClick={handleSearch} disabled={loading}>
               <IconSearch className="mr-1 h-4 w-4" />
               {loading ? "搜索中..." : "搜索"}
@@ -431,40 +609,49 @@ export function SearchTab() {
       </Card>
 
       {/* Grid */}
-      <Card>
-        <CardHeader className="pb-3">
+      <Card className="gap-3">
+        <CardHeader>
           <CardTitle className="text-base">
             搜索结果（共 {rows.length} 条）
           </CardTitle>
         </CardHeader>
         <CardContent>
-          <div
-            className={cn(
-              "h-[calc(100vh-500px)] min-h-[350px] w-full",
-              isDark ? "ag-theme-quartz-dark" : "ag-theme-quartz",
-            )}
-            style={{
-              ["--ag-background-color" as string]: "hsl(var(--card))",
-              ["--ag-foreground-color" as string]: "hsl(var(--foreground))",
-              ["--ag-row-border-color" as string]: "hsl(var(--border))",
-              ["--ag-odd-row-background-color" as string]: isDark
-                ? "rgba(255,255,255,0.04)"
-                : "rgba(0,0,0,0.03)",
-            }}
-          >
-            <AgGridReact<SearchResultRow>
-              ref={gridRef}
-              rowData={rows}
-              columnDefs={columnDefs}
-              defaultColDef={defaultColDef}
-              gridOptions={{ theme: "legacy" }}
-              animateRows
-              pagination
-              paginationPageSize={50}
-              paginationPageSizeSelector={[20, 50, 100, 200]}
-              suppressCellFocus
-              enableCellTextSelection
-            />
+          {/* Same shell as ReportTab / WatchlistTab: rounded border + black column titles */}
+          <div className="overflow-hidden rounded-xl border bg-card">
+            <style>
+              {`
+                .login-ip-search-grid .ag-header,
+                .login-ip-search-grid .ag-header-viewport,
+                .login-ip-search-grid .ag-header-row {
+                  font-weight: 600;
+                }
+                .login-ip-search-grid .ag-header {
+                  border-top-left-radius: 0.75rem;
+                  border-top-right-radius: 0.75rem;
+                }
+              `}
+            </style>
+            <div
+              className={cn(
+                "login-ip-search-grid h-[calc(100vh-500px)] min-h-[350px] w-full",
+                isDark ? "ag-theme-quartz-dark" : "ag-theme-quartz",
+              )}
+              style={gridThemeStyle}
+            >
+              <AgGridReact<SearchResultRow>
+                ref={gridRef}
+                rowData={rows}
+                columnDefs={columnDefs}
+                defaultColDef={defaultColDef}
+                gridOptions={{ theme: "legacy" }}
+                animateRows
+                pagination
+                paginationPageSize={50}
+                paginationPageSizeSelector={[20, 50, 100, 200]}
+                suppressCellFocus
+                enableCellTextSelection
+              />
+            </div>
           </div>
         </CardContent>
       </Card>

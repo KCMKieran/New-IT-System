@@ -197,8 +197,11 @@ export function WatchlistTab() {
 
   return (
     <div className="space-y-4">
+      {/* gap-3 overrides shadcn Card's default gap-6 (24px → 12px), and we
+          drop CardHeader's pb-3 so the parent gap alone controls the
+          title-to-content distance. See .cursor/skills/page-style-conventions. */}
       <Card className="gap-3">
-        <CardHeader className="pb-3">
+        <CardHeader>
           <CardTitle className="text-base">批量新增监控账户</CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
@@ -245,7 +248,9 @@ export function WatchlistTab() {
               </div>
             </div>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
+          {/* min-w on direct button children: keeps "新增" the same width as
+              the primary buttons in Tab 3/4 for cross-tab visual consistency. */}
+          <div className="flex flex-wrap items-center gap-2 [&>button]:min-w-[112px]">
             <Button
               onClick={handleAddClick}
               disabled={!canAdd || saving}
@@ -257,7 +262,7 @@ export function WatchlistTab() {
       </Card>
 
       <Card className="gap-3">
-        <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-2 pb-3">
+        <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-2">
           <CardTitle className="text-base">监控账户列表</CardTitle>
           <Button
             variant="outline"

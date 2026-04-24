@@ -111,20 +111,28 @@ class SearchRequest(BaseModel):
     days: int = Field(7, ge=1, le=30)
 
 
+class CorrelatedAccountItem(BaseModel):
+    """One other login on the same IP (different CRM user from search account)."""
+
+    login: str
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+
+
 class SearchResultAccountRow(BaseModel):
     """Per-match row when searching by account id."""
 
     kind: Literal["account_id"] = "account_id"
     search_term: str
-    search_term_chinese_name: Optional[str] = None
+    search_term_first_name: Optional[str] = None
+    search_term_last_name: Optional[str] = None
     client_id: Optional[str] = None
     date: str
     server: str
     login_ip: str
     login_count: int
-    # Already-filtered: accounts with same client_id as search_term are excluded.
-    # Rendered string, may include Chinese name: "12345 (张三)".
-    correlated_accounts: List[str] = []
+    # Peers on same IP with a *different* CRM userId than the search account.
+    correlated_accounts: List[CorrelatedAccountItem] = []
 
 
 class SearchResultIPRow(BaseModel):

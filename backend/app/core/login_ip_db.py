@@ -48,6 +48,16 @@ _DB_PATH = Path(__file__).resolve().parents[2] / "data" / "login_ip.db"
 # so anything older is dead weight.
 DEFAULT_HISTORY_RETENTION_DAYS = 7
 
+# Default retention for the scheduler audit trail. 90 days is enough for ops
+# to investigate last quarter's incidents while keeping the table bounded
+# (2 cron jobs/day + the occasional manual trigger ≈ ~750 rows/quarter).
+DEFAULT_SCHEDULER_RUN_RETENTION_DAYS = 90
+
+# How long a row can stay in `status='running'` before we consider the job
+# dead (process crashed / OOM killed before `record_run_finish` ran). The two
+# real jobs complete in minutes; 6 h is well outside any legitimate runtime.
+DEFAULT_STUCK_RUN_HOURS = 6
+
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS monitored_accounts (
@@ -469,6 +479,83 @@ def record_run_finish(
         )
         conn.commit()
     logger.info("scheduler_run finished: id=%s status=%s", run_id, status)
+
+
+def cleanup_old_scheduler_runs(
+    days: int = DEFAULT_SCHEDULER_RUN_RETENTION_DAYS,
+) -> int:
+    """Delete audit rows older than `days`. Returns count deleted.
+
+    Counterpart of `cleanup_old_login_history` — without this the
+    `login_ip_scheduler_runs` table would grow forever (2 jobs/day × years).
+    Called nightly by the report job so housekeeping happens on the same
+    schedule as the other retention sweeps.
+
+    We compare against `started_at` (a TEXT column formatted as
+    `'YYYY-MM-DD HH:MM:SS'` via `datetime('now', '+8 hours')`), which is
+    ISO-ordered so a plain string comparison works correctly.
+    """
+    cutoff = (_dt.datetime.now() - _dt.timedelta(days=days)).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+
+    with get_connection() as conn:
+        cursor = conn.execute(
+            "DELETE FROM login_ip_scheduler_runs WHERE started_at < ?",
+            (cutoff,),
+        )
+        deleted = cursor.rowcount
+        conn.commit()
+
+    if deleted:
+        logger.info(
+            "cleanup_old_scheduler_runs: removed %d rows older than %s",
+            deleted,
+            cutoff,
+        )
+    return deleted
+
+
+def reap_stuck_running_runs(
+    stuck_after_hours: int = DEFAULT_STUCK_RUN_HOURS,
+) -> int:
+    """Mark zombie 'running' rows as failed. Returns count reaped.
+
+    If the backend process is killed mid-job (OOM / docker restart / power
+    loss), `record_run_finish` never runs and the row is stuck at
+    `status='running'` forever — it shows up on the UI as a perpetually
+    in-flight task. This helper force-closes any such row whose `started_at`
+    is older than `stuck_after_hours`.
+
+    We UPDATE directly instead of calling `record_run_finish` because that
+    function is reserved for the job's own normal finish path; reaping is a
+    separate maintenance concern and writes a distinct `error_msg` so ops
+    can tell them apart.
+    """
+    cutoff = (_dt.datetime.now() - _dt.timedelta(hours=stuck_after_hours)).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+
+    with get_connection() as conn:
+        cursor = conn.execute(
+            "UPDATE login_ip_scheduler_runs "
+            "SET status = 'failed', "
+            "    error_msg = COALESCE(error_msg, '') || "
+            "                '[reaped: stuck in running past ' || ? || 'h]', "
+            "    finished_at = datetime('now', '+8 hours') "
+            "WHERE status = 'running' AND started_at < ?",
+            (stuck_after_hours, cutoff),
+        )
+        reaped = cursor.rowcount
+        conn.commit()
+
+    if reaped:
+        logger.warning(
+            "reap_stuck_running_runs: closed %d zombie runs stuck past %dh",
+            reaped,
+            stuck_after_hours,
+        )
+    return reaped
 
 
 def list_recent_runs(job_name: str | None = None, limit: int = 30) -> list[dict]:

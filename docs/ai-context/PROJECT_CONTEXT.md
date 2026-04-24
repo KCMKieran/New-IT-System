@@ -381,6 +381,7 @@ New-IT-System/
 - Correlation windows: same-day + previous 7 days (`login_history`)
 - Watchlist CRUD via REST (`POST`/`PATCH`/`DELETE` `/watchlist`); no per-action email verification (same `X-API-Key` gate as other APIs)
 - Manual search (account_id / IP) with async CSV export (ThreadPoolExecutor + UTF-8-BOM)
+- Tab 3 last successful search: `sessionStorage` cache (`frontend/src/lib/login-ip-search-cache.ts`); key scoped by `localStorage.auth_token`; cleared on `logout` via `clearAllLoginIpSearchCaches()` in `auth-provider.tsx`
 - Scheduler audit trail: `login_ip_scheduler_runs` table surfaced in ops tab
 - Failure alerts: ⚠️ email on job failure / partial success
 
@@ -397,7 +398,7 @@ New-IT-System/
 - MySQL Slave (`KCM_fxbackoffice.users`) for Chinese-name enrichment
 
 **Key Files**:
-- `frontend/src/pages/LoginIPs.tsx` (tab shell) + `frontend/src/pages/login-ip/` (ReportTab, WatchlistTab, SearchTab, OperationsTab, `types.ts`)
+- `frontend/src/pages/LoginIPs.tsx` (tab shell) + `frontend/src/pages/login-ip/` (ReportTab, WatchlistTab, SearchTab, OperationsTab, `types.ts`); `frontend/src/lib/login-ip-search-cache.ts` (Tab 3 manual search state cache)
 - `backend/app/api/v1/routes/login_ip.py` (15 endpoints)
 - `backend/app/services/login_ip_{ftp,analyzer,report,search,export,enrichment}_service.py`
 - `backend/app/core/login_ip_db.py` + `backend/app/core/login_ip_scheduler.py`

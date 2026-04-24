@@ -54,16 +54,23 @@ export interface ReportResponse {
 
 export type SearchType = "account_id" | "ip_address";
 
+export interface CorrelatedAccountItem {
+  login: string;
+  first_name: string | null;
+  last_name: string | null;
+}
+
 export interface SearchResultAccountRow {
   kind: "account_id";
   search_term: string;
-  search_term_chinese_name: string | null;
+  search_term_first_name: string | null;
+  search_term_last_name: string | null;
   client_id: string | null;
   date: string;
   server: string;
   login_ip: string;
   login_count: number;
-  correlated_accounts: string[];
+  correlated_accounts: CorrelatedAccountItem[];
 }
 
 export interface SearchResultIPRow {
