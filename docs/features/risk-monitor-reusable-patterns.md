@@ -285,22 +285,53 @@ function LoginCell(params: { value: number; data?: AlertEvent }) {
 
 ## §7 CSV Export
 
-### Frontend AG-Grid export (quick, ≤1000 rows)
+### Backend streaming export (current approach, any row count)
+
+The `/alerts` endpoint is paginated (`page` + `page_size`), so client-side
+`exportDataAsCsv` on AG Grid would only dump the current page. Instead,
+expose a dedicated endpoint that streams the **full** filtered result:
+
+```python
+# backend/app/api/v1/routes/<rule>.py
+@router.get("/<rule>/alerts/export")
+async def export_alerts(...):
+    def rows():
+        buf, writer = io.StringIO(), csv.writer(buf)
+        yield "\ufeff"                       # UTF-8 BOM so Excel reads Chinese
+        writer.writerow(HEADER); yield _flush(buf)
+        for entry in stream_alert_events(..., batch_size=5000):
+            writer.writerow(_project(entry)); yield _flush(buf)
+    return StreamingResponse(rows(), media_type="text/csv; charset=utf-8",
+                             headers={"Content-Disposition": "..."})
+```
+
+Key points:
+- Generator owns the SQLite connection (can't use `with get_db()` — the
+  context manager would close before the generator finishes yielding).
+- `fetchmany(5000)` keeps memory flat regardless of result size.
+- Frontend downloads via `fetch → blob → a.click()` because `apiFetch`
+  needs to inject the `X-API-Key` header (plain `window.open` skips it).
+
+### Frontend streaming download
 
 ```tsx
-const handleExportCsv = () => {
-  if (!gridApiRef.current || !effectiveRange) return;
-  const stamp = `${fmtFilenameStamp(effectiveRange.since)}_to_${fmtFilenameStamp(effectiveRange.until)}`;
-  gridApiRef.current.exportDataAsCsv({
-    fileName: `risk-monitor-{ruleName}_${stamp}.csv`,
-    allColumns: true,
-    processCellCallback: (params) => {
-      const colId = params.column.getColId();
-      if (colId === "scanned_at") return fmtTime(params.value);
-      // Add rule-specific column transformations here
-      return params.value ?? "";
-    },
-  });
+const handleExportCsv = async () => {
+  if (!effectiveRange || exporting) return;
+  setExporting(true);
+  try {
+    const qs = buildFilterQs(effectiveRange);
+    qs.set("sort_by", sortBy);
+    qs.set("sort_order", sortOrder);
+    const res = await apiFetch(`/api/v1/<rule>/alerts/export?${qs}`);
+    if (!res.ok) throw new Error(`Export failed: ${res.status}`);
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `<rule>_${stamp}.csv`;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  } finally { setExporting(false); }
 };
 ```
 
@@ -318,11 +349,12 @@ function fmtFilenameStamp(iso: string): string {
 }
 ```
 
-### Backend task-style export (future, for >1000 rows)
+### When to go task-style instead
 
-Reference implementation: `backend/app/services/client_return_export_service.py`
+Stick with streaming unless the export takes > ~60s (gateway / proxy
+timeouts become the risk). For those cases fall back to the task-style
+pattern in `backend/app/services/client_return_export_service.py`:
 
-Pattern:
 ```
 POST /alerts/export/tasks      → create async export task
 GET  /alerts/export/tasks/{id} → poll status
@@ -333,7 +365,7 @@ GET  /alerts/export/tasks/{id}/download → download CSV
 
 ## §8 API Contract Template
 
-### GET /alerts — time-range query
+### GET /alerts — paginated, sorted, filtered query
 
 Standard parameters (all rules share the same endpoint, differentiated by `rule_id`):
 
@@ -346,15 +378,29 @@ Standard parameters (all rules share the same endpoint, differentiated by `rule_
 | `symbol` | str? | — | Equality filter |
 | `rule_id` | int? | — | Filter by specific rule |
 | `zipcode` | str? | — | Backend LIKE `%x%` substring match |
-| `limit` | int | 200 | Max 1000 |
-| `offset` | int | 0 | Pagination |
+| `page` | int ≥ 1 | 1 | 1-based page index; wins over `limit/offset` if both sent |
+| `page_size` | int [1, 500] | 50 | Upper bound is 500; use `/alerts/export` for bigger pulls |
+| `sort_by` | str? | `scanned_at` | Whitelisted against `SORTABLE_ALERT_COLS`; others silently fall back |
+| `sort_order` | `asc` \| `desc` | `desc` | Case-insensitive |
+| `limit` / `offset` | int? | — | Legacy; kept for old clients only |
 
-Response: `{ entries: AlertEvent[], total: int, since: str, until: str }`
+Response: `{ entries: AlertEvent[], total: int, since: str, until: str, page: int, page_size: int }`
+
+Every sort always appends `id DESC` as a tiebreaker so pagination is
+stable even when the primary key has duplicates (e.g. many rows sharing
+the same `scanned_at` from one batch).
 
 ### GET /alerts/stats — summary aggregates
 
-Same `since` / `until` / `zipcode` params. Returns:
-`{ suspicious_count: int, event_count: int, servers: str[] }`
+Accepts the same filter set as `/alerts` — `since / until / server /
+login / zipcode` — so the Summary Cards stay numerically consistent with
+the grid. Returns: `{ suspicious_count: int, event_count: int, servers: str[] }`
+
+### GET /alerts/export — full CSV (streamed)
+
+Same filters + `sort_by / sort_order` as `/alerts`, but no pagination
+params. Returns `text/csv; charset=utf-8` with a UTF-8 BOM; rows are
+flushed one at a time via a generator so memory stays flat.
 
 ### Default window helper (backend)
 

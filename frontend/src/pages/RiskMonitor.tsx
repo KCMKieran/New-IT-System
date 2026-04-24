@@ -49,7 +49,7 @@ import {
   Download,
 } from "lucide-react";
 import { AgGridReact } from "ag-grid-react";
-import { ColDef, GridApi } from "ag-grid-community";
+import { ColDef, GridApi, SortChangedEvent } from "ag-grid-community";
 import { DateRange } from "react-day-picker";
 import { format } from "date-fns";
 import { cn } from "@/lib/utils";
@@ -100,7 +100,21 @@ interface AlertsResponse {
   total: number;
   since: string;
   until: string;
+  /** Echoed by the backend so the UI can render "第 X / Y 页". */
+  page?: number;
+  page_size?: number;
 }
+
+/** Page-size options for the pagination toolbar. */
+const PAGE_SIZE_OPTIONS = [50, 100, 200, 300, 500] as const;
+
+/** Columns the frontend allows the user to sort by. Must stay in sync
+ *  with backend `SORTABLE_ALERT_COLS`; anything not here stays `sortable: false`. */
+const SORTABLE_COL_IDS = new Set<string>([
+  "scanned_at", "rule_label", "server", "zipcode", "login",
+  "currency", "symbol", "order_count", "total_lots",
+  "equity", "equity_per_lot", "total_open_lots", "leverage", "group",
+]);
 
 interface AlertsStats {
   suspicious_count: number;
@@ -232,6 +246,19 @@ function LoginCell(params: { value: number; data?: AlertEvent }) {
   );
 }
 
+/**
+ * Backend only retains 30 days of `alert_events`, so clamp any `since`
+ * older than that to the earliest available moment. Keeping this in one
+ * place means the calendar UI limit and the range builder agree even if
+ * one of them drifts in a future refactor.
+ */
+const RETENTION_DAYS = 30;
+
+function clampToRetention(since: Date): Date {
+  const earliest = new Date(Date.now() - RETENTION_DAYS * 24 * 3600 * 1000);
+  return since < earliest ? earliest : since;
+}
+
 /** Build [since, until] ISO UTC strings from the current selector state. */
 function buildRangeIso(
   preset: RangePresetKey,
@@ -244,11 +271,14 @@ function buildRangeIso(
     const to = custom.to ? new Date(custom.to) : new Date(custom.from);
     // include the full end day
     to.setHours(23, 59, 59, 999);
-    return { since: from.toISOString(), until: to.toISOString() };
+    return {
+      since: clampToRetention(from).toISOString(),
+      until: to.toISOString(),
+    };
   }
   const hours = RANGE_PRESETS.find((p) => p.key === preset)?.hours ?? 4;
   const until = new Date();
-  const since = new Date(until.getTime() - hours * 3600 * 1000);
+  const since = clampToRetention(new Date(until.getTime() - hours * 3600 * 1000));
   return { since: since.toISOString(), until: until.toISOString() };
 }
 
@@ -345,7 +375,7 @@ function BurstOpenTab({ active }: { active: boolean }) {
 
   // Data state
   const [alerts, setAlerts] = useState<AlertEvent[]>([]);
-  const [total, setTotal] = useState(0);
+  const [totalCount, setTotalCount] = useState(0);
   const [stats, setStats] = useState<AlertsStats>({
     suspicious_count: 0,
     event_count: 0,
@@ -354,6 +384,7 @@ function BurstOpenTab({ active }: { active: boolean }) {
   const [latestMeta, setLatestMeta] = useState<LatestScanMeta | null>(null);
   const [loading, setLoading] = useState(false);
   const [scanningNow, setScanningNow] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const [lastRefresh, setLastRefresh] = useState<string | null>(null);
 
   // Config state
@@ -362,21 +393,42 @@ function BurstOpenTab({ active }: { active: boolean }) {
   const [configOpen, setConfigOpen] = useState(false);
   const [savingConfig, setSavingConfig] = useState(false);
 
-  // Filters (client-side; server-side filters not needed at 1000-row cap)
-  const [serverFilter, setServerFilter] = useState("all");
-  const [loginSearch, setLoginSearch] = useState("");
+  // Server-side pagination + sort state. All of these get pushed to the
+  // API on every fetch; server/login filters used to be client-only but
+  // are now also sent to the backend so pagination stays consistent.
+  const [pageIndex, setPageIndex] = useState(0); // 0-based; API uses 1-based `page`
+  const [pageSize, setPageSize] = useState(50);
+  const [sortBy, setSortBy] = useState<string>("scanned_at");
+  const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
 
-  // Zipcode filter goes to the **backend** (`?zipcode=` LIKE %x%), not
-  // AG-Grid — so the hits come from all pages within the time range,
-  // not just the currently rendered 50 rows. Raw user input is kept in
-  // `zipcodeInput`; `zipcodeQuery` is the debounced value actually sent
-  // to the API so fast typing doesn't spam the server.
+  // Toolbar filters (all server-side now).
+  const [serverFilter, setServerFilter] = useState("all");
+
+  // Login + zipcode inputs: keep the raw value locally, debounce into a
+  // separate `query` state that actually hits the API. Prevents spamming
+  // the backend while the user is still typing.
+  const [loginInput, setLoginInput] = useState("");
+  const [loginQuery, setLoginQuery] = useState("");
+  useEffect(() => {
+    // Backend expects an integer; skip non-numeric input (including the
+    // "partial" state while the user is still typing) instead of sending
+    // a garbage value the API would 422-reject.
+    const trimmed = loginInput.trim();
+    const t = setTimeout(
+      () => setLoginQuery(/^\d+$/.test(trimmed) ? trimmed : ""),
+      300,
+    );
+    return () => clearTimeout(t);
+  }, [loginInput]);
+
   const [zipcodeInput, setZipcodeInput] = useState("");
   const [zipcodeQuery, setZipcodeQuery] = useState("");
   useEffect(() => {
     const t = setTimeout(() => setZipcodeQuery(zipcodeInput.trim()), 300);
     return () => clearTimeout(t);
   }, [zipcodeInput]);
+
+  const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
 
   // Resolve the effective (since, until) for the current selection.
   // Memoized so we don't build a new range object on every render.
@@ -385,23 +437,41 @@ function BurstOpenTab({ active }: { active: boolean }) {
     [rangePreset, customRange],
   );
 
-  /** Fetch alerts + stats for the current range. */
+  /** Build the filter-only query string shared by /alerts, /alerts/stats
+   *  and /alerts/export. Pagination + sort are intentionally NOT here;
+   *  the list and the export want the same filters but different extras. */
+  const buildFilterQs = useCallback(
+    (range: { since: string; until: string }) => {
+      const qs = new URLSearchParams({
+        since: range.since,
+        until: range.until,
+      });
+      if (serverFilter !== "all") qs.set("server", serverFilter);
+      if (loginQuery) qs.set("login", loginQuery);
+      if (zipcodeQuery) qs.set("zipcode", zipcodeQuery);
+      return qs;
+    },
+    [serverFilter, loginQuery, zipcodeQuery],
+  );
+
+  /** Fetch the current page of alerts + stats for the active range. */
   const fetchAlerts = useCallback(
     async (signal?: AbortSignal) => {
       if (!effectiveRange) return;
       setLoading(true);
       try {
-        const qs = new URLSearchParams({
-          since: effectiveRange.since,
-          until: effectiveRange.until,
-          limit: "1000",
-        });
-        if (zipcodeQuery) {
-          qs.set("zipcode", zipcodeQuery);
-        }
+        const filterQs = buildFilterQs(effectiveRange);
+
+        // Alerts endpoint gets pagination + sort on top of the filters.
+        const alertsQs = new URLSearchParams(filterQs);
+        alertsQs.set("page", String(pageIndex + 1));
+        alertsQs.set("page_size", String(pageSize));
+        alertsQs.set("sort_by", sortBy);
+        alertsQs.set("sort_order", sortOrder);
+
         const [alertsRes, statsRes, latestRes] = await Promise.all([
-          apiFetch(`/api/v1/risk-monitor/burst-open/alerts?${qs}`, { signal }),
-          apiFetch(`/api/v1/risk-monitor/burst-open/alerts/stats?${qs}`, { signal }),
+          apiFetch(`/api/v1/risk-monitor/burst-open/alerts?${alertsQs}`, { signal }),
+          apiFetch(`/api/v1/risk-monitor/burst-open/alerts/stats?${filterQs}`, { signal }),
           // latest snapshot is tiny; used only for scan metadata footer.
           // 503 (scanner still initializing) is tolerated here.
           apiFetch(`/api/v1/risk-monitor/burst-open`, { signal }).catch(() => null),
@@ -410,7 +480,14 @@ function BurstOpenTab({ active }: { active: boolean }) {
         if (alertsRes.ok) {
           const json: AlertsResponse = await alertsRes.json();
           setAlerts(json.entries);
-          setTotal(json.total);
+          setTotalCount(json.total);
+          // If the filter/sort change shrank `total` below the current
+          // page, bring the user back to the last valid page instead of
+          // leaving them on an empty one.
+          const maxPageIndex = Math.max(0, Math.ceil(json.total / pageSize) - 1);
+          if (pageIndex > maxPageIndex) {
+            setPageIndex(maxPageIndex);
+          }
         }
         if (statsRes.ok) {
           const json: AlertsStats = await statsRes.json();
@@ -440,8 +517,24 @@ function BurstOpenTab({ active }: { active: boolean }) {
         setLoading(false);
       }
     },
-    [effectiveRange, zipcodeQuery],
+    [effectiveRange, buildFilterQs, pageIndex, pageSize, sortBy, sortOrder],
   );
+
+  // Any filter / range / sort / page-size change should send the user
+  // back to page 1. We do it here (instead of in each onChange handler)
+  // so a single place covers all inputs.
+  useEffect(() => {
+    setPageIndex(0);
+  }, [
+    effectiveRange?.since,
+    effectiveRange?.until,
+    serverFilter,
+    loginQuery,
+    zipcodeQuery,
+    pageSize,
+    sortBy,
+    sortOrder,
+  ]);
 
   /** Fetch config separately so the drawer can open before first scan finishes. */
   const fetchConfig = useCallback(async () => {
@@ -482,6 +575,10 @@ function BurstOpenTab({ active }: { active: boolean }) {
         method: "POST",
       });
       if (res.ok) {
+        // Jump to page 1 — new alerts are always at the top of the
+        // default `scanned_at DESC` ordering, so users want to see them
+        // immediately even if they were mid-browsing another page.
+        setPageIndex(0);
         await fetchAlerts();
       }
     } catch (err) {
@@ -526,42 +623,60 @@ function BurstOpenTab({ active }: { active: boolean }) {
     setConfigOpen(true);
   };
 
-  /** Export current (filtered) rows to CSV via AG-Grid's built-in helper. */
-  const handleExportCsv = () => {
-    if (!gridApiRef.current || !effectiveRange) return;
-    const stamp = `${fmtFilenameStamp(effectiveRange.since)}_to_${fmtFilenameStamp(effectiveRange.until)}`;
-    gridApiRef.current.exportDataAsCsv({
-      fileName: `risk-monitor_${stamp}.csv`,
-      allColumns: true,
-      // Backend stores UTC; users expect HKT in spreadsheets.
-      processCellCallback: (params) => {
-        const colId = params.column.getColId();
-        if (colId === "scanned_at") return fmtTime(params.value);
-        if (colId === "burst_window") {
-          const row = params.node?.data as AlertEvent | undefined;
-          return row ? fmtBurstWindow(row.first_open, row.last_open) : "";
-        }
-        if (colId === "orders") {
-          const row = params.node?.data as AlertEvent | undefined;
-          return row
-            ? row.orders.map((o) => `${o.direction} ${o.lots}`).join("; ")
-            : "";
-        }
-        return params.value ?? "";
-      },
-    });
+  /** Download the full filtered result set as CSV from the backend.
+   *
+   *  We can't use `window.open` because apiFetch injects an X-API-Key
+   *  header that plain browser navigations don't carry. Instead we fetch
+   *  the streamed response as a Blob and click a hidden anchor — this
+   *  also lets us surface loading state and handle errors gracefully.
+   */
+  const handleExportCsv = async () => {
+    if (!effectiveRange || exporting) return;
+    setExporting(true);
+    try {
+      const qs = buildFilterQs(effectiveRange);
+      qs.set("sort_by", sortBy);
+      qs.set("sort_order", sortOrder);
+      const res = await apiFetch(
+        `/api/v1/risk-monitor/burst-open/alerts/export?${qs}`,
+      );
+      if (!res.ok) {
+        throw new Error(`Export failed: ${res.status}`);
+      }
+      const blob = await res.blob();
+      const stamp = `${fmtFilenameStamp(effectiveRange.since)}_to_${fmtFilenameStamp(effectiveRange.until)}`;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `risk-monitor_${stamp}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error("CSV export failed:", err);
+    } finally {
+      setExporting(false);
+    }
   };
 
-  // Client-side server + login filter applied on top of the range-scoped rows.
-  const filteredAlerts = useMemo(
-    () =>
-      alerts.filter((a) => {
-        if (serverFilter !== "all" && a.server !== serverFilter) return false;
-        if (loginSearch && !String(a.login).includes(loginSearch)) return false;
-        return true;
-      }),
-    [alerts, serverFilter, loginSearch],
-  );
+  /** Turn an AG Grid column-sort event into our server-side state.
+   *
+   *  AG Grid's `sortingOrder={['desc','asc']}` on the grid below means
+   *  the user cycles desc → asc → desc, never lands on "no sort", so we
+   *  always have a column to send to the backend. If the whitelist
+   *  check fails (shouldn't, because non-sortable columns are disabled
+   *  via `sortable: false`), we fall back to the default scanned_at.
+   */
+  const handleSortChanged = useCallback((e: SortChangedEvent) => {
+    const active = e.api.getColumnState().find((c) => c.sort);
+    const nextSortBy = active?.colId && SORTABLE_COL_IDS.has(active.colId)
+      ? active.colId
+      : "scanned_at";
+    const nextSortOrder = active?.sort === "asc" ? "asc" : "desc";
+    setSortBy(nextSortBy);
+    setSortOrder(nextSortOrder);
+  }, []);
 
   const columnDefs: ColDef<AlertEvent>[] = useMemo(
     () => [
@@ -584,6 +699,9 @@ function BurstOpenTab({ active }: { active: boolean }) {
         headerName: "具体时间(开仓)",
         colId: "burst_window",
         width: 160,
+        // Derived from two columns, no SQL-friendly sort expression →
+        // disable sort to keep the UI honest.
+        sortable: false,
         valueGetter: (p) =>
           p.data ? fmtBurstWindow(p.data.first_open, p.data.last_open) : "",
       },
@@ -656,6 +774,8 @@ function BurstOpenTab({ active }: { active: boolean }) {
         headerName: "订单明细",
         colId: "orders",
         width: 200,
+        // Aggregate value — no meaningful server-side sort.
+        sortable: false,
         valueGetter: (p) =>
           p.data?.orders?.map((o) => `${o.direction} ${o.lots}`).join(", ") ?? "",
       },
@@ -740,10 +860,10 @@ function BurstOpenTab({ active }: { active: boolean }) {
             variant="outline"
             size="sm"
             onClick={handleExportCsv}
-            disabled={filteredAlerts.length === 0}
+            disabled={exporting || totalCount === 0}
           >
-            <Download className="h-4 w-4 mr-1.5" />
-            导出 CSV
+            <Download className={cn("h-4 w-4 mr-1.5", exporting && "animate-spin")} />
+            {exporting ? "导出中..." : "导出 CSV"}
           </Button>
           <Button variant="outline" size="sm" onClick={openConfigPanel}>
             <Settings2 className="h-4 w-4 mr-1.5" />
@@ -849,8 +969,10 @@ function BurstOpenTab({ active }: { active: boolean }) {
                 selected={customRange}
                 onSelect={setCustomRange}
                 numberOfMonths={2}
-                // 30-day retention = no data older than that, so disable past it
-                disabled={{ before: new Date(Date.now() - 30 * 24 * 3600 * 1000) }}
+                // Backend retention = no data older than RETENTION_DAYS
+                disabled={{
+                  before: new Date(Date.now() - RETENTION_DAYS * 24 * 3600 * 1000),
+                }}
               />
             </PopoverContent>
           </Popover>
@@ -880,52 +1002,128 @@ function BurstOpenTab({ active }: { active: boolean }) {
           />
         </div>
 
-        {/* Login search */}
+        {/* Login search — debounced to the backend as an exact match */}
         <div className="relative w-[180px]">
           <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
           <Input
-            placeholder="搜索账户号"
-            value={loginSearch}
-            onChange={(e) => setLoginSearch(e.target.value)}
+            placeholder="搜索账户号（精确）"
+            value={loginInput}
+            onChange={(e) => setLoginInput(e.target.value)}
             className="pl-8"
+            inputMode="numeric"
           />
         </div>
 
         <span className="text-sm text-muted-foreground ml-auto">
-          {loading
-            ? "加载中..."
-            : total >= 1000
-              ? `已展示 ${filteredAlerts.length} / 1000+ 条（请缩小范围或添加筛选）`
-              : `${filteredAlerts.length} / ${total} 条告警`}
+          {loading ? "加载中..." : `共 ${totalCount} 条告警`}
         </span>
       </div>
 
-      {/* AG-Grid */}
+      {/* AG-Grid — server-side paginated, server-side sorted */}
       <div
         className={cn(
-          "risk-monitor-theme h-[calc(100vh-480px)] min-h-[400px] w-full",
+          "risk-monitor-theme h-[calc(100vh-540px)] min-h-[400px] w-full",
           isDarkMode ? "ag-theme-quartz-dark" : "ag-theme-quartz",
         )}
         style={gridStyle}
       >
         <AgGridReact<AlertEvent>
           ref={gridRef}
-          rowData={filteredAlerts}
+          rowData={alerts}
           columnDefs={columnDefs}
           defaultColDef={defaultColDef}
           gridOptions={{ theme: "legacy" }}
           animateRows={false}
           enableCellTextSelection
           suppressCellFocus
-          pagination
-          paginationPageSize={50}
-          paginationPageSizeSelector={[25, 50, 100, 200]}
+          // Force the user through desc → asc → desc so a column always
+          // has a sort direction. Lets us skip the "no active sort"
+          // branch on the server and keep /alerts deterministic.
+          sortingOrder={["desc", "asc"]}
+          onSortChanged={handleSortChanged}
           onGridReady={(e) => {
             gridApiRef.current = e.api;
           }}
           getRowId={(p) => `evt-${p.data.id}`}
         />
       </div>
+
+      {/* Pagination bar — mirrors ClientPnLMonitor for visual consistency */}
+      <Card>
+        <CardContent className="py-4">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:space-x-4">
+              <div className="text-sm text-muted-foreground">
+                {totalCount === 0
+                  ? "暂无数据"
+                  : `第 ${pageIndex * pageSize + 1}-${Math.min((pageIndex + 1) * pageSize, totalCount)} 条 / 共 ${totalCount} 条`}
+              </div>
+
+              <div className="flex items-center space-x-2">
+                <span className="text-sm text-muted-foreground">每页</span>
+                <Select
+                  value={pageSize.toString()}
+                  onValueChange={(value) => setPageSize(Number(value))}
+                >
+                  <SelectTrigger className="h-8 w-20">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {PAGE_SIZE_OPTIONS.map((size) => (
+                      <SelectItem key={size} value={size.toString()}>
+                        {size}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <span className="text-sm text-muted-foreground">条</span>
+              </div>
+            </div>
+
+            <div className="flex items-center flex-wrap gap-2 w-full sm:w-auto justify-center sm:justify-end">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setPageIndex(0)}
+                disabled={pageIndex === 0 || loading}
+              >
+                首页
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setPageIndex(Math.max(0, pageIndex - 1))}
+                disabled={pageIndex === 0 || loading}
+              >
+                上一页
+              </Button>
+
+              <div className="flex items-center space-x-1">
+                <span className="text-sm text-muted-foreground">
+                  第 {pageIndex + 1} / {totalPages} 页
+                </span>
+              </div>
+
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setPageIndex(Math.min(totalPages - 1, pageIndex + 1))}
+                disabled={pageIndex >= totalPages - 1 || loading}
+              >
+                下一页
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setPageIndex(totalPages - 1)}
+                disabled={pageIndex >= totalPages - 1 || loading}
+              >
+                末页
+              </Button>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
 
       {/* Config Drawer */}
       <ConfigDrawer

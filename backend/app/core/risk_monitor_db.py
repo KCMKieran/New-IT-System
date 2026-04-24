@@ -19,9 +19,28 @@ import logging
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 logger = logging.getLogger(__name__)
+
+# Whitelist of column names allowed as `sort_by` in the /alerts API.
+# NEVER bypass this set — the resolved column name is interpolated
+# directly into SQL (sqlite3 doesn't support bind params for identifiers),
+# so any untrusted value here would be a direct injection vector.
+SORTABLE_ALERT_COLS: frozenset[str] = frozenset({
+    "scanned_at", "rule_id", "rule_label", "server", "login", "symbol",
+    "order_count", "total_lots", "equity", "balance",
+    "equity_per_lot", "total_open_lots", "leverage",
+    "currency", "zipcode", "first_open", "last_open",
+    # Frontend alias for the `account_group` DB column. We map it in
+    # `_resolve_alert_order` so the API stays consistent with the
+    # field name the React component already uses.
+    "group",
+})
+
+# Frontend field name → actual DB column. Only needed where the two
+# differ; anything not present here is assumed to match verbatim.
+_SORT_COL_DB_NAME: dict[str, str] = {"group": "account_group"}
 
 _DB_PATH = Path(__file__).resolve().parents[2] / "data" / "risk_monitor.db"
 
@@ -124,6 +143,28 @@ def init_risk_monitor_db() -> None:
         # rows, flatten their JSON alerts into the event table so existing
         # history is queryable under the new view.
         _backfill_alert_events_if_needed(conn)
+
+        # Startup retention purge. The hot path in `append_scan_and_events`
+        # already trims old rows on every scan, but if scanning was paused
+        # for longer than the retention window the DB would keep stale data
+        # until the next scan fires. Running it here makes startup a safe
+        # net so the "only keep last 30 days" invariant always holds after
+        # a deploy / restart.
+        cutoff_expr = f"datetime('now', '-{_RETENTION_DAYS} days')"
+        deleted_events = conn.execute(
+            f"DELETE FROM alert_events WHERE scanned_at < {cutoff_expr}"
+        ).rowcount
+        deleted_history = conn.execute(
+            f"DELETE FROM scan_history WHERE scanned_at < {cutoff_expr}"
+        ).rowcount
+        conn.commit()
+        if deleted_events or deleted_history:
+            logger.info(
+                "Risk monitor startup purge: removed %d alert_events and %d scan_history rows older than %d days",
+                deleted_events,
+                deleted_history,
+                _RETENTION_DAYS,
+            )
 
     logger.info("Risk monitor SQLite database initialized at %s", _DB_PATH)
 
@@ -367,29 +408,19 @@ def _escape_like(text: str) -> str:
     return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
-def query_alert_events(
+def _build_alert_filters(
     since: str,
     until: str,
-    server: str | None = None,
-    login: int | None = None,
-    symbol: str | None = None,
-    rule_id: int | None = None,
-    zipcode: str | None = None,
-    limit: int = 200,
-    offset: int = 0,
-) -> tuple[list[dict], int]:
-    """Query alert events by time range + optional filters.
+    server: str | None,
+    login: int | None,
+    symbol: str | None,
+    rule_id: int | None,
+    zipcode: str | None,
+) -> tuple[str, list[Any]]:
+    """Build a shared WHERE clause + params list for alert_events queries.
 
-    Args:
-        since / until: UTC ISO8601 strings (inclusive / exclusive).
-        server / login / symbol / rule_id: optional equality filters.
-        zipcode: substring match (`%x%`), case-insensitive. NULLs never
-            match so rows without CRM zipcode are silently excluded
-            when this filter is active.
-        limit / offset: pagination.
-
-    Returns:
-        (entries, total) — entries sorted by scanned_at DESC, id DESC.
+    Extracted so paginated, streaming, and stats queries stay in sync —
+    any new filter only needs to be added here once.
     """
     where = ["scanned_at >= ?", "scanned_at < ?"]
     params: list[Any] = [since, until]
@@ -410,7 +441,70 @@ def query_alert_events(
         where.append("zipcode LIKE ? ESCAPE '\\'")
         params.append(f"%{_escape_like(zipcode)}%")
 
-    where_sql = " AND ".join(where)
+    return " AND ".join(where), params
+
+
+def _resolve_alert_order(
+    sort_by: str | None,
+    sort_order: str | None,
+) -> str:
+    """Resolve user-supplied sort params to a safe ORDER BY fragment.
+
+    The column is validated against `SORTABLE_ALERT_COLS` (falls back to
+    `scanned_at`). The direction is normalized to ASC / DESC. A secondary
+    `id DESC` tiebreaker is always appended to keep pagination stable
+    when the primary sort key has duplicates.
+    """
+    key = sort_by if sort_by in SORTABLE_ALERT_COLS else "scanned_at"
+    col = _SORT_COL_DB_NAME.get(key, key)
+    order = "ASC" if (sort_order or "").lower() == "asc" else "DESC"
+    return f"{col} {order}, id DESC"
+
+
+_ALERT_SELECT_COLS = """
+    id, scan_batch_id, scanned_at, rule_id, rule_label,
+    server, login, symbol, order_count, total_lots,
+    first_open, last_open,
+    equity, balance, equity_per_lot, total_open_lots,
+    leverage, account_group, orders_json, currency, zipcode
+"""
+
+
+def query_alert_events(
+    since: str,
+    until: str,
+    server: str | None = None,
+    login: int | None = None,
+    symbol: str | None = None,
+    rule_id: int | None = None,
+    zipcode: str | None = None,
+    limit: int = 200,
+    offset: int = 0,
+    sort_by: str | None = None,
+    sort_order: str | None = None,
+) -> tuple[list[dict], int]:
+    """Query alert events by time range + optional filters.
+
+    Args:
+        since / until: UTC ISO8601 strings (inclusive / exclusive).
+        server / login / symbol / rule_id: optional equality filters.
+        zipcode: substring match (`%x%`), case-insensitive. NULLs never
+            match so rows without CRM zipcode are silently excluded
+            when this filter is active.
+        limit / offset: pagination.
+        sort_by: column name from `SORTABLE_ALERT_COLS`; anything else
+            falls back to `scanned_at` so the frontend can send any
+            AG Grid column id without us validating it upstream.
+        sort_order: "asc" | "desc" (case-insensitive); defaults to desc.
+
+    Returns:
+        (entries, total) — entries sorted by the resolved column with an
+        `id DESC` tiebreaker.
+    """
+    where_sql, params = _build_alert_filters(
+        since, until, server, login, symbol, rule_id, zipcode,
+    )
+    order_sql = _resolve_alert_order(sort_by, sort_order)
 
     with get_risk_monitor_db() as conn:
         total = conn.execute(
@@ -420,14 +514,10 @@ def query_alert_events(
 
         rows = conn.execute(
             f"""
-            SELECT id, scan_batch_id, scanned_at, rule_id, rule_label,
-                   server, login, symbol, order_count, total_lots,
-                   first_open, last_open,
-                   equity, balance, equity_per_lot, total_open_lots,
-                   leverage, account_group, orders_json, currency, zipcode
+            SELECT {_ALERT_SELECT_COLS}
             FROM alert_events
             WHERE {where_sql}
-            ORDER BY scanned_at DESC, id DESC
+            ORDER BY {order_sql}
             LIMIT ? OFFSET ?
             """,
             params + [limit, offset],
@@ -436,28 +526,76 @@ def query_alert_events(
     return [_row_to_alert_dict(r) for r in rows], total
 
 
+def stream_alert_events(
+    since: str,
+    until: str,
+    server: str | None = None,
+    login: int | None = None,
+    symbol: str | None = None,
+    rule_id: int | None = None,
+    zipcode: str | None = None,
+    sort_by: str | None = None,
+    sort_order: str | None = None,
+    batch_size: int = 5000,
+) -> Iterator[dict]:
+    """Yield alert events matching the filter, without a row-count cap.
+
+    Used by the CSV export endpoint so a large time range can be dumped
+    without loading all rows into memory at once. Connection lifetime is
+    managed inside the generator (regular `with get_risk_monitor_db()`
+    would close before callers finished iterating).
+
+    Rows are emitted in the same order as `query_alert_events` would
+    produce, so sorted CSV output matches the paginated table view.
+    """
+    where_sql, params = _build_alert_filters(
+        since, until, server, login, symbol, rule_id, zipcode,
+    )
+    order_sql = _resolve_alert_order(sort_by, sort_order)
+
+    conn = sqlite3.connect(str(_DB_PATH))
+    conn.row_factory = sqlite3.Row
+    try:
+        cursor = conn.execute(
+            f"""
+            SELECT {_ALERT_SELECT_COLS}
+            FROM alert_events
+            WHERE {where_sql}
+            ORDER BY {order_sql}
+            """,
+            params,
+        )
+        while True:
+            rows = cursor.fetchmany(batch_size)
+            if not rows:
+                break
+            for row in rows:
+                yield _row_to_alert_dict(row)
+    finally:
+        conn.close()
+
+
 def alert_events_stats(
     since: str,
     until: str,
+    server: str | None = None,
+    login: int | None = None,
     zipcode: str | None = None,
 ) -> dict[str, Any]:
     """Aggregate stats over the time range for the summary cards.
 
-    Keeps the zipcode filter in sync with query_alert_events so the
-    "可疑账户 / 告警事件" numbers on the page match whatever the user
-    filtered in the toolbar.
+    Keeps the same filters as query_alert_events so the "可疑账户 /
+    告警事件" numbers on the page match whatever the user filtered in
+    the toolbar.
 
     Returns:
         suspicious_count: distinct login count in range
         event_count:      total alert row count in range
         servers:          distinct servers touched (for UI hint)
     """
-    where = ["scanned_at >= ?", "scanned_at < ?"]
-    params: list[Any] = [since, until]
-    if zipcode:
-        where.append("zipcode LIKE ? ESCAPE '\\'")
-        params.append(f"%{_escape_like(zipcode)}%")
-    where_sql = " AND ".join(where)
+    where_sql, params = _build_alert_filters(
+        since, until, server, login, None, None, zipcode,
+    )
 
     with get_risk_monitor_db() as conn:
         row = conn.execute(

@@ -115,6 +115,13 @@ class AlertsResponse(BaseModel):
     total: int
     since: str
     until: str
+    # Echo back the effective pagination so the frontend can render
+    # "page X of Y" without tracking the last-sent values itself.
+    # Default 1 / 50 matches the new API default when page/page_size
+    # are omitted, keeping legacy clients that only read `entries/total`
+    # unaffected.
+    page: int = 1
+    page_size: int = 50
 
 
 class AlertsStats(BaseModel):

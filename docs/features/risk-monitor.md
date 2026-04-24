@@ -580,8 +580,9 @@ if not redis.exists(key):
 │  GET  /burst-open/config       → 读当前 rules + interval   │
 │  POST /burst-open/config       → 更新 config, 立即生效     │
 │  POST /burst-open/scan-now     → 立即触发一次扫描 (加锁)   │
-│  GET  /burst-open/alerts        → 时间范围查询 alert_events │
-│  GET  /burst-open/alerts/stats  → 时间范围聚合 stats        │
+│  GET  /burst-open/alerts        → 分页 + 排序 + 过滤查询   │
+│  GET  /burst-open/alerts/stats  → 过滤后聚合统计           │
+│  GET  /burst-open/alerts/export → 流式 CSV 导出 (全量)     │
 └─────────────────────────────────────────────────────────────┘
                        │
                        ▼
@@ -656,7 +657,21 @@ CREATE INDEX idx_alert_events_login_scan   ON alert_events(login, scanned_at DES
 CREATE INDEX idx_alert_events_server_sym   ON alert_events(server, symbol, scanned_at DESC);
 ```
 
-**前端展示**: 页面主视图直接查询 `alert_events`（默认最近 4 小时）。时间范围支持快捷预设（1h / 4h / 1d / 7d / 30d）+ 自定义日期范围 picker，支持服务器/账户筛选和 CSV 导出。不再需要"查看历史" Drawer。
+**前端展示**: 页面主视图直接查询 `alert_events`（默认最近 4 小时）。时间范围支持快捷预设（1h / 4h / 1d / 7d / 30d）+ 自定义日期范围 picker，支持服务器/账户/zipcode 筛选，列头点击即按 **服务端排序**（scanned_at / login / total_lots / equity 等白名单列，见 `SORTABLE_ALERT_COLS`），分页走服务端（默认每页 50，可切到 500）。CSV 导出通过 `/burst-open/alerts/export` 后端流式 CSV 输出，不受分页行数限制。不再需要"查看历史" Drawer。
+
+#### 查询接口（2026-04-24 升级到服务端分页）
+
+| 参数 | 类型 | 默认 | 说明 |
+|------|------|------|------|
+| `since` / `until` | ISO8601 UTC | 最近 4h | 时间窗口 |
+| `page` | int ≥ 1 | 1 | 1-based 页码；与 `limit`/`offset` 同时出现时 `page` 优先 |
+| `page_size` | int ∈ [1, 500] | 50 | 每页行数上限 500；全量导出请走 `/alerts/export` |
+| `sort_by` | str | `scanned_at` | 仅接受 `SORTABLE_ALERT_COLS` 白名单，其它值静默回退到 `scanned_at`（防 SQL 注入） |
+| `sort_order` | `asc` \| `desc` | `desc` | 大小写不敏感 |
+| `server` / `login` / `symbol` / `rule_id` / `zipcode` | — | — | 等值 / LIKE 过滤 |
+| `limit` / `offset` | int | — | 旧客户端兼容；`page` 传了就忽略 |
+
+`/alerts/stats` 接同一套 `server/login/zipcode` 过滤，让"可疑账户 / 告警事件"卡片与表格保持一致。`/alerts/export` 参数同 `/alerts` 但**不接受** `page/page_size/limit/offset`，用 `StreamingResponse + csv.writer`，每 5000 行一批从 SQLite `fetchmany`，内存占用与行数无关；响应带 UTF-8 BOM，Excel 直接打开中文不乱码。
 
 **写入路径**: `burst_open_scheduler._run_scan()` → `append_scan_and_events()` 在单事务内写入批次行 + 所有告警事件行。
 
@@ -672,7 +687,12 @@ CREATE INDEX idx_alert_events_server_sym   ON alert_events(server, symbol, scann
 - 方案: 在 `_query_mt4_recent_opens` / `_query_mt5_recent_opens` 的 SELECT 子句里用 `DATE_FORMAT(CONVERT_TZ(t.OPEN_TIME, '+03:00', '+00:00'), '%Y-%m-%dT%TZ')` 直接在 MySQL 端转成 UTC ISO8601。broker 时区写死 `+03:00`（不依赖 `@@session.time_zone`，broker 多年稳定，CONVERT_TZ 也更快）。`WHERE t.OPEN_TIME >= DATE_SUB(NOW(), ...)` 保持原样，因为 `t.OPEN_TIME` 和 `NOW()` 两边都是 broker local，比较仍正确。
 - 回填: `backend/scripts/backfill_alert_events_open_time.py` 一次性把旧的 10142 行 `first_open` / `last_open` 以及 `orders_json` 里 73960 笔 `open_time` 统一减 3 小时并加 `Z` 后缀。脚本幂等（已带 `Z` 或带明确 offset 的值跳过），支持 dry-run，2026-04-17 已执行。
 
-**保留策略**: **30 天**。每次扫描后同步 `DELETE FROM scan_history / alert_events WHERE scanned_at < datetime('now', '-30 days')`。
+**保留策略**: **30 天**（常量 `_RETENTION_DAYS` 集中控制）。清理在两个地方触发：
+
+1. 每次扫描写入后同步 `DELETE FROM scan_history / alert_events WHERE scanned_at < datetime('now', '-30 days')`（热路径，默认每 10min 一次）。
+2. 后端启动时 `init_risk_monitor_db()` 多运行一次同样的清理，避免扫描长期停摆时旧数据堆积。
+
+前端对应约束：`frontend/src/pages/RiskMonitor.tsx` 的日期选择预设最长「最近 30 天」，自定义日历 `disabled={{ before: now - 30d }}` 禁掉更旧的日期，`buildRangeIso()` 里额外 `clampToRetention()` 做双保险——即使 UI 放大了范围，发往后端的 `since` 也不会超窗。
 
 #### 币种处理（2026-04-17 上线）
 
