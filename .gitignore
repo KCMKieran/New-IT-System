@@ -18,6 +18,7 @@ __pycache__
 *.txt
 frontend/public/profit_last_refresh.txt
 *.csv
+*.xlsx
 .agents
 .cursor
 
