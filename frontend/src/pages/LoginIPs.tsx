@@ -3,7 +3,7 @@
  *
  * Four tabs:
  *   1. 日报告   — daily correlation report (read-only)
- *   2. 监控账户  — watchlist CRUD (writes behind email verification)
+ *   2. 监控账户  — watchlist CRUD
  *   3. 手动搜索  — on-demand search + async CSV export
  *   4. 运维    — scheduler timeline + mail recipients
  *

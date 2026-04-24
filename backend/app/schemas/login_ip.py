@@ -192,38 +192,6 @@ class SchedulerRunNowRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Verification code flow (mirror of IB Financial)
-# ---------------------------------------------------------------------------
-
-
-class AdminWhitelistResponse(BaseModel):
-    """Emails that are allowed to request a verification code.
-
-    Backed by the shared `admin_whitelist` SQLite table (single source of truth
-    for all risk-control modules), but exposed via a module-local endpoint so
-    the frontend doesn't need to cross-reference the IB Financial namespace.
-    """
-
-    emails: List[str]
-
-
-class RequestCodeRequest(BaseModel):
-    email: str
-    action: str  # must match the action used in verify-action below
-
-
-class VerifyActionRequest(BaseModel):
-    email: str
-    code: str
-    # Action name plus an optional payload. Supported actions:
-    #   "add_monitored_account"      payload: MonitoredAccountBatchCreate fields
-    #   "update_monitored_account"   payload: {id: int, remarks: str}
-    #   "delete_monitored_account"   payload: {id: int}
-    action: str
-    payload: Optional[dict[str, Any]] = None
-
-
-# ---------------------------------------------------------------------------
 # CSV export (Tab 3 search results)
 # ---------------------------------------------------------------------------
 

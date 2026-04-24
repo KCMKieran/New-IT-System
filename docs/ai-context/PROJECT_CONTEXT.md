@@ -379,27 +379,26 @@ New-IT-System/
 - 4-tab UI: 每日报告 / 监控账户 / 搜索 / 运维
 - Scheduled ingestion via APScheduler (`Asia/Hong_Kong`): 02:00 download + parse FTP/FTPS logs; 08:30 correlation analysis + HTML email report
 - Correlation windows: same-day + previous 7 days (`login_history`)
-- Watchlist CRUD gated by email verification code (Redis TTL 300s, reuses shared `admin_whitelist` via module-local `GET /whitelist` endpoint)
+- Watchlist CRUD via REST (`POST`/`PATCH`/`DELETE` `/watchlist`); no per-action email verification (same `X-API-Key` gate as other APIs)
 - Manual search (account_id / IP) with async CSV export (ThreadPoolExecutor + UTF-8-BOM)
 - Scheduler audit trail: `login_ip_scheduler_runs` table surfaced in ops tab
 - Failure alerts: ⚠️ email on job failure / partial success
 
-**APIs**: 14 endpoints under `/api/v1/login-ip/*`
+**APIs**: 15 endpoints under `/api/v1/login-ip/*`
 - `GET /available-dates`, `GET /report?date=`, `GET /watchlist`, `POST /search`
+- `POST`/`PATCH`/`DELETE` `/watchlist` (batch add, update remarks, delete row)
 - `GET /scheduler/runs`, `POST /scheduler/run-now`
 - `GET|POST /mail/recipients`, `DELETE /mail/recipients/{id}`
 - `POST /export/tasks`, `GET /export/tasks/{id}`, `GET /export/tasks/{id}/download`
-- `GET /whitelist`, `POST /request-code`, `POST /verify-action`
 
 **Data Sources**:
 - FTP/FTPS × 3 MT servers (MT4_Live / MT4_Live2 / MT5) for raw login logs
 - SQLite `backend/data/login_ip.db` (5 tables: monitored_accounts, login_history, mail_recipients, scheduler_runs, export_tasks)
 - MySQL Slave (`KCM_fxbackoffice.users`) for Chinese-name enrichment
-- Shared `admin_whitelist` (SQLite) for verification-code email gating
 
 **Key Files**:
-- `frontend/src/pages/LoginIPs.tsx` (tab shell) + `frontend/src/pages/login-ip/` (ReportTab, WatchlistTab, SearchTab, OperationsTab, useVerification, VerificationDialog, types.ts)
-- `backend/app/api/v1/routes/login_ip.py` (14 endpoints)
+- `frontend/src/pages/LoginIPs.tsx` (tab shell) + `frontend/src/pages/login-ip/` (ReportTab, WatchlistTab, SearchTab, OperationsTab, `types.ts`)
+- `backend/app/api/v1/routes/login_ip.py` (15 endpoints)
 - `backend/app/services/login_ip_{ftp,analyzer,report,search,export,enrichment}_service.py`
 - `backend/app/core/login_ip_db.py` + `backend/app/core/login_ip_scheduler.py`
 - `backend/scripts/migrate_login_ip_from_legacy.py` (one-off migration from legacy `monitoring.db`)

@@ -48,7 +48,7 @@
   login_ip_export_tasks)
            │
            ▼
- FastAPI /api/v1/login-ip/* (14 个 endpoint)
+ FastAPI /api/v1/login-ip/*（15 个 endpoint）
            │
            ▼
  React 4 Tab 页面 (/login-ips)
@@ -63,9 +63,9 @@
 | 数据 | 位置 | 用途 |
 |------|------|------|
 | MT4 Live / MT4 Live2 / MT5 登录日志 | FTP/FTPS (3 台) | 每日 02:00 拉 `YYYYMMDD.log*` |
-| `monitored_accounts` | `login_ip.db` | 运营维护的被监控账户（批量新增需邮箱验证） |
+| `monitored_accounts` | `login_ip.db` | 运营维护的被监控账户（通过 Tab 2 或 REST 写库） |
 | `login_history` | `login_ip.db` | 过去 7 天每 (account, ip, day, server) 的登录记录 |
-| `admin_whitelist` | `it_system.db` (IB Financial) | 允许收验证码的管理员邮箱（多模块共享）|
+| `admin_whitelist` | `it_system.db` (IB Financial) | IB Financial 等模块的验证码白名单；**Login IP 监控账户写操作不再经此表** |
 | CRM MySQL (`KCM_fxbackoffice.users`) | MySQL Slave | 关联账户中文姓名 enrichment |
 | `login_ip_mail_recipients` | `login_ip.db` | 收日报/告警的 `to` / `cc` 列表 |
 | `login_ip_scheduler_runs` | `login_ip.db` | 调度审计（UI 运维 Tab 展示） |
@@ -78,7 +78,7 @@ MT4 vs MT5 日志格式小差异（MT5 多几列），`login_ip_analyzer_service
 
 Base: `/api/v1/login-ip/*`，全部走平台的 `X-API-Key` 中间件（`apiFetch` 自动附带）。
 
-**读路径（不保护）**
+**读路径**
 
 | Method | Path | 说明 |
 |--------|------|------|
@@ -88,29 +88,22 @@ Base: `/api/v1/login-ip/*`，全部走平台的 `X-API-Key` 中间件（`apiFetc
 | POST | `/search` | 批量搜索 `{search_type, terms: string[], days}`（Tab 3） |
 | GET | `/scheduler/runs?job=&limit=` | 最近 N 条调度记录（上限 200） |
 | GET | `/mail/recipients?active_only=` | 收件人列表（UI 编辑用） |
-| GET | `/whitelist` | 白名单邮箱只读（**Tab 2 弹窗用**） |
 
-**写路径 / 任务触发**
+**写路径 / 任务触发**（与平台其它 API 一样依赖 `X-API-Key`；无邮箱验证码层）
 
 | Method | Path | 说明 |
 |--------|------|------|
+| POST | `/watchlist` | 批量新增监控账户，body: `MonitoredAccountBatchCreate`（`account_ids`, `server_name`, `remarks?`） |
+| PATCH | `/watchlist/{id}` | 只改 `remarks`（body: `{ "remarks": string \| null }`） |
+| DELETE | `/watchlist/{id}` | 硬删除一条 `monitored_accounts` |
 | POST | `/scheduler/run-now` | `{job: "download"\|"analyze_report", target_date?}` 手动跑 |
-| POST | `/mail/recipients` | 新增收件人（无验证码，运维内部） |
+| POST | `/mail/recipients` | 新增收件人（运维内部） |
 | DELETE | `/mail/recipients/{id}` | 软删除收件人 (`is_active=0`) |
 | POST | `/export/tasks` | 创建异步 CSV 导出（搜索结果） |
 | GET | `/export/tasks/{id}` | 轮询 status |
 | GET | `/export/tasks/{id}/download` | 下载 CSV（`utf-8-sig`，Excel 直开）|
-| POST | `/request-code` | 发验证码到白名单邮箱（Redis TTL 300s） |
-| POST | `/verify-action` | 消费验证码并执行 watchlist 写 |
 
-**验证码保护的 action**（`POST /verify-action` 的 `action` 字段）：
-
-- `add_monitored_account` — `{account_ids: int[], server_name, remarks?}`
-- `update_monitored_account` — `{id, remarks}`
-- `delete_monitored_account` — `{id}`
-
-> 设计选择：不单独暴露 `POST/PATCH/DELETE /watchlist`，写操作只能通过
-> `/verify-action` 进入，保证操作员绕不过邮箱验证码。
+> **历史说明**：曾通过 `POST /request-code` + `POST /verify-action` 做邮箱双因子；该流已于 2026-04-24 移除。若需恢复，参见 `docs/features/login-ip_migration.md` 中 Phase 6 旧描述。
 
 ## 5. 定时任务
 
@@ -165,10 +158,8 @@ LOGIN_IP_MT4_LIVE2_...        # 同上 6 段
 frontend/src/pages/LoginIPs.tsx                    # shell（4 个 Tab 切换）
 frontend/src/pages/login-ip/
   ├── types.ts                    # 镜像后端 Pydantic schema
-  ├── useVerification.ts          # 验证码 hook
-  ├── VerificationDialog.tsx      # 验证码输入弹窗
   ├── ReportTab.tsx               # Tab 1 每日报告（shadcn Table）
-  ├── WatchlistTab.tsx            # Tab 2 监控账户（shadcn Table + 白名单弹窗）
+  ├── WatchlistTab.tsx            # Tab 2 监控账户（shadcn Table；POST/PATCH/DELETE `/watchlist`）
   ├── SearchTab.tsx               # Tab 3 搜索（AG-Grid + 异步 CSV）
   └── OperationsTab.tsx           # Tab 4 运维（调度审计 + 邮件收件人）
 ```
@@ -178,18 +169,16 @@ frontend/src/pages/login-ip/
 - **Tab 1 / Tab 2 表格**：shadcn `<Table>`，黑底白字表头（`bg-black [&_th]:text-white`），圆角通过父 `overflow-hidden` + `[&_th:first-child]:rounded-tl-xl` 实现。深色模式沿用主题色变量。
 - **Tab 1 关联展示**：关联账户在单元格内红色粗体 inline 显示，不再用绿色大块「无关联」提示。
 - **Tab 1 登录状态 Badge**：三色（未登录灰 / 已登录无关联绿 / 已登录有关联红），文字只留「已登录」「未登录」。
-- **Tab 2 批量新增**：两行响应式（Textarea 账号 / Select 服务器 + Input 备注，桌面 50/50，移动端堆叠），「新增（需邮箱验证）」。
-- **Tab 2 白名单弹窗**：`Dialog` 展示允许收验证码的邮箱，请求 `/api/v1/login-ip/whitelist`（模块解耦，不复用 IB Financial 端点）。
+- **Tab 2 批量新增**：两行响应式（Textarea 账号 / Select 服务器 + Input 备注，桌面 50/50，移动端堆叠），「**新增**」→ `POST /watchlist`。
+- **Tab 2 行内操作**：`保存备注` → `PATCH /watchlist/{id}`；删除 → `DELETE /watchlist/{id}`。无白名单/验证码弹窗。
 - **Tab 3 搜索**：Textarea 多行 `terms` + Select `days` (1/3/7/15/30)，结果走 AG-Grid + 异步 CSV（轮询 `/export/tasks/{id}`）。
 - **所有 fetch** 必走 `apiFetch`；`useEffect` 必带 `AbortController`。
-
-验证码流：前端先 `POST /request-code` → 用户输邮件里的 6 位码 → `POST /verify-action` 带 `{email, code, action, payload}`。所有 watchlist 写操作共用同一个 `useVerification` hook + `VerificationDialog`。
 
 ## 9. 关键文件索引
 
 **Backend**
 
-- `app/api/v1/routes/login_ip.py` — 14 个 endpoint
+- `app/api/v1/routes/login_ip.py` — 15 个 endpoint
 - `app/schemas/login_ip.py` — Pydantic models
 - `app/services/login_ip_ftp_service.py` — FTP/FTPS 下载
 - `app/services/login_ip_analyzer_service.py` — 日志解析
@@ -218,7 +207,7 @@ frontend/src/pages/login-ip/
 | 08:30 没收到邮件 | 1. 运维 Tab 看 `login_ip_analyze_report_job` 是否 `succeeded` → 2. 查 `login_ip_mail_recipients` 是否 `is_active=1` → 3. 查 SMTP 凭据 |
 | 报告显示某账号「未登录」但实际登录了 | 1. 02:00 download 是否成功 → 2. `data/login_ip/YYYYMMDD/` 有没有对应服务器的 JSON → 3. 日志里账号的服务器名是否和 `monitored_accounts.server_name` 完全一致（区分 `MT4_Live` vs `MT4_Live2`）|
 | 关联账户没有中文姓名 | CRM MySQL 连接失败；看 `login_ip_enrichment_service` warning 日志 |
-| 添加监控账户「验证码无效」 | 1. 收件人是否在 `admin_whitelist` → 2. Redis 是否在线 → 3. 距离发码是否超过 300 秒 |
+| Tab 2 写操作 401/403 | 查平台 `X-API-Key` 是否配置正确（与其它 API 相同，不再单独验邮箱码） |
 | 修改 `.env` 密码后 FTP 530 | 密码含 `$` / `!` 等 shell 特殊字符但没加单引号 → 重新改成 `'...'` 再重启容器 |
 | 重跑某一天的分析 | UI 运维 Tab → 「立即运行」 analyze_report + 填 `target_date` |
 

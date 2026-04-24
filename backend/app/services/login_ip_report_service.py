@@ -468,7 +468,7 @@ def render_html_report(
     <body>
         <div class="container">
             <h1>关联分析报告({target_date})</h1>
-            <h2>添加、修改、查看历史记录，请访问：http://10.6.20.138:5173/login-ips </h2>
+            <h2>添加、修改、查看历史记录，请访问：https://analysis.kohleservices.com/login-ips </h2>
             {''.join(summary_parts)}
             {''.join(appendix_parts)}
             <p class="footer">此邮件为自动生成，请勿回复，若有疑问请联系Kieran。</p>
