@@ -44,6 +44,9 @@ class ClientReturnRateRow(BaseModel):
 
     # Frontend local-filter fields (not used for backend sorting/filtering)
     country: str = Field("Unknown", description="Client country: CN (cid=0) or Global (cid=1)")
+    # Same CRM column as risk-monitor: fxbackoffice.mt4_users.ZIPCODE (per-login; here
+    # we expose the zipcode on the client's highest-equity live account in sid 1/5/6).
+    zipcode: Optional[str] = Field(None, description="Client zipcode from mt4_users; null if unset")
     is_akcm: bool = Field(False, description="Whether client has AKCM tag (tagid=30154)")
 
 

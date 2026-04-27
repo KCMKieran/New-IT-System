@@ -8,11 +8,15 @@
  *   - 区间交易利润: trading profit within selected date range
  *   - 区间净入金: net deposits within selected date range
  *   - 负净入金回报率: (equity - A) / A, where A = MAX(deposits_90d, |net_deposit_hist|)
+ *   - 长期收益率 ROACE (return_on_avg_equity): profit_hist / avg_daily_equity × 100%
+ *     - avg_daily_equity: mean daily ending equity on "active" days (stats_balances JOIN
+ *       stats_trading), sid 1/5/6, no demo, no IB Wallet, endingEquity > 0, CEN ÷100
+ *     - profit_hist: realized trade P&L from stats_trading_running_totals (excl. IB comm, bonus)
  *
  * Time range "过去6小时" uses precise CLOSE_TIME filtering (MT4 server time UTC+2/+3).
  * Other ranges use date-level closeDate filtering.
  *
- * Docs: docs/features/client-return-rate.md
+ * Docs: docs/features/client-return-rate.md, docs/features/roace-return-rate.md
  */
 import { useState, useCallback, useMemo, useRef, useEffect } from "react";
 import { useTheme } from "@/components/theme-provider";
@@ -66,6 +70,8 @@ interface ClientReturnRateRow {
   avg_daily_equity: number | null;
   return_on_avg_equity: number | null;
   country: string;
+  /** CRM zipcode from mt4_users.ZIPCODE (same source as risk-monitor); null if empty. */
+  zipcode?: string | null;
   is_akcm: boolean;
 }
 
@@ -511,6 +517,12 @@ export default function ClientReturnRate() {
         ),
       },
       {
+        field: "zipcode",
+        headerName: "zipcode",
+        width: 120,
+        valueFormatter: (p) => (p.value == null || p.value === "" ? "" : String(p.value)),
+      },
+      {
         field: "net_deposit_hist",
         headerName: "历史净入金",
         width: 140,
@@ -547,6 +559,15 @@ export default function ClientReturnRate() {
       {
         field: "avg_daily_equity",
         headerName: "日均净值",
+        headerComponent: InfoHeader,
+        headerComponentParams: {
+          tooltip:
+            "公式: SUM(活跃日 endingEquity) / 活跃天数\n" +
+            "活跃日: stats_trading 有记录的日期（有交易/资金变动）；数据源 stats_balances 日终净值\n" +
+            "范围: sid 1/5/6，排除 demo、IB Wallet(sid=2)，排除 endingEquity=0；CEN 账户净值 ÷100\n\n" +
+            "Formula: SUM(daily ending equity on active days) / count(active days)\n" +
+            "Active days: dates present in stats_trading; balances from stats_balances",
+        },
         width: 140,
         valueFormatter: (p) => formatCurrency(p.value),
         cellStyle: { backgroundColor: "rgba(59, 130, 246, 0.08)" },
@@ -554,6 +575,15 @@ export default function ClientReturnRate() {
       {
         field: "return_on_avg_equity",
         headerName: "长期收益率(ROACE)%",
+        headerComponent: InfoHeader,
+        headerComponentParams: {
+          tooltip:
+            "公式: 历史利润 / 日均净值 × 100%\n" +
+            "历史利润 profit_hist: stats_trading_running_totals 已实现交易盈亏（不含 IB 佣金、奖金、浮动盈亏）\n" +
+            "ROACE = Return on Average Capital Employed（平均占用资本回报率）\n\n" +
+            "Formula: profit_hist / avg_daily_equity × 100%\n" +
+            "profit_hist: realized closed-trade P&L (excl. IB commission, bonus, floating P&L)",
+        },
         width: 180,
         valueFormatter: (p) => formatPercent(p.value),
         cellClass: (p) => getProfitColor(p.value),
@@ -634,6 +664,13 @@ export default function ClientReturnRate() {
           <CardTitle className="text-2xl font-bold">客户收益率查询</CardTitle>
           <p className="text-sm text-muted-foreground">
             展示所选时间范围内有平仓记录的客户
+          </p>
+          {/* Long-term return (ROACE): same definition as backend / docs/features/roace-return-rate.md */}
+          <p className="text-xs text-muted-foreground leading-relaxed border-l-2 border-muted pl-3 mt-2">
+            <span className="font-medium text-foreground/80">长期收益率（ROACE）说明：</span>
+            长期收益率% = 历史利润 ÷ 日均净值 × 100%。日均净值为全历史中「有交易或资金变动」的日期上，
+            各日日终净值（交易账户 sid 1/5/6，不含 IB 钱包与 demo）的平均值；历史利润为已实现交易盈亏（不含
+            IB 佣金、奖金、浮动盈亏）。列头 ℹ 可查看公式与口径细节。
           </p>
         </CardHeader>
         <CardContent>

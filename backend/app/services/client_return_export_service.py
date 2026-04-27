@@ -43,6 +43,7 @@ _HK_TZ = timezone(timedelta(hours=8))
 _CSV_FIELDS = [
     "client_id",
     "country",
+    "zipcode",
     "is_akcm",
     "net_deposit_hist",
     "net_deposit_month",

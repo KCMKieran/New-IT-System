@@ -180,6 +180,7 @@ SELECT
     ROUND(COALESCE(eq.equity, 0), 2) AS equity,
     ROUND(COALESCE(rt.profit_hist_trades, 0), 2) AS profit_hist,
     COALESCE(uc.country, 'Unknown') AS country,
+    zc.zipcode AS zipcode,
     COALESCE(akcm.is_akcm, 0) AS is_akcm,
 
     CASE
@@ -298,6 +299,29 @@ LEFT JOIN (
     WHERE id IN ({id_list_str})
 ) AS uc ON tm.client_id = uc.client_id
 
+-- Zipcode from fxbackoffice.mt4_users (same CRM field as risk-monitor). One row per
+-- client: pick the non-empty ZIPCODE on the account with highest equity (CEN-adjusted),
+-- matching sid/demo filters used for the equity aggregate above.
+LEFT JOIN (
+    SELECT
+        userId AS client_id,
+        SUBSTRING_INDEX(
+            GROUP_CONCAT(
+                NULLIF(TRIM(ZIPCODE), '')
+                ORDER BY
+                    IF(UPPER(CURRENCY) = 'CEN', EQUITY / 100.0, EQUITY) DESC
+                SEPARATOR '|'
+            ),
+            '|',
+            1
+        ) AS zipcode
+    FROM mt4_users
+    WHERE userId IN ({id_list_str})
+      AND sid IN (1, 5, 6)
+      AND `GROUP` NOT LIKE '%demo%'
+    GROUP BY userId
+) AS zc ON tm.client_id = zc.client_id
+
 LEFT JOIN (
     SELECT DISTINCT userid AS client_id, 1 AS is_akcm
     FROM user_tags
@@ -360,6 +384,7 @@ def get_client_return_rate_data(
         "adj_0_2000", "adj_2000_5000", "adj_5000_50000", "adj_50000_plus",
         "deposits_90d", "return_neg_adjusted",
         "avg_daily_equity", "return_on_avg_equity",
+        "zipcode",
     }
     if sort_by not in allowed_sort_columns:
         sort_by = "month_trade_profit"
@@ -377,7 +402,7 @@ def get_client_return_rate_data(
 
     # Redis cache
     cache_params = (
-        "client_return_v3_"
+        "client_return_v4_zipcode_"
         f"{month_start}_{month_end}_{search}_{deposit_bucket}_{sort_by}_{sort_order}_"
         f"{page}_{page_size}_{close_time_start}_{include_avg_equity}_"
         f"{country_filter}_{akcm_filter}_{return_all}"
@@ -462,12 +487,16 @@ def get_client_return_rate_data(
         finally:
             conn.close()
 
-        # Convert Decimal to float; cast is_akcm from int (0/1) to bool
+        # Convert Decimal to float; cast is_akcm from int (0/1) to bool;
+        # normalize zipcode like risk-monitor account_enrichment (empty -> None).
         for row in all_data:
             for k, v in row.items():
                 if isinstance(v, Decimal):
                     row[k] = float(v)
             row["is_akcm"] = bool(row.get("is_akcm", 0))
+            zc = row.get("zipcode")
+            if zc is not None and isinstance(zc, str):
+                row["zipcode"] = zc.strip() or None
 
         # In-memory deposit_bucket filter
         if deposit_bucket:
