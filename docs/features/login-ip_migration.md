@@ -115,7 +115,7 @@ MAIL_SEND_TOO / MAIL_CCC
 
 | 源                                    | 目标                                                               | 说明                                                                       |
 | ------------------------------------- | ------------------------------------------------------------------ | -------------------------------------------------------------------------- |
-| crontab 06:00 `log_download.py` + 08:30 `log_login_analyzer.py` | APScheduler job `login_ip_download_job`（每日 **02:00 HKT**）       | 合并：下载 + parse + 写 login_history + 清理 tmp。时区 HKT（ZoneInfo('Asia/Hong_Kong')）         |
+| crontab 06:00 `log_download.py` + 08:30 `log_login_analyzer.py` | APScheduler job `login_ip_download_job`（每日 **05:10 HKT**）     | 合并：下载 + parse + 写 login_history + 清理 tmp。时区 HKT（ZoneInfo('Asia/Hong_Kong')）         |
 | crontab 08:35 `send_report.py`        | APScheduler job `login_ip_analyze_report_job`（每日 **08:30 HKT**） | 用 `email_service` 发邮件；失败 / partial 都会发 ⚠️ 告警邮件                                     |
 | `main.py` Web UI                      | React 页面（§4）+ FastAPI routes `/api/v1/login-ip/*`              |                                                                            |
 | `monitoring.db`                       | `backend/data/login_ip.db`（两表结构不变）                         | 一次性迁移脚本见 §5                                                        |
@@ -379,7 +379,7 @@ def analyze_date(target_date: str, base_dir: str) -> dict
 时区：HKT（与 docker-compose 的 TZ=Asia/Hong_Kong 一致）
 
 Jobs（target_date 默认 = HKT yesterday）:
-1. login_ip_download_job  每日 02:00 HKT
+1. login_ip_download_job  每日 05:10 HKT
    - 调 download_daily_logs(target_date, TMP_ROOT)
    - 调 analyze_date(target_date, log_dir=TMP_ROOT, out_dir=DATA_DIR)
      （顺便写 login_history）

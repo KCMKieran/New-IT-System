@@ -377,7 +377,7 @@ New-IT-System/
 
 **Key Features**:
 - 4-tab UI: 每日报告 / 监控账户 / 搜索 / 运维
-- Scheduled ingestion via APScheduler (`Asia/Hong_Kong`): 02:00 download + parse FTP/FTPS logs; 08:30 correlation analysis + HTML email report
+- Scheduled ingestion via APScheduler (`Asia/Hong_Kong`): 05:10 download + parse FTP/FTPS logs; 08:30 correlation analysis + HTML email report
 - Correlation windows: same-day + previous 7 days (`login_history`)
 - Watchlist CRUD via REST (`POST`/`PATCH`/`DELETE` `/watchlist`); no per-action email verification (same `X-API-Key` gate as other APIs)
 - Manual search (account_id / IP) with async CSV export (ThreadPoolExecutor + UTF-8-BOM)

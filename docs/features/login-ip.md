@@ -24,7 +24,7 @@
 ┌──────────────────────────────────────────────────────────┐
 │         APScheduler (Asia/Hong_Kong)                      │
 │                                                           │
-│  02:00 HKT  login_ip_download_job                         │
+│  05:10 HKT  login_ip_download_job                         │
 │      ├─ FTP/FTPS × 3 server → data/login_ip/tmp/          │
 │      ├─ parse logs → INSERT login_history (SQLite)        │
 │      └─ 清 tmp/ (只保留过去 7 天分析 JSON)                 │
@@ -62,7 +62,7 @@
 
 | 数据 | 位置 | 用途 |
 |------|------|------|
-| MT4 Live / MT4 Live2 / MT5 登录日志 | FTP/FTPS (3 台) | 每日 02:00 拉 `YYYYMMDD.log*` |
+| MT4 Live / MT4 Live2 / MT5 登录日志 | FTP/FTPS (3 台) | 每日 05:10 HKT 拉 `YYYYMMDD.log*`（见 §3.1 时序） |
 | `monitored_accounts` | `login_ip.db` | 运营维护的被监控账户（通过 Tab 2 或 REST 写库） |
 | `login_history` | `login_ip.db` | 过去 7 天每 (account, ip, day, server) 的登录记录 |
 | `admin_whitelist` | `it_system.db` (IB Financial) | IB Financial 等模块的验证码白名单；**Login IP 监控账户写操作不再经此表** |
@@ -73,6 +73,69 @@
 
 MT4 vs MT5 日志格式小差异（MT5 多几列），`login_ip_analyzer_service.py` 里按服务器
 类型走不同 `split` 路径，统一成 `{account_id, ip_address, login_date, server_name}`。
+
+### 3.1 MT5 journal 日志：列结构、第 4 列语义、与 Login IP 的关系
+
+本模块日常只解析 **login 行**；MT5 同一文件里还包含 **成交/订单/强平** 等事件，对后续 **AB 仓 / 对敲** 类扩展有参考价值。
+
+| 项 | 说明 |
+|----|------|
+| 编码 | **UTF-16-LE**（与 MT4 的 UTF-8 不同），行尾 **CRLF**。解析必须用**文本方式**按 `utf-16-le` 读；若用**二进制按 `\n` 切行**，会错位导致整行解码失败。 |
+| 分隔 | 制表符 `\t` 分列；**至少 6 列**才有完整「时间 + 第 4 列 + 消息体」。 |
+| [0] | 短码（可忽略，用于行首分类）。 |
+| [1] / [2] | level、thread 等。 |
+| [3] | **MT 服务器本地时间** `HH:MM:SS.mmm`（与业务约定的 MT 时区一致，例如 UTC+3 时**不做额外换算**）。 |
+| [4] | **语义随事件类型变化**，这是最容易误解的一列。 |
+| [5]+ | 消息正文；登录行形如 `'<account>': login (...)`；交易相关常有 `'<account>': order performed ...` / `deal performed ...` 等。 |
+
+**第 [4] 列三种常见形态**
+
+1. **合法 IPv4**：多见于客户 **login、logout** 以及大量 **order / deal / modify / position / buy / sell** 行。此时 [4] 可视为「与本次事件关联的**客户端**出口 IP」（与 `login` 行规则一致、位置相同）。
+2. **空**（两截 `\t\t` 之间无内容）：常见于 **dealer/服务器内部**触发的成交流（如止损/止盈激活后的路由），或部分 **order/deal** 行，表示**没有可归因到终端客户的 IP**。
+3. **非 IP 字符串**（如 `DealerLogic769`、`StopOut.All`、`Leverate MT5 Trading Plugin`）：表示 **子系统/模块名**，不是公网地址。`StopOut.*` 与 **强制平仓/爆仓** 链相关，通常不应当作「客户当时所在的 IP」。
+
+**统计级参考**（在单日全量 20260423 样本上跑过 `backend/scripts/probe_mt5_log_for_ip.py` 探测；不同日波动属正常）：
+
+- `login` / `logout`：第 4 列 **几乎恒为** IPv4。
+- `order performed` / `deal performed`：**约八成左右** 行在 [4] 为 IPv4；**其余** 多为 [4] 空（服务端触发链），不是「少抓了 IP」而是事件性质不同。
+- `modify`、挂单行 `buy`/`sell`（limit/stop）、`position modified`：绝大多数 [4] 为 IPv4。
+- `close position ... by stopout`、`stopout at ...%`：第 4 列多为 **`StopOut.All`** 等 logger，**不是客户 IP**。
+
+**与 MySQL 的关系**
+
+- `fxbackoffice.mt4_trades` 等表 **不存逐笔 IP**；IP 在 **MT 服务器 journal 日志**里。要做「某笔 order 的 IP」，以日志为准；库表用于**盈亏/品种/手数/时间**对齐。
+
+### 3.2 抓取与解析注意点
+
+| 技巧 | 原因 |
+|------|------|
+| 下载等 **MT 日界切换之后** 再拉取（见下方与 `05:10` HKT 的对应关系） | 与 `YYYYMMDD.log` 的**日切**一致；过早拉会拿到**未写完**的当日文件。生产调度已用 **HKT 05:10** 下载**昨天**的日志。 |
+| 大文件**流式**读（`for line in f`），勿一次性读入内存 | 单日 MT5 日志可达数 GiB。 |
+| 用 **probe 脚本** 先看分布再写业务解析 | `backend/scripts/probe_mt5_log_for_ip.py`：按行统计「动作词」、各桶第 4 列是否 IPv4、并打样本，避免凭印象猜列。 |
+| 若做 AB/对敲，优先盯 **`deal performed` / `order performed` 行** 再回库对账 | 这两类行在样本中带客户 IP 的比例高、字段里含**账号、方向、手数、品种、订单/成交号**；需 profit 时再用 DB 的 `mt4_trades` 关联合并。 |
+| 区分 **客户主动** vs **系统/条件单触发** | [4] 为空的 `order`/`deal` 多为**服务端/路由**产生；**强平/爆仓** 与 `StopOut` 行一组，[4] 常不是客户公网 IP。业务规则上宜**单独分桶**（见下）。 |
+
+**HKT 05:10 与 MT 日界（为何不是凌晨 2 点拉）**  
+MT 使用例如 **UTC+3** 的「MT 日」时，**MT 00:00 = HKT 05:00**。若在 **HKT 02:00** 去拉 `YYYYMMDD.log`，对应 MT 仍在前一日 **21:00–24:00**，文件**尚未日切/仍在写入**，会漏掉**当天 MT 日末**一段记录。`05:10` 给 **日切后约 10 分钟** 缓冲，兼顾 FTP 落盘延迟。
+
+### 3.3 AB 仓与「系统强制平仓 / 强平」要不要算在一起？
+
+**风控上常说的 AB 仓 / 对敲**一般指：**同一（或协同一批）控制人**，用**多个账户**，在**相近时间、相同品种、有意为之的反向仓位**，以套取返利、洗亏或规避规则；**典型证据链是「人」层面的协同**，例如同 IP 上的主动下单、或可与 IP/设备关联的主动操作链。
+
+**纯系统强平/爆仓**（`StopOut.All`、连续 `close position ... by stopout` 等）是 **保证金/风控规则触发的清盘**：
+
+- 日志里往往 **没有可归因的客户端公网 IP**（第 4 列是子系统名或空），**不能**和「该客户此刻从哪个 IP 点下单」混为一谈。
+- 这类成交**不体现「双方自愿同时建对冲单」的意图**；用它们去和另一边的「主动单」做 **同 IP 对敲**会引入大量**假阳性**（行情波动、连锁爆仓、流动性枯竭都会偶然形成一亏一赚）。
+
+**建议规则（可写进产品/策略）**
+
+| 做法 | 说明 |
+|------|------|
+| **默认在 AB/对敲模型中排除**「仅因 stopout/强平链闭合」产生的成交/平仓行，或单列为 **「强平不纳入对敲评分」** | 与「同 IP 主动开平仓」**分层**，报表更清晰。 |
+| **保留在「资金结果」或事后复盘**里 | 强平仍会产生真实亏损与对手方盈利，**会计与风控总览**可能需要，但与「对敲**意图**」分开统计。 |
+| **边界情况由业务拍板** | 若一方**主动**建仓、对家因**波动被强平**，仍可能形成结构上的**一亏一赢**；是否算「AB」取决于你们是否只关心**双边主动对敲**还是**任意一方含被动平仓**。这不在技术层一次判定，需要 **risk team 定口径**。 |
+
+**一句话**：**系统强制平仓这一侧，通常不当作 AB 仓对敲的「主证据」**；与 **客户主动、带 IP 的 order/deal** 分开看，最不容易误导一线。
 
 ## 4. API 清单
 
@@ -109,7 +172,7 @@ Base: `/api/v1/login-ip/*`，全部走平台的 `X-API-Key` 中间件（`apiFetc
 
 | Job name | Cron (HKT) | 作用 | 失败行为 |
 |----------|-----------|------|---------|
-| `login_ip_download_job` | `02:00` 每日 | FTP 拉日志 + 解析 + 写 `login_history` | 发 ⚠️ 告警邮件；留 tmp 供手动 retry |
+| `login_ip_download_job` | `05:10` 每日 (HKT) | FTP 拉日志 + 解析 + 写 `login_history` | 发 ⚠️ 告警邮件；留 tmp 供手动 retry |
 | `login_ip_analyze_report_job` | `08:30` 每日 | 关联分析 + 发日报 + 每日 SQLite 清理 | 同上；写 `login_ip_scheduler_runs.status='failed'` |
 
 - 并发保护：`threading.Lock`，同一 job 不会重入
@@ -243,6 +306,7 @@ frontend/src/pages/login-ip/
 - `app/core/login_ip_scheduler.py` — APScheduler 2 个 job + 手动触发入口
 - `scripts/migrate_login_ip_from_legacy.py` — 一次性迁移（旧 `monitoring.db` → 新 `login_ip.db`）
 - `scripts/analyze_shared_ip_cross_account.py` — 跨客户 IP 共享离线分析（见 §11）
+- `scripts/probe_mt5_log_for_ip.py` — **只读**探测 MT5 日志中各事件第 4 列是否为 IP（见 §3.1、§3.2）
 
 **Frontend**
 
@@ -259,7 +323,7 @@ frontend/src/pages/login-ip/
 | 症状 | 排查顺序 |
 |------|---------|
 | 08:30 没收到邮件 | 1. 运维 Tab 看 `login_ip_analyze_report_job` 是否 `succeeded` → 2. 查 `login_ip_mail_recipients` 是否 `is_active=1` → 3. 查 SMTP 凭据 |
-| 报告显示某账号「未登录」但实际登录了 | 1. 02:00 download 是否成功 → 2. `data/login_ip/YYYYMMDD/` 有没有对应服务器的 JSON → 3. 日志里账号的服务器名是否和 `monitored_accounts.server_name` 完全一致（区分 `MT4_Live` vs `MT4_Live2`）|
+| 报告显示某账号「未登录」但实际登录了 | 1. 05:10 download 是否成功 → 2. `data/login_ip/YYYYMMDD/` 有没有对应服务器的 JSON → 3. 日志里账号的服务器名是否和 `monitored_accounts.server_name` 完全一致（区分 `MT4_Live` vs `MT4_Live2`）|
 | 关联账户没有中文姓名 | CRM MySQL 连接失败；看 `login_ip_enrichment_service` warning 日志 |
 | Tab 2 写操作 401/403 | 查平台 `X-API-Key` 是否配置正确（与其它 API 相同，不再单独验邮箱码） |
 | 修改 `.env` 密码后 FTP 530 | 密码含 `$` / `!` 等 shell 特殊字符但没加单引号 → 重新改成 `'...'` 再重启容器 |

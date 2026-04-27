@@ -3,7 +3,7 @@ APScheduler integration for the Login IP Monitor.
 
 Two cron jobs (both HK time):
 
-    02:00  login_ip_download_job       — FTP(S) download yesterday's logs
+    05:10  login_ip_download_job       — FTP(S) download yesterday's logs
                                           for all 3 MT servers; parse into
                                           3 JSONs; write monitored-account
                                           logins into login_history; wipe
@@ -14,11 +14,15 @@ Two cron jobs (both HK time):
 
 Design choices
 --------------
-1. **Both jobs target YESTERDAY (HKT) by default.** Servers rotate their
-   `.log` at midnight and we want a fully written file. `02:00` is the
-   earliest safe time to download a "complete" yesterday log. `08:30` gives
-   us 6.5h of slack before the business reads the email — plenty of room
-   to retry manually if the 02:00 job fails.
+1. **Both jobs target YESTERDAY (HKT) by default.** MT servers run UTC+3
+   and rotate `.log` files at MT 00:00 = HKT 05:00. `05:10` is the
+   earliest safe time to download a fully-closed yesterday log (10-min
+   buffer for MT FTP-side flush). `08:30` gives 3+ hours of slack before
+   the business reads the email — room to retry manually if 05:10 fails.
+
+   Historical note: this used to be `02:00`, which silently lost events
+   from MT 21:00–23:59 of "yesterday" because the file was still being
+   written at HKT 02:00. Changed 2026-04-27.
 
 2. **Every job call is audited via `login_ip_scheduler_runs`.** The row
    is INSERTed at start with status='running', and UPDATEd on finish to
@@ -68,7 +72,18 @@ REPORT_JOB_ID = "login_ip_analyze_report"
 
 # Cron firing times. Hard-coded in this MVP; Phase 6 will move them to a
 # SQLite-backed config so ops can change them via the UI without a restart.
-DOWNLOAD_HOUR, DOWNLOAD_MINUTE = 2, 0
+#
+# Why 05:10 HKT for download (changed 2026-04-27 from 02:00):
+#   MT server runs UTC+3, so HKT - 5h = MT.
+#   - HKT 02:00 = MT 21:00 → yesterday's MT log is STILL being written
+#     (file rotates at MT 00:00 = HKT 05:00). The old 02:00 cron pulled an
+#     incomplete file and silently lost MT 21:00–23:59 events forever.
+#   - HKT 05:10 = MT 00:10 → yesterday's MT log has just rotated and is
+#     fully closed. 10-min buffer covers MT FTP-side flush latency.
+#   For the AB-position monitor (window MT 00:00–02:00) the old timing
+#   happened to work because that window writes early in the file, but any
+#   MT 22–24 events were never captured.
+DOWNLOAD_HOUR, DOWNLOAD_MINUTE = 5, 10
 REPORT_HOUR, REPORT_MINUTE = 8, 30
 
 # Raw logs are written here by the FTP service, and read from here by the
