@@ -31,6 +31,8 @@ services:
       # Container system time = HKT so log timestamps & YYYYMMDD folder names
       # match what the business sees; APScheduler explicitly uses ZoneInfo anyway.
       - TZ=Asia/Hong_Kong
+      # Prod should run Login IP cron jobs; dev explicitly disables this switch.
+      - LOGIN_IP_SCHEDULER_ENABLED=true
     restart: unless-stopped
     depends_on:
       - redis-prod
