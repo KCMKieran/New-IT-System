@@ -93,6 +93,8 @@ def _query_mt4_recent_closed_short(
           AND t.LOGIN NOT LIKE '7%%'
           AND u.`GROUP` NOT LIKE '%%demo%%'
           AND u.`GROUP` NOT LIKE '%%test%%'
+          AND COALESCE(u.NAME, '') NOT LIKE '%%demo%%'
+          AND COALESCE(u.NAME, '') NOT LIKE '%%test%%'
         ORDER BY t.LOGIN, t.SYMBOL, t.CLOSE_TIME
     """
     with conn.cursor() as cur:
@@ -124,6 +126,8 @@ def _query_mt5_recent_closed_short(
             (COALESCE(c.Profit, 0) + COALESCE(c.Storage, 0) + COALESCE(c.Commission, 0)) AS profit,
             c.PositionID AS ticket
         FROM mt5_live.mt5_deals c
+        INNER JOIN mt5_live.mt5_users u
+            ON u.Login = c.Login
         INNER JOIN mt5_live.mt5_deals o
             ON c.PositionID = o.PositionID
            AND c.Login = o.Login
@@ -138,6 +142,10 @@ def _query_mt5_recent_closed_short(
         WHERE c.Entry IN (1, 3)
           AND c.Action IN (0, 1)
           AND c.Timestamp >= {cutoff}
+          AND u.`Group` NOT LIKE '%%demo%%'
+          AND u.`Group` NOT LIKE '%%test%%'
+          AND COALESCE(u.Name, '') NOT LIKE '%%demo%%'
+          AND COALESCE(u.Name, '') NOT LIKE '%%test%%'
         ORDER BY c.Login, c.Symbol, c.Time
     """
     with conn.cursor() as cur:
