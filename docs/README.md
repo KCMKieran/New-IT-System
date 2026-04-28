@@ -75,6 +75,7 @@ docs/
 │   ├── pnl-monitor-integration.md
 │   ├── ib-financial-monitor.md  # IB Financial Monitor (replaces D08)
 │   ├── risk-monitor.md          # Trade Real-time Monitor (批量下单 + 缺口交易)
+│   ├── blowup-audit.md          # Blown-up account / AB-pair offline audit
 │   └── filter-backend-integration.md
 ├── deployment/                  # ⭐ Deployment & DevOps
 │   ├── dev-prod-guide.md      # Dev/Prod workflow, Docker, Cloudflare Tunnel

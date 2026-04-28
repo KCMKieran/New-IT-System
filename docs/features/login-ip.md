@@ -94,7 +94,7 @@ MT4 vs MT5 日志格式小差异（MT5 多几列），`login_ip_analyzer_service
 2. **空**（两截 `\t\t` 之间无内容）：常见于 **dealer/服务器内部**触发的成交流（如止损/止盈激活后的路由），或部分 **order/deal** 行，表示**没有可归因到终端客户的 IP**。
 3. **非 IP 字符串**（如 `DealerLogic769`、`StopOut.All`、`Leverate MT5 Trading Plugin`）：表示 **子系统/模块名**，不是公网地址。`StopOut.*` 与 **强制平仓/爆仓** 链相关，通常不应当作「客户当时所在的 IP」。
 
-**统计级参考**（在单日全量 20260423 样本上跑过 `backend/scripts/probe_mt5_log_for_ip.py` 探测；不同日波动属正常）：
+**统计级参考**（在单日全量 20260423 样本上做过一次离线探测，不同日波动属正常；探测脚本已下线，仅留此次结论作经验值）：
 
 - `login` / `logout`：第 4 列 **几乎恒为** IPv4。
 - `order performed` / `deal performed`：**约八成左右** 行在 [4] 为 IPv4；**其余** 多为 [4] 空（服务端触发链），不是「少抓了 IP」而是事件性质不同。
@@ -111,7 +111,6 @@ MT4 vs MT5 日志格式小差异（MT5 多几列），`login_ip_analyzer_service
 |------|------|
 | 下载等 **MT 日界切换之后** 再拉取（见下方与 `05:10` HKT 的对应关系） | 与 `YYYYMMDD.log` 的**日切**一致；过早拉会拿到**未写完**的当日文件。生产调度已用 **HKT 05:10** 下载**昨天**的日志。 |
 | 大文件**流式**读（`for line in f`），勿一次性读入内存 | 单日 MT5 日志可达数 GiB。 |
-| 用 **probe 脚本** 先看分布再写业务解析 | `backend/scripts/probe_mt5_log_for_ip.py`：按行统计「动作词」、各桶第 4 列是否 IPv4、并打样本，避免凭印象猜列。 |
 | 若做 AB/对敲，优先盯 **`deal performed` / `order performed` 行** 再回库对账 | 这两类行在样本中带客户 IP 的比例高、字段里含**账号、方向、手数、品种、订单/成交号**；需 profit 时再用 DB 的 `mt4_trades` 关联合并。 |
 | 区分 **客户主动** vs **系统/条件单触发** | [4] 为空的 `order`/`deal` 多为**服务端/路由**产生；**强平/爆仓** 与 `StopOut` 行一组，[4] 常不是客户公网 IP。业务规则上宜**单独分桶**（见下）。 |
 
@@ -305,8 +304,6 @@ frontend/src/pages/login-ip/
 - `app/core/login_ip_db.py` — SQLite CRUD + 建表
 - `app/core/login_ip_scheduler.py` — APScheduler 2 个 job + 手动触发入口
 - `scripts/migrate_login_ip_from_legacy.py` — 一次性迁移（旧 `monitoring.db` → 新 `login_ip.db`）
-- `scripts/analyze_shared_ip_cross_account.py` — 跨客户 IP 共享离线分析（见 §11）
-- `scripts/probe_mt5_log_for_ip.py` — **只读**探测 MT5 日志中各事件第 4 列是否为 IP（见 §3.1、§3.2）
 
 **Frontend**
 
@@ -331,94 +328,7 @@ frontend/src/pages/login-ip/
 | 运维 Tab 看到某条 `running` 行挂了好几天 | 正常应该 <5min；6h 后会被 `reap_stuck_running_runs` 自动改成 `failed`，`error_msg` 末尾带 `[reaped: stuck in running past 6h]` — 搜 backend log 里这条行的 `run_id` 定位崩溃原因（OOM / docker restart 最常见） |
 | 想查更早的调度记录（>90 天） | 默认只留 90 天；改 `DEFAULT_SCHEDULER_RUN_RETENTION_DAYS` 即可，短期可直接 `sqlite3 backend/data/login_ip.db` 手工拉备份 |
 
-## 11. Ad-hoc 分析脚本
-
-脚本 `backend/scripts/analyze_shared_ip_cross_account.py` —— **跨客户 IP 共享**离线分析工具，不在生产流程里。
-
-### 11.1 做什么
-
-把任意日期区间（支持单日 / N 天 / 自定义 start-end）的 `analysis_ip_to_accounts.json` 聚合成 **"哪些 IP 被不同 MT 账户共用"** 的视图，回答风控/合规的一类典型问题：
-
-> 同一个 IP 下面挂着哪些 CRM 客户？`client_id` 分别是谁？是本人的多账户还是多个不同客户？
-
-**纯只读**：不碰数据库，只读 `backend/data/login_ip/YYYYMMDD/analysis_ip_to_accounts.json`，CRM MySQL 也只查 `mt4_users` 拿账号→userId 映射。
-
-### 11.2 关键 flag
-
-| flag | 作用 |
-|------|------|
-| `--date YYYYMMDD` | 单日快捷方式（最常用） |
-| `--days N` | 过去 N 天滚动窗口（默认 14） |
-| `--start / --end` | 自定义区间 |
-| `--known-accounts-only` | 只保留在 `fxbackoffice.mt4_users.userId IS NOT NULL` 的真实客户账户，同时给 CSV/XLSX 补上 `client_id` + `chinese_name` 列。**强烈推荐开**，能过滤掉 demo/内部/测试账号 |
-| `--per-server` | 按 MT4 / MT5 / MT4_Live2 分组输出，否则三台合并成 `ALL` |
-| `--min-account-id` | 过滤 server-internal 低位账号（默认 1000） |
-| `--top-k` | 终端打印 top-K 最乱的 IP |
-| `--xlsx` | 输出 **Excel（推荐给同事看）** |
-| `--csv` | 输出 flat CSV，一行一 (IP, 账户) |
-| `--csv-pivot` | 输出 pivoted CSV，一行一 IP |
-
-### 11.3 XLSX 文件布局（给风控/同事的主交付物）
-
-两个 Sheet，自带**合并单元格 / 冻结首行 / 严重程度色块**：
-
-**Sheet 1「按 IP 分组」** — 每行一个 `(IP, 客户)` 对：
-
-```
-| IP (vmerged) | Client ID | 中文名 | MT 账户 | 服务器 | 客户数 (UIDs) | 账户数 | 出现天数 |
-```
-
-- A 列 `IP` 垂直合并：同一 IP 下的多个客户同属一个"块"，视觉上自成一组
-- 每换一个 IP 自动切换背景色（白 / 浅灰条纹），方便滚动扫描
-- `客户数 (UIDs)` 列按严重程度上色：
-  - 🔴 `≥10` 个不同 CRM 客户共用同一 IP —— **高优先级**
-  - 🟠 `5–9` 个
-  - 🟡 `3–4` 个
-  - 无色 = `2` 个
-- 排序：`UIDs DESC → 账户数 DESC → IP → client_id`，打开默认头几行就是最可疑的
-
-**Sheet 2「IP 汇总」** — 每行一个 IP：
-
-```
-| IP | 服务器 | 客户数 | 账户数 | 出现天数 | 首日 | 末日 | 账户列表 | Client IDs | 中文名 |
-```
-
-账户列表 / Client IDs / 中文名都用 `|` 分隔。给搜索 / 过滤 / 透视用。
-
-### 11.4 常用命令
-
-```bash
-cd /opt/myproject/New-IT-System/backend
-source .venv/bin/activate
-
-python scripts/analyze_shared_ip_cross_account.py \
-    --date 20260423 \
-    --known-accounts-only --per-server \
-    --xlsx scripts/shared_ip_20260423.xlsx \
-    --csv  scripts/shared_ip_20260423_flat.csv
-```
-
-过去两周 summary（不落盘，只打印 top 20）：
-
-```bash
-python scripts/analyze_shared_ip_cross_account.py --days 14 --top-k 20
-```
-
-### 11.5 解读示例
-
-`124.220.165.142`（腾讯云出口）4/23 单日：**41 个 MT 账户 / 38 个不同 UID**。
-
-- `38 UID / 41 账户 = 0.93` → 基本每个账户一个不同客户，**只有 3 个账户是同一客户的多账号**（例如 `冯延宁` 开了 3 个 MT4 账号）
-- 38 个不同 CRM 客户共用一个腾讯云 IP → 典型"代理池 / 机场出口"嫌疑
-- 下一步：查 IP ASN 归属（腾讯云 IDC 段 vs 中国电信家宽）+ 运维/风控决定是否加入忽略白名单
-
-对比 `125.85.8.239` 4/23 单日：**26 账户 / 23 UID** → 3 个重复账户属同客户，剩下 23 人共用 → 量级小但仍需人工核查。
-
-### 11.6 产物不进 git
-
-`backend/scripts/shared_ip_*.{csv,xlsx}` 都是**含客户 PII** 的衍生文件，已在 `.gitignore` 全局排除 `*.csv` / `*.xlsx`。跑完发给同事或归档后可以本地删除，脚本随时能重跑。
-
-## 12. 废弃旧系统
+## 11. 废弃旧系统
 
 旧项目路径：`/opt/myproject/log_analysis/46-MT-Server-Login-Detect/`
 

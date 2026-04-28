@@ -619,7 +619,7 @@ GET    /api/v1/login-ip/export/tasks/{id}/download  # 下载 CSV（utf-8-sig，E
 
 > **同一个 IP 今天被哪些不同的 CRM 客户登录过？**
 
-产物是 `backend/scripts/analyze_shared_ip_cross_account.py`，详见 [login-ip.md §11](./login-ip.md#11-ad-hoc-分析脚本)。
+当时产物是 `backend/scripts/analyze_shared_ip_cross_account.py` —— 已于 2026-04-28 验证完成后随同 ad-hoc 工具一并下线。下面 4/23 的统计结论保留作为历史参考。
 
 ### 4/23 单日跑出的量级（`--known-accounts-only`）
 
