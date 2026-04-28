@@ -31,10 +31,13 @@ from ....core.burst_open_scheduler import (
 from ....core.risk_monitor_db import (
     alert_events_stats,
     load_config,
+    load_quick_open_close_config,
     query_alert_events,
     save_config,
+    save_quick_open_close_config,
     stream_alert_events,
 )
+from ....services.rule_quick_open_close_service import QUICK_RULE_ID_BASE
 from ....schemas.risk_monitor import (
     AlertEvent,
     AlertsResponse,
@@ -43,6 +46,7 @@ from ....schemas.risk_monitor import (
     BurstOpenConfig,
     BurstOpenScanResult,
     BurstOpenSummary,
+    QuickOpenCloseConfig,
 )
 
 logger = logging.getLogger(__name__)
@@ -50,6 +54,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/risk-monitor")
 
 MAX_RULES = 10
+BURST_RULE_MAX_ID = QUICK_RULE_ID_BASE - 1
 
 # Default look-back window when the frontend omits `since`.
 # Aligns with the "最近 4 小时" default on the page.
@@ -106,9 +111,11 @@ async def burst_open_latest():
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="No scan result available yet. Scanner may still be initializing.",
         )
+    burst_alerts = [a for a in result["alerts"] if int(a.get("rule_id", 0)) <= BURST_RULE_MAX_ID]
+    summary = result.get("burst_summary", result["summary"])
     return BurstOpenScanResult(
-        alerts=[BurstOpenAlert(**a) for a in result["alerts"]],
-        summary=BurstOpenSummary(**result["summary"]),
+        alerts=[BurstOpenAlert(**a) for a in burst_alerts],
+        summary=BurstOpenSummary(**summary),
         config=BurstOpenConfig(**result["config"]),
         scan_time_ms=result["scan_time_ms"],
         scanned_at=result["scanned_at"],
@@ -173,9 +180,11 @@ async def burst_open_scan_now():
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Scan returned no result.",
             )
+        burst_alerts = [a for a in result["alerts"] if int(a.get("rule_id", 0)) <= BURST_RULE_MAX_ID]
+        summary = result.get("burst_summary", result["summary"])
         return BurstOpenScanResult(
-            alerts=[BurstOpenAlert(**a) for a in result["alerts"]],
-            summary=BurstOpenSummary(**result["summary"]),
+            alerts=[BurstOpenAlert(**a) for a in burst_alerts],
+            summary=BurstOpenSummary(**summary),
             config=BurstOpenConfig(**result["config"]),
             scan_time_ms=result["scan_time_ms"],
             scanned_at=result["scanned_at"],
@@ -265,6 +274,7 @@ async def burst_open_alerts(
             login=login,
             symbol=symbol,
             rule_id=rule_id,
+            rule_id_max=BURST_RULE_MAX_ID,
             zipcode=zipcode_clean,
             limit=effective_limit,
             offset=effective_offset,
@@ -313,6 +323,7 @@ async def burst_open_alerts_stats(
             until=until_iso,
             server=server,
             login=login,
+            rule_id_max=BURST_RULE_MAX_ID,
             zipcode=zipcode_clean,
         )
         return AlertsStats(**stats)
@@ -420,6 +431,8 @@ def _csv_stream(
     login: Optional[int],
     symbol: Optional[str],
     rule_id: Optional[int],
+    rule_id_min: Optional[int],
+    rule_id_max: Optional[int],
     zipcode_clean: Optional[str],
     sort_by: Optional[str],
     sort_order: Optional[str],
@@ -449,6 +462,8 @@ def _csv_stream(
         login=login,
         symbol=symbol,
         rule_id=rule_id,
+        rule_id_min=rule_id_min,
+        rule_id_max=rule_id_max,
         zipcode=zipcode_clean,
         sort_by=sort_by,
         sort_order=sort_order,
@@ -497,6 +512,8 @@ async def burst_open_alerts_export(
                 login=login,
                 symbol=symbol,
                 rule_id=rule_id,
+                rule_id_min=None,
+                rule_id_max=BURST_RULE_MAX_ID,
                 zipcode_clean=zipcode_clean,
                 sort_by=sort_by,
                 sort_order=sort_order,
@@ -515,6 +532,180 @@ async def burst_open_alerts_export(
         raise
     except Exception as exc:
         logger.error("Failed to export alert events: %s", exc, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        ) from exc
+
+
+# ── Quick Open-Close endpoints ─────────────────────────────
+
+@router.get("/quick-open-close/config", response_model=QuickOpenCloseConfig)
+async def quick_open_close_get_config():
+    try:
+        cfg = load_quick_open_close_config()
+        return QuickOpenCloseConfig(**cfg)
+    except Exception as exc:
+        logger.error("Failed to read quick-open-close config: %s", exc, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        ) from exc
+
+
+@router.post("/quick-open-close/config", response_model=QuickOpenCloseConfig)
+async def quick_open_close_update_config(config: QuickOpenCloseConfig):
+    if len(config.rules) > MAX_RULES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Maximum {MAX_RULES} rules allowed.",
+        )
+    if len(config.rules) == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="At least one rule is required.",
+        )
+    try:
+        rules_dicts = [r.model_dump(exclude={"id"}) for r in config.rules]
+        save_quick_open_close_config(config.enabled, rules_dicts)
+        return QuickOpenCloseConfig(**load_quick_open_close_config())
+    except Exception as exc:
+        logger.error("Failed to update quick-open-close config: %s", exc, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        ) from exc
+
+
+@router.get("/quick-open-close/alerts", response_model=AlertsResponse)
+async def quick_open_close_alerts(
+    since: Optional[str] = Query(default=None),
+    until: Optional[str] = Query(default=None),
+    server: Optional[str] = Query(default=None),
+    login: Optional[int] = Query(default=None),
+    symbol: Optional[str] = Query(default=None),
+    rule_id: Optional[int] = Query(default=None),
+    zipcode: Optional[str] = Query(default=None, max_length=64),
+    page: Optional[int] = Query(default=None, ge=1),
+    page_size: int = Query(default=50, ge=1, le=_MAX_PAGE_SIZE),
+    limit: Optional[int] = Query(default=None, ge=1, le=_MAX_PAGE_SIZE),
+    offset: Optional[int] = Query(default=None, ge=0),
+    sort_by: Optional[str] = Query(default=None),
+    sort_order: Optional[str] = Query(default=None),
+):
+    since_iso, until_iso = _default_since_until(since, until)
+    zipcode_clean = _clean_zipcode(zipcode)
+
+    if page is not None:
+        effective_limit = page_size
+        effective_offset = (page - 1) * page_size
+        effective_page = page
+    else:
+        effective_limit = limit if limit is not None else page_size
+        effective_offset = offset or 0
+        effective_page = (effective_offset // effective_limit) + 1 if effective_limit else 1
+        page_size = effective_limit
+
+    try:
+        entries, total = query_alert_events(
+            since=since_iso,
+            until=until_iso,
+            server=server,
+            login=login,
+            symbol=symbol,
+            rule_id=rule_id,
+            rule_id_min=QUICK_RULE_ID_BASE,
+            zipcode=zipcode_clean,
+            limit=effective_limit,
+            offset=effective_offset,
+            sort_by=sort_by,
+            sort_order=sort_order,
+        )
+        return AlertsResponse(
+            entries=[AlertEvent(**e) for e in entries],
+            total=total,
+            since=since_iso,
+            until=until_iso,
+            page=effective_page,
+            page_size=page_size,
+        )
+    except Exception as exc:
+        logger.error("Failed to query quick-open-close alerts: %s", exc, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        ) from exc
+
+
+@router.get("/quick-open-close/alerts/stats", response_model=AlertsStats)
+async def quick_open_close_alerts_stats(
+    since: Optional[str] = Query(default=None),
+    until: Optional[str] = Query(default=None),
+    server: Optional[str] = Query(default=None),
+    login: Optional[int] = Query(default=None),
+    zipcode: Optional[str] = Query(default=None, max_length=64),
+):
+    since_iso, until_iso = _default_since_until(since, until)
+    zipcode_clean = _clean_zipcode(zipcode)
+    try:
+        stats = alert_events_stats(
+            since=since_iso,
+            until=until_iso,
+            server=server,
+            login=login,
+            rule_id_min=QUICK_RULE_ID_BASE,
+            zipcode=zipcode_clean,
+        )
+        return AlertsStats(**stats)
+    except Exception as exc:
+        logger.error("Failed to compute quick-open-close stats: %s", exc, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        ) from exc
+
+
+@router.get("/quick-open-close/alerts/export")
+async def quick_open_close_alerts_export(
+    since: Optional[str] = Query(default=None),
+    until: Optional[str] = Query(default=None),
+    server: Optional[str] = Query(default=None),
+    login: Optional[int] = Query(default=None),
+    symbol: Optional[str] = Query(default=None),
+    rule_id: Optional[int] = Query(default=None),
+    zipcode: Optional[str] = Query(default=None, max_length=64),
+    sort_by: Optional[str] = Query(default=None),
+    sort_order: Optional[str] = Query(default=None),
+):
+    since_iso, until_iso = _default_since_until(since, until)
+    zipcode_clean = _clean_zipcode(zipcode)
+
+    filename = "risk-monitor-quick-open-close.csv"
+    try:
+        return StreamingResponse(
+            _csv_stream(
+                since_iso=since_iso,
+                until_iso=until_iso,
+                server=server,
+                login=login,
+                symbol=symbol,
+                rule_id=rule_id,
+                rule_id_min=QUICK_RULE_ID_BASE,
+                rule_id_max=None,
+                zipcode_clean=zipcode_clean,
+                sort_by=sort_by,
+                sort_order=sort_order,
+            ),
+            media_type="text/csv; charset=utf-8",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="{filename}"; '
+                    f"filename*=UTF-8''{quote(filename)}"
+                ),
+            },
+        )
+    except Exception as exc:
+        logger.error("Failed to export quick-open-close alerts: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(exc),

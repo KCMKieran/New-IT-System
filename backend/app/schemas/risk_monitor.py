@@ -27,6 +27,19 @@ class BurstOpenConfig(BaseModel):
     rules: List[BurstOpenRule] = []
 
 
+class QuickOpenCloseRule(BaseModel):
+    id: Optional[int] = None
+    max_hold_seconds: int = Field(default=60, ge=1, le=3600)
+    min_closed_orders: int = Field(default=3, ge=1, le=200)
+    profit_window_min: int = Field(default=5, ge=1, le=120)
+    min_total_profit_usd: float = Field(default=0.0, ge=-1000000.0, le=100000000.0)
+
+
+class QuickOpenCloseConfig(BaseModel):
+    enabled: bool = True
+    rules: List[QuickOpenCloseRule] = []
+
+
 # ── Alert & Scan Result ───────────────────────────────────
 
 class BurstOrderDetail(BaseModel):
@@ -35,6 +48,7 @@ class BurstOrderDetail(BaseModel):
     lots: float
     open_time: str
     symbol: str
+    hold_seconds: Optional[int] = None
 
 
 class BurstOpenAlert(BaseModel):
@@ -97,6 +111,8 @@ class AlertEvent(BaseModel):
     symbol: str
     order_count: int
     total_lots: float
+    hold_duration_sec: Optional[int] = None
+    total_profit_usd: Optional[float] = None
     orders: List[BurstOrderDetail]
     first_open: Optional[str] = None
     last_open: Optional[str] = None

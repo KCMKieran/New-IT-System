@@ -31,7 +31,7 @@ SORTABLE_ALERT_COLS: frozenset[str] = frozenset({
     "scanned_at", "rule_id", "rule_label", "server", "login", "symbol",
     "order_count", "total_lots", "equity", "balance",
     "equity_per_lot", "total_open_lots", "leverage",
-    "currency", "zipcode", "first_open", "last_open",
+    "currency", "zipcode", "first_open", "last_open", "hold_duration_sec", "total_profit_usd",
     # Frontend alias for the `account_group` DB column. We map it in
     # `_resolve_alert_order` so the API stays consistent with the
     # field name the React component already uses.
@@ -67,6 +67,22 @@ CREATE TABLE IF NOT EXISTS burst_open_rules (
     sort_order          INTEGER NOT NULL DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS quick_open_close_config (
+    id                  INTEGER PRIMARY KEY CHECK (id = 1),
+    enabled             INTEGER NOT NULL DEFAULT 1,
+    updated_at          DATETIME
+);
+INSERT OR IGNORE INTO quick_open_close_config (id) VALUES (1);
+
+CREATE TABLE IF NOT EXISTS quick_open_close_rules (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    max_hold_seconds    INTEGER NOT NULL DEFAULT 60,
+    min_closed_orders   INTEGER NOT NULL DEFAULT 3,
+    profit_window_min   INTEGER NOT NULL DEFAULT 5,
+    min_total_profit_usd REAL   NOT NULL DEFAULT 0.0,
+    sort_order          INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS scan_history (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     scanned_at          TEXT    NOT NULL,
@@ -91,6 +107,8 @@ CREATE TABLE IF NOT EXISTS alert_events (
     symbol            TEXT    NOT NULL,
     order_count       INTEGER NOT NULL,
     total_lots        REAL    NOT NULL,
+    hold_duration_sec INTEGER,
+    total_profit_usd  REAL,
     first_open        TEXT,
     last_open         TEXT,
     equity            REAL,
@@ -118,6 +136,12 @@ INSERT INTO burst_open_rules (burst_window_sec, min_order_count, min_lots_per_or
 VALUES (3, 3, 5.0, 0);
 """
 
+_SEED_QUICK_RULE_SQL = """
+INSERT INTO quick_open_close_rules
+    (max_hold_seconds, min_closed_orders, profit_window_min, min_total_profit_usd, sort_order)
+VALUES (60, 3, 5, 0.0, 0);
+"""
+
 
 def init_risk_monitor_db() -> None:
     """Create tables if they don't exist. Seed default rule on first run.
@@ -132,12 +156,17 @@ def init_risk_monitor_db() -> None:
         count = conn.execute("SELECT COUNT(*) FROM burst_open_rules").fetchone()[0]
         if count == 0:
             conn.execute(_SEED_RULE_SQL)
+        quick_count = conn.execute("SELECT COUNT(*) FROM quick_open_close_rules").fetchone()[0]
+        if quick_count == 0:
+            conn.execute(_SEED_QUICK_RULE_SQL)
+        if count == 0 or quick_count == 0:
             conn.commit()
 
         # Lightweight column migrations for installations created before
         # newer fields were introduced. SQLite ignores ALTER TABLE ... ADD
         # COLUMN if the column already exists via a PRAGMA check.
         _migrate_alert_events_columns(conn)
+        _migrate_quick_rules_columns(conn)
 
         # One-time backfill: if alert_events is empty but scan_history has
         # rows, flatten their JSON alerts into the event table so existing
@@ -180,6 +209,24 @@ def _migrate_alert_events_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE alert_events ADD COLUMN currency TEXT")
     if "zipcode" not in cols:
         conn.execute("ALTER TABLE alert_events ADD COLUMN zipcode TEXT")
+    if "hold_duration_sec" not in cols:
+        conn.execute("ALTER TABLE alert_events ADD COLUMN hold_duration_sec INTEGER")
+    if "total_profit_usd" not in cols:
+        conn.execute("ALTER TABLE alert_events ADD COLUMN total_profit_usd REAL")
+    conn.commit()
+
+
+def _migrate_quick_rules_columns(conn: sqlite3.Connection) -> None:
+    """Add columns for quick_open_close_rules introduced after initial schema."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(quick_open_close_rules)")}
+    if "profit_window_min" not in cols:
+        conn.execute(
+            "ALTER TABLE quick_open_close_rules ADD COLUMN profit_window_min INTEGER NOT NULL DEFAULT 5"
+        )
+    if "min_total_profit_usd" not in cols:
+        conn.execute(
+            "ALTER TABLE quick_open_close_rules ADD COLUMN min_total_profit_usd REAL NOT NULL DEFAULT 0.0"
+        )
     conn.commit()
 
 
@@ -207,10 +254,11 @@ def _backfill_alert_events_if_needed(conn: sqlite3.Connection) -> None:
                 INSERT INTO alert_events
                     (scan_batch_id, scanned_at, rule_id, rule_label,
                      server, login, symbol, order_count, total_lots,
+                     hold_duration_sec, total_profit_usd,
                      first_open, last_open,
                      equity, balance, equity_per_lot, total_open_lots,
                      leverage, account_group, orders_json, currency, zipcode)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     batch_id,
@@ -222,6 +270,8 @@ def _backfill_alert_events_if_needed(conn: sqlite3.Connection) -> None:
                     alert.get("symbol", ""),
                     alert.get("order_count", 0),
                     alert.get("total_lots", 0.0),
+                    alert.get("hold_duration_sec"),
+                    alert.get("total_profit_usd"),
                     alert.get("first_open"),
                     alert.get("last_open"),
                     alert.get("equity"),
@@ -301,6 +351,51 @@ def save_config(scan_interval_min: int, rules: list[dict]) -> None:
             )
 
 
+def load_quick_open_close_config() -> dict[str, Any]:
+    """Read quick-open-close enabled flag and rules from SQLite."""
+    with get_risk_monitor_db() as conn:
+        cfg_row = conn.execute(
+            "SELECT enabled FROM quick_open_close_config WHERE id = 1"
+        ).fetchone()
+        enabled = bool(cfg_row["enabled"]) if cfg_row else True
+
+        rule_rows = conn.execute(
+            "SELECT id, max_hold_seconds, min_closed_orders, "
+            "profit_window_min, min_total_profit_usd "
+            "FROM quick_open_close_rules ORDER BY sort_order, id"
+        ).fetchall()
+        rules = [dict(r) for r in rule_rows]
+
+    return {"enabled": enabled, "rules": rules}
+
+
+def save_quick_open_close_config(enabled: bool, rules: list[dict]) -> None:
+    """Overwrite quick-open-close enabled flag and rules atomically."""
+    with get_risk_monitor_db() as conn:
+        conn.execute(
+            "UPDATE quick_open_close_config SET enabled = ?, "
+            "updated_at = datetime('now') WHERE id = 1",
+            (1 if enabled else 0,),
+        )
+        conn.execute("DELETE FROM quick_open_close_rules")
+        conn.execute(
+            "DELETE FROM sqlite_sequence WHERE name = 'quick_open_close_rules'"
+        )
+        for i, r in enumerate(rules):
+            conn.execute(
+                "INSERT INTO quick_open_close_rules "
+                "(max_hold_seconds, min_closed_orders, profit_window_min, min_total_profit_usd, sort_order) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    r["max_hold_seconds"],
+                    r["min_closed_orders"],
+                    r["profit_window_min"],
+                    r["min_total_profit_usd"],
+                    i,
+                ),
+            )
+
+
 # ── Scan history + alert events (write path) ──────────────
 
 def append_scan_and_events(
@@ -309,7 +404,7 @@ def append_scan_and_events(
     accounts_scanned: int,
     suspicious_count: int,
     scan_time_ms: int,
-    rules_config: list[dict],
+    rules_config: Any,
     alerts: list[dict],
 ) -> int:
     """Persist one scan batch + its flattened alert events atomically.
@@ -342,10 +437,11 @@ def append_scan_and_events(
                 INSERT INTO alert_events
                     (scan_batch_id, scanned_at, rule_id, rule_label,
                      server, login, symbol, order_count, total_lots,
+                     hold_duration_sec, total_profit_usd,
                      first_open, last_open,
                      equity, balance, equity_per_lot, total_open_lots,
                      leverage, account_group, orders_json, currency, zipcode)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     batch_id,
@@ -357,6 +453,8 @@ def append_scan_and_events(
                     alert.get("symbol", ""),
                     alert.get("order_count", 0),
                     alert.get("total_lots", 0.0),
+                    alert.get("hold_duration_sec"),
+                    alert.get("total_profit_usd"),
                     alert.get("first_open"),
                     alert.get("last_open"),
                     alert.get("equity"),
@@ -415,6 +513,8 @@ def _build_alert_filters(
     login: int | None,
     symbol: str | None,
     rule_id: int | None,
+    rule_id_min: int | None,
+    rule_id_max: int | None,
     zipcode: str | None,
 ) -> tuple[str, list[Any]]:
     """Build a shared WHERE clause + params list for alert_events queries.
@@ -437,6 +537,12 @@ def _build_alert_filters(
     if rule_id is not None:
         where.append("rule_id = ?")
         params.append(rule_id)
+    if rule_id_min is not None:
+        where.append("rule_id >= ?")
+        params.append(rule_id_min)
+    if rule_id_max is not None:
+        where.append("rule_id <= ?")
+        params.append(rule_id_max)
     if zipcode:
         where.append("zipcode LIKE ? ESCAPE '\\'")
         params.append(f"%{_escape_like(zipcode)}%")
@@ -463,7 +569,7 @@ def _resolve_alert_order(
 
 _ALERT_SELECT_COLS = """
     id, scan_batch_id, scanned_at, rule_id, rule_label,
-    server, login, symbol, order_count, total_lots,
+    server, login, symbol, order_count, total_lots, hold_duration_sec, total_profit_usd,
     first_open, last_open,
     equity, balance, equity_per_lot, total_open_lots,
     leverage, account_group, orders_json, currency, zipcode
@@ -477,6 +583,8 @@ def query_alert_events(
     login: int | None = None,
     symbol: str | None = None,
     rule_id: int | None = None,
+    rule_id_min: int | None = None,
+    rule_id_max: int | None = None,
     zipcode: str | None = None,
     limit: int = 200,
     offset: int = 0,
@@ -502,7 +610,7 @@ def query_alert_events(
         `id DESC` tiebreaker.
     """
     where_sql, params = _build_alert_filters(
-        since, until, server, login, symbol, rule_id, zipcode,
+        since, until, server, login, symbol, rule_id, rule_id_min, rule_id_max, zipcode,
     )
     order_sql = _resolve_alert_order(sort_by, sort_order)
 
@@ -533,6 +641,8 @@ def stream_alert_events(
     login: int | None = None,
     symbol: str | None = None,
     rule_id: int | None = None,
+    rule_id_min: int | None = None,
+    rule_id_max: int | None = None,
     zipcode: str | None = None,
     sort_by: str | None = None,
     sort_order: str | None = None,
@@ -549,7 +659,7 @@ def stream_alert_events(
     produce, so sorted CSV output matches the paginated table view.
     """
     where_sql, params = _build_alert_filters(
-        since, until, server, login, symbol, rule_id, zipcode,
+        since, until, server, login, symbol, rule_id, rule_id_min, rule_id_max, zipcode,
     )
     order_sql = _resolve_alert_order(sort_by, sort_order)
 
@@ -580,6 +690,8 @@ def alert_events_stats(
     until: str,
     server: str | None = None,
     login: int | None = None,
+    rule_id_min: int | None = None,
+    rule_id_max: int | None = None,
     zipcode: str | None = None,
 ) -> dict[str, Any]:
     """Aggregate stats over the time range for the summary cards.
@@ -594,7 +706,7 @@ def alert_events_stats(
         servers:          distinct servers touched (for UI hint)
     """
     where_sql, params = _build_alert_filters(
-        since, until, server, login, None, None, zipcode,
+        since, until, server, login, None, None, rule_id_min, rule_id_max, zipcode,
     )
 
     with get_risk_monitor_db() as conn:

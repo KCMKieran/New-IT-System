@@ -414,6 +414,7 @@ def scan_burst_open(
             "scanned_at": datetime.now(timezone.utc)
             .isoformat(timespec="seconds")
             .replace("+00:00", "Z"),
+            "_universe_pairs": unique_logins,
         }
     finally:
         conn.close()

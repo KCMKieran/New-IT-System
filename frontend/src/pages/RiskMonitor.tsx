@@ -62,6 +62,8 @@ interface BurstOrderDetail {
   lots: number;
   open_time: string;
   symbol: string;
+  hold_seconds?: number;
+  profit?: number;
 }
 
 /**
@@ -80,6 +82,8 @@ interface AlertEvent {
   symbol: string;
   order_count: number;
   total_lots: number;
+  hold_duration_sec?: number | null;
+  total_profit_usd?: number | null;
   orders: BurstOrderDetail[];
   first_open: string | null;  // UTC — "具体时间" start
   last_open: string | null;   // UTC — "具体时间" end
@@ -113,7 +117,7 @@ const PAGE_SIZE_OPTIONS = [50, 100, 200, 300, 500] as const;
 const SORTABLE_COL_IDS = new Set<string>([
   "scanned_at", "rule_label", "server", "zipcode", "login",
   "currency", "symbol", "order_count", "total_lots",
-  "equity", "equity_per_lot", "total_open_lots", "leverage", "group",
+  "equity", "equity_per_lot", "total_open_lots", "leverage", "group", "hold_duration_sec", "total_profit_usd",
 ]);
 
 interface AlertsStats {
@@ -132,6 +136,19 @@ interface BurstOpenRule {
 interface BurstOpenConfig {
   scan_interval_min: number;
   rules: BurstOpenRule[];
+}
+
+interface QuickOpenCloseRule {
+  id?: number;
+  max_hold_seconds: number;
+  min_closed_orders: number;
+  profit_window_min: number;
+  min_total_profit_usd: number;
+}
+
+interface QuickOpenCloseConfig {
+  enabled: boolean;
+  rules: QuickOpenCloseRule[];
 }
 
 /** Latest scan snapshot — only used to show scan metadata (time + duration) */
@@ -335,11 +352,15 @@ export default function RiskMonitor() {
       <Tabs value={activeTab} onValueChange={setActiveTab}>
         <TabsList>
           <TabsTrigger value="burst-open">批量下单</TabsTrigger>
+          <TabsTrigger value="quick-open-close">快开快平</TabsTrigger>
           <TabsTrigger value="gap-trading">缺口交易</TabsTrigger>
         </TabsList>
 
         <TabsContent value="burst-open">
           <BurstOpenTab active={activeTab === "burst-open"} />
+        </TabsContent>
+        <TabsContent value="quick-open-close">
+          <QuickOpenCloseTab active={activeTab === "quick-open-close"} />
         </TabsContent>
         <TabsContent value="gap-trading">
           <div className="flex flex-col items-center justify-center py-20 text-muted-foreground">
@@ -1143,6 +1164,532 @@ function BurstOpenTab({ active }: { active: boolean }) {
   );
 }
 
+// ── Quick Open-Close Tab ─────────────────────────────────
+
+function QuickOpenCloseTab({ active }: { active: boolean }) {
+  const { theme } = useTheme();
+  const isDarkMode = theme === "dark";
+  const gridStyle = useGridThemeStyle(isDarkMode);
+
+  const [rangePreset, setRangePreset] = useState<RangePresetKey>("4h");
+  const [customRange, setCustomRange] = useState<DateRange | undefined>();
+  const [datePickerOpen, setDatePickerOpen] = useState(false);
+
+  const [alerts, setAlerts] = useState<AlertEvent[]>([]);
+  const [totalCount, setTotalCount] = useState(0);
+  const [stats, setStats] = useState<AlertsStats>({
+    suspicious_count: 0,
+    event_count: 0,
+    servers: [],
+  });
+  const [latestMeta, setLatestMeta] = useState<LatestScanMeta | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [scanningNow, setScanningNow] = useState(false);
+  const [lastRefresh, setLastRefresh] = useState<string | null>(null);
+  const [config, setConfig] = useState<QuickOpenCloseConfig | null>(null);
+  const [editConfig, setEditConfig] = useState<QuickOpenCloseConfig | null>(null);
+  const [configOpen, setConfigOpen] = useState(false);
+  const [savingConfig, setSavingConfig] = useState(false);
+
+  const [pageIndex, setPageIndex] = useState(0);
+  const [pageSize, setPageSize] = useState(50);
+  const [sortBy, setSortBy] = useState<string>("scanned_at");
+  const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
+  const [serverFilter, setServerFilter] = useState("all");
+  const [loginInput, setLoginInput] = useState("");
+  const [loginQuery, setLoginQuery] = useState("");
+  const [zipcodeInput, setZipcodeInput] = useState("");
+  const [zipcodeQuery, setZipcodeQuery] = useState("");
+
+  useEffect(() => {
+    const trimmed = loginInput.trim();
+    const t = setTimeout(() => setLoginQuery(/^\d+$/.test(trimmed) ? trimmed : ""), 300);
+    return () => clearTimeout(t);
+  }, [loginInput]);
+
+  useEffect(() => {
+    const t = setTimeout(() => setZipcodeQuery(zipcodeInput.trim()), 300);
+    return () => clearTimeout(t);
+  }, [zipcodeInput]);
+
+  const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
+  const effectiveRange = useMemo(
+    () => buildRangeIso(rangePreset, customRange),
+    [rangePreset, customRange],
+  );
+
+  const buildFilterQs = useCallback(
+    (range: { since: string; until: string }) => {
+      const qs = new URLSearchParams({
+        since: range.since,
+        until: range.until,
+      });
+      if (serverFilter !== "all") qs.set("server", serverFilter);
+      if (loginQuery) qs.set("login", loginQuery);
+      if (zipcodeQuery) qs.set("zipcode", zipcodeQuery);
+      return qs;
+    },
+    [serverFilter, loginQuery, zipcodeQuery],
+  );
+
+  const fetchConfig = useCallback(async () => {
+    try {
+      const [quickRes, burstRes] = await Promise.all([
+        apiFetch("/api/v1/risk-monitor/quick-open-close/config"),
+        apiFetch("/api/v1/risk-monitor/burst-open/config"),
+      ]);
+      if (quickRes.ok) {
+        const cfg: QuickOpenCloseConfig = await quickRes.json();
+        setConfig(cfg);
+      }
+      if (burstRes.ok) {
+        const burstCfg: BurstOpenConfig = await burstRes.json();
+        setLatestMeta((prev) => ({
+          scan_time_ms: prev?.scan_time_ms ?? 0,
+          scanned_at: prev?.scanned_at ?? "",
+          total_accounts_scanned: prev?.total_accounts_scanned ?? 0,
+          config: burstCfg,
+        }));
+      }
+    } catch (err) {
+      console.error("Failed to load quick-open-close config:", err);
+    }
+  }, []);
+
+  const fetchAlerts = useCallback(async (signal?: AbortSignal) => {
+    if (!effectiveRange) return;
+    setLoading(true);
+    try {
+      const filterQs = buildFilterQs(effectiveRange);
+      const alertsQs = new URLSearchParams(filterQs);
+      alertsQs.set("page", String(pageIndex + 1));
+      alertsQs.set("page_size", String(pageSize));
+      alertsQs.set("sort_by", sortBy);
+      alertsQs.set("sort_order", sortOrder);
+
+      const [alertsRes, statsRes, latestRes] = await Promise.all([
+        apiFetch(`/api/v1/risk-monitor/quick-open-close/alerts?${alertsQs}`, { signal }),
+        apiFetch(`/api/v1/risk-monitor/quick-open-close/alerts/stats?${filterQs}`, { signal }),
+        apiFetch(`/api/v1/risk-monitor/burst-open`, { signal }).catch(() => null),
+      ]);
+      if (alertsRes.ok) {
+        const json: AlertsResponse = await alertsRes.json();
+        setAlerts(json.entries);
+        setTotalCount(json.total);
+      }
+      if (statsRes.ok) {
+        const json: AlertsStats = await statsRes.json();
+        setStats(json);
+      }
+      if (latestRes && latestRes.ok) {
+        const json = await latestRes.json();
+        setLatestMeta({
+          scan_time_ms: json.scan_time_ms,
+          scanned_at: json.scanned_at,
+          total_accounts_scanned: json.summary?.total_accounts_scanned ?? 0,
+          config: json.config,
+        });
+      }
+      setLastRefresh(
+        new Date().toLocaleTimeString("zh-CN", {
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit",
+        }),
+      );
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      console.error("Quick-open-close alerts fetch failed:", err);
+    } finally {
+      setLoading(false);
+    }
+  }, [effectiveRange, buildFilterQs, pageIndex, pageSize, sortBy, sortOrder]);
+
+  const refreshIntervalMs = (latestMeta?.config?.scan_interval_min ?? 5) * 60_000;
+
+  useEffect(() => {
+    setPageIndex(0);
+  }, [effectiveRange?.since, effectiveRange?.until, serverFilter, loginQuery, zipcodeQuery, pageSize, sortBy, sortOrder]);
+
+  useEffect(() => {
+    if (!active) return;
+    const controller = new AbortController();
+    fetchAlerts(controller.signal);
+    fetchConfig();
+
+    if (rangePreset !== "custom") {
+      const timer = setInterval(() => fetchAlerts(), refreshIntervalMs);
+      return () => {
+        controller.abort();
+        clearInterval(timer);
+      };
+    }
+    return () => controller.abort();
+  }, [active, fetchAlerts, fetchConfig, rangePreset, refreshIntervalMs]);
+
+  const handleExportCsv = async () => {
+    if (!effectiveRange || exporting) return;
+    setExporting(true);
+    try {
+      const qs = buildFilterQs(effectiveRange);
+      qs.set("sort_by", sortBy);
+      qs.set("sort_order", sortOrder);
+      const res = await apiFetch(`/api/v1/risk-monitor/quick-open-close/alerts/export?${qs}`);
+      if (!res.ok) throw new Error(`Export failed: ${res.status}`);
+      const blob = await res.blob();
+      const stamp = `${fmtFilenameStamp(effectiveRange.since)}_to_${fmtFilenameStamp(effectiveRange.until)}`;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `risk-monitor-quick-open-close_${stamp}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error("Quick-open-close CSV export failed:", err);
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const handleScanNow = async () => {
+    setScanningNow(true);
+    try {
+      const res = await apiFetch("/api/v1/risk-monitor/burst-open/scan-now", {
+        method: "POST",
+      });
+      if (res.ok) {
+        setPageIndex(0);
+        await fetchAlerts();
+      }
+    } catch (err) {
+      console.error("Quick-open-close scan-now failed:", err);
+    } finally {
+      setScanningNow(false);
+    }
+  };
+
+  const handleSortChanged = useCallback((e: SortChangedEvent) => {
+    const activeCol = e.api.getColumnState().find((c) => c.sort);
+    const nextSortBy = activeCol?.colId && SORTABLE_COL_IDS.has(activeCol.colId)
+      ? activeCol.colId
+      : "scanned_at";
+    const nextSortOrder = activeCol?.sort === "asc" ? "asc" : "desc";
+    setSortBy(nextSortBy);
+    setSortOrder(nextSortOrder);
+  }, []);
+
+  const handleSaveConfig = async () => {
+    if (!editConfig) return;
+    setSavingConfig(true);
+    try {
+      const res = await apiFetch("/api/v1/risk-monitor/quick-open-close/config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(editConfig),
+      });
+      if (res.ok) {
+        const saved: QuickOpenCloseConfig = await res.json();
+        setConfig(saved);
+        setEditConfig(null);
+        setConfigOpen(false);
+      }
+    } catch (err) {
+      console.error("Failed to save quick-open-close config:", err);
+    } finally {
+      setSavingConfig(false);
+    }
+  };
+
+  const columnDefs: ColDef<AlertEvent>[] = useMemo(
+    () => [
+      { headerName: "规则", field: "rule_label", colId: "rule_label", width: 110, pinned: "left" },
+      {
+        headerName: "被发现时间",
+        field: "scanned_at",
+        colId: "scanned_at",
+        width: 165,
+        sort: "desc",
+        valueFormatter: (p) => fmtTime(p.value),
+      },
+      { headerName: "服务器", field: "server", colId: "server", width: 120 },
+      {
+        headerName: "Zipcode",
+        field: "zipcode",
+        colId: "zipcode",
+        width: 120,
+        cellRenderer: (p: { value: string | null }) => p.value || "—",
+      },
+      { headerName: "账户", field: "login", colId: "login", width: 110, cellRenderer: LoginCell },
+      { headerName: "币种", field: "currency", colId: "currency", width: 80 },
+      { headerName: "品种", field: "symbol", colId: "symbol", width: 110 },
+      {
+        headerName: "开仓时间",
+        field: "first_open",
+        colId: "first_open",
+        width: 165,
+        valueFormatter: (p) => fmtTime(p.value),
+      },
+      {
+        headerName: "平仓时间",
+        field: "last_open",
+        colId: "last_open",
+        width: 165,
+        valueFormatter: (p) => fmtTime(p.value),
+      },
+      {
+        headerName: "持单时长(秒)",
+        field: "hold_duration_sec",
+        colId: "hold_duration_sec",
+        width: 120,
+        cellClass: "ag-right-aligned-cell",
+      },
+      {
+        headerName: "命中笔数",
+        field: "order_count",
+        colId: "order_count",
+        width: 100,
+        cellClass: "ag-right-aligned-cell",
+      },
+      {
+        headerName: "合并利润(USD)",
+        field: "total_profit_usd",
+        colId: "total_profit_usd",
+        width: 140,
+        cellClass: "ag-right-aligned-cell",
+        cellRenderer: (p: { value: number | null }) => {
+          const v = p.value;
+          if (v === null || v === undefined) return "—";
+          return (
+            <span
+              className={
+                v >= 0
+                  ? "text-emerald-600 dark:text-emerald-400"
+                  : "text-red-600 dark:text-red-400"
+              }
+            >
+              {fmtCurrency(v)}
+            </span>
+          );
+        },
+      },
+      {
+        headerName: "总手数",
+        field: "total_lots",
+        colId: "total_lots",
+        width: 100,
+        cellClass: "ag-right-aligned-cell",
+        valueFormatter: (p) => p.value?.toFixed(2) ?? "",
+      },
+      {
+        headerName: "订单明细",
+        colId: "orders",
+        width: 220,
+        sortable: false,
+        valueGetter: (p) =>
+          p.data?.orders?.map((o) => `${o.direction} ${o.lots} (${o.hold_seconds ?? "-"}s, ${fmtCurrency(o.profit)})`).join(", ") ?? "",
+      },
+    ],
+    [],
+  );
+
+  const rangeLabel =
+    rangePreset === "custom" && customRange?.from
+      ? customRange.to
+        ? `${format(customRange.from, "yyyy-MM-dd")} ~ ${format(customRange.to, "yyyy-MM-dd")}`
+        : format(customRange.from, "yyyy-MM-dd")
+      : (RANGE_PRESETS.find((p) => p.key === rangePreset)?.label ?? "最近 4 小时");
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex items-start justify-between flex-wrap gap-2">
+        <div>
+          <p className="text-sm text-muted-foreground">检测短持仓时长并密集平仓的可疑行为（快开快平）</p>
+          <p className="text-sm text-muted-foreground">
+            当前范围: <span className="font-medium text-foreground">{rangeLabel}</span>
+            {lastRefresh && ` · 上次刷新 ${lastRefresh}`}
+            {latestMeta && latestMeta.scanned_at && ` · 最近扫描 ${fmtTime(latestMeta.scanned_at)} · 耗时 ${latestMeta.scan_time_ms}ms`}
+            {latestMeta?.config && ` · 每 ${latestMeta.config.scan_interval_min} 分钟自动扫描`}
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <Button variant="outline" size="sm" onClick={handleExportCsv} disabled={exporting || totalCount === 0}>
+            <Download className={cn("h-4 w-4 mr-1.5", exporting && "animate-spin")} />
+            {exporting ? "导出中..." : "导出 CSV"}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              setEditConfig(
+                config
+                  ? JSON.parse(JSON.stringify(config))
+                  : {
+                    enabled: true,
+                    rules: [{
+                      max_hold_seconds: 60,
+                      min_closed_orders: 3,
+                      profit_window_min: 5,
+                      min_total_profit_usd: 0,
+                    }],
+                  },
+              );
+              setConfigOpen(true);
+            }}
+          >
+            <Settings2 className="h-4 w-4 mr-1.5" />
+            规则配置
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleScanNow}
+            disabled={scanningNow}
+          >
+            <RefreshCw className={cn("h-4 w-4 mr-1.5", scanningNow && "animate-spin")} />
+            {scanningNow ? "扫描中..." : "立即扫描"}
+          </Button>
+        </div>
+      </div>
+
+      {config && config.rules.length > 0 && (
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-xs text-muted-foreground">当前规则:</span>
+          {config.rules.map((r, i) => (
+            <Badge key={r.id ?? i} variant="secondary" className="text-xs font-normal">
+              Rule {r.id ?? i + 1}: 持单≤{r.max_hold_seconds}秒 / 命中≥{r.min_closed_orders}笔 / {r.profit_window_min}分钟利润≥${r.min_total_profit_usd}
+            </Badge>
+          ))}
+        </div>
+      )}
+
+      <div className="grid grid-cols-2 gap-3">
+        <SummaryCard
+          label="可疑账户（范围内去重）"
+          value={stats.suspicious_count}
+          dotColor="bg-red-500"
+          textColor="text-red-600 dark:text-red-400"
+        />
+        <SummaryCard
+          label="告警事件（范围内总数）"
+          value={stats.event_count}
+          dotColor="bg-amber-500"
+          textColor="text-amber-600 dark:text-amber-400"
+        />
+      </div>
+
+      <div className="flex items-center gap-3 flex-wrap">
+        <Select
+          value={rangePreset}
+          onValueChange={(v) => {
+            setRangePreset(v as RangePresetKey);
+            if (v === "custom" && !customRange?.from) setDatePickerOpen(true);
+          }}
+        >
+          <SelectTrigger className="w-[160px]"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            {RANGE_PRESETS.map((p) => (<SelectItem key={p.key} value={p.key}>{p.label}</SelectItem>))}
+          </SelectContent>
+        </Select>
+
+        {rangePreset === "custom" && (
+          <Popover open={datePickerOpen} onOpenChange={setDatePickerOpen}>
+            <PopoverTrigger asChild>
+              <Button variant="outline" className="w-[240px] justify-start text-left font-normal h-9">
+                <CalendarIcon className="mr-2 h-4 w-4" />
+                {customRange?.from
+                  ? (customRange.to
+                    ? `${format(customRange.from, "yyyy-MM-dd")} ~ ${format(customRange.to, "yyyy-MM-dd")}`
+                    : format(customRange.from, "yyyy-MM-dd"))
+                  : "选择日期范围"}
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent className="w-auto p-0" align="start">
+              <Calendar
+                initialFocus
+                mode="range"
+                defaultMonth={customRange?.from}
+                selected={customRange}
+                onSelect={setCustomRange}
+                numberOfMonths={2}
+                disabled={{ before: new Date(Date.now() - RETENTION_DAYS * 24 * 3600 * 1000) }}
+              />
+            </PopoverContent>
+          </Popover>
+        )}
+
+        <Select value={serverFilter} onValueChange={setServerFilter}>
+          <SelectTrigger className="w-[150px]"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">全部服务器</SelectItem>
+            <SelectItem value="MT4_Live">MT4 Live</SelectItem>
+            <SelectItem value="MT4_Live2">MT4 Live2</SelectItem>
+            <SelectItem value="MT5">MT5</SelectItem>
+          </SelectContent>
+        </Select>
+
+        <div className="relative w-[180px]">
+          <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+          <Input placeholder="搜索 zipcode（模糊）" value={zipcodeInput} onChange={(e) => setZipcodeInput(e.target.value)} className="pl-8" />
+        </div>
+        <div className="relative w-[180px]">
+          <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+          <Input placeholder="搜索账户号（精确）" value={loginInput} onChange={(e) => setLoginInput(e.target.value)} className="pl-8" inputMode="numeric" />
+        </div>
+        <span className="text-sm text-muted-foreground ml-auto">
+          {loading ? "加载中..." : `共 ${totalCount} 条告警`}
+        </span>
+      </div>
+
+      <div
+        className={cn("risk-monitor-theme h-[calc(100vh-540px)] min-h-[400px] w-full", isDarkMode ? "ag-theme-quartz-dark" : "ag-theme-quartz")}
+        style={gridStyle}
+      >
+        <AgGridReact<AlertEvent>
+          rowData={alerts}
+          columnDefs={columnDefs}
+          defaultColDef={defaultColDef}
+          gridOptions={{ theme: "legacy" }}
+          animateRows={false}
+          enableCellTextSelection
+          suppressCellFocus
+          sortingOrder={["desc", "asc"]}
+          onSortChanged={handleSortChanged}
+          getRowId={(p) => `evt-${p.data.id}`}
+        />
+      </div>
+
+      <Card>
+        <CardContent className="py-4">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="text-sm text-muted-foreground">
+              {totalCount === 0 ? "暂无数据" : `第 ${pageIndex * pageSize + 1}-${Math.min((pageIndex + 1) * pageSize, totalCount)} 条 / 共 ${totalCount} 条`}
+            </div>
+            <div className="flex items-center flex-wrap gap-2">
+              <Button variant="outline" size="sm" onClick={() => setPageIndex(0)} disabled={pageIndex === 0 || loading}>首页</Button>
+              <Button variant="outline" size="sm" onClick={() => setPageIndex(Math.max(0, pageIndex - 1))} disabled={pageIndex === 0 || loading}>上一页</Button>
+              <span className="text-sm text-muted-foreground">第 {pageIndex + 1} / {totalPages} 页</span>
+              <Button variant="outline" size="sm" onClick={() => setPageIndex(Math.min(totalPages - 1, pageIndex + 1))} disabled={pageIndex >= totalPages - 1 || loading}>下一页</Button>
+              <Button variant="outline" size="sm" onClick={() => setPageIndex(totalPages - 1)} disabled={pageIndex >= totalPages - 1 || loading}>末页</Button>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      <QuickConfigDrawer
+        open={configOpen}
+        onOpenChange={setConfigOpen}
+        config={editConfig}
+        setConfig={setEditConfig}
+        onSave={handleSaveConfig}
+        saving={savingConfig}
+      />
+    </div>
+  );
+}
+
 // ── Config Drawer ─────────────────────────────────────────
 
 function ConfigDrawer({
@@ -1286,6 +1833,165 @@ function ConfigDrawer({
                   {rule.burst_window_sec}秒内 ≥{rule.min_order_count}笔，每笔 ≥
                   {rule.min_lots_per_order}手
                 </p>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="border-t p-4 flex justify-end gap-2">
+          <DrawerClose asChild>
+            <Button variant="outline">取消</Button>
+          </DrawerClose>
+          <Button onClick={onSave} disabled={saving}>
+            <Save className="h-4 w-4 mr-1.5" />
+            {saving ? "保存中..." : "保存配置"}
+          </Button>
+        </div>
+      </DrawerContent>
+    </Drawer>
+  );
+}
+
+function QuickConfigDrawer({
+  open,
+  onOpenChange,
+  config,
+  setConfig,
+  onSave,
+  saving,
+}: {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  config: QuickOpenCloseConfig | null;
+  setConfig: (c: QuickOpenCloseConfig | null) => void;
+  onSave: () => void;
+  saving: boolean;
+}) {
+  const isMobile = useIsMobile();
+  if (!config) return null;
+
+  const updateRule = (idx: number, field: string, value: string) => {
+    const rules = [...config.rules];
+    (rules[idx] as any)[field] = Number(value);
+    setConfig({ ...config, rules });
+  };
+
+  const addRule = () => {
+    if (config.rules.length >= 10) return;
+    setConfig({
+      ...config,
+      rules: [
+        ...config.rules,
+        {
+          max_hold_seconds: 60,
+          min_closed_orders: 3,
+          profit_window_min: 5,
+          min_total_profit_usd: 0,
+        },
+      ],
+    });
+  };
+
+  const removeRule = (idx: number) => {
+    if (config.rules.length <= 1) return;
+    setConfig({ ...config, rules: config.rules.filter((_, i) => i !== idx) });
+  };
+
+  return (
+    <Drawer open={open} onOpenChange={onOpenChange} direction={isMobile ? "bottom" : "right"}>
+      <DrawerContent
+        className={cn(
+          isMobile
+            ? "max-h-[85vh]"
+            : "ml-auto h-full w-[480px] max-w-[90vw] rounded-l-xl rounded-r-none",
+        )}
+      >
+        <DrawerHeader className="border-b px-6">
+          <DrawerTitle>快开快平规则配置</DrawerTitle>
+        </DrawerHeader>
+        <div className="flex-1 overflow-y-auto p-6 space-y-6">
+          <div className="flex items-center justify-between">
+            <label className="text-sm font-medium">启用规则</label>
+            <Button
+              variant={config.enabled ? "default" : "outline"}
+              size="sm"
+              onClick={() => setConfig({ ...config, enabled: !config.enabled })}
+            >
+              {config.enabled ? "已启用" : "已停用"}
+            </Button>
+          </div>
+
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <label className="text-sm font-medium">检测规则（最多 10 条）</label>
+              <Button variant="outline" size="sm" onClick={addRule} disabled={config.rules.length >= 10}>
+                <Plus className="h-3.5 w-3.5 mr-1" />
+                添加规则
+              </Button>
+            </div>
+
+            {config.rules.map((rule, idx) => (
+              <div key={idx} className="rounded-lg border p-4 space-y-3 bg-muted/30">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm font-medium">Rule {idx + 1}</span>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => removeRule(idx)}
+                    disabled={config.rules.length <= 1}
+                    className="h-7 w-7 p-0 text-muted-foreground hover:text-destructive"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1">
+                    <label className="text-xs text-muted-foreground">最大持单时长（秒）</label>
+                    <Input
+                      type="number"
+                      min={1}
+                      max={3600}
+                      value={rule.max_hold_seconds}
+                      onChange={(e) => updateRule(idx, "max_hold_seconds", e.target.value)}
+                      className="h-8"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs text-muted-foreground">最少命中笔数</label>
+                    <Input
+                      type="number"
+                      min={1}
+                      max={200}
+                      value={rule.min_closed_orders}
+                      onChange={(e) => updateRule(idx, "min_closed_orders", e.target.value)}
+                      className="h-8"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs text-muted-foreground">利润统计窗口（分钟）</label>
+                    <Input
+                      type="number"
+                      min={1}
+                      max={120}
+                      value={rule.profit_window_min}
+                      onChange={(e) => updateRule(idx, "profit_window_min", e.target.value)}
+                      className="h-8"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs text-muted-foreground">最小合并利润（USD）</label>
+                    <Input
+                      type="number"
+                      min={-1000000}
+                      max={100000000}
+                      step={100}
+                      value={rule.min_total_profit_usd}
+                      onChange={(e) => updateRule(idx, "min_total_profit_usd", e.target.value)}
+                      className="h-8"
+                    />
+                  </div>
+                </div>
               </div>
             ))}
           </div>

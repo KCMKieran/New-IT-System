@@ -36,43 +36,80 @@ def _run_scan() -> None:
     global _latest_result
 
     from ..core.config import get_settings
-    from ..core.risk_monitor_db import append_scan_and_events, load_config
+    from ..core.risk_monitor_db import (
+        append_scan_and_events,
+        load_config,
+        load_quick_open_close_config,
+    )
+    from ..services.rule_quick_open_close_service import scan_quick_open_close
     from ..services.risk_monitor_service import scan_burst_open
 
     try:
         config = load_config()
+        quick_config = load_quick_open_close_config()
         settings = get_settings()
 
         # Pass previous alerts for dedup across the overlap window
         prev_alerts = _latest_result.get("alerts", []) if _latest_result else []
 
-        result = scan_burst_open(
+        burst_result = scan_burst_open(
             settings,
             scan_interval_min=config["scan_interval_min"],
             rules=config["rules"],
             previous_alerts=prev_alerts,
         )
+        quick_result: dict[str, Any] | None = None
+        if quick_config.get("enabled", True):
+            try:
+                quick_result = scan_quick_open_close(
+                    settings,
+                    scan_interval_min=config["scan_interval_min"],
+                    rules=quick_config.get("rules", []),
+                    previous_alerts=prev_alerts,
+                )
+            except Exception:
+                logger.error("Quick open-close scan failed", exc_info=True)
 
-        _latest_result = result
+        merged_alerts = list(burst_result["alerts"])
+        if quick_result:
+            merged_alerts.extend(quick_result["alerts"])
+
+        burst_pairs = burst_result.pop("_universe_pairs", set())
+        quick_pairs = quick_result.pop("_universe_pairs", set()) if quick_result else set()
+
+        _latest_result = {
+            "alerts": merged_alerts,
+            "summary": {
+                "suspicious_count": len(merged_alerts),
+                "total_accounts_scanned": len(set(burst_pairs) | set(quick_pairs)),
+            },
+            "burst_summary": burst_result["summary"],
+            "config": burst_result["config"],
+            "scan_time_ms": burst_result["scan_time_ms"] + (quick_result["scan_time_ms"] if quick_result else 0),
+            "scanned_at": burst_result["scanned_at"],
+        }
 
         # Persist both the scan batch metadata and each alert as an
         # event row. The alert_events table is what the new time-range
         # view on the frontend reads from.
         append_scan_and_events(
-            scanned_at=result["scanned_at"],
+            scanned_at=burst_result["scanned_at"],
             scan_interval_min=config["scan_interval_min"],
-            accounts_scanned=result["summary"]["total_accounts_scanned"],
-            suspicious_count=result["summary"]["suspicious_count"],
-            scan_time_ms=result["scan_time_ms"],
-            rules_config=config["rules"],
-            alerts=result["alerts"],
+            accounts_scanned=_latest_result["summary"]["total_accounts_scanned"],
+            suspicious_count=_latest_result["summary"]["suspicious_count"],
+            scan_time_ms=_latest_result["scan_time_ms"],
+            rules_config={
+                "burst_open": config["rules"],
+                "quick_open_close": quick_config.get("rules", []),
+            },
+            alerts=_latest_result["alerts"],
         )
 
         logger.info(
             "Burst scan complete: %d suspicious, %d scanned, %dms",
-            result["summary"]["suspicious_count"],
-            result["summary"]["total_accounts_scanned"],
-            result["scan_time_ms"],
+            _latest_result["summary"]["suspicious_count"],
+            _latest_result["summary"]["total_accounts_scanned"],
+            _latest_result["scan_time_ms"],
         )
     except Exception:
         logger.error("Burst scan failed", exc_info=True)
