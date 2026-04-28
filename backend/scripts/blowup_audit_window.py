@@ -88,8 +88,8 @@ def build_args() -> argparse.Namespace:
     p.add_argument(
         "--min-acc-loss-usd",
         type=float,
-        default=50.0,
-        help="Keep accounts whose absolute cumulative loss in window >= this value; set <=0 to disable",
+        default=0.0,
+        help="Deprecated: loss-threshold filtering is disabled and this value is ignored",
     )
     p.add_argument(
         "--exclude-demo-test",
@@ -378,13 +378,8 @@ def main() -> int:
         raw["balance_usd"] = raw.apply(lambda r: to_usd_eq(r["BALANCE"], r["is_cent"]), axis=1)
         raw["hour_bucket"] = pd.to_datetime(raw["CLOSE_TIME"]).dt.floor("h")
 
-        min_acc_loss = args.min_acc_loss_usd
-        if min_acc_loss and min_acc_loss > 0:
-            acc_loss = raw.groupby("loginSid")["loss_usd"].sum()
-            kept_login_sids = set(acc_loss[acc_loss.abs() >= float(min_acc_loss)].index)
-            raw = raw[raw["loginSid"].isin(kept_login_sids)].reset_index(drop=True)
-        else:
-            kept_login_sids = set(raw["loginSid"].unique())
+        # Keep all loss accounts in window; no minimum-loss threshold filtering.
+        kept_login_sids = set(raw["loginSid"].unique())
 
         if raw.empty:
             hourly = pd.DataFrame(

@@ -167,21 +167,34 @@ function buildRangeIso(
 
 ### Auto-refresh pattern
 
-Relative ranges refresh every 30s; absolute (custom) ranges don't:
+Relative ranges refresh at the backend's `scan_interval_min` cadence
+(read from `/burst-open/config`, 5min fallback before the config response
+arrives). Absolute (custom) ranges don't auto-refresh. (Updated
+2026-04-28, commit 9713e3f — was hard-coded 30s before.)
 
 ```tsx
+// Match UI refresh cadence with the backend scan cadence so we don't
+// hammer the API at 30s while the scanner only produces new data every
+// scan_interval_min minutes.
+const refreshIntervalMs = (config?.scan_interval_min ?? 5) * 60_000;
+
 useEffect(() => {
   if (!active) return;
   const controller = new AbortController();
   fetchAlerts(controller.signal);
+  fetchConfig();
 
   if (rangePreset !== "custom") {
-    const timer = setInterval(() => fetchAlerts(), 30_000);
+    const timer = setInterval(() => fetchAlerts(), refreshIntervalMs);
     return () => { controller.abort(); clearInterval(timer); };
   }
   return () => controller.abort();
-}, [fetchAlerts, active, rangePreset]);
+}, [fetchAlerts, fetchConfig, active, rangePreset, refreshIntervalMs]);
 ```
+
+`refreshIntervalMs` lives in the dependency array so saving a new
+`scan_interval_min` in the Config Drawer immediately re-arms the timer
+with the new value (no page reload needed).
 
 ### Calendar constraint
 

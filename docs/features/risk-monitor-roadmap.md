@@ -128,7 +128,7 @@ class QuickProfitStrategy(Strategy):
 
 **实现复杂度**：Low。在 Burst Open 的分组里加一个 `direction` 维度和 lot_size 方差检查。
 
-**SQL 起点**：复用 [docs/features/risk-monitor.md §9.3](./risk-monitor.md) 的"同秒开仓 ≥ N 笔" 粗筛 SQL，Python 端做方差检查。
+**SQL 起点**：复用 [risk-monitor-archive.md](./risk-monitor-archive.md) §9.3 的"未平仓中同秒开仓 ≥ N 笔" 粗筛 SQL（已归档，不再出现在主文档），Python 端做方差检查。
 
 ### 3.3 Rule C — Quick Open-Close（快开快平）
 
@@ -143,7 +143,7 @@ class QuickProfitStrategy(Strategy):
 - MT4：`mt4_trades WHERE CLOSE_TIME != '1970'` + 时间差计算
 - MT5：`mt5_deals Entry=1/3` 通过 `PositionID` 关联 `Entry=0` 的开仓
 
-SQL 模板参考 [docs/features/risk-monitor.md §9.5](./risk-monitor.md)（"完整交易生命周期"）。
+SQL 模板参考 [risk-monitor-archive.md](./risk-monitor-archive.md) §9.5 "MT5 账户交易分析"（含完整交易生命周期 SQL，已归档）。
 
 ### 3.4 Rule D — Leverage Abuse（滥用杠杆）
 

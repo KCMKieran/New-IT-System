@@ -6,13 +6,18 @@
 >
 > **历史归档**: [risk-monitor-archive.md](./risk-monitor-archive.md) — 已完成的开发计划、探索性 SQL、已移除规则设计、已实施调研记录
 >
-> **变更记录**: 2026-03-26 移除 Scale-In 规则代码，Tab 2 改为「缺口交易」(开发中)。2026-04-23 归档已完成历史章节。
+> **变更记录**:
+> - 2026-03-26 移除 Scale-In 规则代码，Tab 2 改为「缺口交易」(开发中)。
+> - 2026-04-23 归档已完成历史章节到 [risk-monitor-archive.md](./risk-monitor-archive.md)。
+> - 2026-04-28 (commit 9713e3f) 前端轮询从硬编码 30s 改为跟随后端 `scan_interval_min`，并同步刷新本文档 §1 / §3 / §4 / §5 / §6 中残留的旧规则（Scale-In / Frequent Open / Batch-Close / `/scan` API）描述，让主文档与 Burst Open v2 实际实现一致。
 
 ## 1. 系统概览
 
 ### 目标
 
-每 10 分钟扫描所有交易服务器的持仓和近期成交，检测高杠杆 / 高资金利用率客户，预警风控团队。
+每 `scan_interval_min` 分钟（默认 10，前端可调，最小 5）扫描所有交易服务器的近期开仓成交，检测短时间内同品种密集下大单的可疑交易行为（Burst Open Detection），预警风控团队。
+
+> 详细规则定义在 §6 Burst Open Detection。本文档 §3 / §4 / §5 中的 Scale-In / Frequent Open / Batch-Close 设计已被 Burst Open 取代，原始记录归档在 [risk-monitor-archive.md](./risk-monitor-archive.md)。
 
 ### 业务背景
 
@@ -31,56 +36,51 @@ KCM 是 B-Book CFD 券商：客户亏损 = 公司盈利。真正的风险是客�
 ### 架构总览
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                     前端 (每 10 分钟轮询)                      │
-│  GET /api/v1/risk-monitor/scan                               │
-└──────────────────────┬───────────────────────────────────────┘
-                       │
-                       ▼
-┌──────────────────────────────────────────────────────────────┐
-│                      后端 (FastAPI)                           │
-│                                                              │
-│  ┌────────────────────────────────────────────────────────┐  │
-│  │               数据采集层 (Data Collector)                │  │
-│  │                                                        │  │
-│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐             │  │
-│  │  │ MT4 Live │  │MT4 Live2 │  │   MT5    │             │  │
-│  │  │ Adapter  │  │ Adapter  │  │ Adapter  │             │  │
-│  │  └────┬─────┘  └────┬─────┘  └────┬─────┘             │  │
-│  │       └──────────────┼──────────────┘                  │  │
-│  │                      ▼                                 │  │
-│  │          统一持仓格式 (Normalized Position)              │  │
-│  └──────────────────────┬─────────────────────────────────┘  │
-│                         ▼                                    │
-│  ┌────────────────────────────────────────────────────────┐  │
-│  │               规则引擎 (Rule Engine)                     │  │
-│  │                                                        │  │
-│  │  ┌─────────────────┐  ┌────────────────┐              │  │
-│  │  │ 持仓累积检测     │  │ 批量平仓检测   │  ← 当前      │  │
-│  │  │ (Scale-In)      │  │ (Batch-Close)  │              │  │
-│  │  └─────────────────┘  └────────────────┘              │  │
-│  │  ┌─────────────────┐  ┌────────────────┐              │  │
-│  │  │ 未来规则 A      │  │ 未来规则 B     │  ← 扩展      │  │
-│  │  └─────────────────┘  └────────────────┘              │  │
-│  └──────────────────────┬─────────────────────────────────┘  │
-│                         ▼                                    │
-│  ┌────────────────────────────────────────────────────────┐  │
-│  │               告警输出 (Alert Output)                    │  │
-│  │  Redis 去重 → API 响应 + Email 通知                     │  │
-│  └────────────────────────────────────────────────────────┘  │
-└──────────────────────────────────────────────────────────────┘
-                       │
-                       ▼ (单个 pymysql 连接)
-┌──────────────────────────────────────────────────────────────┐
-│              MySQL Slave (Azure)                              │
-│  ┌────────────┐ ┌────────────┐ ┌────────────┐               │
-│  │ mt4_live   │ │fxbackoffice│ │ mt5_live   │               │
-│  │ mt4_trades │ │ mt4_trades │ │ mt5_deals  │               │
-│  │ mt4_users  │ │ mt4_users  │ │mt5_positions│              │
-│  │            │ │ users      │ │ mt5_users  │               │
-│  └────────────┘ └────────────┘ └────────────┘               │
-└──────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│  前端 (RiskMonitor.tsx)                                            │
+│  - GET /burst-open/alerts          ← 时间范围列表 (主数据源)         │
+│  - GET /burst-open/alerts/stats    ← 顶部 SummaryCard 聚合          │
+│  - GET /burst-open                 ← 最近一次扫描元数据 (脚注 + 立即扫描) │
+│  - GET /burst-open/config          ← 规则 + scan_interval_min       │
+│  轮询频率: scan_interval_min × 60s (跟随后端配置, custom 范围不轮询)   │
+└─────────────────────────┬────────────────────────────────────────┘
+                          │
+                          ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  后端 (FastAPI + APScheduler)                                      │
+│                                                                   │
+│  ┌────────────────────────────────────────────────────────────┐  │
+│  │  BurstOpenScheduler (单例后台线程)                            │  │
+│  │  每 scan_interval_min 分钟触发 _locked_scan():               │  │
+│  │    1) MT4 Live + MT4 Live2 + MT5 三个 SQL 拉最近 N 秒开仓     │  │
+│  │       (check_interval_sec = scan_interval_min*60 + 30s buffer)│  │
+│  │    2) Python 滑动窗口 rule_burst_open_detect(orders, rules)   │  │
+│  │       按 (server, login, symbol) 分组, 多规则共享同一份数据    │  │
+│  │    3) 跨扫描去重 + equity / zipcode / currency enrichment    │  │
+│  │    4) 写入 _latest_result (内存) + scan_history + alert_events│  │
+│  │       (SQLite, 30 天保留)                                     │  │
+│  └────────────────────────────────────────────────────────────┘  │
+│                                                                   │
+│  Routes (`api/v1/routes/risk_monitor.py`):                        │
+│    /burst-open                  读 _latest_result 缓存             │
+│    /burst-open/config           SQLite read / write rules         │
+│    /burst-open/scan-now         立即触发一次扫描 (加锁)              │
+│    /burst-open/alerts           SQLite alert_events 时间范围查询     │
+│    /burst-open/alerts/stats     SQLite 聚合 (suspicious / events)   │
+│    /burst-open/alerts/export    SQLite 流式 CSV (StreamingResponse) │
+└─────────────────────────┬────────────────────────────────────────┘
+                          │ 单个 pymysql 连接 (跨库查询)
+                          ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  MySQL Slave (Azure)  —  非 ClickHouse, 实时性要求决定的            │
+│   mt4_live      mt4_live2     mt5_live       fxbackoffice         │
+│   mt4_trades    mt4_trades    mt5_deals      mt4_users            │
+│   mt4_users     mt4_users     mt5_positions  (currency / zipcode) │
+│                               mt5_users                            │
+└──────────────────────────────────────────────────────────────────┘
 ```
+
+> **关于扫描数据源**：本页面是项目里少数几个**不走 ClickHouse 的页面**之一。Burst Open 检测的是"几秒内的密集开仓"，需要秒级新鲜数据，而 ClickHouse 同步有几分钟到几小时延迟。MySQL Slave 跟主库延迟通常在毫秒级，正好满足。
 
 ---
 
@@ -273,27 +273,24 @@ ORDER BY d.Login, d.Time;
 
 - 每条规则是一个**独立函数**，接收标准化数据，返回告警列表
 - 规则可独立启用/禁用，互不影响
-- 新增规则只需添加函数 + 注册到引擎，不改现有代码
+- 新增规则只需添加函数 + 注册到引擎，不改现有代码（详细脚手架见 [risk-monitor-reusable-patterns.md](./risk-monitor-reusable-patterns.md) 和 [SKILL.md "Adding a New Rule"](../../.cursor/skills/risk-monitor/SKILL.md)）
 
-### 规则注册表
+### 当前规则注册
 
-```python
-RULES: list[RuleFunc] = [
-    rule_frequent_open_detect, # ✅ 已实现: 频繁开仓检测
-    # rule_scale_in_detect,    # ❌ 已移除 (2026-03): 持仓累积检测
-    # rule_gap_trading_detect, # 🚧 开发中: 缺口交易检测
-    rule_batch_close_detect,   # 设计中: 同秒批量平仓检测
-    # rule_xxx,                # 未来: 新增规则只需在此注册
-]
-```
+| 规则 | 状态 | 文档 |
+|------|------|------|
+| `rule_burst_open_detect` (批量下单) | ✅ 在线 | 本文档 §6 |
+| Gap Trading (缺口交易) | 🚧 前端占位，后端未实现 | [roadmap.md §3](./risk-monitor-roadmap.md) |
+| Quick Profit / Scale-In / Quick Open-Close / Leverage Abuse / Martingale | 📋 已设计未实现 | [roadmap.md §3](./risk-monitor-roadmap.md) |
+| ~~`rule_frequent_open_detect`~~ | ❌ 2026-03-28 被 Burst Open 取代 | [archive.md "Frequent Opening Detection"](./risk-monitor-archive.md) |
+| ~~`rule_scale_in_detect`~~ | ❌ 2026-03-26 移除 | [archive.md "Scale-In Detection"](./risk-monitor-archive.md) |
+| ~~`rule_batch_close_detect`~~ | ❌ 设计阶段废弃，从未上线 | [archive.md "Old Python Detection Engine"](./risk-monitor-archive.md) |
 
-### 当前规则: 同秒批量平仓 (Batch-Close Detection)
+### 当前规则: Burst Open Detection (批量下单)
 
-**触发条件**: 同一账户在同一秒内平仓 ≥ 3 笔。
+**触发条件**: `burst_window_sec` 秒内，同一 (server, login, symbol) 上 ≥ `min_order_count` 笔订单，每笔 lots ≥ `min_lots_per_order`。买卖都计入，不区分方向。
 
-**输出字段**: 账户、品种、平仓时间、批次大小、总手数、总盈亏、胜率
-
-**数据源**: 最近 20 分钟已平仓成交
+**完整定义、滑动窗口算法、SQL、配置、API、SQLite 表结构、CEN/zipcode enrichment 等所有细节见下方 §6**。
 
 ---
 
@@ -331,49 +328,18 @@ conn = pymysql.connect(
 
 ### API
 
-| 接口 | 方法 | 说明 |
+> **完整 API 契约**见 §6.5 / §6.6 (服务端分页接口 + 响应格式)。本节列概览，避免和详细章节重复。
+
+| 接口 | 方法 | 用途 |
 |------|------|------|
-| `/api/v1/risk-monitor/frequent-open` | GET | 频繁开仓检测 |
-| ~~`/api/v1/risk-monitor/scan`~~ | ~~GET~~ | ❌ 已移除 (2026-03) |
-
-**频繁开仓查询参数**:
-- `check_interval` (默认 8): 检查窗口（分钟）
-- `min_order_count` (默认 3): 最少开仓笔数
-- `equity_per_lot_threshold` (默认 2000): 每手净值阈值（USD）
-- `login` (可选): 过滤特定账户
-- `server` (可选): 过滤特定服务器 (`mt4_live`, `mt4_live2`, `mt5`)
-
-**响应格式**:
-
-```json
-{
-  "alerts": [
-    {
-      "rule": "SCALE_IN",
-      "server": "MT5",
-      "login": 67035072,
-      "severity": "HIGH",
-      "details": {
-        "symbol": "XAUUSD",
-        "direction": "Buy",
-        "open_count": 10,
-        "total_lots": 10.0,
-        "capital_per_lot": 769.0,
-        "balance": 7692.0,
-        "floating_pnl": 1636.0
-      }
-    }
-  ],
-  "summary": {
-    "critical": 1,
-    "high": 3,
-    "watch": 5,
-    "total_accounts_scanned": 2400
-  },
-  "scan_time_ms": 28,
-  "scanned_at": "2026-03-18T07:00:00"
-}
-```
+| `/api/v1/risk-monitor/burst-open` | GET | 读 `_latest_result` 内存缓存，扫描元数据 |
+| `/api/v1/risk-monitor/burst-open/config` | GET / POST | 读写 SQLite 中的 `scan_interval_min` + rules |
+| `/api/v1/risk-monitor/burst-open/scan-now` | POST | 立即扫描 (加锁，单实例排队) |
+| `/api/v1/risk-monitor/burst-open/alerts` | GET | 时间范围 + 过滤 + 服务端分页排序，主数据源 |
+| `/api/v1/risk-monitor/burst-open/alerts/stats` | GET | 同范围聚合，给 SummaryCard |
+| `/api/v1/risk-monitor/burst-open/alerts/export` | GET | 流式 CSV，按当前 filter + sort 全量导出 |
+| ~~`/api/v1/risk-monitor/frequent-open`~~ | — | ❌ 2026-03-28 删除（[archive.md](./risk-monitor-archive.md) 留存原响应格式） |
+| ~~`/api/v1/risk-monitor/scan`~~ | — | ❌ 2026-03 删除 |
 
 ### Email 告警 (未来阶段)
 
@@ -397,40 +363,40 @@ if not redis.exists(key):
 ### 页面: `/risk-monitor`
 
 - 侧边栏分组: Risk Control，页面标题: 交易实时监控
-- 纯中文 UI，不需要 i18n，等级标签用英文
-- **Tab 切换**: 频繁开仓 (默认) / 缺口交易 (开发中，当前为占位)
-- 每个 Tab 独立的 API、刷新间隔、筛选器、表格列
-- A-Book 客户不做过滤，在 UI 中显示 GROUP 列即可
+- 纯中文 UI，不需要 i18n
+- **Tab 切换**: 批量下单 (默认) / 缺口交易 (开发中，当前为占位)
+- 没有 ALERT / WATCH 分级，所有命中统称"可疑用户"，详见 §6.1
 
-#### Tab 1: 频繁开仓 (默认)
+> **历史记录**：早期 Tab 1 是"频繁开仓 + ALERT/WATCH 分级"，2026-03-28 重构为 Burst Open 后取消分级，UI 设计和卡片含义全部变更。原稿归档于 [archive.md "Frequent Opening Detection"](./risk-monitor-archive.md)。
+
+#### Tab 1: 批量下单 (默认)
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│  [频繁开仓] [持仓累积]                                                │
+│  [批量下单] [缺口交易]                                                │
 ├──────────────────────────────────────────────────────────────────────┤
-│  检测最近 N 分钟内频繁开仓的账户             [🔄 立即扫描]             │
-│  上次扫描: 14:32 · 耗时 35ms · 每 8 分钟自动刷新                     │
+│  检测短时间内同品种密集下大单的可疑交易行为(EA/算法特征)              │
+│  当前范围: 最近 4 小时 · 上次刷新 14:32                              │
+│  最近扫描 14:30:00 · 耗时 102ms · 每 N 分钟自动扫描 (N=scan_interval) │
+│             [导出 CSV] [规则配置] [立即扫描]                          │
 ├──────────────────────────────────────────────────────────────────────┤
-│  ┌─ 参数设置 ────────────────────────────────────────────────────┐  │
-│  │  检查窗口: [8min ▼]  最少开仓: [3] 笔  每手净值 < [2000] USD │  │
-│  └───────────────────────────────────────────────────────────────┘  │
+│  当前规则: [Rule 1: 3秒/3笔/≥5手] [Rule 2: 5秒/5笔/≥3手]              │
 ├──────────────────────────────────────────────────────────────────────┤
-│  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────────────┐│
-│  │ 🔴 ALERT          │  │ 🟡 WATCH          │  │ 时间窗口内开仓账户数(N分钟)││
-│  │    2              │  │    5              │  │      150                 ││
-│  │ 每手净值<2,000 USD │  │ 每手净值≥2,000 USD │  │                          ││
-│  └──────────────────┘  └──────────────────┘  └──────────────────────────┘│
+│  ┌────────────────────────┐  ┌────────────────────────┐             │
+│  │ 🔴 可疑账户(范围内去重)  │  │ 🟡 告警事件(范围内总数)  │             │
+│  │      12                │  │      37                │             │
+│  └────────────────────────┘  └────────────────────────┘             │
 ├──────────────────────────────────────────────────────────────────────┤
-│  筛选: [全部服务器 ▼]  [搜索账户号...]                                │
+│  时间范围: [最近 4 小时 ▼] (1h/4h/1d/7d/30d/自定义)                   │
+│  筛选: [全部服务器 ▼] [搜索 zipcode...] [搜索账户号...]              │
+│         共 N 条告警                                                  │
 ├──────────────────────────────────────────────────────────────────────┤
-│  AG-Grid 表格                                                        │
-│  列: 等级 | 服务器 | 账户 | 开仓笔数 | 总手数 | 品种 |               │
-│      净值(Equity) | 每手净值比 | 持仓状态 | 浮动盈亏 |               │
-│      杠杆 | 账户组 | 首笔时间 | 末笔时间                              │
-│  持仓状态: 未平仓(绿)/已平仓(灰)/部分平仓(琥珀)                      │
-│  浮动盈亏: 仍持仓订单的PnL, 红=亏损 绿=盈利                          │
-│  行颜色: ALERT=浅红, WATCH=浅黄                                      │
-│  自动刷新: 等于 check_interval 参数值                                 │
+│  AG-Grid 表格 (服务端分页 + 服务端排序)                              │
+│  列: 规则 | 被发现时间(HKT) | 具体时间(开仓窗口) | 服务器 | Zipcode |  │
+│      账户(CRM链接) | 币种 | 品种 | 批量笔数 | 批量总手数 | 订单明细 |  │
+│      净值(USD) | 每手净值(USD) | 总持仓手数 | 杠杆 | 账户组          │
+│  自动刷新: 跟随后端 scan_interval_min (默认 5min, 最小 5min)         │
+│  分页: 50 / 100 / 200 / 300 / 500 行 ─ 全量导出走 /alerts/export    │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -480,8 +446,8 @@ if not redis.exists(key):
 | 4 | **扫描间隔** | 后端每隔几分钟执行一次扫描 | 10 分钟 | `scan_interval_min` |
 
 **全局约束**:
-- `scan_interval_min` 前端可调，最小 5 分钟，必须为整数
-- SQL 回溯窗口 `check_interval` = `scan_interval_min` + `max(burst_window_sec)`，无缝覆盖且处理边界 (见 §6.9)
+- `scan_interval_min` 前端可调，范围 5 - 60 分钟，整数 (Pydantic schema default 10)
+- SQL 回溯窗口 `check_interval_sec` = `scan_interval_min × 60 + 30s`（固定 30s buffer，常量 `_BOUNDARY_BUFFER_SEC` 在 `risk_monitor_service.py`）。30s 比所有规则的 `burst_window_sec`（≤30s）都大，能覆盖跨扫描边界的 burst；多扫部分由跨扫描去重 `(rule_id, server, login, symbol, first_open)` 抹掉，不会重复入库。原始边界问题分析见 §6.9。
 - Rules 上限: 10 条
 - Rules 持久化: SQLite (重启后恢复)
 - Config 更新: POST 整体替换 rules 数组 (last-write-wins)
@@ -587,14 +553,20 @@ if not redis.exists(key):
                        │
                        ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                  前端 (只读缓存)                              │
+│                  前端 (只读 SQLite alert_events + 内存缓存)    │
 │                                                             │
-│  每 30s 轮询 GET /burst-open → 展示最新扫描结果              │
-│  参数面板: 展示/编辑 rules (读写 config API)                 │
+│  每 scan_interval_min 分钟轮询 (跟随后端配置, 5min fallback)  │
+│  - GET /burst-open/alerts        → AG-Grid 表格主数据         │
+│  - GET /burst-open/alerts/stats  → 顶部 SummaryCard          │
+│  - GET /burst-open               → 扫描元数据 (脚注 + 规则)    │
+│  规则配置: 抽屉读写 config API, 保存后 refreshIntervalMs 自动重算 │
 │  "立即扫描" → POST scan-now                                 │
-│  "查看历史" → GET history → 侧边抽屉/弹窗展示               │
+│  "导出 CSV" → /alerts/export 流式下载 (不限 page_size)        │
+│  时间范围 picker (1h/4h/1d/7d/30d/custom) 取代了旧版 history Drawer │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+> **轮询频率细节** (commit 9713e3f, 2026-04-28)：以前是硬编码 `setInterval(fetchAlerts, 30_000)`，跟后端 scan 节奏不匹配 — 后端 5/10 分钟才出新数据，前端 30s 一次纯属浪费。现在改成 `(config?.scan_interval_min ?? 5) * 60_000`，并把 `refreshIntervalMs` 放进 useEffect 依赖里，所以在 Config Drawer 里改 `scan_interval_min` 保存后，前端 timer 会立即 reschedule，不需要刷新页面。custom (绝对) 范围因为 `until` 是固定时刻，不再需要轮询。
 
 **多用户冲突处理**:
 
@@ -781,16 +753,17 @@ scan_interval = 10min
 → 真实的 burst 被漏掉!
 ```
 
-**解决方案**: SQL 回溯窗口加一个 buffer:
+**解决方案**: SQL 回溯窗口加一个 buffer。
 
-```
-check_interval = scan_interval_min + max(burst_window_sec across all rules)
-```
-
-例如 scan_interval = 10min, 最大 burst_window = 5s → 回溯 10min + 5s = 605s。
-
-多出的 5s 可能产生重复检测 → 用 burst 的 `(server, login, symbol, first_open_time)` 做去重，
-如果上一次扫描已经报过同一个 burst（对比 latest_result），则不重复记录。
+> **2026-04 实际实现**: 没采用动态 `max(burst_window_sec)`，而是用了**固定 30s buffer**（`_BOUNDARY_BUFFER_SEC = 30` in `risk_monitor_service.py`），因为 `burst_window_sec` schema 上限就是 30s，固定 30s 永远 ≥ 任何规则的窗口，简单且安全。
+>
+> ```python
+> # backend/app/services/risk_monitor_service.py
+> _BOUNDARY_BUFFER_SEC = 30
+> check_interval_sec = scan_interval_min * 60 + _BOUNDARY_BUFFER_SEC
+> ```
+>
+> 例如 scan_interval = 10min → 回溯 600s + 30s = 630s。多出来的 30s 可能产生重复检测，由跨扫描去重 `(rule_id, server, login, symbol, first_open)` 与 `_latest_result.alerts` 比对消除（`scan_burst_open` 里的 `previous_alerts` 参数）。
 
 > 回复:
 
@@ -802,7 +775,7 @@ check_interval = scan_interval_min + max(burst_window_sec across all rules)
 |------|---------|------|
 | `burst_window_sec` | 1 ~ 30 秒 | <1 无意义，>30 接近旧规则的"频繁"而非"批量" |
 | `min_order_count` | 2 ~ 50 笔 | <2 没有"密集"概念，>50 不太现实 |
-| `min_lots_per_order` | 0.5 ~ 100 手 | <0.5 微型单无风险，>100 极端罕见 |
+| `min_lots_per_order` | 0.01 ~ 100 手 | 上限 100 极端罕见；下限 0.01 = MT4 最小手数（CEN 账户场景需要） |
 | `scan_interval_min` | 5 ~ 60 分钟 | <5 对 DB 压力增加，>60 实时性太差 |
 
 > 回复 (范围是否合适？):
