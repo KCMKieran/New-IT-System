@@ -549,6 +549,11 @@ function BurstOpenTab({ active }: { active: boolean }) {
     }
   }, []);
 
+  // Match UI refresh cadence with the backend scan cadence from SQLite config.
+  // Use 5 minutes until the config response arrives so we do not fall back to
+  // the previous aggressive 30-second polling.
+  const refreshIntervalMs = (config?.scan_interval_min ?? 5) * 60_000;
+
   // Fetch on mount, when range changes, and periodically for relative ranges.
   // Absolute (custom) ranges don't auto-refresh since the end time is fixed.
   useEffect(() => {
@@ -558,14 +563,14 @@ function BurstOpenTab({ active }: { active: boolean }) {
     fetchConfig();
 
     if (rangePreset !== "custom") {
-      const timer = setInterval(() => fetchAlerts(), 30_000);
+      const timer = setInterval(() => fetchAlerts(), refreshIntervalMs);
       return () => {
         controller.abort();
         clearInterval(timer);
       };
     }
     return () => controller.abort();
-  }, [fetchAlerts, fetchConfig, active, rangePreset]);
+  }, [fetchAlerts, fetchConfig, active, rangePreset, refreshIntervalMs]);
 
   /** Trigger an immediate scan, then re-pull alerts so the new event is visible. */
   const handleScanNow = async () => {
