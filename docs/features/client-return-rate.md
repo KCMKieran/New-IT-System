@@ -16,7 +16,7 @@
 ### 2.1 顶部筛选卡片
 - **标题**: "客户回报率查询"，副标题说明筛选逻辑
 - **日期范围选择器**: 支持自定义日期范围
-- **快速时间选择**: 过去 1 小时 / 过去 6 小时 / 今日 / 本周 / 过去 7 天 / 本月 / 过去 30 天
+- **快速时间选择**: 过去 1 小时 / 过去 6 小时 / 过去 24 小时 / 今日 / 本周 / 过去 7 天 / 本月 / 过去 30 天
 - **客户 ID 搜索**: 精确匹配 client_id
 - **查询按钮**: 触发后端查询
 - **导出 CSV 按钮**: 创建异步导出任务，任务完成后自动下载 CSV
@@ -66,7 +66,7 @@
 
 **Phase 1**: 获取在时间范围内有平仓交易的 client_id 列表及区间交易利润。
 - **快速路径（默认）**: 使用 `stats_trading` 预聚合表，字段 `totalPlClosed`（= PROFIT + SWAPS + COMMISSION），按 `(userId, date)` 索引查询，<1s 完成
-- **慢速回退（sub-day）**: 选择"过去 1/6 小时"等 sub-day 模式时，回退到 `mt4_trades` 原始表，使用 VIRTUAL 列 `totalProfit`（需要 `CLOSE_TIME` 精确过滤）
+- **慢速回退（sub-day）**: 选择"过去 1/6/24 小时"等 sub-day 模式时（前端会传 `close_time_start`），回退到 `mt4_trades` 原始表，使用 VIRTUAL 列 `totalProfit`（需要 `CLOSE_TIME` 精确过滤）。24h 窗口约扫描 2 天 `mt4_trades` 数据，依赖 `closeDate` 索引先收敛范围，再用 `CLOSE_TIME >= close_time_mt4` 精确过滤
 - `stats_trading` 字段映射：`totalPlClosed` = SUM(PROFIT+SWAPS+COMMISSION)，`totalProfit` = 仅 SUM(PROFIT)
 
 **Phase 2**: 对 Phase 1 筛出的 client_id，通过 LEFT JOIN 获取：

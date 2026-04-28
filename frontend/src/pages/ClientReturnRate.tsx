@@ -211,6 +211,12 @@ export default function ClientReturnRate() {
       d.setHours(now.getHours() - 6);
       return { from: d, to: now };
     }
+    if (timeRange === "24h") {
+      // Rolling 24-hour window; uses sub-day path (mt4_trades) for second-level precision
+      const d = new Date(now);
+      d.setHours(now.getHours() - 24);
+      return { from: d, to: now };
+    }
     if (timeRange === "today") {
       const d = new Date(now);
       d.setHours(0, 0, 0, 0);
@@ -259,7 +265,11 @@ export default function ClientReturnRate() {
       if (searchInput.trim()) p.set("search", searchInput.trim());
       if (dr?.from) p.set("month_start", format(dr.from, "yyyy-MM-dd"));
       if (dr?.to) p.set("month_end", format(dr.to, "yyyy-MM-dd"));
-      if ((timeRange === "1h" || timeRange === "6h") && dr?.from) {
+      // Sub-day modes need CLOSE_TIME precision (backend falls back to mt4_trades raw table)
+      if (
+        (timeRange === "1h" || timeRange === "6h" || timeRange === "24h") &&
+        dr?.from
+      ) {
         p.set("close_time_start", format(dr.from, "yyyy-MM-dd HH:mm:ss"));
       }
       const res = await apiFetch(`/api/v1/client-return-rate/query?${p}`);
@@ -371,7 +381,8 @@ export default function ClientReturnRate() {
         month_start: dr?.from ? format(dr.from, "yyyy-MM-dd") : null,
         month_end: dr?.to ? format(dr.to, "yyyy-MM-dd") : null,
         close_time_start:
-          (timeRange === "1h" || timeRange === "6h") && dr?.from
+          (timeRange === "1h" || timeRange === "6h" || timeRange === "24h") &&
+          dr?.from
             ? format(dr.from, "yyyy-MM-dd HH:mm:ss")
             : null,
         include_avg_equity: true,
@@ -731,6 +742,7 @@ export default function ClientReturnRate() {
                 <SelectContent>
                   <SelectItem value="1h">过去 1 小时</SelectItem>
                   <SelectItem value="6h">过去 6 小时</SelectItem>
+                  <SelectItem value="24h">过去 24 小时</SelectItem>
                   <SelectItem value="today">今日</SelectItem>
                   <SelectItem value="this_week">本周</SelectItem>
                   <SelectItem value="1w">过去 7 天</SelectItem>

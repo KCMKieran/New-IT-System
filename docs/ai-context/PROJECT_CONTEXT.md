@@ -270,8 +270,8 @@ New-IT-System/
 
 **Key Features**:
 - Two-phase MySQL query (mt4_trades + stats_transactions)
-- Date range filtering (default: past 1 week, supports 6h/1w/2w/1m/custom)
-- 6-hour precise filtering via CLOSE_TIME (MT4 server time UTC+2 winter / UTC+3 summer)
+- Date range filtering (default: past 1 week, supports 1h/6h/24h/today/this_week/1w/this_month/1m/custom)
+- Sub-day modes (1h/6h/24h) use precise CLOSE_TIME filtering on `mt4_trades` (MT4 server time UTC+2 winter / UTC+3 summer); day-level modes use the fast `stats_trading` aggregated path
 - Client ID search (pushed down to all subqueries for fast lookup)
 - Adjusted return rates by deposit bucket (0-2K, 2K-5K, 5K-50K, 50K+)
 - Negative net deposit return rate: `(equity - A) / A` where `A = MAX(deposits_90d, |net_deposit_hist|)`
