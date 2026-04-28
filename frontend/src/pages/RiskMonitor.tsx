@@ -353,7 +353,6 @@ export default function RiskMonitor() {
         <TabsList>
           <TabsTrigger value="burst-open">批量下单</TabsTrigger>
           <TabsTrigger value="quick-open-close">快开快平</TabsTrigger>
-          <TabsTrigger value="gap-trading">缺口交易</TabsTrigger>
         </TabsList>
 
         <TabsContent value="burst-open">
@@ -361,12 +360,6 @@ export default function RiskMonitor() {
         </TabsContent>
         <TabsContent value="quick-open-close">
           <QuickOpenCloseTab active={activeTab === "quick-open-close"} />
-        </TabsContent>
-        <TabsContent value="gap-trading">
-          <div className="flex flex-col items-center justify-center py-20 text-muted-foreground">
-            <p className="text-lg font-medium">缺口交易检测</p>
-            <p className="text-sm mt-1">开发中 — 检测休市前后的开平仓行为</p>
-          </div>
         </TabsContent>
       </Tabs>
 
