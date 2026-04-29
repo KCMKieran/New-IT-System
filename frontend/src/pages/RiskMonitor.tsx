@@ -20,7 +20,6 @@ import { apiFetch } from "@/lib/fetch";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
   Select,
@@ -120,10 +119,29 @@ const SORTABLE_COL_IDS = new Set<string>([
   "equity", "equity_per_lot", "total_open_lots", "leverage", "group", "hold_duration_sec", "total_profit_usd",
 ]);
 
+/** Backend `QUICK_RULE_ID_BASE` — alert `rule_id` for quick rules is 51, 52, ... */
+const QUICK_RULE_ID_BASE = 51;
+
+/** Per-rule summary cards (批量下单 / 快开快平); cycles if more rules than colors. */
+const RULE_SUMMARY_CARD_STYLES: { dot: string; value: string }[] = [
+  { dot: "bg-violet-500", value: "text-violet-600 dark:text-violet-400" },
+  { dot: "bg-sky-500", value: "text-sky-600 dark:text-sky-400" },
+  { dot: "bg-emerald-500", value: "text-emerald-600 dark:text-emerald-400" },
+  { dot: "bg-amber-500", value: "text-amber-600 dark:text-amber-400" },
+  { dot: "bg-rose-500", value: "text-rose-600 dark:text-rose-400" },
+];
+
+interface QuickRuleBreakdownItem {
+  rule_id: number;
+  account_count: number;
+  event_count: number;
+}
+
 interface AlertsStats {
   suspicious_count: number;
   event_count: number;
   servers: string[];
+  by_rule?: QuickRuleBreakdownItem[] | null;
 }
 
 interface BurstOpenRule {
@@ -136,6 +154,11 @@ interface BurstOpenRule {
 interface BurstOpenConfig {
   scan_interval_min: number;
   rules: BurstOpenRule[];
+}
+
+/** Resolves `alert_events.rule_id` for a saved 批量下单 rule (matches backend `scan_burst_open`). */
+function burstAlertRuleId(rule: BurstOpenRule, index: number): number {
+  return typeof rule.id === "number" ? rule.id : index + 1;
 }
 
 interface QuickOpenCloseRule {
@@ -417,6 +440,8 @@ function BurstOpenTab({ active }: { active: boolean }) {
 
   // Toolbar filters (all server-side now).
   const [serverFilter, setServerFilter] = useState("all");
+  /** Table-only: "all" or burst `rule_id` string. Summary cards use stats without this filter. */
+  const [ruleFilter, setRuleFilter] = useState<string>("all");
 
   // Login + zipcode inputs: keep the raw value locally, debounce into a
   // separate `query` state that actually hits the API. Prevents spamming
@@ -442,6 +467,18 @@ function BurstOpenTab({ active }: { active: boolean }) {
     return () => clearTimeout(t);
   }, [zipcodeInput]);
 
+  // Drop stale rule filter when saved rules are removed or IDs change.
+  useEffect(() => {
+    if (ruleFilter === "all" || !config?.rules?.length) return;
+    const n = Number.parseInt(ruleFilter, 10);
+    if (Number.isNaN(n)) {
+      setRuleFilter("all");
+      return;
+    }
+    const valid = new Set(config.rules.map((r, i) => burstAlertRuleId(r, i)));
+    if (!valid.has(n)) setRuleFilter("all");
+  }, [config?.rules, ruleFilter]);
+
   const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
 
   // Resolve the effective (since, until) for the current selection.
@@ -451,10 +488,8 @@ function BurstOpenTab({ active }: { active: boolean }) {
     [rangePreset, customRange],
   );
 
-  /** Build the filter-only query string shared by /alerts, /alerts/stats
-   *  and /alerts/export. Pagination + sort are intentionally NOT here;
-   *  the list and the export want the same filters but different extras. */
-  const buildFilterQs = useCallback(
+  /** Time + server + login + zip — shared by stats cards (no rule filter). */
+  const buildStatsFilterQs = useCallback(
     (range: { since: string; until: string }) => {
       const qs = new URLSearchParams({
         since: range.since,
@@ -468,16 +503,27 @@ function BurstOpenTab({ active }: { active: boolean }) {
     [serverFilter, loginQuery, zipcodeQuery],
   );
 
+  /** Adds optional `rule_id` for table list + CSV export. */
+  const buildTableFilterQs = useCallback(
+    (range: { since: string; until: string }) => {
+      const qs = buildStatsFilterQs(range);
+      if (ruleFilter !== "all") qs.set("rule_id", ruleFilter);
+      return qs;
+    },
+    [buildStatsFilterQs, ruleFilter],
+  );
+
   /** Fetch the current page of alerts + stats for the active range. */
   const fetchAlerts = useCallback(
     async (signal?: AbortSignal) => {
       if (!effectiveRange) return;
       setLoading(true);
       try {
-        const filterQs = buildFilterQs(effectiveRange);
+        const statsQs = buildStatsFilterQs(effectiveRange);
+        const tableQs = buildTableFilterQs(effectiveRange);
 
         // Alerts endpoint gets pagination + sort on top of the filters.
-        const alertsQs = new URLSearchParams(filterQs);
+        const alertsQs = new URLSearchParams(tableQs);
         alertsQs.set("page", String(pageIndex + 1));
         alertsQs.set("page_size", String(pageSize));
         alertsQs.set("sort_by", sortBy);
@@ -485,7 +531,7 @@ function BurstOpenTab({ active }: { active: boolean }) {
 
         const [alertsRes, statsRes, latestRes] = await Promise.all([
           apiFetch(`/api/v1/risk-monitor/burst-open/alerts?${alertsQs}`, { signal }),
-          apiFetch(`/api/v1/risk-monitor/burst-open/alerts/stats?${filterQs}`, { signal }),
+          apiFetch(`/api/v1/risk-monitor/burst-open/alerts/stats?${statsQs}`, { signal }),
           // latest snapshot is tiny; used only for scan metadata footer.
           // 503 (scanner still initializing) is tolerated here.
           apiFetch(`/api/v1/risk-monitor/burst-open`, { signal }).catch(() => null),
@@ -531,7 +577,7 @@ function BurstOpenTab({ active }: { active: boolean }) {
         setLoading(false);
       }
     },
-    [effectiveRange, buildFilterQs, pageIndex, pageSize, sortBy, sortOrder],
+    [effectiveRange, buildStatsFilterQs, buildTableFilterQs, pageIndex, pageSize, sortBy, sortOrder],
   );
 
   // Any filter / range / sort / page-size change should send the user
@@ -545,6 +591,7 @@ function BurstOpenTab({ active }: { active: boolean }) {
     serverFilter,
     loginQuery,
     zipcodeQuery,
+    ruleFilter,
     pageSize,
     sortBy,
     sortOrder,
@@ -653,7 +700,7 @@ function BurstOpenTab({ active }: { active: boolean }) {
     if (!effectiveRange || exporting) return;
     setExporting(true);
     try {
-      const qs = buildFilterQs(effectiveRange);
+      const qs = buildTableFilterQs(effectiveRange);
       qs.set("sort_by", sortBy);
       qs.set("sort_order", sortOrder);
       const res = await apiFetch(
@@ -900,49 +947,71 @@ function BurstOpenTab({ active }: { active: boolean }) {
         </div>
       </div>
 
-      {/* Active rules display */}
-      {config && config.rules.length > 0 && (
-        <div className="flex items-center gap-2 flex-wrap">
-          <span className="text-xs text-muted-foreground">当前规则:</span>
-          {config.rules.map((r, i) => (
-            <Badge key={r.id ?? i} variant="secondary" className="text-xs font-normal">
-              Rule {r.id ?? i + 1}: {r.burst_window_sec}秒 / {r.min_order_count}笔 / ≥
-              {r.min_lots_per_order}手
-            </Badge>
-          ))}
+      {/* Per-rule summary cards + toolbar — same pattern as 快开快平 tab */}
+      {config && config.rules.length > 0 ? (
+        <div
+          className={cn(
+            "grid w-full gap-1.5 sm:gap-2",
+            config.rules.length > 1
+              ? "grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4"
+              : "grid-cols-1 mx-auto max-w-md",
+          )}
+        >
+          {config.rules.map((rule, idx) => {
+            const ruleId = burstAlertRuleId(rule, idx);
+            const br = stats.by_rule?.find((b) => b.rule_id === ruleId);
+            const nAcc = br?.account_count ?? 0;
+            const nEvt = br?.event_count ?? 0;
+            const st = RULE_SUMMARY_CARD_STYLES[idx % RULE_SUMMARY_CARD_STYLES.length];
+            return (
+              <SummaryCard
+                key={rule.id ?? `burst-rule-${idx}`}
+                compact
+                label={`Rule ${idx + 1} · 去重账户`}
+                value={nAcc}
+                description={
+                  `告警 ${nEvt} 条 · ${rule.burst_window_sec}s 内 ≥${rule.min_order_count} 笔 / 每笔≥${rule.min_lots_per_order} 手`
+                }
+                dotColor={st.dot}
+                textColor={st.value}
+              />
+            );
+          })}
         </div>
+      ) : (
+        <Card className="border-dashed">
+          <CardContent className="p-4 text-sm text-muted-foreground">
+            {config && config.rules.length === 0
+              ? "请先在「规则配置」中添加至少一条规则。"
+              : "正在加载规则…"}
+          </CardContent>
+        </Card>
       )}
 
-      {/* Summary cards */}
-      <div className="grid grid-cols-2 gap-3">
-        <SummaryCard
-          label="可疑账户（范围内去重）"
-          value={stats.suspicious_count}
-          dotColor="bg-red-500"
-          textColor="text-red-600 dark:text-red-400"
-        />
-        <SummaryCard
-          label="告警事件（范围内总数）"
-          value={stats.event_count}
-          dotColor="bg-amber-500"
-          textColor="text-amber-600 dark:text-amber-400"
-        />
-      </div>
-
-      {/* Filters + range selector */}
-      <div className="flex items-center gap-3 flex-wrap">
-        {/* Time range */}
+      <div className="flex flex-col gap-2 w-full sm:flex-row sm:flex-wrap sm:items-stretch sm:gap-3 max-w-full">
+        <Select value={ruleFilter} onValueChange={setRuleFilter}>
+          <SelectTrigger className="w-full min-w-0 h-9 sm:w-40 sm:shrink-0" aria-label="按规则筛选">
+            <SelectValue placeholder="规则" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">全部规则</SelectItem>
+            {config?.rules.map((r, idx) => (
+              <SelectItem key={burstAlertRuleId(r, idx)} value={String(burstAlertRuleId(r, idx))}>
+                Rule {idx + 1}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
         <Select
           value={rangePreset}
           onValueChange={(v) => {
             setRangePreset(v as RangePresetKey);
             if (v === "custom" && !customRange?.from) {
-              // Auto-open the picker when user first switches to custom
               setDatePickerOpen(true);
             }
           }}
         >
-          <SelectTrigger className="w-[160px]">
+          <SelectTrigger className="w-full min-w-0 h-9 sm:w-40 sm:shrink-0">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -954,30 +1023,31 @@ function BurstOpenTab({ active }: { active: boolean }) {
           </SelectContent>
         </Select>
 
-        {/* Custom date range picker */}
         {rangePreset === "custom" && (
           <Popover open={datePickerOpen} onOpenChange={setDatePickerOpen}>
             <PopoverTrigger asChild>
               <Button
                 variant="outline"
                 className={cn(
-                  "w-[240px] justify-start text-left font-normal h-9",
+                  "w-full min-w-0 sm:w-40 h-9 justify-start text-left font-normal shrink-0 overflow-hidden",
                   !customRange?.from && "text-muted-foreground",
                 )}
               >
-                <CalendarIcon className="mr-2 h-4 w-4" />
-                {customRange?.from ? (
-                  customRange.to ? (
-                    <>
-                      {format(customRange.from, "yyyy-MM-dd")} ~{" "}
-                      {format(customRange.to, "yyyy-MM-dd")}
-                    </>
+                <CalendarIcon className="mr-2 h-4 w-4 shrink-0" />
+                <span className="truncate">
+                  {customRange?.from ? (
+                    customRange.to ? (
+                      <>
+                        {format(customRange.from, "yyyy-MM-dd")} ~{" "}
+                        {format(customRange.to, "yyyy-MM-dd")}
+                      </>
+                    ) : (
+                      format(customRange.from, "yyyy-MM-dd")
+                    )
                   ) : (
-                    format(customRange.from, "yyyy-MM-dd")
-                  )
-                ) : (
-                  <span>选择日期范围</span>
-                )}
+                    "选择日期范围"
+                  )}
+                </span>
               </Button>
             </PopoverTrigger>
             <PopoverContent className="w-auto p-0" align="start">
@@ -988,7 +1058,6 @@ function BurstOpenTab({ active }: { active: boolean }) {
                 selected={customRange}
                 onSelect={setCustomRange}
                 numberOfMonths={2}
-                // Backend retention = no data older than RETENTION_DAYS
                 disabled={{
                   before: new Date(Date.now() - RETENTION_DAYS * 24 * 3600 * 1000),
                 }}
@@ -997,9 +1066,8 @@ function BurstOpenTab({ active }: { active: boolean }) {
           </Popover>
         )}
 
-        {/* Server filter */}
         <Select value={serverFilter} onValueChange={setServerFilter}>
-          <SelectTrigger className="w-[150px]">
+          <SelectTrigger className="w-full min-w-0 h-9 sm:w-40 sm:shrink-0">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -1010,30 +1078,28 @@ function BurstOpenTab({ active }: { active: boolean }) {
           </SelectContent>
         </Select>
 
-        {/* Zipcode filter — backend LIKE '%x%' across the whole time range */}
-        <div className="relative w-[180px]">
-          <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+        <div className="relative w-full min-w-0 sm:w-44 sm:shrink-0">
+          <Search className="pointer-events-none absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
           <Input
             placeholder="搜索 zipcode（模糊）"
             value={zipcodeInput}
             onChange={(e) => setZipcodeInput(e.target.value)}
-            className="pl-8"
+            className="pl-8 h-9"
           />
         </div>
 
-        {/* Login search — debounced to the backend as an exact match */}
-        <div className="relative w-[180px]">
-          <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+        <div className="relative w-full min-w-0 sm:w-44 sm:shrink-0">
+          <Search className="pointer-events-none absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
           <Input
             placeholder="搜索账户号（精确）"
             value={loginInput}
             onChange={(e) => setLoginInput(e.target.value)}
-            className="pl-8"
+            className="pl-8 h-9"
             inputMode="numeric"
           />
         </div>
 
-        <span className="text-sm text-muted-foreground ml-auto">
+        <span className="text-sm text-muted-foreground sm:ml-auto sm:shrink-0 py-1.5">
           {loading ? "加载中..." : `共 ${totalCount} 条告警`}
         </span>
       </div>
@@ -1185,8 +1251,11 @@ function QuickOpenCloseTab({ active }: { active: boolean }) {
   const [configOpen, setConfigOpen] = useState(false);
   const [savingConfig, setSavingConfig] = useState(false);
 
+  /** Table-only filter: "all" or concrete `rule_id` string (e.g. "51"). Summary cards use stats without this filter. */
+  const [ruleFilter, setRuleFilter] = useState<string>("all");
+
   const [pageIndex, setPageIndex] = useState(0);
-  const [pageSize, setPageSize] = useState(50);
+  const [pageSize] = useState(50);
   const [sortBy, setSortBy] = useState<string>("scanned_at");
   const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
   const [serverFilter, setServerFilter] = useState("all");
@@ -1206,13 +1275,24 @@ function QuickOpenCloseTab({ active }: { active: boolean }) {
     return () => clearTimeout(t);
   }, [zipcodeInput]);
 
+  // If the user tightens the saved rule list, drop a stale `rule_id` from the table filter.
+  useEffect(() => {
+    if (ruleFilter === "all" || !config?.rules?.length) return;
+    const n = Number.parseInt(ruleFilter, 10);
+    const maxRid = QUICK_RULE_ID_BASE + config.rules.length - 1;
+    if (Number.isNaN(n) || n < QUICK_RULE_ID_BASE || n > maxRid) {
+      setRuleFilter("all");
+    }
+  }, [config?.rules, ruleFilter]);
+
   const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
   const effectiveRange = useMemo(
     () => buildRangeIso(rangePreset, customRange),
     [rangePreset, customRange],
   );
 
-  const buildFilterQs = useCallback(
+  // Time + server/zip/login only — used for /alerts/stats so per-rule cards are not narrowed by the rule dropdown.
+  const buildStatsFilterQs = useCallback(
     (range: { since: string; until: string }) => {
       const qs = new URLSearchParams({
         since: range.since,
@@ -1224,6 +1304,15 @@ function QuickOpenCloseTab({ active }: { active: boolean }) {
       return qs;
     },
     [serverFilter, loginQuery, zipcodeQuery],
+  );
+
+  const buildTableFilterQs = useCallback(
+    (range: { since: string; until: string }) => {
+      const qs = buildStatsFilterQs(range);
+      if (ruleFilter !== "all") qs.set("rule_id", ruleFilter);
+      return qs;
+    },
+    [buildStatsFilterQs, ruleFilter],
   );
 
   const fetchConfig = useCallback(async () => {
@@ -1254,8 +1343,9 @@ function QuickOpenCloseTab({ active }: { active: boolean }) {
     if (!effectiveRange) return;
     setLoading(true);
     try {
-      const filterQs = buildFilterQs(effectiveRange);
-      const alertsQs = new URLSearchParams(filterQs);
+      const statsQs = buildStatsFilterQs(effectiveRange);
+      const tableQs = buildTableFilterQs(effectiveRange);
+      const alertsQs = new URLSearchParams(tableQs);
       alertsQs.set("page", String(pageIndex + 1));
       alertsQs.set("page_size", String(pageSize));
       alertsQs.set("sort_by", sortBy);
@@ -1263,7 +1353,7 @@ function QuickOpenCloseTab({ active }: { active: boolean }) {
 
       const [alertsRes, statsRes, latestRes] = await Promise.all([
         apiFetch(`/api/v1/risk-monitor/quick-open-close/alerts?${alertsQs}`, { signal }),
-        apiFetch(`/api/v1/risk-monitor/quick-open-close/alerts/stats?${filterQs}`, { signal }),
+        apiFetch(`/api/v1/risk-monitor/quick-open-close/alerts/stats?${statsQs}`, { signal }),
         apiFetch(`/api/v1/risk-monitor/burst-open`, { signal }).catch(() => null),
       ]);
       if (alertsRes.ok) {
@@ -1297,13 +1387,13 @@ function QuickOpenCloseTab({ active }: { active: boolean }) {
     } finally {
       setLoading(false);
     }
-  }, [effectiveRange, buildFilterQs, pageIndex, pageSize, sortBy, sortOrder]);
+  }, [effectiveRange, buildStatsFilterQs, buildTableFilterQs, pageIndex, pageSize, sortBy, sortOrder]);
 
   const refreshIntervalMs = (latestMeta?.config?.scan_interval_min ?? 5) * 60_000;
 
   useEffect(() => {
     setPageIndex(0);
-  }, [effectiveRange?.since, effectiveRange?.until, serverFilter, loginQuery, zipcodeQuery, pageSize, sortBy, sortOrder]);
+  }, [effectiveRange?.since, effectiveRange?.until, serverFilter, loginQuery, zipcodeQuery, ruleFilter, pageSize, sortBy, sortOrder]);
 
   useEffect(() => {
     if (!active) return;
@@ -1325,7 +1415,7 @@ function QuickOpenCloseTab({ active }: { active: boolean }) {
     if (!effectiveRange || exporting) return;
     setExporting(true);
     try {
-      const qs = buildFilterQs(effectiveRange);
+      const qs = buildTableFilterQs(effectiveRange);
       qs.set("sort_by", sortBy);
       qs.set("sort_order", sortOrder);
       const res = await apiFetch(`/api/v1/risk-monitor/quick-open-close/alerts/export?${qs}`);
@@ -1547,33 +1637,62 @@ function QuickOpenCloseTab({ active }: { active: boolean }) {
         </div>
       </div>
 
-      {config && config.rules.length > 0 && (
-        <div className="flex items-center gap-2 flex-wrap">
-          <span className="text-xs text-muted-foreground">当前规则:</span>
-          {config.rules.map((r, i) => (
-            <Badge key={r.id ?? i} variant="secondary" className="text-xs font-normal">
-              Rule {r.id ?? i + 1}: 持单≤{r.max_hold_seconds}秒 / 命中≥{r.min_closed_orders}笔 / {r.profit_window_min}分钟利润≥${r.min_total_profit_usd}
-            </Badge>
-          ))}
+      {config && config.rules.length > 0 ? (
+        <div
+          className={cn(
+            "grid w-full gap-1.5 sm:gap-2",
+            config.rules.length > 1
+              ? "grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4"
+              : "grid-cols-1 mx-auto max-w-md",
+          )}
+        >
+          {config.rules.map((rule, idx) => {
+            const ruleId = QUICK_RULE_ID_BASE + idx;
+            const br = stats.by_rule?.find((b) => b.rule_id === ruleId);
+            const nAcc = br?.account_count ?? 0;
+            const nEvt = br?.event_count ?? 0;
+            const st = RULE_SUMMARY_CARD_STYLES[idx % RULE_SUMMARY_CARD_STYLES.length];
+            return (
+              <SummaryCard
+                key={rule.id ?? `quick-rule-${idx}`}
+                compact
+                label={`Rule ${idx + 1} · 去重账户`}
+                value={nAcc}
+                description={
+                  `告警 ${nEvt} 条 · 持单≤${rule.max_hold_seconds}s / ≥${rule.min_closed_orders} 笔 / `
+                  + `${rule.profit_window_min} 分钟内利润 ≥ $${rule.min_total_profit_usd}`
+                }
+                dotColor={st.dot}
+                textColor={st.value}
+              />
+            );
+          })}
         </div>
+      ) : (
+        <Card className="border-dashed">
+          <CardContent className="p-4 text-sm text-muted-foreground">
+            {config && config.rules.length === 0
+              ? "请先在「规则配置」中添加至少一条规则。"
+              : "正在加载规则…"}
+          </CardContent>
+        </Card>
       )}
 
-      <div className="grid grid-cols-2 gap-3">
-        <SummaryCard
-          label="可疑账户（范围内去重）"
-          value={stats.suspicious_count}
-          dotColor="bg-red-500"
-          textColor="text-red-600 dark:text-red-400"
-        />
-        <SummaryCard
-          label="告警事件（范围内总数）"
-          value={stats.event_count}
-          dotColor="bg-amber-500"
-          textColor="text-amber-600 dark:text-amber-400"
-        />
-      </div>
-
-      <div className="flex items-center gap-3 flex-wrap">
+      {/** Same width on sm+ for selects; full width on narrow screens (mobile). */}
+      <div className="flex flex-col gap-2 w-full sm:flex-row sm:flex-wrap sm:items-stretch sm:gap-3 max-w-full">
+        <Select value={ruleFilter} onValueChange={setRuleFilter}>
+          <SelectTrigger className="w-full min-w-0 h-9 sm:w-40 sm:shrink-0" aria-label="按规则筛选">
+            <SelectValue placeholder="规则" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">全部规则</SelectItem>
+            {config?.rules.map((_, idx) => (
+              <SelectItem key={QUICK_RULE_ID_BASE + idx} value={String(QUICK_RULE_ID_BASE + idx)}>
+                Rule {idx + 1}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
         <Select
           value={rangePreset}
           onValueChange={(v) => {
@@ -1581,7 +1700,9 @@ function QuickOpenCloseTab({ active }: { active: boolean }) {
             if (v === "custom" && !customRange?.from) setDatePickerOpen(true);
           }}
         >
-          <SelectTrigger className="w-[160px]"><SelectValue /></SelectTrigger>
+          <SelectTrigger className="w-full min-w-0 h-9 sm:w-40 sm:shrink-0">
+            <SelectValue />
+          </SelectTrigger>
           <SelectContent>
             {RANGE_PRESETS.map((p) => (<SelectItem key={p.key} value={p.key}>{p.label}</SelectItem>))}
           </SelectContent>
@@ -1590,13 +1711,18 @@ function QuickOpenCloseTab({ active }: { active: boolean }) {
         {rangePreset === "custom" && (
           <Popover open={datePickerOpen} onOpenChange={setDatePickerOpen}>
             <PopoverTrigger asChild>
-              <Button variant="outline" className="w-[240px] justify-start text-left font-normal h-9">
-                <CalendarIcon className="mr-2 h-4 w-4" />
-                {customRange?.from
-                  ? (customRange.to
-                    ? `${format(customRange.from, "yyyy-MM-dd")} ~ ${format(customRange.to, "yyyy-MM-dd")}`
-                    : format(customRange.from, "yyyy-MM-dd"))
-                  : "选择日期范围"}
+              <Button
+                variant="outline"
+                className="w-full min-w-0 sm:w-40 h-9 justify-start text-left font-normal shrink-0 overflow-hidden"
+              >
+                <CalendarIcon className="mr-2 h-4 w-4 shrink-0" />
+                <span className="truncate">
+                  {customRange?.from
+                    ? (customRange.to
+                      ? `${format(customRange.from, "yyyy-MM-dd")} ~ ${format(customRange.to, "yyyy-MM-dd")}`
+                      : format(customRange.from, "yyyy-MM-dd"))
+                    : "选择日期范围"}
+                </span>
               </Button>
             </PopoverTrigger>
             <PopoverContent className="w-auto p-0" align="start">
@@ -1614,7 +1740,9 @@ function QuickOpenCloseTab({ active }: { active: boolean }) {
         )}
 
         <Select value={serverFilter} onValueChange={setServerFilter}>
-          <SelectTrigger className="w-[150px]"><SelectValue /></SelectTrigger>
+          <SelectTrigger className="w-full min-w-0 h-9 sm:w-40 sm:shrink-0">
+            <SelectValue />
+          </SelectTrigger>
           <SelectContent>
             <SelectItem value="all">全部服务器</SelectItem>
             <SelectItem value="MT4_Live">MT4 Live</SelectItem>
@@ -1623,15 +1751,15 @@ function QuickOpenCloseTab({ active }: { active: boolean }) {
           </SelectContent>
         </Select>
 
-        <div className="relative w-[180px]">
-          <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
-          <Input placeholder="搜索 zipcode（模糊）" value={zipcodeInput} onChange={(e) => setZipcodeInput(e.target.value)} className="pl-8" />
+        <div className="relative w-full min-w-0 sm:w-44 sm:shrink-0">
+          <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground pointer-events-none" />
+          <Input placeholder="搜索 zipcode（模糊）" value={zipcodeInput} onChange={(e) => setZipcodeInput(e.target.value)} className="pl-8 h-9" />
         </div>
-        <div className="relative w-[180px]">
-          <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
-          <Input placeholder="搜索账户号（精确）" value={loginInput} onChange={(e) => setLoginInput(e.target.value)} className="pl-8" inputMode="numeric" />
+        <div className="relative w-full min-w-0 sm:w-44 sm:shrink-0">
+          <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground pointer-events-none" />
+          <Input placeholder="搜索账户号（精确）" value={loginInput} onChange={(e) => setLoginInput(e.target.value)} className="pl-8 h-9" inputMode="numeric" />
         </div>
-        <span className="text-sm text-muted-foreground ml-auto">
+        <span className="text-sm text-muted-foreground sm:ml-auto sm:shrink-0 py-1.5">
           {loading ? "加载中..." : `共 ${totalCount} 条告警`}
         </span>
       </div>
@@ -2012,25 +2140,58 @@ function SummaryCard({
   value,
   dotColor,
   textColor,
+  /** Tighter padding and type scale — used for 快开快平 per-rule cards. */
+  compact = false,
 }: {
   label: string;
   description?: string;
   value: number;
   dotColor: string;
   textColor: string;
+  compact?: boolean;
 }) {
+  // Card root in `components/ui/card.tsx` defaults to `py-6 gap-6`. With only
+  // CardContent as child, `py-6` still adds large empty bands top/bottom — override.
   return (
-    <Card>
-      <CardContent className="p-4">
-        <div className="flex items-center gap-2 mb-1">
-          <span className={cn("w-2.5 h-2.5 rounded-full", dotColor)} />
-          <span className="text-sm text-muted-foreground">{label}</span>
-        </div>
-        <p className={cn("text-2xl font-bold", textColor)}>
-          {value.toLocaleString()}
-        </p>
-        {description && (
-          <p className="text-xs text-muted-foreground mt-1">{description}</p>
+    <Card className="gap-0 py-0">
+      <CardContent
+        className={cn(
+          compact
+            ? "px-2.5 py-2 sm:px-3 sm:py-2.5"
+            : "px-4 py-3",
+        )}
+      >
+        {compact ? (
+          // Single dense block: title + number on one row (common dashboard pattern), details below.
+          <div className="flex flex-col gap-1">
+            <div className="flex items-baseline justify-between gap-2">
+              <div className="flex min-w-0 items-center gap-1.5">
+                <span className={cn("h-2 w-2 shrink-0 rounded-full", dotColor)} />
+                <span className="truncate text-xs leading-tight text-muted-foreground">{label}</span>
+              </div>
+              <p className={cn("shrink-0 text-lg font-bold tabular-nums leading-none", textColor)}>
+                {value.toLocaleString()}
+              </p>
+            </div>
+            {description && (
+              <p className="line-clamp-2 text-[11px] leading-snug text-muted-foreground" title={description}>
+                {description}
+              </p>
+            )}
+          </div>
+        ) : (
+          <>
+            <div className={cn("flex items-center gap-1.5", "mb-1")}>
+              <span className={cn("w-2.5 h-2.5", "rounded-full shrink-0", dotColor)} />
+              <span className="text-sm text-muted-foreground leading-tight">{label}</span>
+            </div>
+            <p className={cn("text-2xl font-bold tabular-nums leading-none", textColor)}>
+              {value.toLocaleString()}
+            </p>
+            {description && (
+              <p className="text-xs text-muted-foreground mt-1">{description}</p>
+            )}
+          </>
         )}
       </CardContent>
     </Card>

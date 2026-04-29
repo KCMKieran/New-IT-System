@@ -334,8 +334,9 @@ New-IT-System/
 **Purpose**: Scan all MT servers for clients exhibiting suspicious batch ordering patterns. B-Book perspective: flags clients whose high-exposure rapid trading poses risk to company P&L.
 
 **Key Features**:
-- Tab-based UI: 批量下单 (active) / 缺口交易 (placeholder, 开发中)
+- Tab-based UI: 批量下单 (default) / 快开快平（以 `RiskMonitor.tsx` 为准）
 - Burst Open Detection (批量下单): sliding window algorithm detects N orders (each ≥ M lots) within T seconds on the same symbol
+- Quick Open-Close (快开快平): short hold-time + profit-window clustering; `rule_id` ≥ 51 in `alert_events`
 - Backend-driven scanning via APScheduler (single background task, frontend reads cached result)
 - Multi-rule support: up to 10 configurable rules with independent parameters
 - Config persistence in SQLite (`backend/data/risk_monitor.db`)
@@ -351,16 +352,21 @@ New-IT-System/
 **APIs**:
 - `GET /api/v1/risk-monitor/burst-open` — Latest cached scan result (scan metadata + immediate-scan refresh)
 - `GET /api/v1/risk-monitor/burst-open/alerts?since=&until=&zipcode=...` — Time-range alert events view (primary data source); `zipcode` is a LIKE '%x%' substring filter
-- `GET /api/v1/risk-monitor/burst-open/alerts/stats?since=&until=&zipcode=...` — Time-range aggregates for summary cards, honours same zipcode filter
+- `GET /api/v1/risk-monitor/burst-open/alerts/stats?since=&until=&zipcode=...` — Time-range aggregates + `by_rule` per burst rule card; same filters as alerts except **no** `rule_id` (cards stay overview when table is filtered by rule)
 - `GET /api/v1/risk-monitor/burst-open/config` — Current config from SQLite
 - `POST /api/v1/risk-monitor/burst-open/config` — Update config + reschedule scanner
 - `POST /api/v1/risk-monitor/burst-open/scan-now` — Trigger immediate scan
+- `GET /api/v1/risk-monitor/quick-open-close/alerts?since=&until=&...` — 快开快平事件（`rule_id` ≥ 51）
+- `GET /api/v1/risk-monitor/quick-open-close/alerts/stats?...` — 快开快平聚合（含 `by_rule`）
+- `GET` / `POST /api/v1/risk-monitor/quick-open-close/config` — 快开快平配置
+- `GET /api/v1/risk-monitor/quick-open-close/alerts/export` — 快开快平 CSV
 
 **Data sources**: MySQL Slave (`mt4_live`, `mt4_live2`, `mt5_live`) — same DB_HOST config
 
 **Key Files**:
-- `frontend/src/pages/RiskMonitor.tsx` (BurstOpenTab + ConfigDrawer, AG-Grid time-range view)
-- `backend/app/api/v1/routes/risk_monitor.py` (alert/stats/config/scan-now endpoints)
+- `frontend/src/pages/RiskMonitor.tsx` (BurstOpenTab + QuickOpenCloseTab + drawers; Tab UI patterns: `docs/features/risk-monitor-reusable-patterns.md` §11)
+- `backend/app/api/v1/routes/risk_monitor.py` (burst-open + quick-open-close endpoints)
+- `backend/app/services/rule_quick_open_close_service.py` (快开快平检测)
 - `backend/app/services/risk_monitor_service.py` (SQL + sliding window rule engine + CEN currency enrichment)
 - `backend/app/schemas/risk_monitor.py` (Pydantic models)
 - `backend/app/core/burst_open_scheduler.py` (APScheduler + in-memory cache)

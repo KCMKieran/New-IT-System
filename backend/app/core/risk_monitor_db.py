@@ -693,6 +693,8 @@ def alert_events_stats(
     rule_id_min: int | None = None,
     rule_id_max: int | None = None,
     zipcode: str | None = None,
+    *,
+    include_rule_breakdown: bool = False,
 ) -> dict[str, Any]:
     """Aggregate stats over the time range for the summary cards.
 
@@ -700,10 +702,16 @@ def alert_events_stats(
     告警事件" numbers on the page match whatever the user filtered in
     the toolbar.
 
+    When ``include_rule_breakdown`` is True, adds ``by_rule`` with per-``rule_id``
+    distinct logins and event counts. Requires at least one of ``rule_id_min`` or
+    ``rule_id_max`` so the same ``WHERE`` as the main stats applies (e.g. 快开快平
+    uses ``rule_id_min``; 批量下单 uses ``rule_id_max`` only).
+
     Returns:
         suspicious_count: distinct login count in range
         event_count:      total alert row count in range
         servers:          distinct servers touched (for UI hint)
+        by_rule:          optional list of {rule_id, account_count, event_count}
     """
     where_sql, params = _build_alert_filters(
         since, until, server, login, None, None, rule_id_min, rule_id_max, zipcode,
@@ -728,8 +736,34 @@ def alert_events_stats(
             params,
         ).fetchall()
 
-    return {
+        by_rule: list[dict[str, int]] | None = None
+        if include_rule_breakdown and (rule_id_min is not None or rule_id_max is not None):
+            br_rows = conn.execute(
+                f"""
+                SELECT rule_id,
+                       COUNT(DISTINCT login) AS account_count,
+                       COUNT(*)              AS event_count
+                FROM alert_events
+                WHERE {where_sql}
+                GROUP BY rule_id
+                ORDER BY rule_id
+                """,
+                params,
+            ).fetchall()
+            by_rule = [
+                {
+                    "rule_id": int(r["rule_id"]),
+                    "account_count": int(r["account_count"] or 0),
+                    "event_count": int(r["event_count"] or 0),
+                }
+                for r in br_rows
+            ]
+
+    out: dict[str, Any] = {
         "suspicious_count": row["suspicious_count"] or 0,
         "event_count": row["event_count"] or 0,
         "servers": [r["server"] for r in server_rows],
     }
+    if by_rule is not None:
+        out["by_rule"] = by_rule
+    return out

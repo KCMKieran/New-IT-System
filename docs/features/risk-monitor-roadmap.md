@@ -7,6 +7,8 @@
 > - [.cursor/skills/risk-monitor/SKILL.md](../../.cursor/skills/risk-monitor/SKILL.md) — 精简版架构速查
 >
 > **状态**：2026-04-17 创建。2026-04-23 已实施章节（CEN、Zipcode、时区、MT4/MT5 差异）归档到 [risk-monitor-archive.md](./risk-monitor-archive.md)。
+>
+> **与主文档同步（2026-04-29）**：**快开快平（Rule C）核心检测 + 前端 Tab 已上线**——本节表格仍保留「规划中的扩展」（插件化、平仓采集增强等）。勿将本节 P3 文案理解为「快开快平完全未做」。
 
 ---
 
@@ -16,7 +18,7 @@
 
 | 维度 | 现状 | 缺口 |
 |------|------|------|
-| 规则数量 | 1 条（Burst Open） | 5+ 条新规则等待接入 |
+| 规则数量 | 批量下单 + 快开快平 已上线 | 路线图中的 Gap / Scale-In / Martingale 等仍待接入 |
 | 数据采集 | 只拉 "最近 N 分钟开仓" | 需要平仓成交、持仓、资金、入金、合约表 |
 | 规则接入 | 硬编码在 `scan_burst_open()` | 需要插件化（Strategy 模式） |
 | 告警订阅 | 仅前端展示 | 无 Email / IM 主动通知 |
@@ -132,6 +134,8 @@ class QuickProfitStrategy(Strategy):
 
 ### 3.3 Rule C — Quick Open-Close（快开快平）
 
+> **实现状态**：检测、`alert_events` 持久化、`/quick-open-close/*` API 与 **RiskMonitor 第二 Tab** 已交付（详见 [risk-monitor.md](./risk-monitor.md)）。下表条件为产品设计摘要；参数化阈值以 SQLite 配置与前端抽屉为准。
+
 **风控含义**：HFT / scalping 模式。单次风险小但命中率可怕，对 B-Book 毒性极高。
 
 | 条件 | 说明 |
@@ -191,7 +195,7 @@ SQL 模板参考 [risk-monitor-archive.md](./risk-monitor-archive.md) §9.5 "MT5
 |-------|------|------|------|
 | **P1 已完成** | 历史中心化（事件级存储 + 时间范围视图） | - | 完成 |
 | **P2 平台化** | 规则引擎 `Strategy` 模式，`scan()` 从硬编码 → 遍历注册的 strategies | P1 | 1-2 天 |
-| **P3 易规则** | Scale-In（Rule B）+ Quick Open-Close（Rule C）+ 平仓数据采集 | P2 | 2-3 天 |
+| **P3 易规则** | Scale-In（Rule B）+ ~~Quick Open-Close（Rule C）~~ **（核心已上线，余量见 §3.3 注）** + 平仓数据采集增强 | P2 | 2-3 天 |
 | **P4 资金规则** | Quick Profit（Rule A）+ Leverage Abuse（Rule D）+ 入金数据 + 品种合约表 | P3 | 3-5 天 |
 | **P5 马丁** | Martingale（Rule E，跨扫描状态） + 订单 buffer 表 | P4 | 3-5 天 |
 | **P6 订阅** | Email 告警（复用 [email_service.py](../../backend/app/services/email_service.py) + 去重）| P4 | 1-2 天 |

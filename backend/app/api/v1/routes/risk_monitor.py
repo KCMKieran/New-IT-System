@@ -309,11 +309,13 @@ async def burst_open_alerts_stats(
     login: Optional[int] = Query(default=None),
     zipcode: Optional[str] = Query(default=None, max_length=64),
 ):
-    """Return aggregate counts for the summary cards.
+    """Return aggregate counts for the summary area.
 
-    Accepts the same filters as /alerts so the summary numbers stay in
-    lockstep with whatever the user filtered in the toolbar. Symbol /
-    rule_id are excluded on purpose — the cards aggregate across rules.
+    Accepts the same time/server/login/zip filters as /alerts (table). The
+    response includes ``by_rule`` (per-``rule_id`` distinct logins + events) for
+    批量下单 rule cards; it intentionally does **not** apply a ``rule_id`` query
+    param so the cards stay a full overview when the user filters the table
+    by one rule.
     """
     since_iso, until_iso = _default_since_until(since, until)
     zipcode_clean = _clean_zipcode(zipcode)
@@ -325,6 +327,7 @@ async def burst_open_alerts_stats(
             login=login,
             rule_id_max=BURST_RULE_MAX_ID,
             zipcode=zipcode_clean,
+            include_rule_breakdown=True,
         )
         return AlertsStats(**stats)
     except HTTPException:
@@ -655,6 +658,7 @@ async def quick_open_close_alerts_stats(
             login=login,
             rule_id_min=QUICK_RULE_ID_BASE,
             zipcode=zipcode_clean,
+            include_rule_breakdown=True,
         )
         return AlertsStats(**stats)
     except Exception as exc:

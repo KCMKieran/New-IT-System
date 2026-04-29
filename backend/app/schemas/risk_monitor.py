@@ -140,7 +140,16 @@ class AlertsResponse(BaseModel):
     page_size: int = 50
 
 
+class QuickRuleBreakdownItem(BaseModel):
+    """Per-rule aggregates for 快开快平 summary cards (distinct logins + row count)."""
+    rule_id: int
+    account_count: int
+    event_count: int
+
+
 class AlertsStats(BaseModel):
     suspicious_count: int = 0   # distinct logins in range
     event_count: int = 0        # total alert rows in range
     servers: List[str] = []     # servers touched in range
+    # When present (quick-open-close /stats), one entry per rule_id with hits in range.
+    by_rule: Optional[List[QuickRuleBreakdownItem]] = None

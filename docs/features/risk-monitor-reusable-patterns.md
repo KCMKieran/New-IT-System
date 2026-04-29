@@ -209,37 +209,10 @@ Align the date picker disabled range with backend retention (30 days):
 
 ## §5 Frontend SummaryCards Pattern
 
-Source: `RiskMonitor.tsx` lines 1107–1136
+> **2026-04-29 起**：批量下单与快开快平已改为 **按规则一张紧凑卡** + `stats.by_rule`，不再使用「可疑账户 / 告警事件」双卡。  
+> **请优先阅读 §11**（文末「Tab UI — Per-Rule Cards…」）（实现清单、stats 与表格 query 分离、shadcn `Card` 去 `py-6` 等）。
 
-```tsx
-function SummaryCard({
-  label, description, value, dotColor, textColor,
-}: {
-  label: string;
-  description?: string;
-  value: number;
-  dotColor: string;   // e.g. "bg-red-500"
-  textColor: string;  // e.g. "text-red-600 dark:text-red-400"
-}) { ... }
-```
-
-Color semantics:
-
-| Meaning | dotColor | textColor |
-|---------|----------|-----------|
-| Suspicious accounts | `bg-red-500` | `text-red-600 dark:text-red-400` |
-| Alert events | `bg-amber-500` | `text-amber-600 dark:text-amber-400` |
-| Info / neutral | `bg-blue-500` | `text-blue-600 dark:text-blue-400` |
-
-Usage:
-```tsx
-<div className="grid grid-cols-2 gap-3">
-  <SummaryCard label="可疑账户" value={stats.suspicious_count}
-    dotColor="bg-red-500" textColor="text-red-600 dark:text-red-400" />
-  <SummaryCard label="告警事件" value={stats.event_count}
-    dotColor="bg-amber-500" textColor="text-amber-600 dark:text-amber-400" />
-</div>
-```
+`SummaryCard` 仍定义在 `RiskMonitor.tsx`：支持 `compact` 与 `Card className="gap-0 py-0"`。若需旧版两卡布局仅作历史参考，见 [risk-monitor-archive.md](./risk-monitor-archive.md) 或 git 历史；**新 Tab 不要复刻 §5 旧例。**
 
 ---
 
@@ -474,9 +447,42 @@ so subsequent scans can dedup against them.
 
 ---
 
+## §11 Tab UI — Per-Rule Cards + Rule Filter (批量下单 & 快开快平)
+
+**Goal**: New risk tabs that use `alert_events` should share the same toolbar and summary pattern so behavior stays predictable.
+
+### Backend
+
+1. `GET .../alerts/stats` with the same time + `server` + `login` + `zipcode` as `/alerts`, **without** `rule_id` on the stats call.
+2. In `alert_events_stats(..., include_rule_breakdown=True)` with a **rule id band** for this tab:
+   - 批量下单: `rule_id_max = BURST_RULE_MAX_ID` (50)
+   - 快开快平: `rule_id_min = QUICK_RULE_ID_BASE` (51)
+3. Response field `by_rule`: `[{ rule_id, account_count, event_count }, ...]` for cards.
+4. `GET .../alerts` and `/alerts/export` accept optional `rule_id` to narrow the **table/export only**.
+
+Implementation detail: `include_rule_breakdown` runs when `rule_id_min` **or** `rule_id_max` is set (`risk_monitor_db.alert_events_stats`).
+
+### Frontend (`RiskMonitor.tsx` patterns)
+
+| Piece | Behavior |
+|-------|----------|
+| **Cards** | One compact `SummaryCard` per configured rule; map `stats.by_rule` by `rule_id`; show `account_count` large, line-clamp description with rule params + `event_count`. |
+| **`Card` root** | Use `className="gap-0 py-0"` on shadcn `Card` — base component uses `py-6` which wastes vertical space when only `CardContent` is used. |
+| **Stats vs table QS** | `buildStatsFilterQs` (no `rule_id`) vs `buildTableFilterQs` (adds `rule_id` when filter ≠ all). |
+| **Rule filter reset** | When saved rules shrink or IDs change, reset dropdown to「全部规则」if current selection is invalid. |
+| **Grid** | Multiple rules: `grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4`; single rule: `max-w-md mx-auto`. |
+| **Toolbar** | Rule `<Select>` first, then time preset, custom range, server, zipcode, login — controls `w-full sm:w-40` / `sm:w-44` for responsive parity with 快开快平. |
+
+### Rule ID mapping
+
+- **Burst**: `burstAlertRuleId(rule, index)` = `rule.id ?? index + 1` (matches `scan_burst_open`).
+- **Quick**: `QUICK_RULE_ID_BASE + index` (51, 52, …; detection normalizes SQLite ids to this band).
+
+---
+
 ## Maintenance
 
 When adding a new section or updating templates:
-1. Keep this file under 500 lines
+1. Keep this file lean; §11 为主要 Tab 模板，避免与 §5 重复大块示例
 2. Match section numbering (§N) with references in `.cursor/skills/risk-monitor/SKILL.md` § "Adding a New Rule"
 3. Update the SKILL.md if section structure changes

@@ -7,9 +7,12 @@
 > **历史归档**: [risk-monitor-archive.md](./risk-monitor-archive.md) — 已完成的开发计划、探索性 SQL、已移除规则设计、已实施调研记录
 >
 > **变更记录**:
-> - 2026-03-26 移除 Scale-In 规则代码，Tab 2 改为「缺口交易」(开发中)。
+> - 2026-03-26 移除 Scale-In 规则代码，Tab 2 曾改为「缺口交易」占位；**后已移除该 Tab**（当前仅 **批量下单 + 快开快平** 两 Tab，见 §5）。
 > - 2026-04-23 归档已完成历史章节到 [risk-monitor-archive.md](./risk-monitor-archive.md)。
 > - 2026-04-28 (commit 9713e3f) 前端轮询从硬编码 30s 改为跟随后端 `scan_interval_min`，并同步刷新本文档 §1 / §3 / §4 / §5 / §6 中残留的旧规则（Scale-In / Frequent Open / Batch-Close / `/scan` API）描述，让主文档与 Burst Open v2 实际实现一致。
+> - 2026-04-29 **批量下单 Tab UI 对齐快开快平**：每条规则一张紧凑 SummaryCard（`by_rule` 聚合）；工具栏增加「全部规则 / Rule n」筛选（仅作用于表格与导出，不影响卡片）。`/burst-open/alerts/stats` 返回 `by_rule`。详见 [risk-monitor-reusable-patterns.md §11](./risk-monitor-reusable-patterns.md)。
+
+**文档与代码谁为准**：Tab 列表与页面结构以 `frontend/src/pages/RiskMonitor.tsx` 为准；`rule_id` 区间以 `backend/app/api/v1/risk_monitor.py`（`BURST_RULE_MAX_ID` / `QUICK_RULE_ID_BASE`）及检测服务为准；风控 Tab 的卡片 + 筛选分工以 [risk-monitor-reusable-patterns.md §11](./risk-monitor-reusable-patterns.md) 为准。
 
 ## 1. 系统概览
 
@@ -39,7 +42,7 @@ KCM 是 B-Book CFD 券商：客户亏损 = 公司盈利。真正的风险是客�
 ┌──────────────────────────────────────────────────────────────────┐
 │  前端 (RiskMonitor.tsx)                                            │
 │  - GET /burst-open/alerts          ← 时间范围列表 (主数据源)         │
-│  - GET /burst-open/alerts/stats    ← 顶部 SummaryCard 聚合          │
+│  - GET /burst-open/alerts/stats    ← 按规则 SummaryCard (`by_rule`)   │
 │  - GET /burst-open                 ← 最近一次扫描元数据 (脚注 + 立即扫描) │
 │  - GET /burst-open/config          ← 规则 + scan_interval_min       │
 │  轮询频率: scan_interval_min × 60s (跟随后端配置, custom 范围不轮询)   │
@@ -66,7 +69,7 @@ KCM 是 B-Book CFD 券商：客户亏损 = 公司盈利。真正的风险是客�
 │    /burst-open/config           SQLite read / write rules         │
 │    /burst-open/scan-now         立即触发一次扫描 (加锁)              │
 │    /burst-open/alerts           SQLite alert_events 时间范围查询     │
-│    /burst-open/alerts/stats     SQLite 聚合 (suspicious / events)   │
+│    /burst-open/alerts/stats     SQLite 聚合 + optional `by_rule`      │
 │    /burst-open/alerts/export    SQLite 流式 CSV (StreamingResponse) │
 └─────────────────────────┬────────────────────────────────────────┘
                           │ 单个 pymysql 连接 (跨库查询)
@@ -280,8 +283,9 @@ ORDER BY d.Login, d.Time;
 | 规则 | 状态 | 文档 |
 |------|------|------|
 | `rule_burst_open_detect` (批量下单) | ✅ 在线 | 本文档 §6 |
-| Gap Trading (缺口交易) | 🚧 前端占位，后端未实现 | [roadmap.md §3](./risk-monitor-roadmap.md) |
-| Quick Profit / Scale-In / Quick Open-Close / Leverage Abuse / Martingale | 📋 已设计未实现 | [roadmap.md §3](./risk-monitor-roadmap.md) |
+| `scan_quick_open_close` / 快开快平 | ✅ 在线（`rule_id` ≥ 51） | [reusable-patterns §11](./risk-monitor-reusable-patterns.md)、Skill Data Model |
+| Gap Trading (缺口交易) | 📋 仅路线图，**无前端 Tab**；后端未实现 | [roadmap.md §3](./risk-monitor-roadmap.md) |
+| Quick Profit / Scale-In / Leverage Abuse / Martingale 等 | 📋 已设计未实现 | [roadmap.md §3](./risk-monitor-roadmap.md) |
 | ~~`rule_frequent_open_detect`~~ | ❌ 2026-03-28 被 Burst Open 取代 | [archive.md "Frequent Opening Detection"](./risk-monitor-archive.md) |
 | ~~`rule_scale_in_detect`~~ | ❌ 2026-03-26 移除 | [archive.md "Scale-In Detection"](./risk-monitor-archive.md) |
 | ~~`rule_batch_close_detect`~~ | ❌ 设计阶段废弃，从未上线 | [archive.md "Old Python Detection Engine"](./risk-monitor-archive.md) |
@@ -336,7 +340,7 @@ conn = pymysql.connect(
 | `/api/v1/risk-monitor/burst-open/config` | GET / POST | 读写 SQLite 中的 `scan_interval_min` + rules |
 | `/api/v1/risk-monitor/burst-open/scan-now` | POST | 立即扫描 (加锁，单实例排队) |
 | `/api/v1/risk-monitor/burst-open/alerts` | GET | 时间范围 + 过滤 + 服务端分页排序，主数据源 |
-| `/api/v1/risk-monitor/burst-open/alerts/stats` | GET | 同范围聚合，给 SummaryCard |
+| `/api/v1/risk-monitor/burst-open/alerts/stats` | GET | 同范围聚合；`by_rule` 供按规则卡片（与表格 `rule_id` 筛选独立） |
 | `/api/v1/risk-monitor/burst-open/alerts/export` | GET | 流式 CSV，按当前 filter + sort 全量导出 |
 | ~~`/api/v1/risk-monitor/frequent-open`~~ | — | ❌ 2026-03-28 删除（[archive.md](./risk-monitor-archive.md) 留存原响应格式） |
 | ~~`/api/v1/risk-monitor/scan`~~ | — | ❌ 2026-03 删除 |
@@ -364,7 +368,7 @@ if not redis.exists(key):
 
 - 侧边栏分组: Risk Control，页面标题: 交易实时监控
 - 纯中文 UI，不需要 i18n
-- **Tab 切换**: 批量下单 (默认) / 缺口交易 (开发中，当前为占位)
+- **Tab 切换**: 批量下单 (默认) / 快开快平
 - 没有 ALERT / WATCH 分级，所有命中统称"可疑用户"，详见 §6.1
 
 > **历史记录**：早期 Tab 1 是"频繁开仓 + ALERT/WATCH 分级"，2026-03-28 重构为 Burst Open 后取消分级，UI 设计和卡片含义全部变更。原稿归档于 [archive.md "Frequent Opening Detection"](./risk-monitor-archive.md)。
@@ -373,22 +377,18 @@ if not redis.exists(key):
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│  [批量下单] [缺口交易]                                                │
+│  [批量下单] [快开快平]                                                │
 ├──────────────────────────────────────────────────────────────────────┤
 │  检测短时间内同品种密集下大单的可疑交易行为(EA/算法特征)              │
 │  当前范围: 最近 4 小时 · 上次刷新 14:32                              │
 │  最近扫描 14:30:00 · 耗时 102ms · 每 N 分钟自动扫描 (N=scan_interval) │
 │             [导出 CSV] [规则配置] [立即扫描]                          │
 ├──────────────────────────────────────────────────────────────────────┤
-│  当前规则: [Rule 1: 3秒/3笔/≥5手] [Rule 2: 5秒/5笔/≥3手]              │
+│  每规则一张卡片: Rule 1·去重账户 | Rule 2·去重账户 … (紧凑 Card)      │
+│  (文案含告警条数 + 该规则参数摘要)                                    │
 ├──────────────────────────────────────────────────────────────────────┤
-│  ┌────────────────────────┐  ┌────────────────────────┐             │
-│  │ 🔴 可疑账户(范围内去重)  │  │ 🟡 告警事件(范围内总数)  │             │
-│  │      12                │  │      37                │             │
-│  └────────────────────────┘  └────────────────────────┘             │
-├──────────────────────────────────────────────────────────────────────┤
-│  时间范围: [最近 4 小时 ▼] (1h/4h/1d/7d/30d/自定义)                   │
-│  筛选: [全部服务器 ▼] [搜索 zipcode...] [搜索账户号...]              │
+│  [全部规则▼] [最近 4 小时▼] [自定义日期] [全部服务器▼] zipcode 账户  │
+│  (规则筛选仅影响表格/导出；卡片仍展示各规则在全筛选下的聚合)          │
 │         共 N 条告警                                                  │
 ├──────────────────────────────────────────────────────────────────────┤
 │  AG-Grid 表格 (服务端分页 + 服务端排序)                              │
@@ -400,12 +400,9 @@ if not redis.exists(key):
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
-#### Tab 2: 缺口交易 (开发中)
+#### Tab 2: 快开快平
 
-> **原 Tab 2 "持仓累积" 已于 2026-03-26 移除**，替换为「缺口交易」检测。
-> 当前为占位 UI，显示"开发中 — 检测休市前后的开平仓行为"。
->
-> 缺口交易检测目标: 识别客户在休市前（如周五收盘前）开仓压注，利用周一开盘缺口获利的行为。
+> 与批量下单共用同一套 **规则卡片 + 规则筛选 + 时间/服务器/zip/账户** 工具栏模式；数据接口为 `/quick-open-close/*`。详见 `.cursor/skills/risk-monitor/SKILL.md` 与 [risk-monitor-reusable-patterns.md](./risk-monitor-reusable-patterns.md)。
 
 ---
 
@@ -643,7 +640,7 @@ CREATE INDEX idx_alert_events_server_sym   ON alert_events(server, symbol, scann
 | `server` / `login` / `symbol` / `rule_id` / `zipcode` | — | — | 等值 / LIKE 过滤 |
 | `limit` / `offset` | int | — | 旧客户端兼容；`page` 传了就忽略 |
 
-`/alerts/stats` 接同一套 `server/login/zipcode` 过滤，让"可疑账户 / 告警事件"卡片与表格保持一致。`/alerts/export` 参数同 `/alerts` 但**不接受** `page/page_size/limit/offset`，用 `StreamingResponse + csv.writer`，每 5000 行一批从 SQLite `fetchmany`，内存占用与行数无关；响应带 UTF-8 BOM，Excel 直接打开中文不乱码。
+`/alerts/stats` 接同一套 `server/login/zipcode` 过滤（无 `rule_id`），让规则卡片与表格在「时间 + 服务器 + zip + 账户」维度一致；表格另可选用 `rule_id` 只看单规则。`/alerts/export` 参数同 `/alerts` 但**不接受** `page/page_size/limit/offset`，用 `StreamingResponse + csv.writer`，每 5000 行一批从 SQLite `fetchmany`，内存占用与行数无关；响应带 UTF-8 BOM，Excel 直接打开中文不乱码。
 
 **写入路径**: `burst_open_scheduler._run_scan()` → `append_scan_and_events()` 在单事务内写入批次行 + 所有告警事件行。
 
@@ -705,7 +702,7 @@ GET /burst-open/alerts/stats?zipcode=<substr>&...
 - 列顺序：服务器 → **Zipcode** → 账户 → 币种 → 品种 → ...
 - Zipcode 列 NULL 值以灰色 `—` 显示
 - Toolbar 独立输入框（300ms debounce），和时间范围、服务器下拉同级
-- `stats` 接口同步带 zipcode 参数 → "可疑账户 / 告警事件"卡片与表格数据一致
+- `stats` 接口同步带 zipcode 参数 → **规则 SummaryCard**（`by_rule`）与表格在「时间 + 服务器 + zip + 账户」维度一致；表格另可选 `rule_id` 筛选单规则（不影响卡片汇总）
 
 **不做回填**：2026-04-17 起新数据带 zipcode；历史 9871 行 zipcode 永远 NULL，不在筛选结果中。若未来需要，可仿 `backfill_alert_events_currency.py` 写同款脚本。
 
@@ -715,10 +712,10 @@ GET /burst-open/alerts/stats?zipcode=<substr>&...
 |--------|------|------|
 | **SQL 对 DB load** | 10min 窗口的开仓查询使用 OPEN_TIME / Timestamp 索引，预估返回数百行，耗时 <10ms。后端单任务每 10min 查一次，Slave 零压力 | ✅ 可行 |
 | **Python 滑动窗口** | 按 (server, login, symbol) 分组后每组通常 <20 条。排序 O(N log N) + 滑动 O(N)，多条 rules 重复执行也在亚毫秒级 | ✅ 可行 |
-| **后端定时任务** | `asyncio.create_task()` 在 FastAPI startup 启动后台循环。单例 + asyncio.Lock 避免并发。无需 APScheduler 等额外依赖 | ✅ 可行 |
+| **后端定时任务** | `BurstOpenScheduler` 由 `main.py` lifespan 启动，内置 **APScheduler** 周期扫描；单实例锁避免并发扫描。**（旧稿曾写 asyncio 自旋循环，已废弃。）** | ✅ 可行 |
 | **多规则** | SQL 执行一次，Python 对同一数据集执行 3-5 条 rules，额外开销忽略不计 | ✅ 可行 |
 | **SQLite 历史日志** | 内置模块，单文件，写频率极低。每条记录 ~1-5KB (取决于 alerts 数量)，1000 条 ≈ 1-5MB | ✅ 可行 |
-| **前端改动量** | 参数面板从 3 个 input 改为多 rule 卡片式配置 + 新增"查看历史"按钮/抽屉。AG-Grid 列定义调整。改动适中 | ✅ 可行 |
+| **前端改动量** | 多规则 Config Drawer + 时间范围视图 + AG-Grid；增量 Tab 复用 [§11](./risk-monitor-reusable-patterns.md) 模式 | ✅ 可行 |
 
 ### 6.8 确认答案汇总
 
