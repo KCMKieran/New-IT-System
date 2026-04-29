@@ -804,7 +804,7 @@ function BurstOpenTab({ active }: { active: boolean }) {
         pinned: "left",
       },
       {
-        headerName: "被发现时间",
+        headerName: "发现时间 (GMT+8)",
         field: "scanned_at",
         colId: "scanned_at",
         width: 165,
@@ -812,7 +812,7 @@ function BurstOpenTab({ active }: { active: boolean }) {
         valueFormatter: (p) => fmtTime(p.value),
       },
       {
-        headerName: "具体时间(开仓)",
+        headerName: "开仓时间 (GMT+8)",
         colId: "burst_window",
         width: 160,
         // Derived from two columns, no SQL-friendly sort expression →
@@ -1540,7 +1540,7 @@ function QuickOpenCloseTab({ active }: { active: boolean }) {
     () => [
       { headerName: "规则", field: "rule_label", colId: "rule_label", width: 110, pinned: "left" },
       {
-        headerName: "被发现时间",
+        headerName: "发现时间 (GMT+8)",
         field: "scanned_at",
         colId: "scanned_at",
         width: 165,
@@ -1559,14 +1559,14 @@ function QuickOpenCloseTab({ active }: { active: boolean }) {
       { headerName: "币种", field: "currency", colId: "currency", width: 80 },
       { headerName: "品种", field: "symbol", colId: "symbol", width: 110 },
       {
-        headerName: "开仓时间",
+        headerName: "开仓时间 (GMT+8)",
         field: "first_open",
         colId: "first_open",
         width: 165,
         valueFormatter: (p) => fmtTime(p.value),
       },
       {
-        headerName: "平仓时间",
+        headerName: "平仓时间 (GMT+8)",
         field: "last_open",
         colId: "last_open",
         width: 165,
