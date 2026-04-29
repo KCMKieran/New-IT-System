@@ -336,7 +336,7 @@ New-IT-System/
 **Key Features**:
 - Tab-based UI: 批量下单 (default) / 快开快平（以 `RiskMonitor.tsx` 为准）
 - Burst Open Detection (批量下单): sliding window algorithm detects N orders (each ≥ M lots) within T seconds on the same symbol
-- Quick Open-Close (快开快平): short hold-time + profit-window clustering; `rule_id` ≥ 51 in `alert_events`
+- Quick Open-Close (快开快平): short hold + min count + min merged P&L within SQL lookback; `rule_id` ≥ 51 in `alert_events`
 - Backend-driven scanning via APScheduler (single background task, frontend reads cached result)
 - Multi-rule support: up to 10 configurable rules with independent parameters
 - Config persistence in SQLite (`backend/data/risk_monitor.db`)

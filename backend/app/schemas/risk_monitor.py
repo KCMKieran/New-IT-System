@@ -31,7 +31,6 @@ class QuickOpenCloseRule(BaseModel):
     id: Optional[int] = None
     max_hold_seconds: int = Field(default=60, ge=1, le=3600)
     min_closed_orders: int = Field(default=3, ge=1, le=200)
-    profit_window_min: int = Field(default=5, ge=1, le=120)
     min_total_profit_usd: float = Field(default=0.0, ge=-1000000.0, le=100000000.0)
 
 

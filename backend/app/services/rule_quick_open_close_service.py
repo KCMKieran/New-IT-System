@@ -2,7 +2,9 @@
 Quick Open-Close detection (快开快平): closed trades with short hold duration.
 
 Rule IDs 51–60 (do not collide with burst-open 1–10).
-Alert grouping uses close-time sliding windows.
+Per scan, for each (server, login, symbol) we merge P&L over **all** qualifying
+short-hold closes returned by SQL (the lookback = scan interval + 30s buffer).
+There is no separate “profit window” config — the time range is that fetch only.
 """
 
 from __future__ import annotations
@@ -169,7 +171,6 @@ def rule_quick_open_close_detect(
         for rule_idx, rule in enumerate(rules):
             max_hold = int(rule["max_hold_seconds"])
             min_count = int(rule["min_closed_orders"])
-            profit_window_sec = int(rule["profit_window_min"]) * 60
             min_profit_usd = float(rule["min_total_profit_usd"])
             rule_id = int(rule.get("id") or (QUICK_RULE_ID_BASE + rule_idx))
             if rule_id < QUICK_RULE_ID_BASE:
@@ -188,37 +189,9 @@ def rule_quick_open_close_detect(
                 or datetime.min.replace(tzinfo=timezone.utc),
             )
 
-            # Sliding window by close_time; select the best cluster.
-            best_cluster: List[Dict[str, Any]] | None = None
-            for i in range(len(qualifying)):
-                start_t = _parse_iso_dt(qualifying[i].get("close_time"))
-                if start_t is None:
-                    continue
-                current: List[Dict[str, Any]] = []
-                for j in range(i, len(qualifying)):
-                    cur_t = _parse_iso_dt(qualifying[j].get("close_time"))
-                    if cur_t is None:
-                        continue
-                    if (cur_t - start_t).total_seconds() <= profit_window_sec:
-                        current.append(qualifying[j])
-                    else:
-                        break
-                if len(current) < min_count:
-                    continue
-                if best_cluster is None:
-                    best_cluster = current
-                    continue
-                if len(current) > len(best_cluster):
-                    best_cluster = current
-                    continue
-                if len(current) == len(best_cluster):
-                    cur_profit = sum(float(o.get("profit") or 0) for o in current)
-                    best_profit = sum(float(o.get("profit") or 0) for o in best_cluster)
-                    if cur_profit > best_profit:
-                        best_cluster = current
-
-            if not best_cluster:
-                continue
+            # Single cluster: all short-hold closes in this batch for (server, login, symbol).
+            # Time scope is the SQL lookback (scan_interval_min * 60 + buffer), not a sub-window.
+            best_cluster = qualifying
 
             total_lots = 0.0
             total_profit = 0.0
@@ -296,7 +269,6 @@ def scan_quick_open_close(
             "id": rid,
             "max_hold_seconds": int(r["max_hold_seconds"]),
             "min_closed_orders": int(r["min_closed_orders"]),
-            "profit_window_min": int(r.get("profit_window_min", 5)),
             "min_total_profit_usd": float(r.get("min_total_profit_usd", 0.0)),
         })
 

@@ -15,6 +15,7 @@
  * Skill: .cursor/skills/risk-monitor/SKILL.md
  */
 import { useEffect, useState, useRef, useCallback, useMemo } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useTheme } from "@/components/theme-provider";
 import { apiFetch } from "@/lib/fetch";
 import { Card, CardContent } from "@/components/ui/card";
@@ -165,13 +166,21 @@ interface QuickOpenCloseRule {
   id?: number;
   max_hold_seconds: number;
   min_closed_orders: number;
-  profit_window_min: number;
   min_total_profit_usd: number;
 }
 
 interface QuickOpenCloseConfig {
   enabled: boolean;
   rules: QuickOpenCloseRule[];
+}
+
+/** SQLite NULL / missing `enabled` must not show as "disabled" in the UI. */
+function normalizeQuickOpenCloseConfig(c: QuickOpenCloseConfig): QuickOpenCloseConfig {
+  const v = c.enabled as unknown;
+  return {
+    ...c,
+    enabled: v === false || v === 0 ? false : true,
+  };
 }
 
 /** Latest scan snapshot — only used to show scan metadata (time + duration) */
@@ -365,10 +374,51 @@ const defaultColDef: ColDef = {
   autoHeaderHeight: true,
 };
 
+/** Sub-tabs on /risk-monitor — kept in the URL as `?tab=` so refresh keeps the selection. */
+const RISK_MONITOR_TABS = ["burst-open", "quick-open-close"] as const;
+type RiskMonitorTab = (typeof RISK_MONITOR_TABS)[number];
+
+function isRiskMonitorTab(s: string | null): s is RiskMonitorTab {
+  return s === "burst-open" || s === "quick-open-close";
+}
+
 // ── Main Component ────────────────────────────────────────
 
 export default function RiskMonitor() {
-  const [activeTab, setActiveTab] = useState("burst-open");
+  const [searchParams, setSearchParams] = useSearchParams();
+  const tabParam = searchParams.get("tab");
+  const activeTab: RiskMonitorTab = isRiskMonitorTab(tabParam) ? tabParam : "burst-open";
+
+  // Drop unknown ?tab= values from the URL so the address bar matches what we show.
+  useEffect(() => {
+    if (tabParam !== null && !isRiskMonitorTab(tabParam)) {
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          next.delete("tab");
+          return next;
+        },
+        { replace: true },
+      );
+    }
+  }, [tabParam, setSearchParams]);
+
+  const setActiveTab = (value: string) => {
+    if (!isRiskMonitorTab(value)) return;
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        if (value === "burst-open") {
+          // Default tab — omit query for a shorter URL
+          next.delete("tab");
+        } else {
+          next.set("tab", value);
+        }
+        return next;
+      },
+      { replace: true },
+    );
+  };
 
   return (
     <div className="flex flex-col gap-4 p-4 lg:p-6">
@@ -1322,8 +1372,8 @@ function QuickOpenCloseTab({ active }: { active: boolean }) {
         apiFetch("/api/v1/risk-monitor/burst-open/config"),
       ]);
       if (quickRes.ok) {
-        const cfg: QuickOpenCloseConfig = await quickRes.json();
-        setConfig(cfg);
+        const raw = (await quickRes.json()) as QuickOpenCloseConfig;
+        setConfig(normalizeQuickOpenCloseConfig(raw));
       }
       if (burstRes.ok) {
         const burstCfg: BurstOpenConfig = await burstRes.json();
@@ -1474,8 +1524,8 @@ function QuickOpenCloseTab({ active }: { active: boolean }) {
         body: JSON.stringify(editConfig),
       });
       if (res.ok) {
-        const saved: QuickOpenCloseConfig = await res.json();
-        setConfig(saved);
+        const saved = (await res.json()) as QuickOpenCloseConfig;
+        setConfig(normalizeQuickOpenCloseConfig(saved));
         setEditConfig(null);
         setConfigOpen(false);
       }
@@ -1608,13 +1658,14 @@ function QuickOpenCloseTab({ active }: { active: boolean }) {
             onClick={() => {
               setEditConfig(
                 config
-                  ? JSON.parse(JSON.stringify(config))
+                  ? normalizeQuickOpenCloseConfig(
+                    JSON.parse(JSON.stringify(config)) as QuickOpenCloseConfig,
+                  )
                   : {
                     enabled: true,
                     rules: [{
                       max_hold_seconds: 60,
                       min_closed_orders: 3,
-                      profit_window_min: 5,
                       min_total_profit_usd: 0,
                     }],
                   },
@@ -1659,8 +1710,8 @@ function QuickOpenCloseTab({ active }: { active: boolean }) {
                 label={`Rule ${idx + 1} · 去重账户`}
                 value={nAcc}
                 description={
-                  `告警 ${nEvt} 条 · 持单≤${rule.max_hold_seconds}s / ≥${rule.min_closed_orders} 笔 / `
-                  + `${rule.profit_window_min} 分钟内利润 ≥ $${rule.min_total_profit_usd}`
+                  `告警 ${nEvt} 条 · 持单≤${rule.max_hold_seconds}s / ≥${rule.min_closed_orders} 笔 · `
+                  + `合并利润(单次拉取) ≥ $${rule.min_total_profit_usd}`
                 }
                 dotColor={st.dot}
                 textColor={st.value}
@@ -2006,7 +2057,6 @@ function QuickConfigDrawer({
         {
           max_hold_seconds: 60,
           min_closed_orders: 3,
-          profit_window_min: 5,
           min_total_profit_usd: 0,
         },
       ],
@@ -2089,18 +2139,7 @@ function QuickConfigDrawer({
                       className="h-8"
                     />
                   </div>
-                  <div className="space-y-1">
-                    <label className="text-xs text-muted-foreground">利润统计窗口（分钟）</label>
-                    <Input
-                      type="number"
-                      min={1}
-                      max={120}
-                      value={rule.profit_window_min}
-                      onChange={(e) => updateRule(idx, "profit_window_min", e.target.value)}
-                      className="h-8"
-                    />
-                  </div>
-                  <div className="space-y-1">
+                  <div className="space-y-1 col-span-2 sm:col-span-1">
                     <label className="text-xs text-muted-foreground">最小合并利润（USD）</label>
                     <Input
                       type="number"
@@ -2115,6 +2154,9 @@ function QuickConfigDrawer({
                 </div>
               </div>
             ))}
+            <p className="text-xs text-muted-foreground">
+              时间范围与「批量下单」的扫描周期一致：合并利润为单次 SQL 拉取区间内、持单不超过「最大持单时长」的平仓之合计。
+            </p>
           </div>
         </div>
 

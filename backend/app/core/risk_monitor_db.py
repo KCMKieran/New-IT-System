@@ -78,7 +78,6 @@ CREATE TABLE IF NOT EXISTS quick_open_close_rules (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     max_hold_seconds    INTEGER NOT NULL DEFAULT 60,
     min_closed_orders   INTEGER NOT NULL DEFAULT 3,
-    profit_window_min   INTEGER NOT NULL DEFAULT 5,
     min_total_profit_usd REAL   NOT NULL DEFAULT 0.0,
     sort_order          INTEGER NOT NULL DEFAULT 0
 );
@@ -138,8 +137,8 @@ VALUES (3, 3, 5.0, 0);
 
 _SEED_QUICK_RULE_SQL = """
 INSERT INTO quick_open_close_rules
-    (max_hold_seconds, min_closed_orders, profit_window_min, min_total_profit_usd, sort_order)
-VALUES (60, 3, 5, 0.0, 0);
+    (max_hold_seconds, min_closed_orders, min_total_profit_usd, sort_order)
+VALUES (60, 3, 0.0, 0);
 """
 
 
@@ -167,6 +166,8 @@ def init_risk_monitor_db() -> None:
         # COLUMN if the column already exists via a PRAGMA check.
         _migrate_alert_events_columns(conn)
         _migrate_quick_rules_columns(conn)
+        _migrate_drop_profit_window_from_quick_rules(conn)
+        _migrate_quick_open_close_enabled_not_null(conn)
 
         # One-time backfill: if alert_events is empty but scan_history has
         # rows, flatten their JSON alerts into the event table so existing
@@ -219,15 +220,62 @@ def _migrate_alert_events_columns(conn: sqlite3.Connection) -> None:
 def _migrate_quick_rules_columns(conn: sqlite3.Connection) -> None:
     """Add columns for quick_open_close_rules introduced after initial schema."""
     cols = {row[1] for row in conn.execute("PRAGMA table_info(quick_open_close_rules)")}
-    if "profit_window_min" not in cols:
-        conn.execute(
-            "ALTER TABLE quick_open_close_rules ADD COLUMN profit_window_min INTEGER NOT NULL DEFAULT 5"
-        )
     if "min_total_profit_usd" not in cols:
         conn.execute(
             "ALTER TABLE quick_open_close_rules ADD COLUMN min_total_profit_usd REAL NOT NULL DEFAULT 0.0"
         )
     conn.commit()
+
+
+def _migrate_drop_profit_window_from_quick_rules(conn: sqlite3.Connection) -> None:
+    """Remove deprecated profit_window_min column (replaced by full-scan-interval merge)."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(quick_open_close_rules)")}
+    if "profit_window_min" not in cols:
+        return
+    conn.executescript(
+        """
+        BEGIN;
+        CREATE TABLE _quick_open_close_rules_new (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            max_hold_seconds    INTEGER NOT NULL DEFAULT 60,
+            min_closed_orders   INTEGER NOT NULL DEFAULT 3,
+            min_total_profit_usd REAL   NOT NULL DEFAULT 0.0,
+            sort_order          INTEGER NOT NULL DEFAULT 0
+        );
+        INSERT INTO _quick_open_close_rules_new
+            (id, max_hold_seconds, min_closed_orders, min_total_profit_usd, sort_order)
+        SELECT
+            id, max_hold_seconds, min_closed_orders, min_total_profit_usd, sort_order
+        FROM quick_open_close_rules;
+        DROP TABLE quick_open_close_rules;
+        ALTER TABLE _quick_open_close_rules_new RENAME TO quick_open_close_rules;
+        DELETE FROM sqlite_sequence WHERE name = 'quick_open_close_rules';
+        COMMIT;
+        """
+    )
+    max_id = conn.execute("SELECT MAX(id) FROM quick_open_close_rules").fetchone()[0] or 0
+    if max_id:
+        conn.execute(
+            "INSERT INTO sqlite_sequence (name, seq) VALUES (?, ?)",
+            ("quick_open_close_rules", max_id),
+        )
+    conn.commit()
+    logger.info(
+        "Migrated quick_open_close_rules: dropped profit_window_min, preserved %d row(s)", max_id
+    )
+
+
+def _migrate_quick_open_close_enabled_not_null(conn: sqlite3.Connection) -> None:
+    """Legacy rows may have enabled=NULL; bool(None) in Python is False and broke the UI."""
+    try:
+        n = conn.execute(
+            "UPDATE quick_open_close_config SET enabled = 1 WHERE id = 1 AND enabled IS NULL"
+        ).rowcount
+        if n:
+            conn.commit()
+            logger.info("Set quick_open_close_config.enabled=1 where it was NULL (%d row)", n)
+    except sqlite3.Error:
+        pass
 
 
 def _backfill_alert_events_if_needed(conn: sqlite3.Connection) -> None:
@@ -357,11 +405,16 @@ def load_quick_open_close_config() -> dict[str, Any]:
         cfg_row = conn.execute(
             "SELECT enabled FROM quick_open_close_config WHERE id = 1"
         ).fetchone()
-        enabled = bool(cfg_row["enabled"]) if cfg_row else True
+        # SQLite may store NULL in legacy rows; bool(None) is False in Python and would
+        # mis-report as disabled — treat NULL like default ON (1).
+        if not cfg_row:
+            enabled = True
+        else:
+            raw = cfg_row["enabled"]
+            enabled = True if raw is None else bool(raw)
 
         rule_rows = conn.execute(
-            "SELECT id, max_hold_seconds, min_closed_orders, "
-            "profit_window_min, min_total_profit_usd "
+            "SELECT id, max_hold_seconds, min_closed_orders, min_total_profit_usd "
             "FROM quick_open_close_rules ORDER BY sort_order, id"
         ).fetchall()
         rules = [dict(r) for r in rule_rows]
@@ -384,12 +437,11 @@ def save_quick_open_close_config(enabled: bool, rules: list[dict]) -> None:
         for i, r in enumerate(rules):
             conn.execute(
                 "INSERT INTO quick_open_close_rules "
-                "(max_hold_seconds, min_closed_orders, profit_window_min, min_total_profit_usd, sort_order) "
-                "VALUES (?, ?, ?, ?, ?)",
+                "(max_hold_seconds, min_closed_orders, min_total_profit_usd, sort_order) "
+                "VALUES (?, ?, ?, ?)",
                 (
                     r["max_hold_seconds"],
                     r["min_closed_orders"],
-                    r["profit_window_min"],
                     r["min_total_profit_usd"],
                     i,
                 ),
