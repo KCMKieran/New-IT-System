@@ -12,6 +12,7 @@ Notes:
 - Time is MT server time (UTC+3), no timezone conversion in SQL.
 - Default server filter is sid=5 (MT5). You can pass sid=1,6 etc.
 - By default, only same clientid pairs are kept in AB matching.
+- Email with Excel attachment is sent by default; pass --no-send-email to skip.
 """
 
 from __future__ import annotations
@@ -115,8 +116,8 @@ def build_args() -> argparse.Namespace:
     p.add_argument(
         "--send-email",
         action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Send email report with generated xlsx attachment (default: false)",
+        default=True,
+        help="Send email report with generated xlsx attachment (default: true; use --no-send-email to skip)",
     )
     p.add_argument(
         "--mail-to",
@@ -652,7 +653,7 @@ def main() -> int:
         )
         log_step("STEP6", f"Email sent with subject: {subject}")
     else:
-        log_step("STEP6", "Skip email (--send-email not enabled)")
+        log_step("STEP6", "Skip email (--no-send-email)")
 
     log_step("DONE", f"Total elapsed: {time.perf_counter() - all_t0:.2f}s")
     return 0
