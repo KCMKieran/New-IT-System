@@ -35,6 +35,7 @@ This is the documentation hub for the KCM IT System - an internal financial trad
 | IB Report | Broker commission reports | [ib-report.md](features/ib-report.md) |
 | IB Financial Monitor | IB fund monitoring & scheduled reports | [ib-financial-monitor.md](features/ib-financial-monitor.md) |
 | Trade Real-time Monitor | Batch order detection & risk alerts | [risk-monitor.md](features/risk-monitor.md) |
+| Login IP Monitor | Daily MT login IP correlation + on-demand deep audit | [login-ip.md](features/login-ip.md) |
 
 ## Documentation Structure
 
@@ -76,6 +77,8 @@ docs/
 │   ├── ib-financial-monitor.md  # IB Financial Monitor (replaces D08)
 │   ├── risk-monitor.md          # Trade Real-time Monitor (批量下单 + 快开快平)
 │   ├── blowup-audit.md          # Blown-up account / AB-pair offline audit
+│   ├── login-ip.md              # Login IP Monitor + login_ip_deep_audit.py
+│   ├── login-ip_migration.md    # Login-IP migration history (2026-04)
 │   └── filter-backend-integration.md
 ├── deployment/                  # ⭐ Deployment & DevOps
 │   ├── dev-prod-guide.md      # Dev/Prod workflow, Docker, Cloudflare Tunnel

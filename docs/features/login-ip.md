@@ -328,7 +328,125 @@ frontend/src/pages/login-ip/
 | 运维 Tab 看到某条 `running` 行挂了好几天 | 正常应该 <5min；6h 后会被 `reap_stuck_running_runs` 自动改成 `failed`，`error_msg` 末尾带 `[reaped: stuck in running past 6h]` — 搜 backend log 里这条行的 `run_id` 定位崩溃原因（OOM / docker restart 最常见） |
 | 想查更早的调度记录（>90 天） | 默认只留 90 天；改 `DEFAULT_SCHEDULER_RUN_RETENTION_DAYS` 即可，短期可直接 `sqlite3 backend/data/login_ip.db` 手工拉备份 |
 
-## 11. 废弃旧系统
+## 11. 单户深度审计脚本 `login_ip_deep_audit.py`
+
+> **2026-05 新增**。每日 08:30 邮件只列「关联账户清单」，要判断是否真的协同操作得人工去查 SQL。这个脚本把整条调查链一键跑完，给 risk team 一封自包含的证据邮件。
+
+### 11.1 用途
+
+针对 watchlist 中**某一个**监控账户，对**某一个 MT 日**的关联账户做深度审计：
+
+- **基础信息表**：每行一个 loginSid，包含 MT name / CRM name / client_id / zipcode / currency / country / first deposit / **客户级 lifetime + N-day net deposit** / 共享 IP。
+- **当日交易行为**：按账户汇总（笔数/方向/手数/盈亏/品种）+ **同分钟同向**集体下单 + **同分钟反向**对敲（AB 仓证据）+ 完整订单时间线。
+
+代码：`backend/scripts/login_ip_deep_audit.py`。
+邮件接收人：`.env` 的 `BLOWUP_AUDIT_MAIL_TO`（与 blowup-audit 共用）。
+
+### 11.2 净入金口径（**重要**，必须与 `client_return_rate` 对齐）
+
+历史上写过两次符号反了的版本。**正确口径定义如下，新代码改这块前必读**：
+
+```sql
+-- 在 fxbackoffice.stats_transactions 上，按 userId（不是 loginSid！）聚合
+deposits_total = SUM(CASE WHEN type='deposit'
+                          THEN IF(currency='CEN', amount/100, amount) ELSE 0 END)
+withdrawals_total = SUM(CASE WHEN type IN ('withdrawal','ib withdrawal')
+                             THEN IF(currency='CEN', amount/100, amount) ELSE 0 END)
+
+-- 关键: stats_transactions.amount 的 withdrawal 行本身已经是负数 (-329000 这种).
+-- 所以净入金是 PLUS, 不是 MINUS:
+net_deposit = deposits_total + withdrawals_total       -- ✅ 正确
+net_deposit = deposits_total - withdrawals_total       -- ❌ 双重负号, 净入金会被错误放大一倍出金额度
+```
+
+**两条铁律**：
+
+| 条 | 内容 | 来源 |
+|---|---|---|
+| ① 用 `+` 不用 `-` | `withdrawals_total` 已经是负数 | `client_return_service.py:178` `net_deposit_hist = deposits_hist + withdrawals_hist` |
+| ② 按 `userId` 聚合，不按 `loginSid` | KCM 的 net deposit 业务定义是「这个**客户**总共净投了多少钱进 KCM」。客户经常入金到 USD 账户后内部转去 cent 账户交易；按 loginsid 算单户会偏离真实值（实测 67036012 偏差 ~17%） | `client_return_service.py:247-258` `GROUP BY st.userId` |
+
+**type 范围**：固定 `IN ('deposit', 'withdrawal', 'ib withdrawal')`。其它 type 不算：
+- `ib transfer to account` / `transfer in` / `transfer out`：是钱包内部转账，从 client 角度净 0，会重复计算。
+- `deposit` 中 `status != 'approved'`：未通过的入金不算（`stats_transactions` 已经只聚合通过的，源表 `transactions` 用时要加 `status='approved'`）。
+
+**CEN 货币**：金额 `÷100` 转 USD。CEN 账户存的是 cent，1 USD = 100 CEN。
+
+**校验方式**：随便挑一个客户，跑这两个 SQL，应该数字相等：
+
+```sql
+-- A. 脚本/CRR 用的口径 (stats_transactions, 按 userId)
+SELECT
+    SUM(IF(type='deposit',     IF(currency='CEN', amount/100, amount), 0))
+    + SUM(IF(type IN ('withdrawal','ib withdrawal'),
+                                   IF(currency='CEN', amount/100, amount), 0)) AS net_deposit
+FROM fxbackoffice.stats_transactions
+WHERE userId = ? AND type IN ('deposit','withdrawal','ib withdrawal');
+
+-- B. 原始事实表对账 (transactions, status='approved' only)
+SELECT
+    SUM(IF(type IN ('deposit','withdrawal','ib withdrawal'),
+           IF(processedCurrency='CEN', processedAmount/100, processedAmount), 0)) AS net_deposit
+FROM fxbackoffice.transactions
+WHERE fromUserId = ? AND status = 'approved';
+```
+
+A ≈ B（B 可能略大 1 天，因 stats_transactions 是预聚合表有日界延迟）。
+
+### 11.3 自动过滤项
+
+| 过滤 | 实现 | 原因 |
+|---|---|---|
+| **登录号 `7` 开头** | `DEMO_LOGIN_PREFIX = "7"` 在 `fetch_correlated_account_pool` 中过滤 | KCM 约定：MT 登录号 `7xxxxxxx` 是 demo / test 账户。同 `open_positions_service.py` 的 `t.LOGIN NOT LIKE '7%'`。Login-IP 系统本身不过滤这些（日志里就有），脚本层把它们剔除以免污染 risk team 的视野 |
+| **watchlist `server_name` 错填** | 不读 watchlist 的 server_name；用 `mt4_users.LOGIN → loginsid` 反查 | 实测 67036012 在 watchlist 写成 `MT4_Live`，但 DB 里实际是 `5-67036012` (MT5 + CEN)。`mt4_users.sid` 才是 source of truth |
+| **跨服务器关联自动适配** | 关联账户的 sid 由各自的 `mt4_users.sid` 决定，不假设跟 target 同 sid | `login_ip_report_service.build_report_data` 的循环会跨服务器拾取关联，单 target 的 correlated 列表理论上可包含 MT4/MT5/MT4Live2 混合 |
+
+### 11.4 命令
+
+```bash
+cd /opt/myproject/New-IT-System/backend
+source .venv/bin/activate
+
+# 默认: target=67036012, MT 日 = 昨天 HKT, 30 天 net deposit, 发邮件
+python scripts/login_ip_deep_audit.py
+
+# 指定日期 / 指定 lookback / 不发邮件 (HTML 写到 backend/scripts/)
+python scripts/login_ip_deep_audit.py --date 20260504 --lookback-days 90 --no-send-email
+
+# 换其它 watchlist 账号 (必须已经在 watchlist 里, 否则 SystemExit)
+python scripts/login_ip_deep_audit.py --target-account 12345678
+
+# 临时换收件人
+python scripts/login_ip_deep_audit.py --mail-to "alice@x.com,bob@x.com"
+```
+
+### 11.5 性能
+
+8 户 + 10–20 关联账户，单 MT 日：
+
+| 步骤 | 耗时 |
+|---|---|
+| 读 login-ip 报告 JSON + chinese_name enrichment | ~250 ms |
+| `mt4_users` 反查 sid (1 query) | ~100 ms |
+| 基础信息 + 净入金 (1 query, 两个 userId 子查询) | ~150 ms |
+| 当日交易明细 (1 query, `loginSid IN + closeDate=` 命中索引) | ~150 ms |
+| Python 算同分钟桶 + 渲染 HTML | ~30 ms |
+| SMTP 发送 | ~2 s |
+
+总耗时 **<3 秒**。可以放心做成 cron / 按需触发。
+
+### 11.6 邮件接收人
+
+复用 blowup-audit 的：
+
+```env
+BLOWUP_AUDIT_MAIL_TO=kieran.xiang@kohleservices.com
+BLOWUP_AUDIT_MAIL_CC=
+```
+
+如果未来要给 login-ip 单独配收件人，加 `LOGIN_IP_AUDIT_MAIL_TO` 即可。
+
+## 12. 废弃旧系统
 
 旧项目路径：`/opt/myproject/log_analysis/46-MT-Server-Login-Detect/`
 

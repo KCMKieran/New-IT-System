@@ -409,8 +409,9 @@ New-IT-System/
 - `backend/app/services/login_ip_{ftp,analyzer,report,search,export,enrichment}_service.py`
 - `backend/app/core/login_ip_db.py` + `backend/app/core/login_ip_scheduler.py`
 - `backend/scripts/migrate_login_ip_from_legacy.py` (one-off migration from legacy `monitoring.db`)
+- `backend/scripts/login_ip_deep_audit.py` (2026-05) — **on-demand deep audit** for one watchlist account on one MT day. Pulls correlated logins from the structured report, resolves real `loginsid` via `mt4_users` (bypasses miskeyed `server_name`), enriches with CRM info + **client-level lifetime / N-day net deposit**, derives same-minute / same-symbol / same-direction (集体下单) and same-minute / opposite-direction (AB-pair) signals, then ships an HTML email to `BLOWUP_AUDIT_MAIL_TO`. Auto-filters `7`-prefix demo logins. **Net deposit formula must use `+` not `-`** (see [login-ip.md §11.2](../features/login-ip.md#112-净入金口径重要必须与-client_return_rate-对齐) — same as `client_return_service.py:178`).
 
-**Env**: `LOGIN_IP_{MT4,MT5,MT4_LIVE2}_{HOST,PORT,USER,PASSWORD,REMOTE_DIR,USE_FTPS}` (18 vars). Passwords containing `$`/`!`/etc. MUST be single-quoted — see [dev-prod-guide.md](../deployment/dev-prod-guide.md) §环境变量特殊字符转义.
+**Env**: `LOGIN_IP_{MT4,MT5,MT4_LIVE2}_{HOST,PORT,USER,PASSWORD,REMOTE_DIR,USE_FTPS}` (18 vars). Passwords containing `$`/`!`/etc. MUST be single-quoted — see [dev-prod-guide.md](../deployment/dev-prod-guide.md) §环境变量特殊字符转义. Deep audit script reuses `BLOWUP_AUDIT_MAIL_TO` / `BLOWUP_AUDIT_MAIL_CC`.
 
 **Docs**: [login-ip.md](../features/login-ip.md) | [Migration history](../features/login-ip_migration.md)
 
