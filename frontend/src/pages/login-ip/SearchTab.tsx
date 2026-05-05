@@ -45,6 +45,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import {
+  IconInfoCircle,
   IconSearch,
   IconDownload,
   IconRefresh,
@@ -522,6 +523,26 @@ export function SearchTab() {
           <CardTitle className="text-base">手动搜索</CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
+          {/* Explain data freshness: search reads on-disk JSONs built after the nightly download; "today" is never complete until the pipeline runs next day */}
+          <div
+            role="note"
+            className="flex gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950/35 dark:text-amber-100"
+          >
+            <IconInfoCircle
+              className="mt-0.5 size-4 shrink-0 opacity-90"
+              aria-hidden
+            />
+            <div className="space-y-1 leading-snug">
+              <p className="font-medium">数据时效说明</p>
+              <p>
+                手动搜索使用的是已入库的<strong>整日</strong>分析结果，<strong>不包含当天</strong>尚未完成采集与解析的日志；能查到的「最新整日」通常为<strong>香港时间前一自然日</strong>。「天数范围」是在已有数据中往回覆盖若干天，不会改变「不包含今天」这一规则。
+              </p>
+              <p className="text-amber-800/95 dark:text-amber-200/90">
+                每日<strong>香港时间 05:10</strong>
+                左右会自动从 FTP 拉取并解析<strong>昨日</strong>三台 MT 的登录日志（与 MT 日志日切对齐）；在此之前，昨日的全量记录可能尚未就绪。
+              </p>
+            </div>
+          </div>
           <div className="grid gap-3 md:grid-cols-4">
             <div className="space-y-1">
               <Label>搜索类型</Label>
