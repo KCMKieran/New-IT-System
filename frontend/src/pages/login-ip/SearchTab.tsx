@@ -68,15 +68,11 @@ import type {
 const linkCls =
   "text-blue-600 hover:underline dark:text-blue-400 font-mono text-sm";
 
-/** Plain label for tooltips / old string[] rows (IP 模式) */
+/** Correlated accounts in the grid: show MT login id only (no CRM names). */
 function formatCorrelatedEntry(
   c: CorrelatedAccountItem | string,
 ): string {
   if (typeof c === "string") return c;
-  const fn = c.first_name?.trim();
-  const ln = c.last_name?.trim();
-  if (fn && ln) return `${c.login} (${ln}, ${fn})`;
-  if (fn || ln) return `${c.login} (${ln || fn})`;
   return c.login;
 }
 
