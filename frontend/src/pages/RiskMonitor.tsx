@@ -916,11 +916,9 @@ function BurstOpenTab({ active }: { active: boolean }) {
 
   /** Turn an AG Grid column-sort event into our server-side state.
    *
-   *  AG Grid's `sortingOrder={['desc','asc']}` on the grid below means
-   *  the user cycles desc → asc → desc, never lands on "no sort", so we
-   *  always have a column to send to the backend. If the whitelist
-   *  check fails (shouldn't, because non-sortable columns are disabled
-   *  via `sortable: false`), we fall back to the default scanned_at.
+   *  The grid supports a third click to clear sort (desc → asc → none).
+   *  When no sortable column is active, we fall back to the backend's
+   *  default order: `scanned_at DESC`.
    */
   const handleSortChanged = useCallback((e: SortChangedEvent) => {
     const active = e.api.getColumnState().find((c) => c.sort);
@@ -1325,10 +1323,10 @@ function BurstOpenTab({ active }: { active: boolean }) {
           animateRows={false}
           enableCellTextSelection
           suppressCellFocus
-          // Force the user through desc → asc → desc so a column always
-          // has a sort direction. Lets us skip the "no active sort"
-          // branch on the server and keep /alerts deterministic.
-          sortingOrder={["desc", "asc"]}
+          // Keep AG Grid's 3-state sort cycle: desc → asc → none.
+          // When sort is cleared, frontend falls back to `scanned_at DESC`
+          // so `/alerts` stays deterministic.
+          sortingOrder={["desc", "asc", null]}
           onSortChanged={handleSortChanged}
           onGridReady={(e) => {
             gridApiRef.current = e.api;
@@ -2089,7 +2087,7 @@ function QuickOpenCloseTab({ active }: { active: boolean }) {
           animateRows={false}
           enableCellTextSelection
           suppressCellFocus
-          sortingOrder={["desc", "asc"]}
+          sortingOrder={["desc", "asc", null]}
           onSortChanged={handleSortChanged}
           getRowId={(p) => `evt-${p.data.id}`}
         />
@@ -2408,15 +2406,19 @@ function QuickConfigDrawer({
           <DrawerTitle>快开快平规则配置</DrawerTitle>
         </DrawerHeader>
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
-          <div className="flex items-center justify-between">
-            <label className="text-sm font-medium">启用规则</label>
-            <Button
-              variant={config.enabled ? "default" : "outline"}
-              size="sm"
-              onClick={() => setConfig({ ...config, enabled: !config.enabled })}
-            >
-              {config.enabled ? "已启用" : "已停用"}
-            </Button>
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between">
+              <label className="text-sm font-medium">启用规则</label>
+              <Checkbox
+                checked={config.enabled}
+                onCheckedChange={(v) =>
+                  setConfig({ ...config, enabled: v === true })
+                }
+              />
+            </div>
+            <p className="text-xs text-muted-foreground">
+              关闭后仅停止新告警扫描，不影响历史告警展示。
+            </p>
           </div>
 
           <div className="space-y-3">
@@ -3362,7 +3364,7 @@ function QuickProfitTab({ active }: { active: boolean }) {
           animateRows={false}
           enableCellTextSelection
           suppressCellFocus
-          sortingOrder={["desc", "asc"]}
+          sortingOrder={["desc", "asc", null]}
           onSortChanged={handleSortChanged}
           onGridReady={(e) => {
             gridApiRef.current = e.api;
@@ -3494,14 +3496,19 @@ function QuickProfitConfigDrawer({
           <DrawerTitle>快速获利规则配置</DrawerTitle>
         </DrawerHeader>
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
-          <div className="flex items-center justify-between">
-            <label className="text-sm font-medium">启用快速获利检测</label>
-            <Checkbox
-              checked={config.enabled}
-              onCheckedChange={(v) =>
-                setConfig({ ...config, enabled: v === true })
-              }
-            />
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between">
+              <label className="text-sm font-medium">启用快速获利检测</label>
+              <Checkbox
+                checked={config.enabled}
+                onCheckedChange={(v) =>
+                  setConfig({ ...config, enabled: v === true })
+                }
+              />
+            </div>
+            <p className="text-xs text-muted-foreground">
+              关闭后仅停止新告警扫描，不影响历史告警展示。
+            </p>
           </div>
 
           <div className="space-y-3">
