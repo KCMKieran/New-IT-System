@@ -477,6 +477,109 @@ Implementation detail: `include_rule_breakdown` runs when `rule_id_min` **or** `
 
 - **Burst**: `burstAlertRuleId(rule, index)` = `rule.id ?? index + 1` (matches `scan_burst_open`).
 - **Quick**: `QUICK_RULE_ID_BASE + index` (51, 52, …; detection normalizes SQLite ids to this band).
+- **Quick Profit**: `QUICK_PROFIT_RULE_ID_BASE + index` (61, 62, …).
+
+---
+
+## §12 Aggregate Window Rule + Independent Live-Refresh Endpoint
+
+> Pattern introduced for Quick Profit (Tab 3) — generalises to any rule whose
+> trigger is a SUM over a sliding window AND whose value drifts in real time
+> (live floating P&L, live equity, live margin ratio, …).
+
+### Why a separate pattern
+
+Burst-open / Quick-open-close are **event-style** — once an order cluster
+fires, the alert is final. Aggregate-window rules have two tensions:
+
+1. **SQL lookback ≠ scheduler interval.** Summing the last 30 min when the
+   scheduler wakes every 10 min cannot use `INTERVAL 10 MINUTE` in WHERE.
+2. **The triggered value keeps changing.** Floating P&L moves every tick; if
+   we only persist the scan-time snapshot the user sees stale numbers.
+
+### Backend recipe
+
+1. **One SQL pull per scan**, lookback = `max(rule.lookback_min) * 60 + 30s`.
+2. **Python slices each rule's window** from the same dataset → one SQL
+   serves N rules.
+3. **Floating snapshot SQL is keyed on the candidate logins**, not the full
+   trades table — `WHERE login IN (...)`.
+4. **Cross-scan dedup is keyed on elapsed time, not absolute buckets**:
+   suppress a new alert when the previous alert for the same
+   `(rule_id, server, login, symbol)` fired less than `lookback_min` ago.
+   (Earlier we used `floor(now / (lookback_min*60))` but absolute buckets
+   leak across boundaries — e.g. a 30-min rule firing at 11:55 would
+   re-fire at 12:01 on the new bucket index. The elapsed-time check
+   matches the rule's stated intent and works regardless of scheduler
+   cadence.)
+5. **CEN normalisation runs AFTER aggregation, then re-checks the
+   threshold** so currency-induced false positives are filtered.
+
+### Live-refresh endpoint contract
+
+```
+GET /{rule}/floating-refresh?ids=ID1,ID2,...
+  → 200 { items: [ { id, realized, floating, total, status }, ... ] }
+
+  • Read-only (no alert_events writes, no scheduler trigger)
+  • Cap input at ≤1000 ids (fits SQLite IN() comfortably)
+  • Closed rows short-circuit (return persisted numbers as-is)
+  • Only re-queries (server, login) for non-closed rows
+```
+
+### Frontend recipe (in `RiskMonitor.tsx`)
+
+Refresh is **on-demand** (toolbar button), not auto-polled — the alert row's
+`total_profit_usd` is the threshold-clearing snapshot at scan time, and a
+background poll could silently overwrite it with a lower / negative live
+value while the user is reading the table. Make the user the one who asks
+for fresh numbers.
+
+```tsx
+const handleRefreshFloating = useCallback(async () => {
+  if (refreshingFloating) return;
+  const openIds = rows
+    .filter((r) => r.position_status !== "closed")
+    .map((r) => r.id);
+  if (openIds.length === 0) return;
+  setRefreshingFloating(true);
+  try {
+    const res = await apiFetch(
+      `/api/v1/.../floating-refresh?ids=${openIds.join(",")}`,
+    );
+    if (!res.ok) return;
+    const json = await res.json();
+    const byId = new Map(json.items.map((it) => [it.id, it]));
+    const updates = rows
+      .map((r) => {
+        const u = byId.get(r.id);
+        return u ? { ...r, ...u } : null;
+      })
+      .filter(Boolean);
+    // Local update — no scroll jump, no sort recompute
+    if (updates.length) {
+      gridApiRef.current?.applyTransaction({ update: updates });
+      setRows((prev) =>
+        prev.map((r) => {
+          const u = byId.get(r.id);
+          return u ? { ...r, ...u } : r;
+        }),
+      );
+    }
+  } finally {
+    setRefreshingFloating(false);
+  }
+}, [rows, refreshingFloating]);
+
+// In JSX:
+<Button onClick={handleRefreshFloating} disabled={refreshingFloating || ...}>
+  刷新浮动盈亏
+</Button>
+```
+
+Status mapping → colored Badge keeps the user oriented on which numbers will
+keep changing (`open`/`mixed` = amber/blue) vs final (`closed` = green).
+The button's disabled state covers "all rows are closed → nothing to refresh".
 
 ---
 

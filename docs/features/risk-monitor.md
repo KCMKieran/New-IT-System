@@ -11,6 +11,11 @@
 > - 2026-04-23 归档已完成历史章节到 [risk-monitor-archive.md](./risk-monitor-archive.md)。
 > - 2026-04-28 (commit 9713e3f) 前端轮询从硬编码 30s 改为跟随后端 `scan_interval_min`，并同步刷新本文档 §1 / §3 / §4 / §5 / §6 中残留的旧规则（Scale-In / Frequent Open / Batch-Close / `/scan` API）描述，让主文档与 Burst Open v2 实际实现一致。
 > - 2026-04-29 **批量下单 Tab UI 对齐快开快平**：每条规则一张紧凑 SummaryCard（`by_rule` 聚合）；工具栏增加「全部规则 / Rule n」筛选（仅作用于表格与导出，不影响卡片）。`/burst-open/alerts/stats` 返回 `by_rule`。详见 [risk-monitor-reusable-patterns.md §11](./risk-monitor-reusable-patterns.md)。
+> - 2026-05-07 **快速获利 Tab 上线**（Phase 1）：第三个 Tab，按账户聚合滑动窗口 P&L（已实现 + 可选浮动）超过阈值即告警。`rule_id` 区间 61-70；新增 6 个 API（含 `/quick-profit/floating-refresh` 浮动轻量刷新）；前端 `PositionStatusBadge` 三态彩色 + AG-Grid `applyTransaction` 局部更新；6 个入金/出金列默认隐藏。Phase 2（入金比例规则 A2）延期。详见下方 §7「Quick Profit Detection」。
+> - 2026-05-07（同日 hotfix）快速获利 Tab 三个问题：
+>   1. **CEN 归一化后阈值过滤失效** — `scan_quick_profit` 里 `norm_rules.id` 错用了 SQLite 主键（1,2…），与 detect 输出的 alert.rule_id（61,62…）对不上，导致二次阈值过滤回退到 0，CEN 账户出现一堆几十 USD 甚至负数的低值告警。改为 `QUICK_PROFIT_RULE_ID_BASE + idx`。
+>   2. **浮动 P&L 30s 自动轮询去掉** — 改成工具栏「刷新浮动盈亏」按钮，用户主动点才刷，避免后台异步把告警快照覆盖成低值/负数。同时把跨扫描去重从「绝对时间桶」改成「时间差 ≤ lookback_min」，避免跨桶边界（如 11:55 / 12:01）泄漏重复告警。
+>   3. **Dedup 在多次扫描间静默失效** — `rule_quick_profit_detect` 输出的 alert dict 没有 `scanned_at` 字段（`append_scan_and_events` 单独传入到 SQL），下次扫描读 `_latest_result.alerts` 作为 prev_alerts 时全部 scanned_at=None，新版 dedup `if scanned is None: continue` 直接跳过 → prev_latest 永远是空 → dedup 无效。修复：detect 给每条 alert 写 `scanned_at`。同时在 `_run_scan` 开头若 `_latest_result` 为空（重启场景），用 `get_recent_quick_profit_alerts(max_lookback_min)` 从 SQLite 加载最近告警 seed prev pool，让 dedup 跨进程重启也工作。
 
 **文档与代码谁为准**：Tab 列表与页面结构以 `frontend/src/pages/RiskMonitor.tsx` 为准；`rule_id` 区间以 `backend/app/api/v1/risk_monitor.py`（`BURST_RULE_MAX_ID` / `QUICK_RULE_ID_BASE`）及检测服务为准；风控 Tab 的卡片 + 筛选分工以 [risk-monitor-reusable-patterns.md §11](./risk-monitor-reusable-patterns.md) 为准。
 
@@ -894,3 +899,116 @@ A 最简单，B 可读性更好。建议 v1 用 A，后续按需加 B。
 推荐 A (干净切换)。你的偏好？
 
 > 回复: 使用方案A
+
+## 7. 快速获利检测 (Quick Profit Detection) — Tab 3
+
+> Phase 1 上线于 2026-05-07。Phase 2（A2 入金比例规则）延期到下一阶段；当前
+> 入金/出金 1d/7d/30d 仅作为列展示，不参与触发条件。
+
+### 7.1 业务诉求
+
+识别"短时间内利润突增"的客户：在窗口期内（默认 30 分钟）已实现利润 +
+（可选）当前浮动利润总和超过阈值（默认 \$5000）即触发告警。
+触发后再人工 review 是否对冲、是否影响 B-Book 头寸。
+
+### 7.2 调度 vs Lookback 解耦（核心设计）
+
+`scan_interval_min`（5-60，全局）和 `lookback_min`（10-60，每条规则）相互
+独立：
+
+- 一次扫描的 SQL 拉取窗口 = `max(rule.lookback_min) * 60 + 30s`
+- Python 端再按各规则自身 `lookback_min` 切窗 + 求和
+- 一次 SQL 服务多条规则；最大延迟 ≤ `scan_interval_min`，与 lookback 大小无关
+
+> 这是与 §6 批量下单 / 快开快平的关键差异：聚合式规则不能让 SQL 拉取窗口
+> 等于扫描间隔，否则一个 30 分钟的求和规则会被一个 10 分钟的扫描间隔截断。
+
+### 7.3 三态 position_status
+
+每个 alert 在检测时根据"窗口内是否有平仓"+"账户当前是否有浮动"分类：
+
+| status | 含义 | Badge | 浮动是否会变 |
+|--------|------|-------|------------|
+| `closed` | 全部已平仓 | 绿色 已平仓 | 否（最终值） |
+| `open` | 全部还在持仓 | 琥珀 持仓中 | 是（用户点「刷新浮动盈亏」按钮触发） |
+| `mixed` | 部分平 + 部分浮动 | 蓝色 部分平仓 | 是（用户点「刷新浮动盈亏」按钮触发） |
+
+### 7.4 浮动 P&L 实时刷新（独立轻量端点）
+
+> **痛点**：`alert_events` 是历史快照，扫描时定下来后不会变；但浮动 P&L
+> 每秒都在波动。重跑扫描器既慢又会触发去重。
+
+**方案**：新增 `GET /api/v1/risk-monitor/quick-profit/floating-refresh?ids=`
+
+| 字段 | 设计 |
+|------|------|
+| 入参 | 表格里 `position_status != 'closed'` 行的 alert_events.id 列表 |
+| 流程 | 1) 取 (server, login) 集合 → 2) 跑 floating SQL（仅候选账户） → 3) 重新分类 status → 4) 返回 `[{id, realized, floating, total, status}, ...]` |
+| 不写 DB | 完全只读，不更新 `alert_events`，不触发 scheduler |
+| 性能 | 表格通常 < 100 行，单接口 < 500ms |
+
+**前端**（`QuickProfitTab` in `RiskMonitor.tsx`）：
+
+- 工具栏「刷新浮动盈亏」按钮触发 `handleRefreshFloating()`，仅刷新 open / mixed 行
+- 表格里全部都是 closed 时按钮自动 disabled
+- 收到响应后用 `gridApi.applyTransaction({ update: rows })` 局部更新
+  AG-Grid，避免重排和 selection 丢失
+- 没有自动轮询：浮动是用户主动操作（"我现在想看一下当前是什么数"），
+  避免后台轮询把告警的 `total_profit_usd` 异步覆盖成低于阈值/负数的实时值
+
+### 7.5 数据来源
+
+| 用途 | SQL |
+|------|-----|
+| Realized P&L | `mt4_trades / mt5_deals` `WHERE CLOSE_TIME >= DATE_SUB(NOW(), INTERVAL N SECOND)`（沿用快开快平模板，**去掉持单时长限制**，保留 demo/test 排除） |
+| Floating snapshot | MT4: `mt4_trades` `WHERE CLOSE_TIME = '1970-01-01 00:00:00' AND LOGIN IN (...)`；MT5: `mt5_positions WHERE Login IN (...)` |
+| Deposit / Withdrawal 1d/7d/30d | `fxbackoffice.stats_transactions` JOIN `fxbackoffice.mt4_users` (CEN ÷100 同 `ib_data_service.py`) |
+
+### 7.6 跨扫描去重
+
+按 `(rule_id, server, login, symbol)` 取上一次扫描的 `scanned_at`，若距今
+小于当前规则的 `lookback_min` 分钟则抑制本次告警；否则放行。
+
+- 30 分钟规则在触发后的 30 分钟内不重复，60 分钟规则同理
+- 早期版本用绝对时间桶 `floor(now_ts / (lookback_min*60))`，但跨桶边界
+  会泄漏（11:55 触发的 alert 在 12:01 仍会被复发）；改用「时间差」后稳健
+- `rule_quick_profit_detect` 必须给输出 alert 写 `scanned_at`，否则
+  `_latest_result.alerts` 喂回 dedup 时会被 `if scanned is None: continue`
+  全部跳过，dedup 静默失效（用户表现为「立即扫描」每次都重复入库）
+- 重启后 `_latest_result` 是空，scheduler 在 `_run_scan` 开头从
+  `get_recent_quick_profit_alerts(max_lookback_min)` seed prev_alerts，
+  让 dedup 跨进程重启也保持 `lookback_min` 内不重复
+
+### 7.7 CEN 归一化
+
+Realized + floating 在 enrichment 后按 `currency='CEN'` 整体 ÷100；
+然后**重新对照 `min_profit_usd` 阈值**过滤一次，避免 CEN 账户的"看起来超阈"
+（实际只是分而不是美元）误报。
+
+> **关键 chain**：`scan_quick_profit` 里 `norm_rules.id` 必须等于
+> `QUICK_PROFIT_RULE_ID_BASE + idx`（业务 rule_id），不能用 SQLite 主键。
+> 否则 detect 写出的 alert.rule_id（61, 62…）和 `min_by_rule` 里的键
+> （SQLite PK 1, 2…）对不上，二次过滤回退到 0，所有 CEN 归一化后的
+> 低值告警都漏过来。这条对应回归测试
+> `test_detect_overrides_sqlite_pk_with_business_rule_id`。
+
+### 7.8 实现文件
+
+| 改动 | 文件 |
+|------|------|
+| 新增 | `backend/app/services/rule_quick_profit_service.py` |
+| 新增 | `backend/app/services/deposit_enrichment.py` |
+| 新增 | 6 端点 in `backend/app/api/v1/routes/risk_monitor.py` |
+| 改动 | `backend/app/schemas/risk_monitor.py` (`QuickProfitRule`/`Config` + `AlertEvent` 9 个新字段 + `QuickProfitFloatingRefresh*`) |
+| 改动 | `backend/app/core/risk_monitor_db.py` (新表 `quick_profit_config` + `quick_profit_rules`，`alert_events` 9 列迁移，`get_alerts_by_ids`) |
+| 改动 | `backend/app/core/burst_open_scheduler.py` (`_run_scan` 串入 `scan_quick_profit`) |
+| 改动 | `frontend/src/pages/RiskMonitor.tsx` (`QuickProfitTab` + `PositionStatusBadge` + `QuickProfitConfigDrawer`) |
+| 测试 | `backend/tests/test_rule_quick_profit_service.py`、`test_quick_profit_floating_refresh.py`、`test_quick_profit_api.py` |
+
+### 7.9 关键决策
+
+1. Rule ID 段 61-70（`QUICK_PROFIT_RULE_ID_BASE = 61`）
+2. 触发条件：`total_profit_usd >= min_profit_usd`（含等号）
+3. 浮动刷新：用户手动点击工具栏按钮触发（不再 30s 自动轮询，避免后台异步覆盖告警快照）
+4. 入金/出金列：默认隐藏，用户自行打开
+5. Phase 1 不做"利润 > N% 入金"比较；Phase 2 在已上线的入金统计基础上再实现

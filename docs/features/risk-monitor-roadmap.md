@@ -103,16 +103,22 @@ class QuickProfitStrategy(Strategy):
 
 ### 3.1 Rule A — Quick Profit（快速获利）
 
+> **实现状态（Phase 1，2026-05-07）**：A1 已上线 / Tab 3「快速获利」交付。
+> A2「利润 > N% 入金」推迟到 Phase 2（当前已展示 1d/7d/30d 入金/出金列）。
+> 详见 [risk-monitor.md §7](./risk-monitor.md)。
+
 **风控含义**：短时间赚大钱 = 方向判断极准 / 信息优势 / 新闻套利 = B-Book 直接亏损源。
 
-| 子规则 | 触发条件 | 数据源 |
-|--------|---------|--------|
-| A1 | 30min 内已实现 + 浮动利润 > $5,000 | 平仓成交 + 当前持仓 Profit |
-| A2 | 24min 内利润 > 最近 30 天累计入金的 30% | 平仓成交 + fxbackoffice 入金记录 |
+| 子规则 | 触发条件 | 数据源 | 状态 |
+|--------|---------|--------|------|
+| A1 | `lookback_min` 内已实现 + 可选浮动 ≥ `min_profit_usd` | 平仓成交 + 当前持仓 Profit | ✅ 上线（lookback 10-60 min 可配，阈值 $100 起） |
+| A2 | 同窗口内利润 > 最近 30 天累计入金的 30% | A1 + fxbackoffice 入金记录 | ⏳ 推迟到 Phase 2（入金统计列已上线） |
 
-**实现难点**：
-- "30min 滑动窗口" 必须实时（不只是"扫描时刻前 30min"）→ 需要跨扫描累积
-- 入金数据在 `fxbackoffice` 库，需要复用 [backend/app/services/ib_data_service.py](../../backend/app/services/ib_data_service.py) 的连接
+**Phase 1 关键决策**：
+- "30min 滑动窗口" 与 `scan_interval_min` **解耦**：SQL 拉 `max(rule.lookback_min) + 30s`，Python 切窗求和
+- 浮动 P&L 通过独立轻量端点 `/quick-profit/floating-refresh` 由工具栏「刷新浮动盈亏」按钮按需触发（不重跑 scheduler，不自动轮询）
+- 入金数据复用 [ib_data_service.py](../../backend/app/services/ib_data_service.py) 的 `fxbackoffice` 连接 + CEN 归一化模板
+- Position status 三态（closed / open / mixed）由前端 `PositionStatusBadge` 三色 Badge 区分
 
 **扩展指标**（同事后续可能想要）：
 - Profit / Equity 比率
@@ -196,7 +202,7 @@ SQL 模板参考 [risk-monitor-archive.md](./risk-monitor-archive.md) §9.5 "MT5
 | **P1 已完成** | 历史中心化（事件级存储 + 时间范围视图） | - | 完成 |
 | **P2 平台化** | 规则引擎 `Strategy` 模式，`scan()` 从硬编码 → 遍历注册的 strategies | P1 | 1-2 天 |
 | **P3 易规则** | Scale-In（Rule B）+ ~~Quick Open-Close（Rule C）~~ **（核心已上线，余量见 §3.3 注）** + 平仓数据采集增强 | P2 | 2-3 天 |
-| **P4 资金规则** | Quick Profit（Rule A）+ Leverage Abuse（Rule D）+ 入金数据 + 品种合约表 | P3 | 3-5 天 |
+| **P4 资金规则** | ~~Quick Profit（Rule A1, Phase 1，2026-05-07 ✅）~~ + Quick Profit A2（待 Phase 2）+ Leverage Abuse（Rule D）+ 品种合约表 | P3 | A1 完成；其余 3-5 天 |
 | **P5 马丁** | Martingale（Rule E，跨扫描状态） + 订单 buffer 表 | P4 | 3-5 天 |
 | **P6 订阅** | Email 告警（复用 [email_service.py](../../backend/app/services/email_service.py) + 去重）| P4 | 1-2 天 |
 | **P7 看板** | Dashboard 组件 `SuspiciousClients.tsx`（命中次数 Top 10） | P1 | 1 天 |

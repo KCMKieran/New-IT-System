@@ -334,9 +334,10 @@ New-IT-System/
 **Purpose**: Scan all MT servers for clients exhibiting suspicious batch ordering patterns. B-Book perspective: flags clients whose high-exposure rapid trading poses risk to company P&L.
 
 **Key Features**:
-- Tab-based UI: 批量下单 (default) / 快开快平（以 `RiskMonitor.tsx` 为准）
+- Tab-based UI: 批量下单 (default) / 快开快平 / 快速获利（以 `RiskMonitor.tsx` 为准）
 - Burst Open Detection (批量下单): sliding window algorithm detects N orders (each ≥ M lots) within T seconds on the same symbol
-- Quick Open-Close (快开快平): short hold + min count + min merged P&L within SQL lookback; `rule_id` ≥ 51 in `alert_events`
+- Quick Open-Close (快开快平): short hold + min count + min merged P&L within SQL lookback; `rule_id` 51-60 in `alert_events`
+- Quick Profit (快速获利): aggregate window P&L (realized + optional floating) ≥ threshold; `rule_id` 61-70; per-rule `lookback_min` (10-60) **decoupled from `scan_interval_min`**; live floating P&L refreshed on-demand via dedicated `/quick-profit/floating-refresh` endpoint, triggered by the toolbar "刷新浮动盈亏" button (no scheduler trigger, no auto-poll)
 - Backend-driven scanning via APScheduler (single background task, frontend reads cached result)
 - Multi-rule support: up to 10 configurable rules with independent parameters
 - Config persistence in SQLite (`backend/data/risk_monitor.db`)
@@ -360,17 +361,24 @@ New-IT-System/
 - `GET /api/v1/risk-monitor/quick-open-close/alerts/stats?...` — 快开快平聚合（含 `by_rule`）
 - `GET` / `POST /api/v1/risk-monitor/quick-open-close/config` — 快开快平配置
 - `GET /api/v1/risk-monitor/quick-open-close/alerts/export` — 快开快平 CSV
+- `GET /api/v1/risk-monitor/quick-profit/alerts?since=&until=&...` — 快速获利事件（`rule_id` 61-70）
+- `GET /api/v1/risk-monitor/quick-profit/alerts/stats?...` — 快速获利聚合（含 `by_rule`）
+- `GET` / `POST /api/v1/risk-monitor/quick-profit/config` — 快速获利配置（`lookback_min` 10-60、`min_profit_usd` ≥100、`include_floating`）
+- `GET /api/v1/risk-monitor/quick-profit/alerts/export` — 快速获利 CSV
+- `GET /api/v1/risk-monitor/quick-profit/floating-refresh?ids=...` — 浮动 P&L 轻量按需刷新（用户点工具栏「刷新浮动盈亏」按钮触发，仅查 `position_status != 'closed'` 行；不写库）
 
-**Data sources**: MySQL Slave (`mt4_live`, `mt4_live2`, `mt5_live`) — same DB_HOST config
+**Data sources**: MySQL Slave (`mt4_live`, `mt4_live2`, `mt5_live`, `fxbackoffice`) — same DB_HOST config
 
 **Key Files**:
-- `frontend/src/pages/RiskMonitor.tsx` (BurstOpenTab + QuickOpenCloseTab + drawers; Tab UI patterns: `docs/features/risk-monitor-reusable-patterns.md` §11)
-- `backend/app/api/v1/routes/risk_monitor.py` (burst-open + quick-open-close endpoints)
+- `frontend/src/pages/RiskMonitor.tsx` (BurstOpenTab + QuickOpenCloseTab + QuickProfitTab + drawers + `PositionStatusBadge`; Tab UI patterns: `docs/features/risk-monitor-reusable-patterns.md` §11; aggregate-window + live-refresh pattern: §12)
+- `backend/app/api/v1/routes/risk_monitor.py` (burst-open + quick-open-close + quick-profit endpoints)
 - `backend/app/services/rule_quick_open_close_service.py` (快开快平检测)
+- `backend/app/services/rule_quick_profit_service.py` (快速获利检测 + 浮动刷新辅助函数)
+- `backend/app/services/deposit_enrichment.py` (1d/7d/30d 入金/出金聚合，CEN 归一化)
 - `backend/app/services/risk_monitor_service.py` (SQL + sliding window rule engine + CEN currency enrichment)
 - `backend/app/schemas/risk_monitor.py` (Pydantic models)
 - `backend/app/core/burst_open_scheduler.py` (APScheduler + in-memory cache)
-- `backend/app/core/risk_monitor_db.py` (SQLite config/history CRUD, `alert_events` event-level table)
+- `backend/app/core/risk_monitor_db.py` (SQLite config/history CRUD, `alert_events` event-level table; quick_profit_config + quick_profit_rules + 9 个 QP 列)
 - `backend/scripts/backfill_alert_events_currency.py` (one-off migration for legacy currency=NULL rows)
 - `backend/scripts/backfill_alert_events_open_time.py` (one-off migration: broker UTC+3 naive timestamps → UTC ISO8601 in `first_open`/`last_open`/`orders_json`)
 
