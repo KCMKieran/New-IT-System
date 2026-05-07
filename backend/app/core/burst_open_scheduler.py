@@ -38,19 +38,41 @@ def _run_scan() -> None:
     from ..core.config import get_settings
     from ..core.risk_monitor_db import (
         append_scan_and_events,
+        get_recent_quick_profit_alerts,
         load_config,
         load_quick_open_close_config,
+        load_quick_profit_config,
     )
     from ..services.rule_quick_open_close_service import scan_quick_open_close
+    from ..services.rule_quick_profit_service import scan_quick_profit
     from ..services.risk_monitor_service import scan_burst_open
 
     try:
         config = load_config()
         quick_config = load_quick_open_close_config()
+        qp_config = load_quick_profit_config()
         settings = get_settings()
 
-        # Pass previous alerts for dedup across the overlap window
+        # Pass previous alerts for dedup across the overlap window. After a
+        # process restart `_latest_result` is None, which would let
+        # quick-profit re-emit an alert that fired just before the restart.
+        # Seed from SQLite so dedup survives restarts and (if we ever go
+        # multi-worker) cross-process — the lookup is keyed on the largest
+        # configured Quick Profit lookback so any still-in-window prior is
+        # visible.
         prev_alerts = _latest_result.get("alerts", []) if _latest_result else []
+        if not any(int(a.get("rule_id", 0)) >= 61 for a in prev_alerts):
+            qp_rules = qp_config.get("rules") or []
+            if qp_rules:
+                seed_minutes = max(int(r["lookback_min"]) for r in qp_rules)
+                try:
+                    prev_alerts = list(prev_alerts) + get_recent_quick_profit_alerts(
+                        seed_minutes
+                    )
+                except Exception:
+                    logger.warning(
+                        "Quick profit dedup seed failed", exc_info=True
+                    )
 
         burst_result = scan_burst_open(
             settings,
@@ -70,22 +92,45 @@ def _run_scan() -> None:
             except Exception:
                 logger.error("Quick open-close scan failed", exc_info=True)
 
+        # Quick Profit decouples its lookback from scan_interval — it picks
+        # max(rule.lookback_min) inside the service, so the scheduler just
+        # forwards the rules and the previous-alert dedup pool.
+        qp_result: dict[str, Any] | None = None
+        if qp_config.get("enabled", True) and qp_config.get("rules"):
+            try:
+                qp_result = scan_quick_profit(
+                    settings,
+                    rules=qp_config["rules"],
+                    previous_alerts=prev_alerts,
+                )
+            except Exception:
+                logger.error("Quick profit scan failed", exc_info=True)
+
         merged_alerts = list(burst_result["alerts"])
         if quick_result:
             merged_alerts.extend(quick_result["alerts"])
+        if qp_result:
+            merged_alerts.extend(qp_result["alerts"])
 
         burst_pairs = burst_result.pop("_universe_pairs", set())
         quick_pairs = quick_result.pop("_universe_pairs", set()) if quick_result else set()
+        qp_pairs = qp_result.pop("_universe_pairs", set()) if qp_result else set()
 
         _latest_result = {
             "alerts": merged_alerts,
             "summary": {
                 "suspicious_count": len(merged_alerts),
-                "total_accounts_scanned": len(set(burst_pairs) | set(quick_pairs)),
+                "total_accounts_scanned": len(
+                    set(burst_pairs) | set(quick_pairs) | set(qp_pairs)
+                ),
             },
             "burst_summary": burst_result["summary"],
             "config": burst_result["config"],
-            "scan_time_ms": burst_result["scan_time_ms"] + (quick_result["scan_time_ms"] if quick_result else 0),
+            "scan_time_ms": (
+                burst_result["scan_time_ms"]
+                + (quick_result["scan_time_ms"] if quick_result else 0)
+                + (qp_result["scan_time_ms"] if qp_result else 0)
+            ),
             "scanned_at": burst_result["scanned_at"],
         }
 
@@ -101,6 +146,7 @@ def _run_scan() -> None:
             rules_config={
                 "burst_open": config["rules"],
                 "quick_open_close": quick_config.get("rules", []),
+                "quick_profit": qp_config.get("rules", []),
             },
             alerts=_latest_result["alerts"],
         )

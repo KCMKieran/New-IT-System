@@ -32,6 +32,10 @@ SORTABLE_ALERT_COLS: frozenset[str] = frozenset({
     "order_count", "total_lots", "equity", "balance",
     "equity_per_lot", "total_open_lots", "leverage",
     "currency", "zipcode", "first_open", "last_open", "hold_duration_sec", "total_profit_usd",
+    # Quick Profit columns
+    "realized_profit", "floating_profit_snapshot", "position_status",
+    "deposit_1d", "deposit_7d", "deposit_30d",
+    "withdrawal_1d", "withdrawal_7d", "withdrawal_30d",
     # Frontend alias for the `account_group` DB column. We map it in
     # `_resolve_alert_order` so the API stays consistent with the
     # field name the React component already uses.
@@ -82,6 +86,25 @@ CREATE TABLE IF NOT EXISTS quick_open_close_rules (
     sort_order          INTEGER NOT NULL DEFAULT 0
 );
 
+-- Quick Profit (快速获利): aggregate window-profit threshold rules.
+-- enabled flag is single-row like quick_open_close_config so the scheduler
+-- can short-circuit the scan when nothing is configured.
+CREATE TABLE IF NOT EXISTS quick_profit_config (
+    id          INTEGER PRIMARY KEY CHECK (id = 1),
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    updated_at  DATETIME
+);
+INSERT OR IGNORE INTO quick_profit_config (id) VALUES (1);
+
+CREATE TABLE IF NOT EXISTS quick_profit_rules (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    lookback_min     INTEGER NOT NULL DEFAULT 30,
+    min_profit_usd   REAL    NOT NULL DEFAULT 5000.0,
+    -- Stored as 0/1; SQLite has no native bool. Loader coerces to Python bool.
+    include_floating INTEGER NOT NULL DEFAULT 1,
+    sort_order       INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS scan_history (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     scanned_at          TEXT    NOT NULL,
@@ -118,7 +141,17 @@ CREATE TABLE IF NOT EXISTS alert_events (
     account_group     TEXT,
     orders_json       TEXT,
     currency          TEXT,                -- "USD" or "CEN" (for display; equity/balance already USD)
-    zipcode           TEXT                 -- client zipcode from fxbackoffice.mt4_users
+    zipcode           TEXT,                -- client zipcode from fxbackoffice.mt4_users
+    -- Quick Profit-specific columns. NULL for burst-open / quick-open-close rows.
+    realized_profit          REAL,
+    floating_profit_snapshot REAL,
+    position_status          TEXT,         -- "closed" | "open" | "mixed"
+    deposit_1d               REAL,
+    deposit_7d               REAL,
+    deposit_30d              REAL,
+    withdrawal_1d            REAL,
+    withdrawal_7d            REAL,
+    withdrawal_30d           REAL
 );
 
 CREATE INDEX IF NOT EXISTS idx_alert_events_scanned_at
@@ -141,6 +174,15 @@ INSERT INTO quick_open_close_rules
 VALUES (60, 3, 0.0, 0);
 """
 
+# Seeded so the UI shows a sensible default the first time a user opens the
+# Quick Profit drawer. Mirrors §3.1 of risk-monitor-roadmap (lookback 30min,
+# threshold $5000, include floating P&L).
+_SEED_QUICK_PROFIT_RULE_SQL = """
+INSERT INTO quick_profit_rules
+    (lookback_min, min_profit_usd, include_floating, sort_order)
+VALUES (30, 5000.0, 1, 0);
+"""
+
 
 def init_risk_monitor_db() -> None:
     """Create tables if they don't exist. Seed default rule on first run.
@@ -158,7 +200,10 @@ def init_risk_monitor_db() -> None:
         quick_count = conn.execute("SELECT COUNT(*) FROM quick_open_close_rules").fetchone()[0]
         if quick_count == 0:
             conn.execute(_SEED_QUICK_RULE_SQL)
-        if count == 0 or quick_count == 0:
+        qp_count = conn.execute("SELECT COUNT(*) FROM quick_profit_rules").fetchone()[0]
+        if qp_count == 0:
+            conn.execute(_SEED_QUICK_PROFIT_RULE_SQL)
+        if count == 0 or quick_count == 0 or qp_count == 0:
             conn.commit()
 
         # Lightweight column migrations for installations created before
@@ -168,6 +213,7 @@ def init_risk_monitor_db() -> None:
         _migrate_quick_rules_columns(conn)
         _migrate_drop_profit_window_from_quick_rules(conn)
         _migrate_quick_open_close_enabled_not_null(conn)
+        _migrate_quick_profit_columns(conn)
 
         # One-time backfill: if alert_events is empty but scan_history has
         # rows, flatten their JSON alerts into the event table so existing
@@ -214,7 +260,38 @@ def _migrate_alert_events_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE alert_events ADD COLUMN hold_duration_sec INTEGER")
     if "total_profit_usd" not in cols:
         conn.execute("ALTER TABLE alert_events ADD COLUMN total_profit_usd REAL")
+    # Quick Profit columns. Each ADD is independent so partial upgrades stay
+    # consistent (ALTER COLUMN is not supported in SQLite, only ADD).
+    qp_cols = [
+        ("realized_profit", "REAL"),
+        ("floating_profit_snapshot", "REAL"),
+        ("position_status", "TEXT"),
+        ("deposit_1d", "REAL"),
+        ("deposit_7d", "REAL"),
+        ("deposit_30d", "REAL"),
+        ("withdrawal_1d", "REAL"),
+        ("withdrawal_7d", "REAL"),
+        ("withdrawal_30d", "REAL"),
+    ]
+    for name, sqltype in qp_cols:
+        if name not in cols:
+            conn.execute(f"ALTER TABLE alert_events ADD COLUMN {name} {sqltype}")
     conn.commit()
+
+
+def _migrate_quick_profit_columns(conn: sqlite3.Connection) -> None:
+    """Ensure quick_profit_rules has the include_floating column.
+
+    The initial CREATE includes it, but a defensive PRAGMA check makes the
+    migration safe to re-run (and keeps the pattern symmetric with the
+    other rule tables).
+    """
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(quick_profit_rules)")}
+    if "include_floating" not in cols:
+        conn.execute(
+            "ALTER TABLE quick_profit_rules ADD COLUMN include_floating INTEGER NOT NULL DEFAULT 1"
+        )
+        conn.commit()
 
 
 def _migrate_quick_rules_columns(conn: sqlite3.Connection) -> None:
@@ -448,6 +525,62 @@ def save_quick_open_close_config(enabled: bool, rules: list[dict]) -> None:
             )
 
 
+def load_quick_profit_config() -> dict[str, Any]:
+    """Read Quick Profit enabled flag + rules.
+
+    NULL ``enabled`` (legacy rows) is treated as True so the UI doesn't show
+    the feature as disabled when nothing was explicitly stored.
+    """
+    with get_risk_monitor_db() as conn:
+        cfg_row = conn.execute(
+            "SELECT enabled FROM quick_profit_config WHERE id = 1"
+        ).fetchone()
+        if not cfg_row:
+            enabled = True
+        else:
+            raw = cfg_row["enabled"]
+            enabled = True if raw is None else bool(raw)
+
+        rule_rows = conn.execute(
+            "SELECT id, lookback_min, min_profit_usd, include_floating "
+            "FROM quick_profit_rules ORDER BY sort_order, id"
+        ).fetchall()
+        rules: list[dict[str, Any]] = []
+        for r in rule_rows:
+            d = dict(r)
+            # Coerce SQLite INTEGER → Python bool so the API serializer emits true/false.
+            d["include_floating"] = bool(d.get("include_floating", 1))
+            rules.append(d)
+
+    return {"enabled": enabled, "rules": rules}
+
+
+def save_quick_profit_config(enabled: bool, rules: list[dict]) -> None:
+    """Overwrite Quick Profit enabled flag + rules atomically."""
+    with get_risk_monitor_db() as conn:
+        conn.execute(
+            "UPDATE quick_profit_config SET enabled = ?, "
+            "updated_at = datetime('now') WHERE id = 1",
+            (1 if enabled else 0,),
+        )
+        conn.execute("DELETE FROM quick_profit_rules")
+        conn.execute(
+            "DELETE FROM sqlite_sequence WHERE name = 'quick_profit_rules'"
+        )
+        for i, r in enumerate(rules):
+            conn.execute(
+                "INSERT INTO quick_profit_rules "
+                "(lookback_min, min_profit_usd, include_floating, sort_order) "
+                "VALUES (?, ?, ?, ?)",
+                (
+                    int(r["lookback_min"]),
+                    float(r["min_profit_usd"]),
+                    1 if r.get("include_floating", True) else 0,
+                    i,
+                ),
+            )
+
+
 # ── Scan history + alert events (write path) ──────────────
 
 def append_scan_and_events(
@@ -492,8 +625,12 @@ def append_scan_and_events(
                      hold_duration_sec, total_profit_usd,
                      first_open, last_open,
                      equity, balance, equity_per_lot, total_open_lots,
-                     leverage, account_group, orders_json, currency, zipcode)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     leverage, account_group, orders_json, currency, zipcode,
+                     realized_profit, floating_profit_snapshot, position_status,
+                     deposit_1d, deposit_7d, deposit_30d,
+                     withdrawal_1d, withdrawal_7d, withdrawal_30d)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     batch_id,
@@ -518,6 +655,15 @@ def append_scan_and_events(
                     json.dumps(alert.get("orders", [])),
                     alert.get("currency"),
                     alert.get("zipcode"),
+                    alert.get("realized_profit"),
+                    alert.get("floating_profit_snapshot"),
+                    alert.get("position_status"),
+                    alert.get("deposit_1d"),
+                    alert.get("deposit_7d"),
+                    alert.get("deposit_30d"),
+                    alert.get("withdrawal_1d"),
+                    alert.get("withdrawal_7d"),
+                    alert.get("withdrawal_30d"),
                 ),
             )
 
@@ -624,7 +770,10 @@ _ALERT_SELECT_COLS = """
     server, login, symbol, order_count, total_lots, hold_duration_sec, total_profit_usd,
     first_open, last_open,
     equity, balance, equity_per_lot, total_open_lots,
-    leverage, account_group, orders_json, currency, zipcode
+    leverage, account_group, orders_json, currency, zipcode,
+    realized_profit, floating_profit_snapshot, position_status,
+    deposit_1d, deposit_7d, deposit_30d,
+    withdrawal_1d, withdrawal_7d, withdrawal_30d
 """
 
 
@@ -819,3 +968,50 @@ def alert_events_stats(
     if by_rule is not None:
         out["by_rule"] = by_rule
     return out
+
+
+def get_recent_quick_profit_alerts(minutes: int) -> list[dict[str, Any]]:
+    """Latest quick-profit alerts (rule_id 61-70) within the last N minutes.
+
+    Used by the scheduler to seed dedup memory after a process restart. Without
+    this seed, the first scan after restart cannot dedup against alerts that
+    fired before the restart and would re-emit them. ``minutes`` should be
+    >= the largest rule's lookback so any in-window prior alert is visible.
+    """
+    if minutes <= 0:
+        return []
+    with get_risk_monitor_db() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT {_ALERT_SELECT_COLS}
+            FROM alert_events
+            WHERE rule_id BETWEEN 61 AND 70
+              AND scanned_at >= datetime('now', ?)
+            """,
+            (f"-{int(minutes)} minutes",),
+        ).fetchall()
+    return [_row_to_alert_dict(r) for r in rows]
+
+
+def get_alerts_by_ids(ids: list[int]) -> list[dict[str, Any]]:
+    """Look up specific alert_events rows by primary key.
+
+    Used by the Quick Profit floating-refresh endpoint to map a small set of
+    visible row ids back to the (server, login) pairs we need to re-query.
+    Empty input returns an empty list without hitting the DB.
+    """
+    if not ids:
+        return []
+    # SQLite's variable limit is 999 by default; the floating refresh poller
+    # never sends more than the page size (≤500), so a single IN() clause is fine.
+    placeholders = ",".join(["?"] * len(ids))
+    with get_risk_monitor_db() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT {_ALERT_SELECT_COLS}
+            FROM alert_events
+            WHERE id IN ({placeholders})
+            """,
+            list(ids),
+        ).fetchall()
+    return [_row_to_alert_dict(r) for r in rows]

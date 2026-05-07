@@ -39,6 +39,26 @@ class QuickOpenCloseConfig(BaseModel):
     rules: List[QuickOpenCloseRule] = []
 
 
+# Quick Profit detection: aggregate profit (realized + optional floating)
+# inside a sliding window per (account, symbol). Triggered when total >= threshold.
+class QuickProfitRule(BaseModel):
+    id: Optional[int] = None
+    # Sliding window in minutes. SQL lookback uses max(rule.lookback_min) so
+    # one query serves all rules; Python slices each rule's own window.
+    lookback_min: int = Field(default=30, ge=10, le=60)
+    # USD threshold; comparison happens after CEN ÷100 normalization.
+    min_profit_usd: float = Field(default=5000.0, ge=100.0, le=10_000_000.0)
+    # When True, aggregate also adds the account's current floating P&L snapshot
+    # captured at scan time. Detection logic short-circuits floating SQL when no
+    # rule has this enabled.
+    include_floating: bool = Field(default=True)
+
+
+class QuickProfitConfig(BaseModel):
+    enabled: bool = True
+    rules: List[QuickProfitRule] = []
+
+
 # ── Alert & Scan Result ───────────────────────────────────
 
 class BurstOrderDetail(BaseModel):
@@ -123,6 +143,23 @@ class AlertEvent(BaseModel):
     group: Optional[str] = None
     currency: Optional[str] = None
     zipcode: Optional[str] = None
+    # Quick Profit specific fields. Realized + floating sum to total_profit_usd
+    # at scan time; the floating snapshot can drift later (refreshed via
+    # /quick-profit/floating-refresh on the frontend).
+    realized_profit: Optional[float] = None
+    floating_profit_snapshot: Optional[float] = None
+    # "closed" | "open" | "mixed"; drives the status badge color and whether
+    # the floating-refresh poller asks the backend to re-query this row.
+    position_status: Optional[str] = None
+    # Per-account deposit / withdrawal aggregates (USD, CEN-normalized) over
+    # 1d/7d/30d windows. Display-only on the quick-profit tab; not used by
+    # the trigger logic in v1.
+    deposit_1d: Optional[float] = None
+    deposit_7d: Optional[float] = None
+    deposit_30d: Optional[float] = None
+    withdrawal_1d: Optional[float] = None
+    withdrawal_7d: Optional[float] = None
+    withdrawal_30d: Optional[float] = None
 
 
 class AlertsResponse(BaseModel):
@@ -152,3 +189,21 @@ class AlertsStats(BaseModel):
     servers: List[str] = []     # servers touched in range
     # When present (quick-open-close /stats), one entry per rule_id with hits in range.
     by_rule: Optional[List[QuickRuleBreakdownItem]] = None
+
+
+class QuickProfitFloatingRefreshItem(BaseModel):
+    """Single row in the floating-refresh response.
+
+    Returned by GET /quick-profit/floating-refresh — re-queries live MT4/MT5
+    for currently open positions of the alert's account and recomputes the
+    window total without touching alert_events.
+    """
+    id: int
+    realized_profit: Optional[float] = None
+    floating_profit_snapshot: Optional[float] = None
+    total_profit_usd: Optional[float] = None
+    position_status: Optional[str] = None
+
+
+class QuickProfitFloatingRefreshResponse(BaseModel):
+    items: List[QuickProfitFloatingRefreshItem]
