@@ -473,6 +473,7 @@ Implementation detail: `include_rule_breakdown` runs when `rule_id_min` **or** `
 | **Grid** | Multiple rules: `grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4`; single rule: `max-w-md mx-auto`. |
 | **Toolbar** | Rule `<Select>` first, then time preset, custom range, server, zipcode, login — controls `w-full sm:w-40` / `sm:w-44` for responsive parity with 快开快平. |
 | **Header actions (导出 / 配置 / 扫描 / 刷新浮动)** | Use a column layout below `sm` and `flex-wrap` on the button row (`RISK_MONITOR_HEADER_ROW` + `RISK_MONITOR_HEADER_ACTIONS` in `RiskMonitor.tsx`). shadcn `Button` defaults include `shrink-0` and `whitespace-nowrap`; a single-row flex parent overflows on narrow phones unless actions wrap or stack. |
+| **Pagination (mobile compact mode)** | On small screens: hide row-range summary text (e.g. `第 1-50 条 / 共 N 条`), hide "首页" button, keep `上一页 / 第 X/Y 页 / 下一页 / 最后`; fix mobile `page_size=20` to reduce footer width/height pressure. Desktop keeps full pagination controls. |
 
 ### Rule ID mapping
 

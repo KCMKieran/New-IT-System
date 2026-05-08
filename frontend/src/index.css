@@ -132,3 +132,27 @@
 .ag-paging-panel {
   border-top: none !important;
 }
+
+/* Mobile pagination compaction for client return-rate grids:
+   reduce footer density and hide less-critical row-range text. */
+@media (max-width: 767px) {
+  .client-return-rate-grid .ag-paging-panel,
+  .return-rate-summary-grid .ag-paging-panel {
+    min-height: 30px;
+    gap: 4px;
+    padding: 2px 6px;
+    font-size: 11px;
+    flex-wrap: wrap;
+  }
+
+  .client-return-rate-grid .ag-paging-row-summary-panel,
+  .return-rate-summary-grid .ag-paging-row-summary-panel {
+    display: none;
+  }
+
+  .client-return-rate-grid .ag-paging-button,
+  .return-rate-summary-grid .ag-paging-button {
+    min-height: 20px;
+    min-width: 20px;
+  }
+}

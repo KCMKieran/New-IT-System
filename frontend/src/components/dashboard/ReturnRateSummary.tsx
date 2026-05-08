@@ -11,6 +11,7 @@ import { ColDef, GridReadyEvent } from "ag-grid-community";
 import { cn } from "@/lib/utils";
 import { InfoHeader } from "@/components/ui/info-header";
 import { format } from "date-fns";
+import { useIsMobile } from "@/hooks/use-mobile";
 
 interface ClientReturnRateRow {
   client_id: number;
@@ -50,6 +51,7 @@ type HoursOption = "6" | "24";
 export default function ReturnRateSummary() {
   const { theme } = useTheme();
   const isDarkMode = theme === "dark";
+  const isMobile = useIsMobile();
   const gridRef = useRef<AgGridReact>(null);
 
   const [rows, setRows] = useState<ClientReturnRateRow[]>([]);
@@ -275,7 +277,7 @@ export default function ReturnRateSummary() {
         {/* AG Grid Table — same styling as /client-return-rate page */}
         <div
           className={cn(
-            "h-[420px] w-full rounded-md overflow-hidden border shadow-sm",
+            "return-rate-summary-grid h-[420px] w-full rounded-md overflow-hidden border shadow-sm",
             isDarkMode ? "ag-theme-quartz-dark" : "ag-theme-quartz",
           )}
           style={{
@@ -306,8 +308,8 @@ export default function ReturnRateSummary() {
             onGridReady={onGridReady}
             animateRows
             pagination
-            paginationPageSize={100}
-            paginationPageSizeSelector={[50, 100, 200]}
+            paginationPageSize={isMobile ? 50 : 100}
+            paginationPageSizeSelector={isMobile ? false : [50, 100, 200]}
             suppressCellFocus
             enableCellTextSelection
             getRowId={(p) => String(p.data.client_id)}

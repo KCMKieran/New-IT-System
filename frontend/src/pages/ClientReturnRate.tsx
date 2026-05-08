@@ -52,6 +52,7 @@ import {
 import { DateRange } from "react-day-picker";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { InfoHeader } from "@/components/ui/info-header";
+import { useIsMobile } from "@/hooks/use-mobile";
 
 interface ClientReturnRateRow {
   client_id: number;
@@ -147,6 +148,7 @@ function saveCachedState(state: CachedState) {
 export default function ClientReturnRate() {
   const { theme } = useTheme();
   const isDarkMode = theme === "dark";
+  const isMobile = useIsMobile();
   const gridRef = useRef<AgGridReact>(null);
 
   // Try to restore from sessionStorage on first render
@@ -937,7 +939,7 @@ export default function ClientReturnRate() {
       <div className="flex-1 relative">
         <div
           className={cn(
-            "h-[calc(100vh-280px)] min-h-[400px] w-full",
+            "client-return-rate-grid h-[calc(100vh-280px)] min-h-[400px] w-full",
             isDarkMode ? "ag-theme-quartz-dark" : "ag-theme-quartz",
           )}
           style={{
@@ -972,8 +974,8 @@ export default function ClientReturnRate() {
             onGridReady={onGridReady}
             animateRows
             pagination
-            paginationPageSize={50}
-            paginationPageSizeSelector={[20, 50, 100, 200]}
+            paginationPageSize={isMobile ? 20 : 50}
+            paginationPageSizeSelector={isMobile ? false : [20, 50, 100, 200]}
             suppressCellFocus
             enableCellTextSelection
             getRowId={(p) => String(p.data.client_id)}

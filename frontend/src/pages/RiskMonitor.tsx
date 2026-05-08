@@ -572,6 +572,7 @@ export default function RiskMonitor() {
 function BurstOpenTab({ active }: { active: boolean }) {
   const { theme } = useTheme();
   const isDarkMode = theme === "dark";
+  const isMobile = useIsMobile();
   const gridRef = useRef<AgGridReact<AlertEvent>>(null);
   const gridApiRef = useRef<GridApi<AlertEvent> | null>(null);
   const gridStyle = useGridThemeStyle(isDarkMode);
@@ -651,6 +652,15 @@ function BurstOpenTab({ active }: { active: boolean }) {
   }, [config?.rules, ruleFilter]);
 
   const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
+
+  // Mobile pagination uses a fixed compact page size to keep footer controls readable.
+  useEffect(() => {
+    if (!isMobile) return;
+    if (pageSize !== 20) {
+      setPageSize(20);
+      setPageIndex(0);
+    }
+  }, [isMobile, pageSize]);
 
   // Resolve the effective (since, until) for the current selection.
   // Memoized so we don't build a new range object on every render.
@@ -1371,42 +1381,48 @@ function BurstOpenTab({ active }: { active: boolean }) {
         <CardContent className="py-4">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:space-x-4">
-              <div className="text-sm text-muted-foreground">
-                {totalCount === 0
-                  ? "暂无数据"
-                  : `第 ${pageIndex * pageSize + 1}-${Math.min((pageIndex + 1) * pageSize, totalCount)} 条 / 共 ${totalCount} 条`}
-              </div>
+              {!isMobile && (
+                <div className="text-sm text-muted-foreground">
+                  {totalCount === 0
+                    ? "暂无数据"
+                    : `第 ${pageIndex * pageSize + 1}-${Math.min((pageIndex + 1) * pageSize, totalCount)} 条 / 共 ${totalCount} 条`}
+                </div>
+              )}
 
-              <div className="flex items-center space-x-2">
-                <span className="text-sm text-muted-foreground">每页</span>
-                <Select
-                  value={pageSize.toString()}
-                  onValueChange={(value) => setPageSize(Number(value))}
-                >
-                  <SelectTrigger className="h-8 w-20">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {PAGE_SIZE_OPTIONS.map((size) => (
-                      <SelectItem key={size} value={size.toString()}>
-                        {size}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <span className="text-sm text-muted-foreground">条</span>
-              </div>
+              {!isMobile && (
+                <div className="flex items-center space-x-2">
+                  <span className="text-sm text-muted-foreground">每页</span>
+                  <Select
+                    value={pageSize.toString()}
+                    onValueChange={(value) => setPageSize(Number(value))}
+                  >
+                    <SelectTrigger className="h-8 w-20">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {PAGE_SIZE_OPTIONS.map((size) => (
+                        <SelectItem key={size} value={size.toString()}>
+                          {size}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <span className="text-sm text-muted-foreground">条</span>
+                </div>
+              )}
             </div>
 
             <div className="flex items-center flex-wrap gap-2 w-full sm:w-auto justify-center sm:justify-end">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setPageIndex(0)}
-                disabled={pageIndex === 0 || loading}
-              >
-                首页
-              </Button>
+              {!isMobile && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setPageIndex(0)}
+                  disabled={pageIndex === 0 || loading}
+                >
+                  首页
+                </Button>
+              )}
               <Button
                 variant="outline"
                 size="sm"
@@ -1438,7 +1454,7 @@ function BurstOpenTab({ active }: { active: boolean }) {
                 onClick={() => setPageIndex(totalPages - 1)}
                 disabled={pageIndex >= totalPages - 1 || loading}
               >
-                末页
+                {isMobile ? "最后" : "末页"}
               </Button>
             </div>
           </div>
@@ -1463,6 +1479,7 @@ function BurstOpenTab({ active }: { active: boolean }) {
 function QuickOpenCloseTab({ active }: { active: boolean }) {
   const { theme } = useTheme();
   const isDarkMode = theme === "dark";
+  const isMobile = useIsMobile();
   const gridStyle = useGridThemeStyle(isDarkMode);
 
   const [rangePreset, setRangePreset] = useState<RangePresetKey>("4h");
@@ -1492,7 +1509,7 @@ function QuickOpenCloseTab({ active }: { active: boolean }) {
   const [ruleFilter, setRuleFilter] = useState<string>("all");
 
   const [pageIndex, setPageIndex] = useState(0);
-  const [pageSize] = useState(50);
+  const pageSize = isMobile ? 20 : 50;
   const [sortBy, setSortBy] = useState<string>("scanned_at");
   const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
   const [serverFilter, setServerFilter] = useState("all");
@@ -2152,17 +2169,21 @@ function QuickOpenCloseTab({ active }: { active: boolean }) {
             <div className="text-sm text-muted-foreground">
               {totalCount === 0
                 ? "暂无数据"
-                : `第 ${pageIndex * pageSize + 1}-${Math.min((pageIndex + 1) * pageSize, totalCount)} 条 / 共 ${totalCount} 条`}
+                : isMobile
+                  ? `共 ${totalCount} 条`
+                  : `第 ${pageIndex * pageSize + 1}-${Math.min((pageIndex + 1) * pageSize, totalCount)} 条 / 共 ${totalCount} 条`}
             </div>
             <div className="flex items-center flex-wrap gap-2">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setPageIndex(0)}
-                disabled={pageIndex === 0 || loading}
-              >
-                首页
-              </Button>
+              {!isMobile && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setPageIndex(0)}
+                  disabled={pageIndex === 0 || loading}
+                >
+                  首页
+                </Button>
+              )}
               <Button
                 variant="outline"
                 size="sm"
@@ -2190,7 +2211,7 @@ function QuickOpenCloseTab({ active }: { active: boolean }) {
                 onClick={() => setPageIndex(totalPages - 1)}
                 disabled={pageIndex >= totalPages - 1 || loading}
               >
-                末页
+                {isMobile ? "最后" : "末页"}
               </Button>
             </div>
           </div>
@@ -2619,6 +2640,7 @@ function PositionStatusCell(p: { value?: string | null }) {
 function QuickProfitTab({ active }: { active: boolean }) {
   const { theme } = useTheme();
   const isDarkMode = theme === "dark";
+  const isMobile = useIsMobile();
   const gridStyle = useGridThemeStyle(isDarkMode);
   const gridApiRef = useRef<GridApi<AlertEvent> | null>(null);
 
@@ -2648,7 +2670,7 @@ function QuickProfitTab({ active }: { active: boolean }) {
   const [ruleFilter, setRuleFilter] = useState<string>("all");
 
   const [pageIndex, setPageIndex] = useState(0);
-  const [pageSize] = useState(50);
+  const pageSize = isMobile ? 20 : 50;
   const [sortBy, setSortBy] = useState<string>("scanned_at");
   const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
   const [serverFilter, setServerFilter] = useState("all");
@@ -3398,17 +3420,21 @@ function QuickProfitTab({ active }: { active: boolean }) {
             <div className="text-sm text-muted-foreground">
               {totalCount === 0
                 ? "暂无数据"
-                : `第 ${pageIndex * pageSize + 1}-${Math.min((pageIndex + 1) * pageSize, totalCount)} 条 / 共 ${totalCount} 条`}
+                : isMobile
+                  ? `共 ${totalCount} 条`
+                  : `第 ${pageIndex * pageSize + 1}-${Math.min((pageIndex + 1) * pageSize, totalCount)} 条 / 共 ${totalCount} 条`}
             </div>
             <div className="flex items-center flex-wrap gap-2">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setPageIndex(0)}
-                disabled={pageIndex === 0 || loading}
-              >
-                首页
-              </Button>
+              {!isMobile && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setPageIndex(0)}
+                  disabled={pageIndex === 0 || loading}
+                >
+                  首页
+                </Button>
+              )}
               <Button
                 variant="outline"
                 size="sm"
@@ -3436,7 +3462,7 @@ function QuickProfitTab({ active }: { active: boolean }) {
                 onClick={() => setPageIndex(totalPages - 1)}
                 disabled={pageIndex >= totalPages - 1 || loading}
               >
-                末页
+                {isMobile ? "最后" : "末页"}
               </Button>
             </div>
           </div>
