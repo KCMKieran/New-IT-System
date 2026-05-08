@@ -7,6 +7,7 @@
 > **历史归档**: [risk-monitor-archive.md](./risk-monitor-archive.md) — 已完成的开发计划、探索性 SQL、已移除规则设计、已实施调研记录
 >
 > **变更记录**:
+> - 2026-05-08 **三 Tab 页眉操作区移动端适配**：`RiskMonitor.tsx` 使用 `RISK_MONITOR_HEADER_ROW` / `RISK_MONITOR_HEADER_ACTIONS`（窄屏纵向堆叠 + 操作按钮 `flex-wrap`），避免「导出 CSV / 规则配置 / 立即扫描 / 刷新浮动盈亏」在单行 `flex` 下与 `Button` 的 `shrink-0` 组合导致横向溢出；根容器与 Tabs 增加 `min-w-0`。详见 [risk-monitor-reusable-patterns.md §11](./risk-monitor-reusable-patterns.md)。
 > - 2026-03-26 移除 Scale-In 规则代码，Tab 2 曾改为「缺口交易」占位；**后已移除该 Tab**（当前仅 **批量下单 + 快开快平** 两 Tab，见 §5）。
 > - 2026-04-23 归档已完成历史章节到 [risk-monitor-archive.md](./risk-monitor-archive.md)。
 > - 2026-04-28 (commit 9713e3f) 前端轮询从硬编码 30s 改为跟随后端 `scan_interval_min`，并同步刷新本文档 §1 / §3 / §4 / §5 / §6 中残留的旧规则（Scale-In / Frequent Open / Batch-Close / `/scan` API）描述，让主文档与 Burst Open v2 实际实现一致。

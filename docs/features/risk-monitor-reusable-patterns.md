@@ -472,6 +472,7 @@ Implementation detail: `include_rule_breakdown` runs when `rule_id_min` **or** `
 | **Rule filter reset** | When saved rules shrink or IDs change, reset dropdown to「全部规则」if current selection is invalid. |
 | **Grid** | Multiple rules: `grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4`; single rule: `max-w-md mx-auto`. |
 | **Toolbar** | Rule `<Select>` first, then time preset, custom range, server, zipcode, login — controls `w-full sm:w-40` / `sm:w-44` for responsive parity with 快开快平. |
+| **Header actions (导出 / 配置 / 扫描 / 刷新浮动)** | Use a column layout below `sm` and `flex-wrap` on the button row (`RISK_MONITOR_HEADER_ROW` + `RISK_MONITOR_HEADER_ACTIONS` in `RiskMonitor.tsx`). shadcn `Button` defaults include `shrink-0` and `whitespace-nowrap`; a single-row flex parent overflows on narrow phones unless actions wrap or stack. |
 
 ### Rule ID mapping
 

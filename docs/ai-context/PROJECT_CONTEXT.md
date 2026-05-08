@@ -348,7 +348,7 @@ New-IT-System/
 - Zipcode enrichment (same `fxbackoffice.mt4_users` query as currency): `alert_events.zipcode` stored; frontend has a toolbar LIKE filter to cluster same-address accounts
 - Timezone convention: backend stores `scanned_at` / `first_open` / `last_open` / `orders[].open_time` all in UTC (`...Z`). Broker MT4/MT5 servers run in UTC+3 (Indian/Antananarivo, no DST), so SQL queries wrap `OPEN_TIME` / `Time` with `CONVERT_TZ(..., '+03:00', '+00:00')` + `DATE_FORMAT(..., '%Y-%m-%dT%TZ')` to normalize before persisting. Frontend renders in `Asia/Hong_Kong` (HKT).
 
-**Frontend view**: Time-range alert view (default last 4h, presets: 1h/4h/1d/7d/30d/custom). 30 days retention. Config Drawer (multi-rule) + CSV export via AG-Grid. No history drawer (time-range picker replaces it).
+**Frontend view**: Time-range alert view (default last 4h, presets: 1h/4h/1d/7d/30d/custom). 30 days retention. Config Drawer (multi-rule) + CSV export via AG-Grid. No history drawer (time-range picker replaces it). Mobile: each tab’s header stacks description above actions; CSV / config / scan / floating-refresh buttons use shared `RISK_MONITOR_HEADER_ROW` + `RISK_MONITOR_HEADER_ACTIONS` (`flex-wrap` below `sm`) so the row does not overflow when `Button` applies `shrink-0`.
 
 **APIs**:
 - `GET /api/v1/risk-monitor/burst-open` — Latest cached scan result (scan metadata + immediate-scan refresh)

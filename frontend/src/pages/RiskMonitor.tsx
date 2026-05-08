@@ -377,6 +377,16 @@ function LoginCell(params: { value: number; data?: AlertEvent }) {
  */
 const RETENTION_DAYS = 30;
 
+/**
+ * Mobile-friendly tab header: description stacks above actions on narrow viewports;
+ * action buttons use flex-wrap so they flow to new lines instead of overflowing.
+ * (Project Button uses shrink-0 + whitespace-nowrap — a nowrap parent row overflows easily.)
+ */
+const RISK_MONITOR_HEADER_ROW =
+  "flex min-w-0 w-full max-w-full flex-col gap-3 sm:flex-row sm:items-start sm:justify-between";
+const RISK_MONITOR_HEADER_ACTIONS =
+  "flex min-w-0 w-full flex-wrap items-center gap-2 sm:w-auto sm:flex-nowrap sm:justify-end sm:shrink-0";
+
 function clampToRetention(since: Date): Date {
   const earliest = new Date(Date.now() - RETENTION_DAYS * 24 * 3600 * 1000);
   return since < earliest ? earliest : since;
@@ -513,8 +523,8 @@ export default function RiskMonitor() {
   };
 
   return (
-    <div className="flex flex-col gap-4 p-4 lg:p-6">
-      <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
+    <div className="flex min-w-0 flex-col gap-4 p-4 lg:p-6">
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full min-w-0">
         <TabsList className="grid w-full max-w-4xl grid-cols-3 sm:auto-cols-fr sm:grid-flow-col">
           <TabsTrigger
             value="burst-open"
@@ -1117,10 +1127,10 @@ function BurstOpenTab({ active }: { active: boolean }) {
         "最近 4 小时");
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex min-w-0 flex-col gap-4">
       {/* Header */}
-      <div className="flex items-start justify-between flex-wrap gap-2">
-        <div>
+      <div className={RISK_MONITOR_HEADER_ROW}>
+        <div className="min-w-0">
           <p className="text-sm text-muted-foreground">
             检测短时间内同品种密集下大单的可疑交易行为（EA / 算法交易特征）
           </p>
@@ -1133,7 +1143,7 @@ function BurstOpenTab({ active }: { active: boolean }) {
             {config && ` · 每 ${config.scan_interval_min} 分钟自动扫描`}
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className={RISK_MONITOR_HEADER_ACTIONS}>
           <Button
             variant="outline"
             size="sm"
@@ -1891,9 +1901,9 @@ function QuickOpenCloseTab({ active }: { active: boolean }) {
         "最近 4 小时");
 
   return (
-    <div className="flex flex-col gap-4">
-      <div className="flex items-start justify-between flex-wrap gap-2">
-        <div>
+    <div className="flex min-w-0 flex-col gap-4">
+      <div className={RISK_MONITOR_HEADER_ROW}>
+        <div className="min-w-0">
           <p className="text-sm text-muted-foreground">
             检测短持仓时长并密集平仓的可疑行为（快开快平）
           </p>
@@ -1908,7 +1918,7 @@ function QuickOpenCloseTab({ active }: { active: boolean }) {
               ` · 每 ${latestMeta.config.scan_interval_min} 分钟自动扫描`}
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className={RISK_MONITOR_HEADER_ACTIONS}>
           <Button
             variant="outline"
             size="sm"
@@ -3114,9 +3124,9 @@ function QuickProfitTab({ active }: { active: boolean }) {
         "最近 4 小时");
 
   return (
-    <div className="flex flex-col gap-4">
-      <div className="flex items-start justify-between flex-wrap gap-2">
-        <div>
+    <div className="flex min-w-0 flex-col gap-4">
+      <div className={RISK_MONITOR_HEADER_ROW}>
+        <div className="min-w-0">
           <p className="text-sm text-muted-foreground">
             检测窗口期内已实现利润 + 浮动利润总和超过阈值的可疑账户（快速获利）
           </p>
@@ -3131,7 +3141,7 @@ function QuickProfitTab({ active }: { active: boolean }) {
               ` · 每 ${latestMeta.config.scan_interval_min} 分钟自动扫描 · 浮动盈亏需手动刷新`}
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className={RISK_MONITOR_HEADER_ACTIONS}>
           <Button
             variant="outline"
             size="sm"
