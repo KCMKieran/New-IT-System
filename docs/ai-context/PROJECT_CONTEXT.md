@@ -374,11 +374,11 @@ New-IT-System/
 - `backend/app/api/v1/routes/risk_monitor.py` (burst-open + quick-open-close + quick-profit endpoints)
 - `backend/app/services/rule_quick_open_close_service.py` (快开快平检测)
 - `backend/app/services/rule_quick_profit_service.py` (快速获利检测 + 浮动刷新辅助函数)
-- `backend/app/services/deposit_enrichment.py` (1d/7d/30d 入金/出金聚合，CEN 归一化)
+- `backend/app/services/account_enrichment.py` (CRM 字段批量富化 + `get_net_deposit_hist_map` **client-level** 历史净入金：按 `userId` 聚合后映射回 loginsid，过滤 demo / `sid IN (1,2,5,6)`，CEN ÷100；与 client-return-rate 公式完全一致)
 - `backend/app/services/risk_monitor_service.py` (SQL + sliding window rule engine + CEN currency enrichment)
 - `backend/app/schemas/risk_monitor.py` (Pydantic models)
 - `backend/app/core/burst_open_scheduler.py` (APScheduler + in-memory cache)
-- `backend/app/core/risk_monitor_db.py` (SQLite config/history CRUD, `alert_events` event-level table; quick_profit_config + quick_profit_rules + 9 个 QP 列)
+- `backend/app/core/risk_monitor_db.py` (SQLite config/history CRUD, `alert_events` event-level table; quick_profit_config + quick_profit_rules + QP 列；`net_deposit_hist` 列三个 tab 共用)
 - `backend/scripts/backfill_alert_events_currency.py` (one-off migration for legacy currency=NULL rows)
 - `backend/scripts/backfill_alert_events_open_time.py` (one-off migration: broker UTC+3 naive timestamps → UTC ISO8601 in `first_open`/`last_open`/`orders_json`)
 

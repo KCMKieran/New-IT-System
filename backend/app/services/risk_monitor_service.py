@@ -35,6 +35,7 @@ from ..core.sql_helpers import (
 from .account_enrichment import (
     apply_cen_conversion,
     get_account_info_map,
+    get_net_deposit_hist_map,
     round_or_none,
 )
 
@@ -465,8 +466,9 @@ def _enrich_account_info(
         except Exception:
             logger.error("Failed to query MT4_Live2 total lots", exc_info=True)
 
-    # CRM-side enrichment: currency + zipcode, single roundtrip.
+    # CRM-side enrichment: currency + zipcode, plus historical net deposit.
     account_info_map = get_account_info_map(conn, alerts)
+    net_deposit_hist_map = get_net_deposit_hist_map(conn, alerts)
 
     for alert in alerts:
         srv = alert["server"]
@@ -500,6 +502,9 @@ def _enrich_account_info(
         currency = info.get("currency") or "USD"
         alert["currency"] = currency
         alert["zipcode"] = info.get("zipcode")  # None when CRM has no value
+        alert["net_deposit_hist"] = (
+            net_deposit_hist_map.get(loginsid) if loginsid else None
+        )
 
         apply_cen_conversion(alert, currency)
 

@@ -103,6 +103,8 @@ interface AlertEvent {
   currency: string | null;
   /** Client zipcode from fxbackoffice.mt4_users; null when CRM has no value. Backend supports LIKE substring filter. */
   zipcode: string | null;
+  /** Historical net deposit (same formula as client-return-rate "历史净入金"). */
+  net_deposit_hist?: number | null;
   // Quick Profit-only fields. NULL on burst-open / quick-open-close rows.
   /** Realized P&L portion within the rule's lookback window (USD, CEN-normalised). */
   realized_profit?: number | null;
@@ -110,13 +112,6 @@ interface AlertEvent {
   floating_profit_snapshot?: number | null;
   /** "closed" | "open" | "mixed" — drives the status Badge color. */
   position_status?: string | null;
-  /** Per-account deposit aggregates (USD). Display-only on Quick Profit. */
-  deposit_1d?: number | null;
-  deposit_7d?: number | null;
-  deposit_30d?: number | null;
-  withdrawal_1d?: number | null;
-  withdrawal_7d?: number | null;
-  withdrawal_30d?: number | null;
 }
 
 interface AlertsResponse {
@@ -141,6 +136,7 @@ const SORTABLE_COL_IDS = new Set<string>([
   "zipcode",
   "login",
   "currency",
+  "net_deposit_hist",
   "symbol",
   "order_count",
   "total_lots",
@@ -1005,6 +1001,31 @@ function BurstOpenTab({ active }: { active: boolean }) {
           );
         },
       },
+      {
+        headerName: "Net Deposit",
+        field: "net_deposit_hist",
+        colId: "net_deposit_hist",
+        width: 130,
+        cellClass: "ag-right-aligned-cell",
+        filter: "agNumberColumnFilter",
+        cellRenderer: (p: { value: number | null }) => {
+          const v = p.value;
+          if (v === null || v === undefined) return "—";
+          // ≥0 means client still has net inflow on us (绿); <0 means
+          // client has withdrawn more than deposited (红, 风控关注).
+          return (
+            <span
+              className={
+                v >= 0
+                  ? "text-emerald-600 dark:text-emerald-400"
+                  : "text-red-600 dark:text-red-400"
+              }
+            >
+              {fmtCurrency(v)}
+            </span>
+          );
+        },
+      },
       { headerName: "品种", field: "symbol", colId: "symbol", width: 110 },
       {
         headerName: "批量笔数",
@@ -1763,6 +1784,28 @@ function QuickOpenCloseTab({ active }: { active: boolean }) {
         cellRenderer: LoginCell,
       },
       { headerName: "币种", field: "currency", colId: "currency", width: 80 },
+      {
+        headerName: "Net Deposit",
+        field: "net_deposit_hist",
+        colId: "net_deposit_hist",
+        width: 130,
+        cellClass: "ag-right-aligned-cell",
+        cellRenderer: (p: { value: number | null }) => {
+          const v = p.value;
+          if (v === null || v === undefined) return "—";
+          return (
+            <span
+              className={
+                v >= 0
+                  ? "text-emerald-600 dark:text-emerald-400"
+                  : "text-red-600 dark:text-red-400"
+              }
+            >
+              {fmtCurrency(v)}
+            </span>
+          );
+        },
+      },
       { headerName: "品种", field: "symbol", colId: "symbol", width: 110 },
       {
         headerName: "开仓时间 (GMT+8)",
@@ -2965,6 +3008,28 @@ function QuickProfitTab({ active }: { active: boolean }) {
         cellRenderer: LoginCell,
       },
       { headerName: "币种", field: "currency", colId: "currency", width: 80 },
+      {
+        headerName: "Net Deposit",
+        field: "net_deposit_hist",
+        colId: "net_deposit_hist",
+        width: 130,
+        cellClass: "ag-right-aligned-cell",
+        cellRenderer: (p: { value: number | null }) => {
+          const v = p.value;
+          if (v === null || v === undefined) return "—";
+          return (
+            <span
+              className={
+                v >= 0
+                  ? "text-emerald-600 dark:text-emerald-400"
+                  : "text-red-600 dark:text-red-400"
+              }
+            >
+              {fmtCurrency(v)}
+            </span>
+          );
+        },
+      },
       { headerName: "品种", field: "symbol", colId: "symbol", width: 110 },
       {
         // Main metric — bold + green when positive so it pops in the table.
@@ -3035,62 +3100,6 @@ function QuickProfitTab({ active }: { active: boolean }) {
         width: 100,
         cellClass: "ag-right-aligned-cell",
         valueFormatter: (p) => p.value?.toFixed(2) ?? "",
-      },
-      // Deposit / withdrawal columns: hidden by default; analyst can reveal
-      // via AG-Grid column toolPanel or right-click menu when needed.
-      {
-        headerName: "入金 1d",
-        field: "deposit_1d",
-        colId: "deposit_1d",
-        width: 110,
-        hide: true,
-        cellClass: "ag-right-aligned-cell",
-        valueFormatter: (p) => fmtCurrency(p.value),
-      },
-      {
-        headerName: "入金 7d",
-        field: "deposit_7d",
-        colId: "deposit_7d",
-        width: 110,
-        hide: true,
-        cellClass: "ag-right-aligned-cell",
-        valueFormatter: (p) => fmtCurrency(p.value),
-      },
-      {
-        headerName: "入金 30d",
-        field: "deposit_30d",
-        colId: "deposit_30d",
-        width: 110,
-        hide: true,
-        cellClass: "ag-right-aligned-cell",
-        valueFormatter: (p) => fmtCurrency(p.value),
-      },
-      {
-        headerName: "出金 1d",
-        field: "withdrawal_1d",
-        colId: "withdrawal_1d",
-        width: 110,
-        hide: true,
-        cellClass: "ag-right-aligned-cell",
-        valueFormatter: (p) => fmtCurrency(p.value),
-      },
-      {
-        headerName: "出金 7d",
-        field: "withdrawal_7d",
-        colId: "withdrawal_7d",
-        width: 110,
-        hide: true,
-        cellClass: "ag-right-aligned-cell",
-        valueFormatter: (p) => fmtCurrency(p.value),
-      },
-      {
-        headerName: "出金 30d",
-        field: "withdrawal_30d",
-        colId: "withdrawal_30d",
-        width: 110,
-        hide: true,
-        cellClass: "ag-right-aligned-cell",
-        valueFormatter: (p) => fmtCurrency(p.value),
       },
     ],
     [lookbackByRuleId],

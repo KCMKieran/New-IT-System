@@ -41,8 +41,7 @@ from ..core.sql_helpers import (
     SID_MAP,
     broker_time_to_utc_iso,
 )
-from .account_enrichment import get_account_info_map
-from .deposit_enrichment import apply_deposit_summary, get_deposit_summary_map
+from .account_enrichment import get_account_info_map, get_net_deposit_hist_map
 
 logger = logging.getLogger(__name__)
 
@@ -561,7 +560,7 @@ def scan_quick_profit(
 
         if alerts:
             info_map = get_account_info_map(conn, alerts)
-            deposit_map = get_deposit_summary_map(conn, alerts)
+            net_deposit_hist_map = get_net_deposit_hist_map(conn, alerts)
             for alert in alerts:
                 sid = SID_MAP.get(str(alert["server"]))
                 lid = int(alert["login"])
@@ -570,6 +569,9 @@ def scan_quick_profit(
                 currency = info.get("currency") or "USD"
                 alert["currency"] = currency
                 alert["zipcode"] = info.get("zipcode")
+                alert["net_deposit_hist"] = (
+                    net_deposit_hist_map.get(loginsid) if loginsid else None
+                )
                 if currency == "CEN":
                     # Profit fields and per-order profit are stored as
                     # cents on CEN accounts → divide before display so the
@@ -581,10 +583,6 @@ def scan_quick_profit(
                     for order in alert.get("orders", []):
                         if order.get("profit") is not None:
                             order["profit"] = round(float(order["profit"]) / 100.0, 2)
-
-                apply_deposit_summary(
-                    alert, deposit_map.get(loginsid) if loginsid else None
-                )
 
             # Re-apply threshold AFTER CEN normalization. A CEN alert whose
             # raw profit was ≥ threshold * 100 may fall below threshold in

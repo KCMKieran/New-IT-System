@@ -96,6 +96,8 @@ class BurstOpenAlert(BaseModel):
     # value. Used by the frontend zipcode column and toolbar LIKE filter
     # to surface account clusters sharing the same registration address.
     zipcode: Optional[str] = None
+    # Historical net deposit (same formula as client-return-rate "历史净入金").
+    net_deposit_hist: Optional[float] = None
 
 
 class BurstOpenSummary(BaseModel):
@@ -143,6 +145,7 @@ class AlertEvent(BaseModel):
     group: Optional[str] = None
     currency: Optional[str] = None
     zipcode: Optional[str] = None
+    net_deposit_hist: Optional[float] = None
     # Quick Profit specific fields. Realized + floating sum to total_profit_usd
     # at scan time; the floating snapshot can drift later (refreshed via
     # /quick-profit/floating-refresh on the frontend).
@@ -151,15 +154,6 @@ class AlertEvent(BaseModel):
     # "closed" | "open" | "mixed"; drives the status badge color and whether
     # the floating-refresh poller asks the backend to re-query this row.
     position_status: Optional[str] = None
-    # Per-account deposit / withdrawal aggregates (USD, CEN-normalized) over
-    # 1d/7d/30d windows. Display-only on the quick-profit tab; not used by
-    # the trigger logic in v1.
-    deposit_1d: Optional[float] = None
-    deposit_7d: Optional[float] = None
-    deposit_30d: Optional[float] = None
-    withdrawal_1d: Optional[float] = None
-    withdrawal_7d: Optional[float] = None
-    withdrawal_30d: Optional[float] = None
 
 
 class AlertsResponse(BaseModel):

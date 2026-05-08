@@ -149,7 +149,7 @@ def test_quick_profit_export_csv_streams_header(client: TestClient):
     for col in (
         "scanned_at", "position_status", "realized_profit",
         "floating_profit_snapshot", "total_profit_usd",
-        "deposit_1d", "withdrawal_30d", "rule_label",
+        "net_deposit_hist", "rule_label",
     ):
         assert col in header, f"missing column {col!r} in {header}"
 

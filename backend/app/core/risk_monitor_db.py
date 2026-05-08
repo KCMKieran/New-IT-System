@@ -32,10 +32,9 @@ SORTABLE_ALERT_COLS: frozenset[str] = frozenset({
     "order_count", "total_lots", "equity", "balance",
     "equity_per_lot", "total_open_lots", "leverage",
     "currency", "zipcode", "first_open", "last_open", "hold_duration_sec", "total_profit_usd",
+    "net_deposit_hist",
     # Quick Profit columns
     "realized_profit", "floating_profit_snapshot", "position_status",
-    "deposit_1d", "deposit_7d", "deposit_30d",
-    "withdrawal_1d", "withdrawal_7d", "withdrawal_30d",
     # Frontend alias for the `account_group` DB column. We map it in
     # `_resolve_alert_order` so the API stays consistent with the
     # field name the React component already uses.
@@ -142,6 +141,7 @@ CREATE TABLE IF NOT EXISTS alert_events (
     orders_json       TEXT,
     currency          TEXT,                -- "USD" or "CEN" (for display; equity/balance already USD)
     zipcode           TEXT,                -- client zipcode from fxbackoffice.mt4_users
+    net_deposit_hist  REAL,                -- historical net deposit (client-return-rate formula)
     -- Quick Profit-specific columns. NULL for burst-open / quick-open-close rows.
     realized_profit          REAL,
     floating_profit_snapshot REAL,
@@ -263,6 +263,7 @@ def _migrate_alert_events_columns(conn: sqlite3.Connection) -> None:
     # Quick Profit columns. Each ADD is independent so partial upgrades stay
     # consistent (ALTER COLUMN is not supported in SQLite, only ADD).
     qp_cols = [
+        ("net_deposit_hist", "REAL"),
         ("realized_profit", "REAL"),
         ("floating_profit_snapshot", "REAL"),
         ("position_status", "TEXT"),
@@ -382,8 +383,8 @@ def _backfill_alert_events_if_needed(conn: sqlite3.Connection) -> None:
                      hold_duration_sec, total_profit_usd,
                      first_open, last_open,
                      equity, balance, equity_per_lot, total_open_lots,
-                     leverage, account_group, orders_json, currency, zipcode)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     leverage, account_group, orders_json, currency, zipcode, net_deposit_hist)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     batch_id,
@@ -408,6 +409,7 @@ def _backfill_alert_events_if_needed(conn: sqlite3.Connection) -> None:
                     json.dumps(alert.get("orders", [])),
                     alert.get("currency"),
                     alert.get("zipcode"),
+                    alert.get("net_deposit_hist"),
                 ),
             )
             inserted += 1
@@ -625,12 +627,10 @@ def append_scan_and_events(
                      hold_duration_sec, total_profit_usd,
                      first_open, last_open,
                      equity, balance, equity_per_lot, total_open_lots,
-                     leverage, account_group, orders_json, currency, zipcode,
-                     realized_profit, floating_profit_snapshot, position_status,
-                     deposit_1d, deposit_7d, deposit_30d,
-                     withdrawal_1d, withdrawal_7d, withdrawal_30d)
+                     leverage, account_group, orders_json, currency, zipcode, net_deposit_hist,
+                     realized_profit, floating_profit_snapshot, position_status)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     batch_id,
@@ -655,15 +655,10 @@ def append_scan_and_events(
                     json.dumps(alert.get("orders", [])),
                     alert.get("currency"),
                     alert.get("zipcode"),
+                    alert.get("net_deposit_hist"),
                     alert.get("realized_profit"),
                     alert.get("floating_profit_snapshot"),
                     alert.get("position_status"),
-                    alert.get("deposit_1d"),
-                    alert.get("deposit_7d"),
-                    alert.get("deposit_30d"),
-                    alert.get("withdrawal_1d"),
-                    alert.get("withdrawal_7d"),
-                    alert.get("withdrawal_30d"),
                 ),
             )
 
@@ -771,9 +766,8 @@ _ALERT_SELECT_COLS = """
     first_open, last_open,
     equity, balance, equity_per_lot, total_open_lots,
     leverage, account_group, orders_json, currency, zipcode,
-    realized_profit, floating_profit_snapshot, position_status,
-    deposit_1d, deposit_7d, deposit_30d,
-    withdrawal_1d, withdrawal_7d, withdrawal_30d
+    net_deposit_hist,
+    realized_profit, floating_profit_snapshot, position_status
 """
 
 

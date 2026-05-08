@@ -11,7 +11,9 @@
 > - 2026-04-23 归档已完成历史章节到 [risk-monitor-archive.md](./risk-monitor-archive.md)。
 > - 2026-04-28 (commit 9713e3f) 前端轮询从硬编码 30s 改为跟随后端 `scan_interval_min`，并同步刷新本文档 §1 / §3 / §4 / §5 / §6 中残留的旧规则（Scale-In / Frequent Open / Batch-Close / `/scan` API）描述，让主文档与 Burst Open v2 实际实现一致。
 > - 2026-04-29 **批量下单 Tab UI 对齐快开快平**：每条规则一张紧凑 SummaryCard（`by_rule` 聚合）；工具栏增加「全部规则 / Rule n」筛选（仅作用于表格与导出，不影响卡片）。`/burst-open/alerts/stats` 返回 `by_rule`。详见 [risk-monitor-reusable-patterns.md §11](./risk-monitor-reusable-patterns.md)。
-> - 2026-05-07 **快速获利 Tab 上线**（Phase 1）：第三个 Tab，按账户聚合滑动窗口 P&L（已实现 + 可选浮动）超过阈值即告警。`rule_id` 区间 61-70；新增 6 个 API（含 `/quick-profit/floating-refresh` 浮动轻量刷新）；前端 `PositionStatusBadge` 三态彩色 + AG-Grid `applyTransaction` 局部更新；6 个入金/出金列默认隐藏。Phase 2（入金比例规则 A2）延期。详见下方 §7「Quick Profit Detection」。
+> - 2026-05-07 **快速获利 Tab 上线**（Phase 1）：第三个 Tab，按账户聚合滑动窗口 P&L（已实现 + 可选浮动）超过阈值即告警。`rule_id` 区间 61-70；新增 6 个 API（含 `/quick-profit/floating-refresh` 浮动轻量刷新）；前端 `PositionStatusBadge` 三态彩色 + AG-Grid `applyTransaction` 局部更新。Phase 2（入金比例规则 A2）延期。详见下方 §7「Quick Profit Detection」。
+> - 2026-05-07 **三 Tab 加 Net Deposit 列**：`account_enrichment.get_net_deposit_hist_map` 提供 **client-level** 历史净入金（按 `userId` 聚合后映射回 loginsid，过滤 `sid IN (1,2,5,6)` + `GROUP NOT LIKE '%demo%'`，公式与 client-return-rate "历史净入金" 一致：`SUM(deposit) + SUM(withdrawal + ib withdrawal)`，CEN 自动 ÷100）。监控目标是 account-level，但展示的净入金是该客户名下所有合规账户的总值——同一客户的多个被告警 loginsid 拿到相同数。前端 ≥0 绿 / <0 红 / null 显示 "—"，仅展示，不参与触发。同步下线快速获利 Tab 的 1d/7d/30d 入金/出金 6 列与 `deposit_enrichment.py`。
+> - 2026-05-07 hotfix（同日两处）：(a) 第一版 SQL 用 `JOIN ON mu.userId = st.userId` + `GROUP BY mu.loginsid`，**形式上**已是 client-level 但缺 demo/sid 过滤，改为标准嵌套查询（外层 target → loginsid，内层 client-level 聚合再 LEFT JOIN）。(b) PyMySQL 占位符坑：`LIKE '%demo%'` 必须写成 `'%%demo%%'`，否则 mogrify 会把 `%` 当作格式化指令并报 `TypeError: %d format: a real number is required, not str`，扫描失败 → `net_deposit_hist` 全部写 NULL。
 > - 2026-05-07（同日 hotfix）快速获利 Tab 三个问题：
 >   1. **CEN 归一化后阈值过滤失效** — `scan_quick_profit` 里 `norm_rules.id` 错用了 SQLite 主键（1,2…），与 detect 输出的 alert.rule_id（61,62…）对不上，导致二次阈值过滤回退到 0，CEN 账户出现一堆几十 USD 甚至负数的低值告警。改为 `QUICK_PROFIT_RULE_ID_BASE + idx`。
 >   2. **浮动 P&L 30s 自动轮询去掉** — 改成工具栏「刷新浮动盈亏」按钮，用户主动点才刷，避免后台异步把告警快照覆盖成低值/负数。同时把跨扫描去重从「绝对时间桶」改成「时间差 ≤ lookback_min」，避免跨桶边界（如 11:55 / 12:01）泄漏重复告警。
@@ -902,8 +904,13 @@ A 最简单，B 可读性更好。建议 v1 用 A，后续按需加 B。
 
 ## 7. 快速获利检测 (Quick Profit Detection) — Tab 3
 
-> Phase 1 上线于 2026-05-07。Phase 2（A2 入金比例规则）延期到下一阶段；当前
-> 入金/出金 1d/7d/30d 仅作为列展示，不参与触发条件。
+> Phase 1 上线于 2026-05-07。Phase 2（A2 入金比例规则）延期到下一阶段。
+> 1d/7d/30d 入金/出金列已下线（2026-05-07）；现统一展示 **client-level** 历史
+> 净入金 `net_deposit_hist`（公式 + 过滤条件与 client-return-rate "历史净入金"
+> 一致：`SUM(deposit) + SUM(withdrawal + ib withdrawal)`，CEN ÷100，过滤
+> demo / 非 1·2·5·6 服务器），三个 tab 共用。监控仍是 account-level，但同一
+> 客户的多个被告警账户拿到相同的客户级总数；非合规账户返回 NULL（前端"—"）。
+> 仅展示，不参与触发条件。
 
 ### 7.1 业务诉求
 
@@ -997,10 +1004,10 @@ Realized + floating 在 enrichment 后按 `currency='CEN'` 整体 ÷100；
 | 改动 | 文件 |
 |------|------|
 | 新增 | `backend/app/services/rule_quick_profit_service.py` |
-| 新增 | `backend/app/services/deposit_enrichment.py` |
 | 新增 | 6 端点 in `backend/app/api/v1/routes/risk_monitor.py` |
-| 改动 | `backend/app/schemas/risk_monitor.py` (`QuickProfitRule`/`Config` + `AlertEvent` 9 个新字段 + `QuickProfitFloatingRefresh*`) |
-| 改动 | `backend/app/core/risk_monitor_db.py` (新表 `quick_profit_config` + `quick_profit_rules`，`alert_events` 9 列迁移，`get_alerts_by_ids`) |
+| 改动 | `backend/app/services/account_enrichment.py` (新增 `get_net_deposit_hist_map`，三 tab 共用) |
+| 改动 | `backend/app/schemas/risk_monitor.py` (`QuickProfitRule`/`Config` + `AlertEvent` 4 个新字段：`net_deposit_hist`/`realized_profit`/`floating_profit_snapshot`/`position_status` + `QuickProfitFloatingRefresh*`) |
+| 改动 | `backend/app/core/risk_monitor_db.py` (新表 `quick_profit_config` + `quick_profit_rules`，`alert_events` 列迁移，`get_alerts_by_ids`) |
 | 改动 | `backend/app/core/burst_open_scheduler.py` (`_run_scan` 串入 `scan_quick_profit`) |
 | 改动 | `frontend/src/pages/RiskMonitor.tsx` (`QuickProfitTab` + `PositionStatusBadge` + `QuickProfitConfigDrawer`) |
 | 测试 | `backend/tests/test_rule_quick_profit_service.py`、`test_quick_profit_floating_refresh.py`、`test_quick_profit_api.py` |
@@ -1010,5 +1017,5 @@ Realized + floating 在 enrichment 后按 `currency='CEN'` 整体 ÷100；
 1. Rule ID 段 61-70（`QUICK_PROFIT_RULE_ID_BASE = 61`）
 2. 触发条件：`total_profit_usd >= min_profit_usd`（含等号）
 3. 浮动刷新：用户手动点击工具栏按钮触发（不再 30s 自动轮询，避免后台异步覆盖告警快照）
-4. 入金/出金列：默认隐藏，用户自行打开
-5. Phase 1 不做"利润 > N% 入金"比较；Phase 2 在已上线的入金统计基础上再实现
+4. 历史净入金（`net_deposit_hist`）三 Tab 共用，公式与 client-return-rate 一致；CEN 账户在 SQL 内 ÷100；红绿配色仅作展示
+5. Phase 1 不做"利润 > N% 入金"比较；Phase 2 用 `net_deposit_hist` 做入金比例规则
