@@ -1,10 +1,4 @@
-import {
-  useState,
-  useEffect,
-  useMemo,
-  useCallback,
-  Fragment,
-} from "react";
+import { useState, useEffect, useMemo, useCallback, Fragment } from "react";
 import { useSearchParams, useNavigate } from "react-router-dom";
 import { format, subDays, differenceInCalendarDays } from "date-fns";
 import { DateRange } from "react-day-picker";
@@ -29,9 +23,11 @@ import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Calendar } from "@/components/ui/calendar";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Checkbox } from "@/components/ui/checkbox";
-import { Label } from "@/components/ui/label";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Table,
@@ -125,15 +121,17 @@ export default function DashboardPnlHistory() {
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const [range, setRange] = useState<DateRange>(initialRange);
-  const [pendingRange, setPendingRange] = useState<DateRange | undefined>(initialRange);
-  const [deductIb, setDeductIb] = useState<boolean>(
-    searchParams.get("deduct_ib") === "1",
+  const [pendingRange, setPendingRange] = useState<DateRange | undefined>(
+    initialRange,
   );
   const [rows, setRows] = useState<PnlHistoryRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [queryMs, setQueryMs] = useState<number | null>(null);
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [expandedDates, setExpandedDates] = useState<Set<string>>(new Set());
+  const [expandedCountries, setExpandedCountries] = useState<Set<string>>(
+    new Set(),
+  );
 
   // Fetch with AbortController (React 18 StrictMode safe)
   useEffect(() => {
@@ -143,10 +141,9 @@ export default function DashboardPnlHistory() {
     const to = format(range.to, "yyyy-MM-dd");
     setLoading(true);
     setError(null);
-    apiFetch(
-      `/api/v1/dashboard/pnl-history?date_from=${from}&date_to=${to}`,
-      { signal: controller.signal },
-    )
+    apiFetch(`/api/v1/dashboard/pnl-history?date_from=${from}&date_to=${to}`, {
+      signal: controller.signal,
+    })
       .then((res) => {
         if (!res.ok) {
           return res.json().then((j) => {
@@ -169,88 +166,98 @@ export default function DashboardPnlHistory() {
     return () => controller.abort();
   }, [range.from, range.to]);
 
-  // Sync URL when applied range or toggle changes
+  // Sync URL when applied range changes
   useEffect(() => {
     if (!range.from || !range.to) return;
     const next = new URLSearchParams(searchParams);
     next.set("from", format(range.from, "yyyy-MM-dd"));
     next.set("to", format(range.to, "yyyy-MM-dd"));
-    if (deductIb) next.set("deduct_ib", "1");
-    else next.delete("deduct_ib");
     setSearchParams(next, { replace: true });
-  }, [range.from, range.to, deductIb]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [range.from, range.to]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Country order (stable across renders) — by total profit desc, so largest stack on bottom
+  // Country order (stable across renders) — by |total profit| desc, so largest stack on bottom.
+  // Chart shows client-perspective Profit (matches the dashboard card on Home).
   const countriesOrdered = useMemo(() => {
     const totals = new Map<string, number>();
     for (const r of rows) {
-      totals.set(
-        r.country,
-        (totals.get(r.country) ?? 0) +
-          (deductIb ? r.profit_excl_rbt - r.ib_commission : r.profit_excl_rbt),
-      );
+      totals.set(r.country, (totals.get(r.country) ?? 0) + r.profit_excl_rbt);
     }
     return Array.from(totals.entries())
-      .sort((a, b) => b[1] - a[1])
+      .sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]))
       .map(([c]) => c);
-  }, [rows, deductIb]);
+  }, [rows]);
 
   // Chart data: one entry per date, with one numeric key per country
   const chartData = useMemo(() => {
     const byDate = new Map<string, Record<string, number | string>>();
     for (const r of rows) {
       const e = byDate.get(r.date) ?? { date: r.date };
-      const v = deductIb
-        ? r.profit_excl_rbt - r.ib_commission
-        : r.profit_excl_rbt;
-      e[r.country] = ((e[r.country] as number) ?? 0) + v;
+      e[r.country] = ((e[r.country] as number) ?? 0) + r.profit_excl_rbt;
       byDate.set(r.date, e);
     }
     return Array.from(byDate.values()).sort((a, b) =>
       String(a.date).localeCompare(String(b.date)),
     );
-  }, [rows, deductIb]);
+  }, [rows]);
 
-  // Table data: grouped by (date, country) with sales_team children
-  type TableGroup = {
-    date: string;
+  // Table data: 3-level tree → Date > Country > Sales Team.
+  // Each level has its own profit / IB sums for collapsed-row display.
+  type TeamRow = { sales_team: string; profit: number; ib: number };
+  type CountryNode = {
     country: string;
     profit: number;
     ib: number;
-    teams: { sales_team: string; profit: number; ib: number }[];
+    teams: TeamRow[];
   };
-  const tableGroups: TableGroup[] = useMemo(() => {
-    const map = new Map<string, TableGroup>();
+  type DateNode = {
+    date: string;
+    profit: number;
+    ib: number;
+    countries: CountryNode[];
+  };
+  const dateNodes: DateNode[] = useMemo(() => {
+    const dateMap = new Map<string, DateNode>();
     for (const r of rows) {
-      const key = `${r.date}|${r.country}`;
-      const g =
-        map.get(key) ??
-        ({
-          date: r.date,
-          country: r.country,
-          profit: 0,
-          ib: 0,
-          teams: [],
-        } as TableGroup);
-      g.profit += r.profit_excl_rbt;
-      g.ib += r.ib_commission;
-      g.teams.push({
+      let dn = dateMap.get(r.date);
+      if (!dn) {
+        dn = { date: r.date, profit: 0, ib: 0, countries: [] };
+        dateMap.set(r.date, dn);
+      }
+      dn.profit += r.profit_excl_rbt;
+      dn.ib += r.ib_commission;
+      let cn = dn.countries.find((c) => c.country === r.country);
+      if (!cn) {
+        cn = { country: r.country, profit: 0, ib: 0, teams: [] };
+        dn.countries.push(cn);
+      }
+      cn.profit += r.profit_excl_rbt;
+      cn.ib += r.ib_commission;
+      cn.teams.push({
         sales_team: r.sales_team,
         profit: r.profit_excl_rbt,
         ib: r.ib_commission,
       });
-      map.set(key, g);
     }
-    const arr = Array.from(map.values());
-    // Sort: latest date first; within a date, by |profit| desc
-    arr.sort((a, b) => {
-      if (a.date !== b.date) return b.date.localeCompare(a.date);
-      return Math.abs(b.profit) - Math.abs(a.profit);
-    });
-    arr.forEach((g) =>
-      g.teams.sort((x, y) => Math.abs(y.profit) - Math.abs(x.profit)),
-    );
+    const arr = Array.from(dateMap.values());
+    arr.sort((a, b) => b.date.localeCompare(a.date));
+    for (const d of arr) {
+      d.countries.sort((a, b) => Math.abs(b.profit) - Math.abs(a.profit));
+      for (const c of d.countries) {
+        c.teams.sort((x, y) => Math.abs(y.profit) - Math.abs(x.profit));
+      }
+    }
     return arr;
+  }, [rows]);
+
+  // Window-level totals (used for the summary banner above the table)
+  const summary = useMemo(() => {
+    let p = 0;
+    let i = 0;
+    for (const r of rows) {
+      p += r.profit_excl_rbt;
+      i += r.ib_commission;
+    }
+    return { profit: p, ib: i, companyNet: -p - i };
   }, [rows]);
 
   const applyQuick = useCallback((days: number) => {
@@ -298,8 +305,17 @@ export default function DashboardPnlHistory() {
       : 0;
   const minChartWidth = Math.max(360, days * 44); // ~44px per day on mobile to keep ticks readable
 
-  const toggleExpanded = (key: string) => {
-    setExpanded((prev) => {
+  const toggleDate = (date: string) => {
+    setExpandedDates((prev) => {
+      const next = new Set(prev);
+      if (next.has(date)) next.delete(date);
+      else next.add(date);
+      return next;
+    });
+  };
+  const toggleCountry = (date: string, country: string) => {
+    const key = `${date}|${country}`;
+    setExpandedCountries((prev) => {
       const next = new Set(prev);
       if (next.has(key)) next.delete(key);
       else next.add(key);
@@ -410,16 +426,6 @@ export default function DashboardPnlHistory() {
                 </div>
               </PopoverContent>
             </Popover>
-            <div className="flex items-center gap-2">
-              <Checkbox
-                id="deduct-ib"
-                checked={deductIb}
-                onCheckedChange={(v) => setDeductIb(Boolean(v))}
-              />
-              <Label htmlFor="deduct-ib" className="text-xs cursor-pointer">
-                扣除 IB 佣金
-              </Label>
-            </div>
             {queryMs != null && !loading && (
               <span className="text-xs text-muted-foreground">
                 查询耗时 {queryMs} ms · {rows.length} 行
@@ -433,7 +439,7 @@ export default function DashboardPnlHistory() {
       <Card>
         <CardHeader className="pb-1">
           <CardTitle className="text-sm">
-            每日 {deductIb ? "净 Profit（已扣 IB）" : "Profit (excl. rbt)"} · 按国家堆叠
+            每日 Profit (excl. rbt) · 按国家堆叠
           </CardTitle>
         </CardHeader>
         <CardContent>
@@ -504,139 +510,229 @@ export default function DashboardPnlHistory() {
       {/* Table */}
       <Card>
         <CardHeader className="pb-1">
-          <CardTitle className="text-sm">明细 · 按日 × 国家（展开看 Sales Team）</CardTitle>
+          <CardTitle className="text-sm">
+            明细 · 日期 → 国家 → Sales Team（逐级展开）
+          </CardTitle>
         </CardHeader>
-        <CardContent>
+        <CardContent className="space-y-2">
           {loading ? (
             <Skeleton className="h-[260px] w-full" />
           ) : error ? (
             <div className="py-8 text-center text-sm text-destructive">
               {error}
             </div>
-          ) : tableGroups.length === 0 ? (
+          ) : dateNodes.length === 0 ? (
             <div className="py-8 text-center text-sm text-muted-foreground">
               暂无数据
             </div>
           ) : (
-            <div className="overflow-x-auto rounded-md border">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead className="w-7" aria-label="展开" />
-                    <TableHead className="text-xs">日期</TableHead>
-                    <TableHead className="text-xs">国家</TableHead>
-                    <TableHead className="text-left text-xs">
-                      Profit (excl. rbt)
-                    </TableHead>
-                    <TableHead className="text-left text-xs">IB 佣金</TableHead>
-                    <TableHead className="hidden sm:table-cell text-left text-xs">
-                      净额 (Profit − IB)
-                    </TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {tableGroups.map((g, idx) => {
-                    const key = `${g.date}|${g.country}`;
-                    const isExpanded = expanded.has(key);
-                    const net = g.profit - g.ib;
-                    return (
-                      <Fragment key={key}>
-                        <TableRow
-                          className={cn(
-                            "cursor-pointer hover:bg-muted/50",
-                            idx % 2 === 1 && "bg-muted/30",
-                          )}
-                          onClick={() => toggleExpanded(key)}
-                        >
-                          <TableCell className="w-7 p-0 align-middle">
-                            <span
+            <>
+              {/* Window summary banner */}
+              <div className="rounded-md border bg-muted/40 px-3 py-2 text-xs flex flex-wrap items-center gap-x-5 gap-y-1">
+                <span className="font-medium">
+                  周期汇总
+                  <span className="ml-1 text-muted-foreground">
+                    ({dateNodes.length} 天)
+                  </span>
+                </span>
+                <span>
+                  <span className="text-muted-foreground">
+                    Profit (excl. rbt):{" "}
+                  </span>
+                  <span className={cn("font-medium", pnlColor(summary.profit))}>
+                    {formatUsdPrecise(summary.profit)}
+                  </span>
+                </span>
+                <span>
+                  <span className="text-muted-foreground">IB 佣金: </span>
+                  <span className="font-medium text-muted-foreground">
+                    {formatUsdPrecise(summary.ib)}
+                  </span>
+                </span>
+                <span>
+                  <span className="text-muted-foreground">公司净利: </span>
+                  <span
+                    className={cn(
+                      "font-medium",
+                      pnlColor(summary.companyNet),
+                    )}
+                  >
+                    {formatUsdPrecise(summary.companyNet)}
+                  </span>
+                </span>
+              </div>
+
+              <div className="overflow-x-auto rounded-md border">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead className="w-7" aria-label="展开" />
+                      <TableHead className="text-xs">维度</TableHead>
+                      <TableHead className="text-left text-xs">
+                        Profit (excl. rbt)
+                      </TableHead>
+                      <TableHead className="text-left text-xs">
+                        IB 佣金
+                      </TableHead>
+                      <TableHead
+                        className="hidden sm:table-cell text-left text-xs"
+                        title="公司净利 = −Profit − IB"
+                      >
+                        公司净利
+                      </TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {dateNodes.map((d, di) => {
+                      const dateOpen = expandedDates.has(d.date);
+                      const dateCompanyNet = -d.profit - d.ib;
+                      return (
+                        <Fragment key={d.date}>
+                          {/* Level 1: Date */}
+                          <TableRow
+                            className={cn(
+                              "cursor-pointer hover:bg-muted/60 bg-muted/30",
+                              di % 2 === 1 && "bg-muted/40",
+                            )}
+                            onClick={() => toggleDate(d.date)}
+                          >
+                            <TableCell className="w-7 p-0 align-middle">
+                              <span
+                                className={cn(
+                                  "inline-flex size-6 items-center justify-center rounded",
+                                  dateOpen && "rotate-90",
+                                )}
+                              >
+                                <ChevronRight className="size-3.5 transition-transform duration-200" />
+                              </span>
+                            </TableCell>
+                            <TableCell className="font-mono text-xs font-medium">
+                              <span className="hidden sm:inline">{d.date}</span>
+                              <span className="sm:hidden">
+                                {d.date.slice(5)}
+                              </span>
+                              <span className="ml-2 text-muted-foreground font-sans font-normal">
+                                ({d.countries.length} 国)
+                              </span>
+                            </TableCell>
+                            <TableCell
                               className={cn(
-                                "inline-flex size-6 items-center justify-center rounded",
-                                isExpanded && "rotate-90",
+                                "text-left text-xs font-medium",
+                                pnlColor(d.profit),
                               )}
                             >
-                              <ChevronRight className="size-3.5 transition-transform duration-200" />
-                            </span>
-                          </TableCell>
-                          <TableCell className="font-mono text-xs">
-                            <span className="hidden sm:inline">{g.date}</span>
-                            <span className="sm:hidden">{g.date.slice(5)}</span>
-                          </TableCell>
-                          <TableCell className="text-xs font-medium">
-                            {g.country}
-                          </TableCell>
-                          <TableCell
-                            className={cn("text-left text-xs", pnlColor(g.profit))}
-                          >
-                            {formatUsdPrecise(g.profit)}
-                          </TableCell>
-                          <TableCell className="text-left text-xs text-muted-foreground">
-                            {formatUsdPrecise(g.ib)}
-                          </TableCell>
-                          <TableCell
-                            className={cn(
-                              "hidden sm:table-cell text-left text-xs",
-                              pnlColor(net),
-                            )}
-                          >
-                            {formatUsdPrecise(net)}
-                          </TableCell>
-                        </TableRow>
-                        {isExpanded && (
-                          <TableRow className="bg-muted/20 hover:bg-muted/20">
-                            <TableCell colSpan={6} className="p-0">
-                              <table className="w-full text-xs">
-                                <tbody>
-                                  {g.teams.map((t, ti) => {
-                                    const teamNet = t.profit - t.ib;
-                                    return (
-                                      <tr
-                                        key={t.sales_team}
-                                        className={cn(
-                                          "border-t border-border/50",
-                                          ti % 2 === 1 && "bg-muted/20",
-                                        )}
-                                      >
-                                        <td className="w-7 py-1" />
-                                        <td className="py-1 text-muted-foreground">
-                                          {" "}
-                                        </td>
-                                        <td className="pl-6 py-1 text-muted-foreground">
-                                          {t.sales_team}
-                                        </td>
-                                        <td
-                                          className={cn(
-                                            "text-left py-1",
-                                            pnlColor(t.profit),
-                                          )}
-                                        >
-                                          {formatUsdPrecise(t.profit)}
-                                        </td>
-                                        <td className="text-left py-1 text-muted-foreground">
-                                          {formatUsdPrecise(t.ib)}
-                                        </td>
-                                        <td
-                                          className={cn(
-                                            "hidden sm:table-cell text-left py-1",
-                                            pnlColor(teamNet),
-                                          )}
-                                        >
-                                          {formatUsdPrecise(teamNet)}
-                                        </td>
-                                      </tr>
-                                    );
-                                  })}
-                                </tbody>
-                              </table>
+                              {formatUsdPrecise(d.profit)}
+                            </TableCell>
+                            <TableCell className="text-left text-xs text-muted-foreground">
+                              {formatUsdPrecise(d.ib)}
+                            </TableCell>
+                            <TableCell
+                              className={cn(
+                                "hidden sm:table-cell text-left text-xs font-medium",
+                                pnlColor(dateCompanyNet),
+                              )}
+                            >
+                              {formatUsdPrecise(dateCompanyNet)}
                             </TableCell>
                           </TableRow>
-                        )}
-                      </Fragment>
-                    );
-                  })}
-                </TableBody>
-              </Table>
-            </div>
+                          {/* Level 2: Country (under expanded date) */}
+                          {dateOpen &&
+                            d.countries.map((c) => {
+                              const countryKey = `${d.date}|${c.country}`;
+                              const countryOpen =
+                                expandedCountries.has(countryKey);
+                              const countryCompanyNet = -c.profit - c.ib;
+                              return (
+                                <Fragment key={countryKey}>
+                                  <TableRow
+                                    className="cursor-pointer hover:bg-muted/40"
+                                    onClick={() =>
+                                      toggleCountry(d.date, c.country)
+                                    }
+                                  >
+                                    <TableCell className="w-7 p-0 align-middle">
+                                      <span
+                                        className={cn(
+                                          "inline-flex size-6 items-center justify-center rounded ml-3",
+                                          countryOpen && "rotate-90",
+                                        )}
+                                      >
+                                        <ChevronRight className="size-3.5 transition-transform duration-200" />
+                                      </span>
+                                    </TableCell>
+                                    <TableCell className="text-xs">
+                                      <span className="pl-6">{c.country}</span>
+                                      <span className="ml-2 text-muted-foreground">
+                                        ({c.teams.length})
+                                      </span>
+                                    </TableCell>
+                                    <TableCell
+                                      className={cn(
+                                        "text-left text-xs",
+                                        pnlColor(c.profit),
+                                      )}
+                                    >
+                                      {formatUsdPrecise(c.profit)}
+                                    </TableCell>
+                                    <TableCell className="text-left text-xs text-muted-foreground">
+                                      {formatUsdPrecise(c.ib)}
+                                    </TableCell>
+                                    <TableCell
+                                      className={cn(
+                                        "hidden sm:table-cell text-left text-xs",
+                                        pnlColor(countryCompanyNet),
+                                      )}
+                                    >
+                                      {formatUsdPrecise(countryCompanyNet)}
+                                    </TableCell>
+                                  </TableRow>
+                                  {/* Level 3: Sales Team (under expanded country) */}
+                                  {countryOpen &&
+                                    c.teams.map((t) => {
+                                      const teamCompanyNet = -t.profit - t.ib;
+                                      return (
+                                        <TableRow
+                                          key={`${countryKey}|${t.sales_team}`}
+                                          className="bg-muted/10 hover:bg-muted/20"
+                                        >
+                                          <TableCell className="w-7" />
+                                          <TableCell className="text-xs text-muted-foreground">
+                                            <span className="pl-12">
+                                              {t.sales_team}
+                                            </span>
+                                          </TableCell>
+                                          <TableCell
+                                            className={cn(
+                                              "text-left text-xs",
+                                              pnlColor(t.profit),
+                                            )}
+                                          >
+                                            {formatUsdPrecise(t.profit)}
+                                          </TableCell>
+                                          <TableCell className="text-left text-xs text-muted-foreground">
+                                            {formatUsdPrecise(t.ib)}
+                                          </TableCell>
+                                          <TableCell
+                                            className={cn(
+                                              "hidden sm:table-cell text-left text-xs",
+                                              pnlColor(teamCompanyNet),
+                                            )}
+                                          >
+                                            {formatUsdPrecise(teamCompanyNet)}
+                                          </TableCell>
+                                        </TableRow>
+                                      );
+                                    })}
+                                </Fragment>
+                              );
+                            })}
+                        </Fragment>
+                      );
+                    })}
+                  </TableBody>
+                </Table>
+              </div>
+            </>
           )}
         </CardContent>
       </Card>
