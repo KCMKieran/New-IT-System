@@ -35,6 +35,11 @@ SORTABLE_ALERT_COLS: frozenset[str] = frozenset({
     "net_deposit_hist",
     # Quick Profit columns
     "realized_profit", "floating_profit_snapshot", "position_status",
+    # Gap Trade columns (sub-rule 71 SO+AB, 81 per-client window profit)
+    "l_login_sid", "c_login_sid", "l_profit_usd", "c_profit_usd", "net_usd",
+    "open_diff_sec", "lot_ratio", "shared_ip_count",
+    "client_userid", "contributing_account_count", "profit_ratio",
+    "triggered_by", "window_date",
     # Frontend alias for the `account_group` DB column. We map it in
     # `_resolve_alert_order` so the API stays consistent with the
     # field name the React component already uses.
@@ -104,6 +109,16 @@ CREATE TABLE IF NOT EXISTS quick_profit_rules (
     sort_order       INTEGER NOT NULL DEFAULT 0
 );
 
+-- Gap Trade (休市开盘 gap 检测): single-row config storing the whole
+-- nested config tree as JSON because the shape has two sub-rules (SO+AB
+-- and per-client profit) that don't map cleanly to a rules table.
+CREATE TABLE IF NOT EXISTS gap_trade_config (
+    id          INTEGER PRIMARY KEY CHECK (id = 1),
+    config_json TEXT    NOT NULL DEFAULT '{}',
+    updated_at  DATETIME
+);
+INSERT OR IGNORE INTO gap_trade_config (id, config_json) VALUES (1, '{}');
+
 CREATE TABLE IF NOT EXISTS scan_history (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     scanned_at          TEXT    NOT NULL,
@@ -151,7 +166,49 @@ CREATE TABLE IF NOT EXISTS alert_events (
     deposit_30d              REAL,
     withdrawal_1d            REAL,
     withdrawal_7d            REAL,
-    withdrawal_30d           REAL
+    withdrawal_30d           REAL,
+    -- Gap Trade SO+AB pair (rule_id = 71). Loser leg "L" is also stored on
+    -- the common columns (server, login, symbol, scanned_at). These add
+    -- counter leg "C" + pair relationship + IP overlap metadata.
+    l_login_sid              TEXT,
+    l_userid                 INTEGER,
+    l_name                   TEXT,
+    l_groupsid               TEXT,
+    l_ticket                 INTEGER,
+    l_lots                   REAL,
+    l_open_time              TEXT,
+    l_close_time             TEXT,
+    l_profit_usd             REAL,
+    l_balance_usd            REAL,
+    c_login_sid              TEXT,
+    c_userid                 INTEGER,
+    c_name                   TEXT,
+    c_ticket                 INTEGER,
+    c_lots                   REAL,
+    c_open_time              TEXT,
+    c_close_time             TEXT,
+    c_profit_usd             REAL,
+    open_diff_sec            INTEGER,
+    lot_ratio                REAL,
+    net_usd                  REAL,
+    so_comment               TEXT,
+    shared_ips               TEXT,
+    shared_ip_count          INTEGER,
+    l_ip_count               INTEGER,
+    c_ip_count               INTEGER,
+    scan_days                INTEGER,
+    -- Gap Trade per-client window profit (rule_id = 81). client_userid
+    -- aggregates across multiple accounts of the same client.
+    client_userid                 INTEGER,
+    client_name                   TEXT,
+    client_groupsid               TEXT,
+    contributing_login_sids       TEXT,
+    contributing_account_count    INTEGER,
+    symbols                       TEXT,
+    symbol_count                  INTEGER,
+    profit_ratio                  REAL,
+    triggered_by                  TEXT,    -- "ratio" | "absolute" | "both"
+    window_date                   TEXT     -- "YYYY-MM-DD" MT date
 );
 
 CREATE INDEX IF NOT EXISTS idx_alert_events_scanned_at
@@ -214,6 +271,7 @@ def init_risk_monitor_db() -> None:
         _migrate_drop_profit_window_from_quick_rules(conn)
         _migrate_quick_open_close_enabled_not_null(conn)
         _migrate_quick_profit_columns(conn)
+        _migrate_gap_trade_config(conn)
 
         # One-time backfill: if alert_events is empty but scan_history has
         # rows, flatten their JSON alerts into the event table so existing
@@ -277,7 +335,75 @@ def _migrate_alert_events_columns(conn: sqlite3.Connection) -> None:
     for name, sqltype in qp_cols:
         if name not in cols:
             conn.execute(f"ALTER TABLE alert_events ADD COLUMN {name} {sqltype}")
+    # Gap Trade columns (rules 71 / 81) — added 2026-05-12.
+    gap_cols = [
+        ("l_login_sid", "TEXT"),
+        ("l_userid", "INTEGER"),
+        ("l_name", "TEXT"),
+        ("l_groupsid", "TEXT"),
+        ("l_ticket", "INTEGER"),
+        ("l_lots", "REAL"),
+        ("l_open_time", "TEXT"),
+        ("l_close_time", "TEXT"),
+        ("l_profit_usd", "REAL"),
+        ("l_balance_usd", "REAL"),
+        ("c_login_sid", "TEXT"),
+        ("c_userid", "INTEGER"),
+        ("c_name", "TEXT"),
+        ("c_ticket", "INTEGER"),
+        ("c_lots", "REAL"),
+        ("c_open_time", "TEXT"),
+        ("c_close_time", "TEXT"),
+        ("c_profit_usd", "REAL"),
+        ("open_diff_sec", "INTEGER"),
+        ("lot_ratio", "REAL"),
+        ("net_usd", "REAL"),
+        ("so_comment", "TEXT"),
+        ("shared_ips", "TEXT"),
+        ("shared_ip_count", "INTEGER"),
+        ("l_ip_count", "INTEGER"),
+        ("c_ip_count", "INTEGER"),
+        ("scan_days", "INTEGER"),
+        ("client_userid", "INTEGER"),
+        ("client_name", "TEXT"),
+        ("client_groupsid", "TEXT"),
+        ("contributing_login_sids", "TEXT"),
+        ("contributing_account_count", "INTEGER"),
+        ("symbols", "TEXT"),
+        ("symbol_count", "INTEGER"),
+        ("profit_ratio", "REAL"),
+        ("triggered_by", "TEXT"),
+        ("window_date", "TEXT"),
+    ]
+    for name, sqltype in gap_cols:
+        if name not in cols:
+            conn.execute(f"ALTER TABLE alert_events ADD COLUMN {name} {sqltype}")
     conn.commit()
+
+
+def _migrate_gap_trade_config(conn: sqlite3.Connection) -> None:
+    """Create gap_trade_config table on installations that predate Gap Trade.
+
+    `init_risk_monitor_db` runs `_SCHEMA_SQL` first which CREATE-IF-NOT-EXISTS
+    the table, so this helper is mostly defensive — kept symmetric with the
+    other migration helpers and a safety net if the schema script ever stops
+    being the source of truth.
+    """
+    rows = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='gap_trade_config'"
+    ).fetchall()
+    if not rows:
+        conn.executescript(
+            """
+            CREATE TABLE gap_trade_config (
+                id          INTEGER PRIMARY KEY CHECK (id = 1),
+                config_json TEXT    NOT NULL DEFAULT '{}',
+                updated_at  DATETIME
+            );
+            INSERT OR IGNORE INTO gap_trade_config (id, config_json) VALUES (1, '{}');
+            """
+        )
+        conn.commit()
 
 
 def _migrate_quick_profit_columns(conn: sqlite3.Connection) -> None:
@@ -583,6 +709,43 @@ def save_quick_profit_config(enabled: bool, rules: list[dict]) -> None:
             )
 
 
+# ── Gap Trade config (JSON-blob single row) ───────────────
+
+
+def load_gap_trade_config() -> dict[str, Any]:
+    """Read the JSON-encoded Gap Trade config; returns {} when unset.
+
+    The route layer wraps the result in the Pydantic `GapTradeConfig` model
+    which applies field defaults, so a fresh install returning {} still
+    surfaces a fully-populated config to the frontend.
+    """
+    with get_risk_monitor_db() as conn:
+        row = conn.execute(
+            "SELECT config_json FROM gap_trade_config WHERE id = 1"
+        ).fetchone()
+    if not row:
+        return {}
+    raw = row["config_json"] or "{}"
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        # Corrupt JSON would otherwise 500 the whole risk-monitor page;
+        # treat it as "no override" and let defaults apply.
+        logger.warning("gap_trade_config.config_json is not valid JSON; using defaults")
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_gap_trade_config(config: dict[str, Any]) -> None:
+    """Persist the Gap Trade config as a JSON blob."""
+    with get_risk_monitor_db() as conn:
+        conn.execute(
+            "UPDATE gap_trade_config SET config_json = ?, "
+            "updated_at = datetime('now') WHERE id = 1",
+            (json.dumps(config),),
+        )
+
+
 # ── Scan history + alert events (write path) ──────────────
 
 def append_scan_and_events(
@@ -618,49 +781,57 @@ def append_scan_and_events(
         )
         batch_id = cursor.lastrowid or 0
 
+        # Build the INSERT statement once outside the loop so the column list
+        # and the `?` placeholders are derived from the same source. This
+        # eliminates a copy/paste vector for column-count mismatch.
+        _base_cols = (
+            "scan_batch_id", "scanned_at", "rule_id", "rule_label",
+            "server", "login", "symbol", "order_count", "total_lots",
+            "hold_duration_sec", "total_profit_usd",
+            "first_open", "last_open",
+            "equity", "balance", "equity_per_lot", "total_open_lots",
+            "leverage", "account_group", "orders_json", "currency", "zipcode",
+            "net_deposit_hist", "realized_profit", "floating_profit_snapshot",
+            "position_status",
+        )
+        _all_cols = _base_cols + _GAP_TRADE_INSERT_COLS
+        _placeholders = ", ".join(["?"] * len(_all_cols))
+        _insert_sql = (
+            f"INSERT INTO alert_events ({', '.join(_all_cols)}) "
+            f"VALUES ({_placeholders})"
+        )
+
         for alert in alerts:
-            conn.execute(
-                """
-                INSERT INTO alert_events
-                    (scan_batch_id, scanned_at, rule_id, rule_label,
-                     server, login, symbol, order_count, total_lots,
-                     hold_duration_sec, total_profit_usd,
-                     first_open, last_open,
-                     equity, balance, equity_per_lot, total_open_lots,
-                     leverage, account_group, orders_json, currency, zipcode, net_deposit_hist,
-                     realized_profit, floating_profit_snapshot, position_status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                        ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    batch_id,
-                    scanned_at,
-                    alert.get("rule_id", 0),
-                    alert.get("rule_label", ""),
-                    alert.get("server", ""),
-                    alert.get("login", 0),
-                    alert.get("symbol", ""),
-                    alert.get("order_count", 0),
-                    alert.get("total_lots", 0.0),
-                    alert.get("hold_duration_sec"),
-                    alert.get("total_profit_usd"),
-                    alert.get("first_open"),
-                    alert.get("last_open"),
-                    alert.get("equity"),
-                    alert.get("balance"),
-                    alert.get("equity_per_lot"),
-                    alert.get("total_open_lots"),
-                    alert.get("leverage"),
-                    alert.get("group"),
-                    json.dumps(alert.get("orders", [])),
-                    alert.get("currency"),
-                    alert.get("zipcode"),
-                    alert.get("net_deposit_hist"),
-                    alert.get("realized_profit"),
-                    alert.get("floating_profit_snapshot"),
-                    alert.get("position_status"),
-                ),
+            base_values = (
+                batch_id,
+                scanned_at,
+                alert.get("rule_id", 0),
+                alert.get("rule_label", ""),
+                alert.get("server", ""),
+                alert.get("login", 0),
+                alert.get("symbol", ""),
+                alert.get("order_count", 0),
+                alert.get("total_lots", 0.0),
+                alert.get("hold_duration_sec"),
+                alert.get("total_profit_usd"),
+                alert.get("first_open"),
+                alert.get("last_open"),
+                alert.get("equity"),
+                alert.get("balance"),
+                alert.get("equity_per_lot"),
+                alert.get("total_open_lots"),
+                alert.get("leverage"),
+                alert.get("group"),
+                json.dumps(alert.get("orders", [])),
+                alert.get("currency"),
+                alert.get("zipcode"),
+                alert.get("net_deposit_hist"),
+                alert.get("realized_profit"),
+                alert.get("floating_profit_snapshot"),
+                alert.get("position_status"),
             )
+            gap_values = tuple(alert.get(col) for col in _GAP_TRADE_INSERT_COLS)
+            conn.execute(_insert_sql, base_values + gap_values)
 
         # Retention purge (both tables share the same window).
         cutoff_expr = f"datetime('now', '-{_RETENTION_DAYS} days')"
@@ -767,8 +938,33 @@ _ALERT_SELECT_COLS = """
     equity, balance, equity_per_lot, total_open_lots,
     leverage, account_group, orders_json, currency, zipcode,
     net_deposit_hist,
-    realized_profit, floating_profit_snapshot, position_status
+    realized_profit, floating_profit_snapshot, position_status,
+    l_login_sid, l_userid, l_name, l_groupsid, l_ticket, l_lots,
+    l_open_time, l_close_time, l_profit_usd, l_balance_usd,
+    c_login_sid, c_userid, c_name, c_ticket, c_lots,
+    c_open_time, c_close_time, c_profit_usd,
+    open_diff_sec, lot_ratio, net_usd, so_comment,
+    shared_ips, shared_ip_count, l_ip_count, c_ip_count, scan_days,
+    client_userid, client_name, client_groupsid,
+    contributing_login_sids, contributing_account_count,
+    symbols, symbol_count, profit_ratio, triggered_by, window_date
 """
+
+# Field names that flow into alert_events through `append_scan_and_events`.
+# Kept as an ordered list because both the INSERT column list and the
+# matching `?` placeholders must line up — building both from the same
+# source removes a copy-paste failure mode.
+_GAP_TRADE_INSERT_COLS: tuple[str, ...] = (
+    "l_login_sid", "l_userid", "l_name", "l_groupsid", "l_ticket", "l_lots",
+    "l_open_time", "l_close_time", "l_profit_usd", "l_balance_usd",
+    "c_login_sid", "c_userid", "c_name", "c_ticket", "c_lots",
+    "c_open_time", "c_close_time", "c_profit_usd",
+    "open_diff_sec", "lot_ratio", "net_usd", "so_comment",
+    "shared_ips", "shared_ip_count", "l_ip_count", "c_ip_count", "scan_days",
+    "client_userid", "client_name", "client_groupsid",
+    "contributing_login_sids", "contributing_account_count",
+    "symbols", "symbol_count", "profit_ratio", "triggered_by", "window_date",
+)
 
 
 def query_alert_events(

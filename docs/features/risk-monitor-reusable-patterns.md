@@ -480,6 +480,25 @@ Implementation detail: `include_rule_breakdown` runs when `rule_id_min` **or** `
 - **Burst**: `burstAlertRuleId(rule, index)` = `rule.id ?? index + 1` (matches `scan_burst_open`).
 - **Quick**: `QUICK_RULE_ID_BASE + index` (51, 52, …; detection normalizes SQLite ids to this band).
 - **Quick Profit**: `QUICK_PROFIT_RULE_ID_BASE + index` (61, 62, …).
+- **Gap Trade**: fixed `71` (SO+AB) + `81` (per-client profit). Range 71-90 reserved; not user-configurable, so no per-index mapping.
+
+### Variant: split-detector tab (Gap Trade)
+
+Gap Trade Tab (2026-05-12) is a precedent for a different shape — one tab,
+**two fixed sub-detectors instead of N configurable rules**:
+
+- **2 cards** (one per sub-rule_id, not one per user-defined rule); no rule filter dropdown.
+- **2 AG-Grid sections** stacked in one tab (检测 A SO+AB + 检测 B 超额 Profit), each
+  with its own 9-column compact table. Section headers use `<Badge variant="outline">`.
+- **Detail Sheet** (right-side; mobile bottom 85vh) instead of an expansion row — opens
+  on row click, dispatches to `GapTradeSoDetail` or `GapTradeGapDetail` by `rule_id`.
+- **No pagination** — daily volume is small (≤ a few dozen), single `page_size=500` fetch.
+- **Day-based time presets** (今天 / 昨天 / 3d / 7d / 30d / 自定义) instead of hours.
+- **No 立即扫描 / 刷新 button** — cron is `mon-fri 02:05 MT` only, data updates 1×/day.
+
+When adding another single-day cron-driven rule with multiple sub-detectors,
+copy GapTradeTab; for multi-rule tunable detectors (Martingale, Scale-In, etc.),
+copy 快开快平 + §11 above.
 
 ---
 

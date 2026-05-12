@@ -29,6 +29,13 @@ services:
       # Extra switch specifically for the login_ip scheduler so dev can disable
       # it without affecting the main IB-financial scheduler above.
       - LOGIN_IP_SCHEDULER_ENABLED=false
+      # Risk-monitor schedulers stay off in dev because dev shares the SQLite
+      # alert_events table with prod. Two concurrent schedulers would double-
+      # write alerts and break Quick Profit cross-scan dedup (each process has
+      # its own in-memory _latest_result). Rule edits / manual /scan-now still
+      # work; only the periodic background tick is suppressed here.
+      - BURST_SCAN_ENABLED=false
+      - GAP_TRADE_SCAN_ENABLED=false
     restart: unless-stopped
     depends_on:
       - redis

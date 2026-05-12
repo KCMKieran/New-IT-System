@@ -39,6 +39,14 @@ import {
   DrawerClose,
 } from "@/components/ui/drawer";
 import {
+  Sheet,
+  SheetContent,
+  SheetHeader,
+  SheetTitle,
+  SheetDescription,
+} from "@/components/ui/sheet";
+import { Separator } from "@/components/ui/separator";
+import {
   Popover,
   PopoverContent,
   PopoverTrigger,
@@ -112,6 +120,46 @@ interface AlertEvent {
   floating_profit_snapshot?: number | null;
   /** "closed" | "open" | "mixed" — drives the status Badge color. */
   position_status?: string | null;
+  // ── Gap Trade fields (rule_id 71 + 81). All NULL on other rule rows. ──
+  // rule 71 (SO + AB pair) — loser leg L + counter leg C + IP overlap.
+  l_login_sid?: string | null;
+  l_userid?: number | null;
+  l_name?: string | null;
+  l_groupsid?: string | null;
+  l_ticket?: number | null;
+  l_lots?: number | null;
+  l_open_time?: string | null;
+  l_close_time?: string | null;
+  l_profit_usd?: number | null;
+  l_balance_usd?: number | null;
+  c_login_sid?: string | null;
+  c_userid?: number | null;
+  c_name?: string | null;
+  c_ticket?: number | null;
+  c_lots?: number | null;
+  c_open_time?: string | null;
+  c_close_time?: string | null;
+  c_profit_usd?: number | null;
+  open_diff_sec?: number | null;
+  lot_ratio?: number | null;
+  net_usd?: number | null;
+  so_comment?: string | null;
+  shared_ips?: string | null;
+  shared_ip_count?: number | null;
+  l_ip_count?: number | null;
+  c_ip_count?: number | null;
+  scan_days?: number | null;
+  // rule 81 (per-client window profit) — aggregate over a client's accounts.
+  client_userid?: number | null;
+  client_name?: string | null;
+  client_groupsid?: string | null;
+  contributing_login_sids?: string | null;
+  contributing_account_count?: number | null;
+  symbols?: string | null;
+  symbol_count?: number | null;
+  profit_ratio?: number | null;
+  triggered_by?: string | null;
+  window_date?: string | null;
 }
 
 interface AlertsResponse {
@@ -473,12 +521,16 @@ const RISK_MONITOR_TABS = [
   "burst-open",
   "quick-open-close",
   "quick-profit",
+  "gap-trade",
 ] as const;
 type RiskMonitorTab = (typeof RISK_MONITOR_TABS)[number];
 
 function isRiskMonitorTab(s: string | null): s is RiskMonitorTab {
   return (
-    s === "burst-open" || s === "quick-open-close" || s === "quick-profit"
+    s === "burst-open" ||
+    s === "quick-open-close" ||
+    s === "quick-profit" ||
+    s === "gap-trade"
   );
 }
 
@@ -525,7 +577,7 @@ export default function RiskMonitor() {
   return (
     <div className="flex min-w-0 flex-col gap-4 p-4 lg:p-6">
       <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full min-w-0">
-        <TabsList className="grid w-full max-w-4xl grid-cols-3 sm:auto-cols-fr sm:grid-flow-col">
+        <TabsList className="grid w-full max-w-4xl grid-cols-4 sm:auto-cols-fr sm:grid-flow-col">
           <TabsTrigger
             value="burst-open"
             className="px-2 text-xs sm:px-3 sm:text-sm whitespace-nowrap"
@@ -544,6 +596,12 @@ export default function RiskMonitor() {
           >
             快速获利
           </TabsTrigger>
+          <TabsTrigger
+            value="gap-trade"
+            className="px-2 text-xs sm:px-3 sm:text-sm whitespace-nowrap"
+          >
+            Gap Trade
+          </TabsTrigger>
         </TabsList>
 
         <TabsContent value="burst-open">
@@ -554,6 +612,9 @@ export default function RiskMonitor() {
         </TabsContent>
         <TabsContent value="quick-profit">
           <QuickProfitTab active={activeTab === "quick-profit"} />
+        </TabsContent>
+        <TabsContent value="gap-trade">
+          <GapTradeTab active={activeTab === "gap-trade"} />
         </TabsContent>
       </Tabs>
 
@@ -3661,6 +3722,1307 @@ function QuickProfitConfigDrawer({
         </div>
       </DrawerContent>
     </Drawer>
+  );
+}
+
+// ── Gap Trade Tab ─────────────────────────────────────────
+// Rule 71 = SO + AB pair (双账户配对 + IP 共享高亮)
+// Rule 81 = per-client window profit (单客户聚合)
+// Scan window: each weekday MT 00:00–02:00 (cron at 02:05 MT)
+// Time filter is DAY-based (Today / Yesterday default / 3d / 7d / custom)
+// because the data only updates once a day.
+
+const GAP_TRADE_SO_RULE_ID = 71;
+const GAP_TRADE_GAP_RULE_ID = 81;
+
+interface GapTradeSoRuleConfig {
+  enabled: boolean;
+  max_open_diff_sec: number;
+  min_lot_ratio: number;
+  max_lot_ratio: number;
+  cross_client_only: boolean;
+}
+
+interface GapTradeGapRuleConfig {
+  enabled: boolean;
+  profit_ratio_min: number;
+  min_profit_usd: number;
+  min_net_deposit_hist: number;
+}
+
+interface GapTradeConfig {
+  window_start_hour_mt: number;
+  window_end_hour_mt: number;
+  weekdays_only: boolean;
+  sid_list: number[];
+  so_ab: GapTradeSoRuleConfig;
+  gap_profit: GapTradeGapRuleConfig;
+}
+
+type GapTradeDayRange = "today" | "yesterday" | "3d" | "7d" | "30d" | "custom";
+
+const GAP_TRADE_DAY_RANGES: { key: GapTradeDayRange; label: string }[] = [
+  { key: "today", label: "今天" },
+  { key: "yesterday", label: "昨天" },
+  { key: "3d", label: "最近 3 天" },
+  { key: "7d", label: "最近 7 天" },
+  { key: "30d", label: "最近 30 天" },
+  { key: "custom", label: "自定义" },
+];
+
+/** Build [since, until] ISO from a day-based selection. Hours snap to local
+ *  midnight (00:00) → next-midnight so the window aligns with the daily cron. */
+function buildGapTradeRangeIso(
+  preset: GapTradeDayRange,
+  custom: DateRange | undefined,
+): { since: string; until: string } | null {
+  if (preset === "custom") {
+    if (!custom?.from) return null;
+    const from = new Date(custom.from);
+    from.setHours(0, 0, 0, 0);
+    const to = custom.to ? new Date(custom.to) : new Date(custom.from);
+    to.setHours(23, 59, 59, 999);
+    return {
+      since: clampToRetention(from).toISOString(),
+      until: to.toISOString(),
+    };
+  }
+  const now = new Date();
+  const today0 = new Date(now);
+  today0.setHours(0, 0, 0, 0);
+  let since: Date;
+  let until: Date;
+  switch (preset) {
+    case "today":
+      since = today0;
+      until = now;
+      break;
+    case "yesterday": {
+      const y0 = new Date(today0);
+      y0.setDate(y0.getDate() - 1);
+      const y1 = new Date(today0);
+      since = y0;
+      until = y1;
+      break;
+    }
+    case "3d":
+      since = new Date(today0.getTime() - 3 * 24 * 3600 * 1000);
+      until = now;
+      break;
+    case "7d":
+      since = new Date(today0.getTime() - 7 * 24 * 3600 * 1000);
+      until = now;
+      break;
+    case "30d":
+      since = new Date(today0.getTime() - 30 * 24 * 3600 * 1000);
+      until = now;
+      break;
+    default:
+      since = today0;
+      until = now;
+  }
+  return {
+    since: clampToRetention(since).toISOString(),
+    until: until.toISOString(),
+  };
+}
+
+/** Render a `{sid}-{login}` string as a CRM-linked cell.
+ *  Shared by both halves of the SO+AB table so L / C cells look identical. */
+function renderLoginSidLink(value: string | null | undefined): React.ReactNode {
+  if (!value) return null;
+  const [sidStr, loginStr] = value.split("-");
+  const sid = Number(sidStr);
+  const login = Number(loginStr);
+  if (!Number.isFinite(login)) return value;
+  const server = sid === 5 ? "MT5" : sid === 6 ? "MT4_Live2" : "MT4_Live";
+  return (
+    <a
+      href={crmLink(login, server)}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="text-blue-600 hover:underline dark:text-blue-400 font-medium"
+      onClick={(e) => e.stopPropagation()}
+    >
+      {value}
+    </a>
+  );
+}
+
+/** Compact server label cell. */
+function fmtRatio(v: number | null | undefined): string {
+  if (v === null || v === undefined) return "—";
+  return `${v.toFixed(2)}×`;
+}
+
+/** First N elements of a comma-joined string, with a "+N" suffix when truncated. */
+function truncateList(csv: string | null | undefined, n: number): string {
+  if (!csv) return "—";
+  const parts = csv.split(",").filter(Boolean);
+  if (parts.length <= n) return parts.join(", ");
+  return `${parts.slice(0, n).join(", ")} +${parts.length - n}`;
+}
+
+function GapTradeTab({ active }: { active: boolean }) {
+  const { theme } = useTheme();
+  const isDarkMode = theme === "dark";
+  const isMobile = useIsMobile();
+  const gridStyle = useGridThemeStyle(isDarkMode);
+
+  // ── Filters ──
+  const [rangePreset, setRangePreset] = useState<GapTradeDayRange>("yesterday");
+  const [customRange, setCustomRange] = useState<DateRange | undefined>();
+  const [datePickerOpen, setDatePickerOpen] = useState(false);
+  const [serverFilter, setServerFilter] = useState<string>("all");
+
+  // ── Data state ──
+  const [alerts, setAlerts] = useState<AlertEvent[]>([]);
+  const [stats, setStats] = useState<AlertsStats>({
+    suspicious_count: 0,
+    event_count: 0,
+    servers: [],
+  });
+  const [loading, setLoading] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [lastRefresh, setLastRefresh] = useState<string | null>(null);
+
+  // ── Config drawer ──
+  const [config, setConfig] = useState<GapTradeConfig | null>(null);
+  const [editConfig, setEditConfig] = useState<GapTradeConfig | null>(null);
+  const [configOpen, setConfigOpen] = useState(false);
+  const [savingConfig, setSavingConfig] = useState(false);
+
+  // ── Detail Sheet (right-side panel) ──
+  const [detailRow, setDetailRow] = useState<AlertEvent | null>(null);
+
+  const effectiveRange = useMemo(
+    () => buildGapTradeRangeIso(rangePreset, customRange),
+    [rangePreset, customRange],
+  );
+
+  const soAbAlerts = useMemo(
+    () => alerts.filter((a) => a.rule_id === GAP_TRADE_SO_RULE_ID),
+    [alerts],
+  );
+  const gapAlerts = useMemo(
+    () => alerts.filter((a) => a.rule_id === GAP_TRADE_GAP_RULE_ID),
+    [alerts],
+  );
+
+  // Per-rule event counts. `stats.by_rule` is authoritative; fall back to
+  // local row counts when the backend omits the breakdown.
+  const soAbCount = useMemo(() => {
+    if (stats.by_rule) {
+      const r = stats.by_rule.find((b) => b.rule_id === GAP_TRADE_SO_RULE_ID);
+      if (r) return r.event_count;
+    }
+    return soAbAlerts.length;
+  }, [stats.by_rule, soAbAlerts.length]);
+  const gapClientCount = useMemo(() => {
+    if (stats.by_rule) {
+      const r = stats.by_rule.find((b) => b.rule_id === GAP_TRADE_GAP_RULE_ID);
+      if (r) return r.event_count;
+    }
+    return gapAlerts.length;
+  }, [stats.by_rule, gapAlerts.length]);
+
+  const buildFilterQs = useCallback(
+    (range: { since: string; until: string }) => {
+      const qs = new URLSearchParams({
+        since: range.since,
+        until: range.until,
+      });
+      if (serverFilter !== "all") qs.set("server", serverFilter);
+      return qs;
+    },
+    [serverFilter],
+  );
+
+  const fetchAlerts = useCallback(
+    async (signal?: AbortSignal) => {
+      if (!effectiveRange) return;
+      setLoading(true);
+      try {
+        const qs = buildFilterQs(effectiveRange);
+        // Single big page — Gap Trade output is small (≤ a few dozen per
+        // weekday). 500 is the API cap; if we ever exceed it we'll add paging.
+        const alertsQs = new URLSearchParams(qs);
+        alertsQs.set("page_size", "500");
+        alertsQs.set("sort_by", "scanned_at");
+        alertsQs.set("sort_order", "desc");
+        const [alertsRes, statsRes] = await Promise.all([
+          apiFetch(`/api/v1/risk-monitor/gap-trade/alerts?${alertsQs}`, {
+            signal,
+          }),
+          apiFetch(`/api/v1/risk-monitor/gap-trade/alerts/stats?${qs}`, {
+            signal,
+          }),
+        ]);
+        if (alertsRes.ok) {
+          const json: AlertsResponse = await alertsRes.json();
+          setAlerts(json.entries);
+        }
+        if (statsRes.ok) {
+          const json: AlertsStats = await statsRes.json();
+          setStats(json);
+        }
+        setLastRefresh(
+          new Date().toLocaleTimeString("zh-CN", {
+            hour: "2-digit",
+            minute: "2-digit",
+            second: "2-digit",
+          }),
+        );
+      } catch (err) {
+        if ((err as Error).name !== "AbortError") {
+          console.error("Failed to load gap-trade alerts", err);
+        }
+      } finally {
+        setLoading(false);
+      }
+    },
+    [effectiveRange, buildFilterQs],
+  );
+
+  // Fetch on activation + when filters change. AbortController per React
+  // 18 StrictMode rules — see CLAUDE.md. No interval poll: data only changes
+  // once a day at MT 02:05, so the active-tab fetch is enough.
+  useEffect(() => {
+    if (!active) return;
+    const controller = new AbortController();
+    fetchAlerts(controller.signal);
+    return () => controller.abort();
+  }, [active, fetchAlerts]);
+
+  // Fetch config once on activation; reused on every drawer open.
+  useEffect(() => {
+    if (!active) return;
+    const controller = new AbortController();
+    (async () => {
+      try {
+        const res = await apiFetch(`/api/v1/risk-monitor/gap-trade/config`, {
+          signal: controller.signal,
+        });
+        if (res.ok) {
+          const json: GapTradeConfig = await res.json();
+          setConfig(json);
+        }
+      } catch (err) {
+        if ((err as Error).name !== "AbortError") {
+          console.error("Failed to load gap-trade config", err);
+        }
+      }
+    })();
+    return () => controller.abort();
+  }, [active]);
+
+  const handleExport = useCallback(async () => {
+    if (!effectiveRange) return;
+    setExporting(true);
+    try {
+      const qs = buildFilterQs(effectiveRange);
+      const res = await apiFetch(
+        `/api/v1/risk-monitor/gap-trade/alerts/export?${qs}`,
+      );
+      if (!res.ok) throw new Error(`Export HTTP ${res.status}`);
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `gap-trade_${fmtFilenameStamp(effectiveRange.since)}_to_${fmtFilenameStamp(effectiveRange.until)}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error("Failed to export gap-trade CSV", err);
+    } finally {
+      setExporting(false);
+    }
+  }, [effectiveRange, buildFilterQs]);
+
+  const handleOpenConfig = () => {
+    setEditConfig(config ? structuredClone(config) : null);
+    setConfigOpen(true);
+  };
+
+  const handleSaveConfig = async () => {
+    if (!editConfig) return;
+    setSavingConfig(true);
+    try {
+      const res = await apiFetch(`/api/v1/risk-monitor/gap-trade/config`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(editConfig),
+      });
+      if (res.ok) {
+        const json: GapTradeConfig = await res.json();
+        setConfig(json);
+        setConfigOpen(false);
+      } else {
+        console.error("Save gap-trade config failed", await res.text());
+      }
+    } catch (err) {
+      console.error("Save gap-trade config error", err);
+    } finally {
+      setSavingConfig(false);
+    }
+  };
+
+  // ── Column definitions ──
+  // Layout / column conventions mirror BurstOpen tab: fixed `width` instead
+  // of `minWidth`, `colId` declared, server-side-style numeric formatters,
+  // CRM-link cell renderers identical to LoginCell.
+
+  const soAbColumns = useMemo<ColDef<AlertEvent>[]>(
+    () => [
+      {
+        // First column replaces the prior "⚠" with a plain "是 / 否" label
+        // so the table reads consistently with the rest of the row data —
+        // the row's yellow background already conveys the alert weight.
+        headerName: "是否同 IP",
+        field: "shared_ip_count" as keyof AlertEvent,
+        colId: "shared_ip_count",
+        width: 110,
+        cellRenderer: (params: { value?: number | null }) => {
+          const yes = (params.value ?? 0) > 0;
+          return (
+            <span
+              className={
+                yes
+                  ? "font-semibold text-amber-700 dark:text-amber-400"
+                  : "text-muted-foreground"
+              }
+            >
+              {yes ? "是" : "否"}
+            </span>
+          );
+        },
+      },
+      {
+        headerName: "强平时间 (GMT+8)",
+        field: "l_close_time" as keyof AlertEvent,
+        colId: "l_close_time",
+        width: 165,
+        valueFormatter: (p) => fmtTime(p.value as string | null | undefined),
+      },
+      { headerName: "产品", field: "symbol", colId: "symbol", width: 120 },
+      {
+        headerName: "L 账户 (强平)",
+        field: "l_login_sid" as keyof AlertEvent,
+        colId: "l_login_sid",
+        width: 140,
+        cellRenderer: (params: { value?: string | null }) =>
+          renderLoginSidLink(params.value),
+      },
+      {
+        headerName: "C 账户 (对手)",
+        field: "c_login_sid" as keyof AlertEvent,
+        colId: "c_login_sid",
+        width: 140,
+        cellRenderer: (params: { value?: string | null }) =>
+          renderLoginSidLink(params.value),
+      },
+      {
+        headerName: "L 亏损 (USD)",
+        field: "l_profit_usd" as keyof AlertEvent,
+        colId: "l_profit_usd",
+        width: 130,
+        cellClass: "ag-right-aligned-cell text-rose-600 dark:text-rose-400",
+        valueFormatter: (p) => fmtCurrency(p.value as number | null | undefined),
+      },
+      {
+        headerName: "C 盈利 (USD)",
+        field: "c_profit_usd" as keyof AlertEvent,
+        colId: "c_profit_usd",
+        width: 130,
+        cellClass: "ag-right-aligned-cell text-emerald-600 dark:text-emerald-400",
+        valueFormatter: (p) => fmtCurrency(p.value as number | null | undefined),
+      },
+      {
+        headerName: "净 (USD)",
+        field: "net_usd" as keyof AlertEvent,
+        colId: "net_usd",
+        width: 110,
+        cellClass: "ag-right-aligned-cell",
+        cellRenderer: (params: { value?: number | null }) => {
+          const v = params.value;
+          if (v === null || v === undefined) return "—";
+          const strong = Math.abs(v) < 100;
+          return (
+            <span className={strong ? "font-bold" : ""}>{fmtCurrency(v)}</span>
+          );
+        },
+      },
+      {
+        headerName: "同 IP 数",
+        field: "shared_ip_count" as keyof AlertEvent,
+        colId: "shared_ip_count_num",
+        width: 100,
+        cellClass: "ag-right-aligned-cell",
+        cellRenderer: (params: { value?: number | null }) => {
+          const v = params.value ?? 0;
+          if (v === 0) return "—";
+          return <span className="font-bold">{v}</span>;
+        },
+      },
+    ],
+    [],
+  );
+
+  const gapColumns = useMemo<ColDef<AlertEvent>[]>(
+    () => [
+      {
+        headerName: "窗口日期",
+        field: "window_date" as keyof AlertEvent,
+        colId: "window_date",
+        width: 120,
+      },
+      {
+        headerName: "客户 ID",
+        field: "client_userid" as keyof AlertEvent,
+        colId: "client_userid",
+        width: 110,
+        cellRenderer: (params: { value?: number | null }) => {
+          const v = params.value;
+          if (!v) return null;
+          return (
+            <a
+              href={`https://mt4.kohleglobal.com/crm/users/${v}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-blue-600 hover:underline dark:text-blue-400 font-medium"
+              onClick={(e) => e.stopPropagation()}
+            >
+              {v}
+            </a>
+          );
+        },
+      },
+      {
+        headerName: "客户名",
+        field: "client_name" as keyof AlertEvent,
+        colId: "client_name",
+        width: 180,
+        tooltipField: "client_name" as keyof AlertEvent,
+      },
+      {
+        headerName: "账户数",
+        field: "contributing_account_count" as keyof AlertEvent,
+        colId: "contributing_account_count",
+        width: 90,
+        cellClass: "ag-right-aligned-cell",
+        cellRenderer: (params: { value?: number | null }) => {
+          const v = params.value ?? 1;
+          return <span className={v > 1 ? "font-bold" : ""}>{v}</span>;
+        },
+      },
+      {
+        headerName: "产品",
+        field: "symbols" as keyof AlertEvent,
+        colId: "symbols",
+        width: 180,
+        valueFormatter: (p) =>
+          truncateList(p.value as string | null | undefined, 2),
+        tooltipValueGetter: (p) =>
+          (p.data?.symbols as string | undefined) ?? "",
+      },
+      {
+        headerName: "累积 Profit (USD)",
+        field: "total_profit_usd",
+        colId: "total_profit_usd",
+        width: 150,
+        cellClass:
+          "ag-right-aligned-cell text-emerald-600 dark:text-emerald-400 font-bold",
+        valueFormatter: (p) =>
+          fmtCurrency(p.value as number | null | undefined),
+      },
+      {
+        headerName: "净入金 (USD)",
+        field: "net_deposit_hist" as keyof AlertEvent,
+        colId: "net_deposit_hist",
+        width: 130,
+        cellClass: "ag-right-aligned-cell",
+        valueFormatter: (p) =>
+          fmtCurrency(p.value as number | null | undefined),
+      },
+      {
+        headerName: "倍数",
+        field: "profit_ratio" as keyof AlertEvent,
+        colId: "profit_ratio",
+        width: 90,
+        cellClass: "ag-right-aligned-cell",
+        cellRenderer: (params: { value?: number | null }) => {
+          const v = params.value;
+          if (v === null || v === undefined) return "—";
+          const danger = v >= 2.0;
+          return (
+            <span
+              className={cn(
+                "font-bold",
+                danger && "text-rose-600 dark:text-rose-400",
+              )}
+            >
+              {fmtRatio(v)}
+            </span>
+          );
+        },
+      },
+      {
+        headerName: "触发",
+        field: "triggered_by" as keyof AlertEvent,
+        colId: "triggered_by",
+        width: 100,
+        cellRenderer: (params: { value?: string | null }) => {
+          const v = params.value;
+          if (!v) return null;
+          const labelMap: Record<string, string> = {
+            ratio: "比率",
+            absolute: "绝对",
+            both: "双触发",
+          };
+          const variant =
+            v === "both"
+              ? "destructive"
+              : v === "ratio"
+                ? "secondary"
+                : "outline";
+          return (
+            <Badge
+              variant={variant as "destructive" | "secondary" | "outline"}
+            >
+              {labelMap[v] ?? v}
+            </Badge>
+          );
+        },
+      },
+    ],
+    [],
+  );
+
+  // Row class: yellow highlight for shared-IP SO+AB rows. Keeps the prior
+  // visual signal (per user request) while the new 是否同 IP column makes
+  // the underlying flag scannable in the column too.
+  const soAbRowClass = useCallback((params: { data?: AlertEvent }) => {
+    if (!params.data) return "";
+    return (params.data.shared_ip_count ?? 0) > 0
+      ? "gap-trade-shared-ip-row"
+      : "";
+  }, []);
+
+  const rangeLabel =
+    rangePreset === "custom" && customRange?.from
+      ? customRange.to
+        ? `${format(customRange.from, "yyyy-MM-dd")} ~ ${format(customRange.to, "yyyy-MM-dd")}`
+        : format(customRange.from, "yyyy-MM-dd")
+      : (GAP_TRADE_DAY_RANGES.find((p) => p.key === rangePreset)?.label ??
+        "昨天");
+
+  return (
+    <>
+      <div className="flex min-w-0 flex-col gap-4">
+        {/* Header — same shape as other tabs: description + actions on the right */}
+        <div className={RISK_MONITOR_HEADER_ROW}>
+          <div className="min-w-0">
+            <p className="text-sm text-muted-foreground">
+              每个工作日 MT 02:05 自动扫描前 2 小时（00:00–02:00）窗口的强平 AB
+              配对与客户级超额盈利，数据每日刷新一次。
+            </p>
+            <p className="text-sm text-muted-foreground">
+              当前范围:{" "}
+              <span className="font-medium text-foreground">{rangeLabel}</span>
+              {lastRefresh && ` · 上次刷新 ${lastRefresh}`}
+              {config &&
+                ` · 扫描窗口 MT ${config.window_start_hour_mt
+                  .toString()
+                  .padStart(2, "0")}:00 ~ ${config.window_end_hour_mt
+                  .toString()
+                  .padStart(2, "0")}:00 · ${
+                  config.weekdays_only ? "仅工作日" : "每日"
+                }`}
+            </p>
+          </div>
+          <div className={RISK_MONITOR_HEADER_ACTIONS}>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleExport}
+              disabled={exporting || alerts.length === 0}
+            >
+              <Download
+                className={cn("h-4 w-4 mr-1.5", exporting && "animate-spin")}
+              />
+              {exporting ? "导出中..." : "导出 CSV"}
+            </Button>
+            <Button variant="outline" size="sm" onClick={handleOpenConfig}>
+              <Settings2 className="h-4 w-4 mr-1.5" />
+              规则配置
+            </Button>
+          </div>
+        </div>
+
+        {/* Per-rule summary cards — same compact pattern as 批量下单 / 快开快平.
+            Only the 2 sub-detectors are shown; the prior "同 IP 强信号" card is
+            removed since the table already conveys it via row highlight + column. */}
+        <div className="grid w-full gap-1.5 sm:gap-2 grid-cols-1 sm:grid-cols-2">
+          <SummaryCard
+            compact
+            label="检测 A · SO + AB 配对"
+            value={soAbCount}
+            description="窗口内疑似对敲的强平 L + 获利 C 双账户对（同 IP 行黄色高亮）"
+            dotColor={RULE_SUMMARY_CARD_STYLES[0].dot}
+            textColor={RULE_SUMMARY_CARD_STYLES[0].value}
+          />
+          <SummaryCard
+            compact
+            label="检测 B · 超额 Profit 客户"
+            value={gapClientCount}
+            description={
+              config
+                ? `累积 P&L ≥ ${config.gap_profit.profit_ratio_min}× 净入金 或 ≥ $${config.gap_profit.min_profit_usd.toLocaleString()}`
+                : "累积 P&L ≥ 1 倍本金 或 ≥ $1000"
+            }
+            dotColor={RULE_SUMMARY_CARD_STYLES[2].dot}
+            textColor={RULE_SUMMARY_CARD_STYLES[2].value}
+          />
+        </div>
+
+        {/* Filter toolbar — same shape as other tabs: range Select + server
+            Select inline; only the date-range options differ (day-based). */}
+        <div className="flex flex-col gap-2 w-full sm:flex-row sm:flex-wrap sm:items-stretch sm:gap-3 max-w-full">
+          <Select
+            value={rangePreset}
+            onValueChange={(v) => {
+              setRangePreset(v as GapTradeDayRange);
+              if (v === "custom" && !customRange?.from) {
+                setDatePickerOpen(true);
+              }
+            }}
+          >
+            <SelectTrigger className="w-full min-w-0 h-9 sm:w-40 sm:shrink-0">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {GAP_TRADE_DAY_RANGES.map((p) => (
+                <SelectItem key={p.key} value={p.key}>
+                  {p.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+
+          {rangePreset === "custom" && (
+            <Popover open={datePickerOpen} onOpenChange={setDatePickerOpen}>
+              <PopoverTrigger asChild>
+                <Button
+                  variant="outline"
+                  className={cn(
+                    "w-full min-w-0 sm:w-40 h-9 justify-start text-left font-normal shrink-0 overflow-hidden",
+                    !customRange?.from && "text-muted-foreground",
+                  )}
+                >
+                  <CalendarIcon className="mr-2 h-4 w-4 shrink-0" />
+                  <span className="truncate">
+                    {customRange?.from ? (
+                      customRange.to ? (
+                        <>
+                          {format(customRange.from, "yyyy-MM-dd")} ~{" "}
+                          {format(customRange.to, "yyyy-MM-dd")}
+                        </>
+                      ) : (
+                        format(customRange.from, "yyyy-MM-dd")
+                      )
+                    ) : (
+                      "选择日期范围"
+                    )}
+                  </span>
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent className="w-auto p-0" align="start">
+                <Calendar
+                  initialFocus
+                  mode="range"
+                  defaultMonth={customRange?.from}
+                  selected={customRange}
+                  onSelect={setCustomRange}
+                  numberOfMonths={2}
+                  disabled={{
+                    before: new Date(
+                      Date.now() - RETENTION_DAYS * 24 * 3600 * 1000,
+                    ),
+                  }}
+                />
+              </PopoverContent>
+            </Popover>
+          )}
+
+          <Select value={serverFilter} onValueChange={setServerFilter}>
+            <SelectTrigger className="w-full min-w-0 h-9 sm:w-40 sm:shrink-0">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">全部服务器</SelectItem>
+              <SelectItem value="MT4_Live">MT4 Live</SelectItem>
+              <SelectItem value="MT4_Live2">MT4 Live2</SelectItem>
+              <SelectItem value="MT5">MT5</SelectItem>
+            </SelectContent>
+          </Select>
+
+          <span className="text-sm text-muted-foreground sm:ml-auto sm:shrink-0 py-1.5">
+            {loading
+              ? "加载中..."
+              : `共 ${soAbAlerts.length + gapAlerts.length} 条告警 · A ${soAbAlerts.length} / B ${gapAlerts.length}`}
+          </span>
+        </div>
+
+        {/* Section A header */}
+        <h3 className="text-sm font-semibold flex items-center gap-2">
+          <Badge variant="outline">检测 A</Badge>
+          <span>SO + AB 仓配对</span>
+          <span className="text-xs font-normal text-muted-foreground">
+            · 共 {soAbAlerts.length} 条 · 点击行查看完整字段
+          </span>
+        </h3>
+        {/* AG-Grid — same theme + legacy mode + heights as the other 3 tabs */}
+        <div
+          className={cn(
+            "risk-monitor-theme h-[420px] min-h-[280px] w-full",
+            isDarkMode ? "ag-theme-quartz-dark" : "ag-theme-quartz",
+          )}
+          style={gridStyle}
+        >
+          <AgGridReact<AlertEvent>
+            rowData={soAbAlerts}
+            columnDefs={soAbColumns}
+            defaultColDef={defaultColDef}
+            gridOptions={{ theme: "legacy" }}
+            animateRows={false}
+            enableCellTextSelection
+            suppressCellFocus
+            rowClass="cursor-pointer"
+            getRowClass={soAbRowClass}
+            onRowClicked={(e) => e.data && setDetailRow(e.data)}
+            getRowId={(p) => `gap-so-${p.data.id}`}
+            overlayNoRowsTemplate='<span class="text-sm text-muted-foreground">窗口内未发现 SO+AB 配对</span>'
+          />
+        </div>
+
+        {/* Section B header */}
+        <h3 className="text-sm font-semibold flex items-center gap-2">
+          <Badge variant="outline">检测 B</Badge>
+          <span>高开低开超额 Profit</span>
+          <span className="text-xs font-normal text-muted-foreground">
+            · 共 {gapAlerts.length} 条 · 点击行查看完整字段
+          </span>
+        </h3>
+        <div
+          className={cn(
+            "risk-monitor-theme h-[420px] min-h-[280px] w-full",
+            isDarkMode ? "ag-theme-quartz-dark" : "ag-theme-quartz",
+          )}
+          style={gridStyle}
+        >
+          <AgGridReact<AlertEvent>
+            rowData={gapAlerts}
+            columnDefs={gapColumns}
+            defaultColDef={defaultColDef}
+            gridOptions={{ theme: "legacy" }}
+            animateRows={false}
+            enableCellTextSelection
+            suppressCellFocus
+            rowClass="cursor-pointer"
+            onRowClicked={(e) => e.data && setDetailRow(e.data)}
+            getRowId={(p) => `gap-gp-${p.data.id}`}
+            overlayNoRowsTemplate='<span class="text-sm text-muted-foreground">窗口内未发现超额 Profit 客户</span>'
+          />
+        </div>
+      </div>
+
+      {/* Detail Sheet — right side; mobile takes full width via bottom sheet feel */}
+      <Sheet
+        open={detailRow !== null}
+        onOpenChange={(open) => !open && setDetailRow(null)}
+      >
+        <SheetContent
+          side={isMobile ? "bottom" : "right"}
+          className={cn(
+            "overflow-y-auto",
+            isMobile ? "h-[85vh] rounded-t-lg" : "w-full sm:max-w-md md:max-w-lg",
+          )}
+        >
+          {detailRow && (
+            <>
+              <SheetHeader className="px-4 pt-4 pb-2">
+                <SheetTitle>
+                  {detailRow.rule_id === GAP_TRADE_SO_RULE_ID
+                    ? "SO + AB 配对详情"
+                    : "客户超额 Profit 详情"}
+                </SheetTitle>
+                <SheetDescription>{detailRow.rule_label}</SheetDescription>
+              </SheetHeader>
+              <Separator />
+              <div className="space-y-4 px-4 py-3 text-sm">
+                {detailRow.rule_id === GAP_TRADE_SO_RULE_ID ? (
+                  <GapTradeSoDetail row={detailRow} />
+                ) : (
+                  <GapTradeGapDetail row={detailRow} />
+                )}
+              </div>
+            </>
+          )}
+        </SheetContent>
+      </Sheet>
+
+      {/* Config Drawer */}
+      <Drawer
+        open={configOpen}
+        onOpenChange={(o) => {
+          if (!o) setEditConfig(null);
+          setConfigOpen(o);
+        }}
+      >
+        <DrawerContent className="max-h-[90vh]">
+          <DrawerHeader>
+            <DrawerTitle>Gap Trade 配置</DrawerTitle>
+          </DrawerHeader>
+          {editConfig && (
+            <div className="space-y-4 overflow-y-auto px-4 pb-4 text-sm">
+              <div>
+                <p className="font-medium mb-1">扫描窗口 (MT 时间)</p>
+                <div className="flex items-center gap-2">
+                  <Input
+                    type="number"
+                    min={0}
+                    max={23}
+                    value={editConfig.window_start_hour_mt}
+                    onChange={(e) =>
+                      setEditConfig({
+                        ...editConfig,
+                        window_start_hour_mt: Number(e.target.value || 0),
+                      })
+                    }
+                    className="w-20 h-8"
+                  />
+                  <span className="text-muted-foreground">~</span>
+                  <Input
+                    type="number"
+                    min={1}
+                    max={24}
+                    value={editConfig.window_end_hour_mt}
+                    onChange={(e) =>
+                      setEditConfig({
+                        ...editConfig,
+                        window_end_hour_mt: Number(e.target.value || 2),
+                      })
+                    }
+                    className="w-20 h-8"
+                  />
+                  <span className="text-xs text-muted-foreground">小时 (默认 0–2)</span>
+                </div>
+              </div>
+              <Separator />
+              <div>
+                <p className="font-medium mb-2">检测 A · SO + AB 配对</p>
+                <div className="space-y-2 ml-1">
+                  <label className="flex items-center gap-2 text-xs">
+                    <Checkbox
+                      checked={editConfig.so_ab.enabled}
+                      onCheckedChange={(c) =>
+                        setEditConfig({
+                          ...editConfig,
+                          so_ab: { ...editConfig.so_ab, enabled: !!c },
+                        })
+                      }
+                    />
+                    启用
+                  </label>
+                  <div className="flex flex-wrap items-center gap-2 text-xs">
+                    <span>开仓差秒数 ≤</span>
+                    <Input
+                      type="number"
+                      min={1}
+                      max={3600}
+                      value={editConfig.so_ab.max_open_diff_sec}
+                      onChange={(e) =>
+                        setEditConfig({
+                          ...editConfig,
+                          so_ab: {
+                            ...editConfig.so_ab,
+                            max_open_diff_sec: Number(e.target.value || 300),
+                          },
+                        })
+                      }
+                      className="w-20 h-8"
+                    />
+                    <span>秒</span>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2 text-xs">
+                    <span>手数比范围</span>
+                    <Input
+                      type="number"
+                      step="0.1"
+                      value={editConfig.so_ab.min_lot_ratio}
+                      onChange={(e) =>
+                        setEditConfig({
+                          ...editConfig,
+                          so_ab: {
+                            ...editConfig.so_ab,
+                            min_lot_ratio: Number(e.target.value || 0.5),
+                          },
+                        })
+                      }
+                      className="w-20 h-8"
+                    />
+                    <span>~</span>
+                    <Input
+                      type="number"
+                      step="0.1"
+                      value={editConfig.so_ab.max_lot_ratio}
+                      onChange={(e) =>
+                        setEditConfig({
+                          ...editConfig,
+                          so_ab: {
+                            ...editConfig.so_ab,
+                            max_lot_ratio: Number(e.target.value || 2.0),
+                          },
+                        })
+                      }
+                      className="w-20 h-8"
+                    />
+                  </div>
+                  <label className="flex items-center gap-2 text-xs">
+                    <Checkbox
+                      checked={editConfig.so_ab.cross_client_only}
+                      onCheckedChange={(c) =>
+                        setEditConfig({
+                          ...editConfig,
+                          so_ab: {
+                            ...editConfig.so_ab,
+                            cross_client_only: !!c,
+                          },
+                        })
+                      }
+                    />
+                    仅跨客户配对(推荐)
+                  </label>
+                </div>
+              </div>
+              <Separator />
+              <div>
+                <p className="font-medium mb-2">检测 B · 超额 Profit</p>
+                <div className="space-y-2 ml-1">
+                  <label className="flex items-center gap-2 text-xs">
+                    <Checkbox
+                      checked={editConfig.gap_profit.enabled}
+                      onCheckedChange={(c) =>
+                        setEditConfig({
+                          ...editConfig,
+                          gap_profit: {
+                            ...editConfig.gap_profit,
+                            enabled: !!c,
+                          },
+                        })
+                      }
+                    />
+                    启用
+                  </label>
+                  <div className="flex flex-wrap items-center gap-2 text-xs">
+                    <span>Profit / 净入金 ≥</span>
+                    <Input
+                      type="number"
+                      step="0.1"
+                      value={editConfig.gap_profit.profit_ratio_min}
+                      onChange={(e) =>
+                        setEditConfig({
+                          ...editConfig,
+                          gap_profit: {
+                            ...editConfig.gap_profit,
+                            profit_ratio_min: Number(e.target.value || 1.0),
+                          },
+                        })
+                      }
+                      className="w-20 h-8"
+                    />
+                    <span className="text-muted-foreground">倍</span>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2 text-xs">
+                    <span>绝对 Profit ≥</span>
+                    <Input
+                      type="number"
+                      step="100"
+                      value={editConfig.gap_profit.min_profit_usd}
+                      onChange={(e) =>
+                        setEditConfig({
+                          ...editConfig,
+                          gap_profit: {
+                            ...editConfig.gap_profit,
+                            min_profit_usd: Number(e.target.value || 1000),
+                          },
+                        })
+                      }
+                      className="w-24 h-8"
+                    />
+                    <span className="text-muted-foreground">USD</span>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2 text-xs">
+                    <span>最小净入金 ≥</span>
+                    <Input
+                      type="number"
+                      step="50"
+                      value={editConfig.gap_profit.min_net_deposit_hist}
+                      onChange={(e) =>
+                        setEditConfig({
+                          ...editConfig,
+                          gap_profit: {
+                            ...editConfig.gap_profit,
+                            min_net_deposit_hist: Number(e.target.value || 100),
+                          },
+                        })
+                      }
+                      className="w-24 h-8"
+                    />
+                    <span className="text-muted-foreground">USD (过滤小账户)</span>
+                  </div>
+                </div>
+              </div>
+              <div className="flex justify-end gap-2 pt-2">
+                <DrawerClose asChild>
+                  <Button variant="outline" size="sm">
+                    取消
+                  </Button>
+                </DrawerClose>
+                <Button
+                  size="sm"
+                  onClick={handleSaveConfig}
+                  disabled={savingConfig}
+                >
+                  <Save className="h-4 w-4 mr-1" />
+                  保存
+                </Button>
+              </div>
+            </div>
+          )}
+        </DrawerContent>
+      </Drawer>
+
+      {/* Yellow row highlight for shared-IP SO+AB rows.
+          Targets AG-Grid's `.ag-row` class via the custom class we set in
+          `getRowClass`; tints both light and dark backgrounds so contrast
+          is preserved either way. */}
+      <style>{`
+        .ag-row.gap-trade-shared-ip-row,
+        .ag-row.gap-trade-shared-ip-row .ag-cell {
+          background-color: rgb(254 243 199) !important;
+        }
+        .dark .ag-row.gap-trade-shared-ip-row,
+        .dark .ag-row.gap-trade-shared-ip-row .ag-cell {
+          background-color: rgb(120 53 15 / 0.35) !important;
+        }
+        .ag-row.gap-trade-shared-ip-row:hover,
+        .ag-row.gap-trade-shared-ip-row:hover .ag-cell {
+          background-color: rgb(253 230 138) !important;
+        }
+        .dark .ag-row.gap-trade-shared-ip-row:hover,
+        .dark .ag-row.gap-trade-shared-ip-row:hover .ag-cell {
+          background-color: rgb(146 64 14 / 0.5) !important;
+        }
+      `}</style>
+    </>
+  );
+}
+
+/** SO+AB detail panel — every field, including the IPs that didn't fit in the table. */
+function GapTradeSoDetail({ row }: { row: AlertEvent }) {
+  const sharedIps = (row.shared_ips || "").split(",").filter(Boolean);
+  return (
+    <>
+      <DetailGroup title="强平方 (L)">
+        <DetailRow label="账户" value={row.l_login_sid ?? "—"} />
+        <DetailRow label="客户 ID" value={row.l_userid ?? "—"} />
+        <DetailRow label="客户名" value={row.l_name ?? "—"} />
+        <DetailRow label="Group" value={row.l_groupsid ?? "—"} />
+        <DetailRow label="Ticket" value={row.l_ticket ?? "—"} />
+        <DetailRow label="手数" value={row.l_lots ?? "—"} />
+        <DetailRow label="开仓时间" value={fmtTime(row.l_open_time)} />
+        <DetailRow label="强平时间" value={fmtTime(row.l_close_time)} />
+        <DetailRow
+          label="亏损 (USD)"
+          value={fmtCurrency(row.l_profit_usd)}
+          highlightClass="text-rose-600 dark:text-rose-400"
+        />
+        <DetailRow label="余额 (USD)" value={fmtCurrency(row.l_balance_usd)} />
+        <DetailRow
+          label="历史净入金"
+          value={fmtCurrency(row.net_deposit_hist)}
+        />
+        <DetailRow label="SO 标记" value={row.so_comment ?? "—"} />
+      </DetailGroup>
+      <Separator />
+      <DetailGroup title="对手方 (C)">
+        <DetailRow label="账户" value={row.c_login_sid ?? "—"} />
+        <DetailRow label="客户 ID" value={row.c_userid ?? "—"} />
+        <DetailRow label="客户名" value={row.c_name ?? "—"} />
+        <DetailRow label="Ticket" value={row.c_ticket ?? "—"} />
+        <DetailRow label="手数" value={row.c_lots ?? "—"} />
+        <DetailRow label="开仓时间" value={fmtTime(row.c_open_time)} />
+        <DetailRow label="平仓时间" value={fmtTime(row.c_close_time)} />
+        <DetailRow
+          label="盈利 (USD)"
+          value={fmtCurrency(row.c_profit_usd)}
+          highlightClass="text-emerald-600 dark:text-emerald-400"
+        />
+      </DetailGroup>
+      <Separator />
+      <DetailGroup title="配对关系">
+        <DetailRow label="产品" value={row.symbol} />
+        <DetailRow label="开仓时间差" value={`${row.open_diff_sec ?? "—"} 秒`} />
+        <DetailRow label="手数比 C/L" value={row.lot_ratio ?? "—"} />
+        <DetailRow
+          label="净 P&L"
+          value={fmtCurrency(row.net_usd)}
+          highlightClass={
+            row.net_usd !== null && row.net_usd !== undefined && Math.abs(row.net_usd) < 100
+              ? "font-bold"
+              : ""
+          }
+        />
+      </DetailGroup>
+      <Separator />
+      <DetailGroup title="IP 关联">
+        <DetailRow label="L IP 数" value={row.l_ip_count ?? 0} />
+        <DetailRow label="C IP 数" value={row.c_ip_count ?? 0} />
+        <DetailRow label="扫描天数" value={row.scan_days ?? 0} />
+        <DetailRow
+          label="共享 IP 数"
+          value={row.shared_ip_count ?? 0}
+          highlightClass={
+            (row.shared_ip_count ?? 0) > 0
+              ? "font-bold text-amber-700 dark:text-amber-400"
+              : ""
+          }
+        />
+        {sharedIps.length > 0 && (
+          <div className="pl-1">
+            <p className="text-xs text-muted-foreground mb-1">共享 IP 列表:</p>
+            <div className="flex flex-wrap gap-1">
+              {sharedIps.map((ip) => (
+                <Badge key={ip} variant="outline" className="font-mono text-[10px]">
+                  {ip}
+                </Badge>
+              ))}
+            </div>
+          </div>
+        )}
+      </DetailGroup>
+    </>
+  );
+}
+
+/** Per-client gap-profit detail panel — full contributing-account list + symbols. */
+function GapTradeGapDetail({ row }: { row: AlertEvent }) {
+  const loginSids = (row.contributing_login_sids || "")
+    .split(",")
+    .filter(Boolean);
+  const symbols = (row.symbols || "").split(",").filter(Boolean);
+  return (
+    <>
+      <DetailGroup title="客户">
+        <DetailRow label="客户 ID" value={row.client_userid ?? "—"} />
+        <DetailRow label="客户名" value={row.client_name ?? "—"} />
+        <DetailRow label="Group" value={row.client_groupsid ?? "—"} />
+        <DetailRow label="窗口日期" value={row.window_date ?? "—"} />
+      </DetailGroup>
+      <Separator />
+      <DetailGroup title="Profit 概况">
+        <DetailRow
+          label="累积 Profit (USD)"
+          value={fmtCurrency(row.total_profit_usd)}
+          highlightClass="text-emerald-600 dark:text-emerald-400 font-bold"
+        />
+        <DetailRow
+          label="历史净入金 (USD)"
+          value={fmtCurrency(row.net_deposit_hist)}
+        />
+        <DetailRow
+          label="倍数"
+          value={fmtRatio(row.profit_ratio)}
+          highlightClass={
+            (row.profit_ratio ?? 0) >= 2 ? "text-rose-600 dark:text-rose-400 font-bold" : ""
+          }
+        />
+        <DetailRow label="订单数" value={row.order_count ?? 0} />
+        <DetailRow label="触发条件" value={row.triggered_by ?? "—"} />
+      </DetailGroup>
+      <Separator />
+      <DetailGroup title={`涉及账户 (${loginSids.length})`}>
+        <div className="flex flex-col gap-1">
+          {loginSids.map((ls) => {
+            const [sidStr, loginStr] = ls.split("-");
+            const sid = Number(sidStr);
+            const login = Number(loginStr);
+            const server =
+              sid === 5 ? "MT5" : sid === 6 ? "MT4_Live2" : "MT4_Live";
+            return (
+              <a
+                key={ls}
+                href={crmLink(login, server)}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-blue-600 hover:underline dark:text-blue-400 font-mono text-xs"
+              >
+                {ls}
+              </a>
+            );
+          })}
+        </div>
+      </DetailGroup>
+      <Separator />
+      <DetailGroup title={`涉及产品 (${symbols.length})`}>
+        <div className="flex flex-wrap gap-1">
+          {symbols.map((s) => (
+            <Badge key={s} variant="outline" className="text-[10px]">
+              {s}
+            </Badge>
+          ))}
+        </div>
+      </DetailGroup>
+    </>
+  );
+}
+
+function DetailGroup({
+  title,
+  children,
+}: {
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div>
+      <p className="text-xs font-semibold text-muted-foreground mb-1.5 uppercase tracking-wide">
+        {title}
+      </p>
+      <div className="space-y-1.5">{children}</div>
+    </div>
+  );
+}
+
+function DetailRow({
+  label,
+  value,
+  highlightClass,
+}: {
+  label: string;
+  value: React.ReactNode;
+  highlightClass?: string;
+}) {
+  return (
+    <div className="flex items-baseline justify-between gap-3 text-xs">
+      <span className="text-muted-foreground shrink-0">{label}</span>
+      <span className={cn("text-right tabular-nums break-all", highlightClass)}>
+        {value}
+      </span>
+    </div>
   );
 }
 

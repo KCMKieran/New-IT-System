@@ -48,7 +48,10 @@ Ubuntu 服务器 (10.6.20.138)
 | **登录认证** | 关闭（`VITE_DISABLE_AUTH=true`） | 关闭（Cloudflare Zero Trust 负责认证） |
 | **端口** | 前端 `:5173`，后端 `:8001` | Nginx `:3000`（统一入口，内部转发 `/api`） |
 | **访问地址** | `http://10.6.20.138:5173` | `http://10.6.20.138:3000` 或 `analysis.kohleservices.com` |
+| **后台 scheduler** | 关闭（`SCHEDULER_ENABLED=false`、`LOGIN_IP_SCHEDULER_ENABLED=false`、`BURST_SCAN_ENABLED=false`、`GAP_TRADE_SCAN_ENABLED=false`） | 全部开启 |
 | **用途** | 写代码、调试 | 给用户使用 |
+
+> **为什么 dev 必须关掉所有 scheduler**：dev 容器把宿主机 `backend/data` 直接挂进 `/app/data`，与 prod 共享同一份 SQLite（`risk_monitor.db` 等）。如果 dev 也开后台扫描，两个 Python 进程会向同一张表并发写入告警，且各自的 in-memory 缓存（如 `_latest_result`）互相不可见，导致 Quick Profit 的跨扫描去重失效、`alert_events` 出现同账号反复重复（2026-05-12 修过一次）。dev 想验证 rule 改动，请用前端「立即扫描」按钮触发 `/scan-now`，写入仍然落到共享 SQLite，prod 下一轮 tick 自动读到。
 
 ---
 

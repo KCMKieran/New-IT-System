@@ -334,10 +334,11 @@ New-IT-System/
 **Purpose**: Scan all MT servers for clients exhibiting suspicious batch ordering patterns. B-Book perspective: flags clients whose high-exposure rapid trading poses risk to company P&L.
 
 **Key Features**:
-- Tab-based UI: 批量下单 (default) / 快开快平 / 快速获利（以 `RiskMonitor.tsx` 为准）
+- Tab-based UI: 批量下单 (default) / 快开快平 / 快速获利 / Gap Trade（以 `RiskMonitor.tsx` 为准）
 - Burst Open Detection (批量下单): sliding window algorithm detects N orders (each ≥ M lots) within T seconds on the same symbol
 - Quick Open-Close (快开快平): short hold + min count + min merged P&L within SQL lookback; `rule_id` 51-60 in `alert_events`
 - Quick Profit (快速获利): aggregate window P&L (realized + optional floating) ≥ threshold; `rule_id` 61-70; per-rule `lookback_min` (10-60) **decoupled from `scan_interval_min`**; live floating P&L refreshed on-demand via dedicated `/quick-profit/floating-refresh` endpoint, triggered by the toolbar "刷新浮动盈亏" button (no scheduler trigger, no auto-poll)
+- Gap Trade (休市开盘缺口监控): independent Mon-Fri MT 02:05 cron scanning the MT 00:00-02:00 window. Two sub-rules in one tab — rule 71 (SO + AB pair: 强平 L 腿 + 跨客户同 groupsid 反向 C 腿,IP overlap 高亮); rule 81 (per-client window profit, `userid` 聚合,`profit_ratio_min` 或 `min_profit_usd` 任一触发); day-based time filter (今天/昨天/3d/7d/30d/custom); no scan-now / refresh buttons (daily cron only); click row → right-side Sheet detail; `rule_id` 71-90 reserved
 - Backend-driven scanning via APScheduler (single background task, frontend reads cached result)
 - Multi-rule support: up to 10 configurable rules with independent parameters
 - Config persistence in SQLite (`backend/data/risk_monitor.db`)
@@ -366,19 +367,25 @@ New-IT-System/
 - `GET` / `POST /api/v1/risk-monitor/quick-profit/config` — 快速获利配置（`lookback_min` 10-60、`min_profit_usd` ≥100、`include_floating`）
 - `GET /api/v1/risk-monitor/quick-profit/alerts/export` — 快速获利 CSV
 - `GET /api/v1/risk-monitor/quick-profit/floating-refresh?ids=...` — 浮动 P&L 轻量按需刷新（用户点工具栏「刷新浮动盈亏」按钮触发，仅查 `position_status != 'closed'` 行；不写库）
+- `GET /api/v1/risk-monitor/gap-trade/alerts?since=&until=&...` — Gap Trade 告警（`rule_id` 71-90,默认 lookback 1 天)
+- `GET /api/v1/risk-monitor/gap-trade/alerts/stats?...` — Gap Trade 聚合(含 `by_rule`,前端用 71 / 81 拆两张卡)
+- `GET` / `POST /api/v1/risk-monitor/gap-trade/config` — Gap Trade 配置(JSON blob: window_hours + sid_list + so_ab + gap_profit 子配置)
+- `GET /api/v1/risk-monitor/gap-trade/alerts/export` — Gap Trade CSV(宽列,SO+AB 与超额 Profit 两套字段并列)
 
 **Data sources**: MySQL Slave (`mt4_live`, `mt4_live2`, `mt5_live`, `fxbackoffice`) — same DB_HOST config
 
 **Key Files**:
-- `frontend/src/pages/RiskMonitor.tsx` (BurstOpenTab + QuickOpenCloseTab + QuickProfitTab + drawers + `PositionStatusBadge`; Tab UI patterns: `docs/features/risk-monitor-reusable-patterns.md` §11; aggregate-window + live-refresh pattern: §12)
-- `backend/app/api/v1/routes/risk_monitor.py` (burst-open + quick-open-close + quick-profit endpoints)
+- `frontend/src/pages/RiskMonitor.tsx` (BurstOpenTab + QuickOpenCloseTab + QuickProfitTab + GapTradeTab + drawers + Detail Sheet + `PositionStatusBadge`; Tab UI patterns: `docs/features/risk-monitor-reusable-patterns.md` §11; aggregate-window + live-refresh pattern: §12)
+- `backend/app/api/v1/routes/risk_monitor.py` (burst-open + quick-open-close + quick-profit + gap-trade endpoints)
 - `backend/app/services/rule_quick_open_close_service.py` (快开快平检测)
 - `backend/app/services/rule_quick_profit_service.py` (快速获利检测 + 浮动刷新辅助函数)
+- `backend/app/services/rule_gap_trade_so_service.py` (Gap Trade SO+AB 配对,W04 移植 + IP overlap enrichment)
+- `backend/app/services/rule_gap_trade_gap_service.py` (Gap Trade 客户级窗口 profit 聚合 + 双阈值)
 - `backend/app/services/account_enrichment.py` (CRM 字段批量富化 + `get_net_deposit_hist_map` **client-level** 历史净入金：按 `userId` 聚合后映射回 loginsid，过滤 demo / `sid IN (1,2,5,6)`，CEN ÷100；与 client-return-rate 公式完全一致)
 - `backend/app/services/risk_monitor_service.py` (SQL + sliding window rule engine + CEN currency enrichment)
 - `backend/app/schemas/risk_monitor.py` (Pydantic models)
 - `backend/app/core/burst_open_scheduler.py` (APScheduler + in-memory cache)
-- `backend/app/core/risk_monitor_db.py` (SQLite config/history CRUD, `alert_events` event-level table; quick_profit_config + quick_profit_rules + QP 列；`net_deposit_hist` 列三个 tab 共用)
+- `backend/app/core/risk_monitor_db.py` (SQLite config/history CRUD, `alert_events` event-level table; quick_profit_config + quick_profit_rules + QP 列;gap_trade_config 单行 JSON 表 + Gap Trade 37 个新列(L_/C_/shared_*/client_*/window_date 等);`net_deposit_hist` 列**四个 tab 共用**)
 - `backend/scripts/backfill_alert_events_currency.py` (one-off migration for legacy currency=NULL rows)
 - `backend/scripts/backfill_alert_events_open_time.py` (one-off migration: broker UTC+3 naive timestamps → UTC ISO8601 in `first_open`/`last_open`/`orders_json`)
 

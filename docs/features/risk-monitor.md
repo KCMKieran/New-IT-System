@@ -7,6 +7,14 @@
 > **历史归档**: [risk-monitor-archive.md](./risk-monitor-archive.md) — 已完成的开发计划、探索性 SQL、已移除规则设计、已实施调研记录
 >
 > **变更记录**:
+> - 2026-05-12（同日两次迭代）Gap Trade Tab **UI 对齐 + 日志增强**：
+>   - **UI 重构**：AG-Grid 切到 `risk-monitor-theme h-[420px]` + `gridOptions={{ theme: "legacy" }}`，跟前 3 个 tab 完全一致；时间筛选改成 `<Select>` 下拉（与其他 tab 同款 `h-9 sm:w-40`），选项 = 今天 / 昨天（默认）/ 最近 3 天 / 7 天 / 30 天 / 自定义；检测 A 首列从 `⚠` 图标改成「**是否同 IP**」（"是"琥珀色 / "否"灰色，整行同时黄色高亮保持不变）；删除「同 IP 强信号」summary 卡片（信息已由整行高亮 + 列表达）；删除「刷新」按钮（数据每天 02:05 才更新一次，刷新无意义；切 Tab 自动 fetch）；抽出 `renderLoginSidLink()` 共用渲染函数。
+>   - **日志增强**：`rule_gap_trade_so_service` / `rule_gap_trade_gap_service` 新增 5 条 INFO（detect 开始 + SQL 行数 + IP enrich 摘要 + net_deposit 命中率 + done 耗时）+ 1 条 funnel 统计（gap-profit 的 "clients=N profitable=N dropped(no_deposit, low_deposit, below_threshold) → N alerts"），出问题时可一眼判断是 SQL 没数据 / IP 文件全缺 / 阈值卡死 / 净入金过滤掉了。Scheduler 最终汇总日志拆出 SO+AB 与 gap-profit 各自计数。
+> - 2026-05-12 **Gap Trade Tab 上线（第 4 个 Tab，rule_ids 71 / 81）**：休市开盘缺口监控，每个工作日 MT 02:05 cron 扫描前 2h 窗口（MT 00:00–02:00）。两个子检测同一 Tab 内分两段表展示：
+>   - **检测 A** `rule_id = 71` — SO + AB 配对（W04 `Azure_Function_BAU/W04_Blowup_Audit_Weekly.py` 移植）：找窗口内 COMMENT 前缀 `[so` / `so:` / `cso:` 的强平 L 腿，配同 symbol/反向/开仓 ±300s/手数 0.5–2× 的 C 腿，约束 **同 groupsid 但 userid 不同**（跨客户串通）。读取 `backend/data/login_ip/<YYYYMMDD>/analysis_ip_to_accounts.json`，L 与 C 在持仓期间共享 IP → 前端整行黄色高亮。
+>   - **检测 B** `rule_id = 81` — 按 `userid` 聚合窗口内**纯平仓** P&L（CEN ÷100 后），`total_profit / net_deposit_hist ≥ 1×` **或** `total_profit ≥ $1000` 任一满足即触发，`triggered_by` 字段记录是哪个条件命中。
+>
+>   前端按天筛选（Today / Yesterday 默认 / 3d / 7d / 30d / Custom date range），点击行打开右侧 Sheet 详情面板（移动端从底部弹出）。`GapTradeConfig` 单行 JSON 存于 SQLite；scheduler 走独立 `CronTrigger(day_of_week="mon-fri", hour=2, minute=5, timezone="Etc/GMT-3")`，**不提供"立即扫描"按钮**（数据每天只更新一次）。CSV 导出列宽容两个子规则的字段。详见 [Skill](../../.cursor/skills/risk-monitor/SKILL.md) §"Rule 4: Gap Trade"。
 > - 2026-05-08 **三 Tab 页眉操作区移动端适配**：`RiskMonitor.tsx` 使用 `RISK_MONITOR_HEADER_ROW` / `RISK_MONITOR_HEADER_ACTIONS`（窄屏纵向堆叠 + 操作按钮 `flex-wrap`），避免「导出 CSV / 规则配置 / 立即扫描 / 刷新浮动盈亏」在单行 `flex` 下与 `Button` 的 `shrink-0` 组合导致横向溢出；根容器与 Tabs 增加 `min-w-0`。详见 [risk-monitor-reusable-patterns.md §11](./risk-monitor-reusable-patterns.md)。
 > - 2026-03-26 移除 Scale-In 规则代码，Tab 2 曾改为「缺口交易」占位；**后已移除该 Tab**（当前仅 **批量下单 + 快开快平** 两 Tab，见 §5）。
 > - 2026-04-23 归档已完成历史章节到 [risk-monitor-archive.md](./risk-monitor-archive.md)。
@@ -19,6 +27,9 @@
 >   1. **CEN 归一化后阈值过滤失效** — `scan_quick_profit` 里 `norm_rules.id` 错用了 SQLite 主键（1,2…），与 detect 输出的 alert.rule_id（61,62…）对不上，导致二次阈值过滤回退到 0，CEN 账户出现一堆几十 USD 甚至负数的低值告警。改为 `QUICK_PROFIT_RULE_ID_BASE + idx`。
 >   2. **浮动 P&L 30s 自动轮询去掉** — 改成工具栏「刷新浮动盈亏」按钮，用户主动点才刷，避免后台异步把告警快照覆盖成低值/负数。同时把跨扫描去重从「绝对时间桶」改成「时间差 ≤ lookback_min」，避免跨桶边界（如 11:55 / 12:01）泄漏重复告警。
 >   3. **Dedup 在多次扫描间静默失效** — `rule_quick_profit_detect` 输出的 alert dict 没有 `scanned_at` 字段（`append_scan_and_events` 单独传入到 SQL），下次扫描读 `_latest_result.alerts` 作为 prev_alerts 时全部 scanned_at=None，新版 dedup `if scanned is None: continue` 直接跳过 → prev_latest 永远是空 → dedup 无效。修复：detect 给每条 alert 写 `scanned_at`。同时在 `_run_scan` 开头若 `_latest_result` 为空（重启场景），用 `get_recent_quick_profit_alerts(max_lookback_min)` 从 SQLite 加载最近告警 seed prev pool，让 dedup 跨进程重启也工作。
+> - 2026-05-12 hotfix（Quick Profit 4h 内同账号重复告警）— 两层根因，同日一并修复：
+>   1. **运维层（L1）**：dev + prod 两个后端容器**共享同一份 SQLite**（`backend/data/risk_monitor.db`）但**各跑各的 APScheduler**，写入互相不可见。dev compose 加 `BURST_SCAN_ENABLED=false` + `GAP_TRADE_SCAN_ENABLED=false`，dev 退化为「只读 + 手动 `/scan-now`」，唯一的周期扫描归 prod 负责。
+>   2. **代码层（L2）**：`_run_scan` 里 SQLite seed 的条件 `if not any(rule_id >= 61 in prev_alerts)` 只在 in-memory 完全没 QP 告警时才补种；只要本轮有任何**新** QP 告警进入 `_latest_result.alerts`，下一轮 prev_alerts 就丢掉所有**更早的**同 key 告警 → 它们在仍处于 lookback 窗口时复发。改为**无条件 seed**：抽出 `_build_quick_profit_prev_alerts` helper，每轮都把 `get_recent_quick_profit_alerts(max_lookback)` 合并进 prev_alerts，由 `_dedup_by_time_bucket` 按 key 取最新 `scanned_at`；新增 `tests/test_burst_open_scheduler_prev_alerts.py` 5 条回归测试钉住"新+老 QP 共存"、"冷启动"、"无 QP 规则"、"SQLite 失败"、"非 QP 透传"五条路径。
 
 **文档与代码谁为准**：Tab 列表与页面结构以 `frontend/src/pages/RiskMonitor.tsx` 为准；`rule_id` 区间以 `backend/app/api/v1/risk_monitor.py`（`BURST_RULE_MAX_ID` / `QUICK_RULE_ID_BASE`）及检测服务为准；风控 Tab 的卡片 + 筛选分工以 [risk-monitor-reusable-patterns.md §11](./risk-monitor-reusable-patterns.md) 为准。
 
@@ -909,7 +920,7 @@ A 最简单，B 可读性更好。建议 v1 用 A，后续按需加 B。
 > 1d/7d/30d 入金/出金列已下线（2026-05-07）；现统一展示 **client-level** 历史
 > 净入金 `net_deposit_hist`（公式 + 过滤条件与 client-return-rate "历史净入金"
 > 一致：`SUM(deposit) + SUM(withdrawal + ib withdrawal)`，CEN ÷100，过滤
-> demo / 非 1·2·5·6 服务器），三个 tab 共用。监控仍是 account-level，但同一
+> demo / 非 1·2·5·6 服务器），**四个 tab 共用**（含 Gap Trade）。监控仍是 account-level，但同一
 > 客户的多个被告警账户拿到相同的客户级总数；非合规账户返回 NULL（前端"—"）。
 > 仅展示，不参与触发条件。
 
@@ -983,9 +994,15 @@ A 最简单，B 可读性更好。建议 v1 用 A，后续按需加 B。
 - `rule_quick_profit_detect` 必须给输出 alert 写 `scanned_at`，否则
   `_latest_result.alerts` 喂回 dedup 时会被 `if scanned is None: continue`
   全部跳过，dedup 静默失效（用户表现为「立即扫描」每次都重复入库）
-- 重启后 `_latest_result` 是空，scheduler 在 `_run_scan` 开头从
-  `get_recent_quick_profit_alerts(max_lookback_min)` seed prev_alerts，
-  让 dedup 跨进程重启也保持 `lookback_min` 内不重复
+- **SQLite seed 是无条件的**：每轮 `_run_scan` 都通过
+  `_build_quick_profit_prev_alerts` 把 `get_recent_quick_profit_alerts(max_lookback)`
+  合并进 prev_alerts，与 `_latest_result.alerts` 拼接。`_dedup_by_time_bucket`
+  按 `(rule_id, server, login, symbol)` 取最新 `scanned_at`，所以拼接安全。
+  之前版本「仅在 in-memory 无 QP 告警时才 seed」的条件会在「新告警 + 老告警
+  共存」时把老告警从 dedup 池里挤掉 → 老告警在 lookback 窗口内复发，已 2026-05-12 修复
+- **只允许一个 scheduler 写入这张 SQLite**：dev 容器必须 `BURST_SCAN_ENABLED=false`，
+  否则 dev + prod 双扫描器对同一 `alert_events` 各写一份，
+  每个进程的 `_latest_result` 互相看不到对方的 emit，dedup 链路断裂
 
 ### 7.7 CEN 归一化
 
@@ -1018,5 +1035,5 @@ Realized + floating 在 enrichment 后按 `currency='CEN'` 整体 ÷100；
 1. Rule ID 段 61-70（`QUICK_PROFIT_RULE_ID_BASE = 61`）
 2. 触发条件：`total_profit_usd >= min_profit_usd`（含等号）
 3. 浮动刷新：用户手动点击工具栏按钮触发（不再 30s 自动轮询，避免后台异步覆盖告警快照）
-4. 历史净入金（`net_deposit_hist`）三 Tab 共用，公式与 client-return-rate 一致；CEN 账户在 SQL 内 ÷100；红绿配色仅作展示
+4. 历史净入金（`net_deposit_hist`）**四 Tab 共用**（含 Gap Trade），公式与 client-return-rate 一致；CEN 账户在 SQL 内 ÷100；红绿配色仅作展示
 5. Phase 1 不做"利润 > N% 入金"比较；Phase 2 用 `net_deposit_hist` 做入金比例规则

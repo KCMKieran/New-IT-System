@@ -17,7 +17,7 @@ import csv
 import io
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Iterator, Optional
+from typing import Any, Iterator, Optional
 from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Query, status
@@ -32,10 +32,12 @@ from ....core.risk_monitor_db import (
     alert_events_stats,
     get_alerts_by_ids,
     load_config,
+    load_gap_trade_config,
     load_quick_open_close_config,
     load_quick_profit_config,
     query_alert_events,
     save_config,
+    save_gap_trade_config,
     save_quick_open_close_config,
     save_quick_profit_config,
     stream_alert_events,
@@ -54,6 +56,7 @@ from ....schemas.risk_monitor import (
     BurstOpenConfig,
     BurstOpenScanResult,
     BurstOpenSummary,
+    GapTradeConfig,
     QuickOpenCloseConfig,
     QuickProfitConfig,
     QuickProfitFloatingRefreshItem,
@@ -67,6 +70,11 @@ router = APIRouter(prefix="/risk-monitor")
 MAX_RULES = 10
 BURST_RULE_MAX_ID = QUICK_RULE_ID_BASE - 1
 QUICK_RULE_MAX_ID = QUICK_PROFIT_RULE_ID_BASE - 1
+# Gap Trade range. SO+AB = 71-80, per-client profit = 81-90 — we currently
+# allocate one rule_id per sub-detector but reserve the band for future
+# variants (e.g. EU-session gap variant).
+GAP_TRADE_RULE_ID_MIN = 71
+GAP_TRADE_RULE_ID_MAX = 90
 
 # Default look-back window when the frontend omits `since`.
 # Aligns with the "最近 4 小时" default on the page.
@@ -1015,6 +1023,251 @@ async def quick_profit_floating_refresh(
         raise
     except Exception as exc:
         logger.error("Quick-profit floating refresh failed: %s", exc, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        ) from exc
+
+
+# ── Gap Trade endpoints ────────────────────────────────────
+# Daily scan window — frontend filter is day-based ("Yesterday" default, plus
+# 3d / 7d / 30d / custom date range). The default lookback is 24h instead of
+# the burst tab's 4h so the page is meaningful on first load (the cron runs
+# at 02:05 MT, so "Today's" alerts only exist after that time).
+_GAP_TRADE_DEFAULT_WINDOW = timedelta(days=1)
+
+
+def _gap_trade_default_since_until(
+    since: Optional[str], until: Optional[str]
+) -> tuple[str, str]:
+    """Like ``_default_since_until`` but defaults to a 1-day lookback."""
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    until_dt = _parse_iso_utc(until) if until else now
+    since_dt = _parse_iso_utc(since) if since else until_dt - _GAP_TRADE_DEFAULT_WINDOW
+    return since_dt.isoformat(), until_dt.isoformat()
+
+
+@router.get("/gap-trade/config", response_model=GapTradeConfig)
+async def gap_trade_get_config():
+    """Return current Gap Trade config (applies Pydantic defaults when unset)."""
+    try:
+        cfg = load_gap_trade_config()
+        return GapTradeConfig(**cfg)
+    except Exception as exc:
+        logger.error("Failed to read gap-trade config: %s", exc, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        ) from exc
+
+
+@router.post("/gap-trade/config", response_model=GapTradeConfig)
+async def gap_trade_update_config(config: GapTradeConfig):
+    """Persist new Gap Trade config. Takes effect from the next cron tick.
+
+    No scheduler reschedule call here because the cron firing time is fixed
+    (Mon-Fri 02:05 MT); only the in-scan parameters change.
+    """
+    if config.window_start_hour_mt >= config.window_end_hour_mt:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="window_start_hour_mt must be < window_end_hour_mt.",
+        )
+    if not config.sid_list:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="sid_list cannot be empty.",
+        )
+    if config.so_ab.min_lot_ratio > config.so_ab.max_lot_ratio:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="so_ab.min_lot_ratio must be <= so_ab.max_lot_ratio.",
+        )
+    try:
+        save_gap_trade_config(config.model_dump())
+        return GapTradeConfig(**load_gap_trade_config())
+    except Exception as exc:
+        logger.error("Failed to update gap-trade config: %s", exc, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        ) from exc
+
+
+@router.get("/gap-trade/alerts", response_model=AlertsResponse)
+async def gap_trade_alerts(
+    since: Optional[str] = Query(default=None),
+    until: Optional[str] = Query(default=None),
+    server: Optional[str] = Query(default=None),
+    login: Optional[int] = Query(default=None),
+    symbol: Optional[str] = Query(default=None),
+    rule_id: Optional[int] = Query(default=None),
+    zipcode: Optional[str] = Query(default=None, max_length=64),
+    page: Optional[int] = Query(default=None, ge=1),
+    page_size: int = Query(default=50, ge=1, le=_MAX_PAGE_SIZE),
+    limit: Optional[int] = Query(default=None, ge=1, le=_MAX_PAGE_SIZE),
+    offset: Optional[int] = Query(default=None, ge=0),
+    sort_by: Optional[str] = Query(default=None),
+    sort_order: Optional[str] = Query(default=None),
+):
+    """Paginated Gap Trade alerts (rule_ids 71-90) for the time range.
+
+    ``rule_id`` may be passed to split SO+AB (71) from per-client profit
+    (81) on the frontend; omitted = both.
+    """
+    since_iso, until_iso = _gap_trade_default_since_until(since, until)
+    zipcode_clean = _clean_zipcode(zipcode)
+
+    if page is not None:
+        effective_limit = page_size
+        effective_offset = (page - 1) * page_size
+        effective_page = page
+    else:
+        effective_limit = limit if limit is not None else page_size
+        effective_offset = offset or 0
+        effective_page = (effective_offset // effective_limit) + 1 if effective_limit else 1
+        page_size = effective_limit
+
+    try:
+        entries, total = query_alert_events(
+            since=since_iso,
+            until=until_iso,
+            server=server,
+            login=login,
+            symbol=symbol,
+            rule_id=rule_id,
+            rule_id_min=GAP_TRADE_RULE_ID_MIN,
+            rule_id_max=GAP_TRADE_RULE_ID_MAX,
+            zipcode=zipcode_clean,
+            limit=effective_limit,
+            offset=effective_offset,
+            sort_by=sort_by,
+            sort_order=sort_order,
+        )
+        return AlertsResponse(
+            entries=[AlertEvent(**e) for e in entries],
+            total=total,
+            since=since_iso,
+            until=until_iso,
+            page=effective_page,
+            page_size=page_size,
+        )
+    except Exception as exc:
+        logger.error("Failed to query gap-trade alerts: %s", exc, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        ) from exc
+
+
+@router.get("/gap-trade/alerts/stats", response_model=AlertsStats)
+async def gap_trade_alerts_stats(
+    since: Optional[str] = Query(default=None),
+    until: Optional[str] = Query(default=None),
+    server: Optional[str] = Query(default=None),
+    login: Optional[int] = Query(default=None),
+    zipcode: Optional[str] = Query(default=None, max_length=64),
+):
+    """Summary cards: distinct accounts + event counts + per-rule breakdown.
+
+    The frontend uses ``by_rule`` to split SO+AB vs per-client profit on the
+    two summary cards (each card shows its own rule_id totals).
+    """
+    since_iso, until_iso = _gap_trade_default_since_until(since, until)
+    zipcode_clean = _clean_zipcode(zipcode)
+    try:
+        stats = alert_events_stats(
+            since=since_iso,
+            until=until_iso,
+            server=server,
+            login=login,
+            rule_id_min=GAP_TRADE_RULE_ID_MIN,
+            rule_id_max=GAP_TRADE_RULE_ID_MAX,
+            zipcode=zipcode_clean,
+            include_rule_breakdown=True,
+        )
+        return AlertsStats(**stats)
+    except Exception as exc:
+        logger.error("Failed to compute gap-trade stats: %s", exc, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        ) from exc
+
+
+# Gap Trade CSV columns. SO+AB and per-client profit have different shapes,
+# so we emit a single wide row that includes both column families — any cell
+# that doesn't apply to a row is left blank. Analysts pivot in Excel.
+_GAP_TRADE_CSV_HEADER = [
+    "scanned_at",
+    "rule_id",
+    "rule_label",
+    "window_date",
+    # SO+AB (rule 71)
+    "l_login_sid", "l_userid", "l_name", "l_groupsid",
+    "l_open_time", "l_close_time", "l_lots", "l_profit_usd", "l_balance_usd",
+    "c_login_sid", "c_userid", "c_name",
+    "c_open_time", "c_close_time", "c_lots", "c_profit_usd",
+    "symbol", "open_diff_sec", "lot_ratio", "net_usd", "so_comment",
+    "shared_ips", "shared_ip_count", "l_ip_count", "c_ip_count", "scan_days",
+    # Per-client profit (rule 81)
+    "client_userid", "client_name", "client_groupsid",
+    "contributing_login_sids", "contributing_account_count",
+    "symbols", "symbol_count",
+    "total_profit_usd", "net_deposit_hist", "profit_ratio", "triggered_by",
+    "order_count",
+]
+
+
+def _csv_row_from_gap_trade(entry: dict) -> list:
+    def _opt(key: str) -> Any:
+        v = entry.get(key)
+        return "" if v is None else v
+    return [_opt(col) for col in _GAP_TRADE_CSV_HEADER]
+
+
+@router.get("/gap-trade/alerts/export")
+async def gap_trade_alerts_export(
+    since: Optional[str] = Query(default=None),
+    until: Optional[str] = Query(default=None),
+    server: Optional[str] = Query(default=None),
+    login: Optional[int] = Query(default=None),
+    symbol: Optional[str] = Query(default=None),
+    rule_id: Optional[int] = Query(default=None),
+    zipcode: Optional[str] = Query(default=None, max_length=64),
+    sort_by: Optional[str] = Query(default=None),
+    sort_order: Optional[str] = Query(default=None),
+):
+    since_iso, until_iso = _gap_trade_default_since_until(since, until)
+    zipcode_clean = _clean_zipcode(zipcode)
+    filename = "risk-monitor-gap-trade.csv"
+    try:
+        return StreamingResponse(
+            _csv_stream(
+                since_iso=since_iso,
+                until_iso=until_iso,
+                server=server,
+                login=login,
+                symbol=symbol,
+                rule_id=rule_id,
+                rule_id_min=GAP_TRADE_RULE_ID_MIN,
+                rule_id_max=GAP_TRADE_RULE_ID_MAX,
+                zipcode_clean=zipcode_clean,
+                sort_by=sort_by,
+                sort_order=sort_order,
+                header=_GAP_TRADE_CSV_HEADER,
+                row_fn=_csv_row_from_gap_trade,
+            ),
+            media_type="text/csv; charset=utf-8",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="{filename}"; '
+                    f"filename*=UTF-8''{quote(filename)}"
+                ),
+            },
+        )
+    except Exception as exc:
+        logger.error("Failed to export gap-trade alerts: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(exc),

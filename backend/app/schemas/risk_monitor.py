@@ -59,6 +59,58 @@ class QuickProfitConfig(BaseModel):
     rules: List[QuickProfitRule] = []
 
 
+# ── Gap Trade (rule_ids 71-90) ────────────────────────────
+# Two sub-detectors share one config + scheduled scan window (MT 00:00–02:00
+# Mon–Fri). Sub-detector A finds Stop-out trades and pairs them with a
+# suspected counter-leg from a different client in the same group; sub-
+# detector B aggregates per-client P&L inside the window and flags
+# clients whose ROI vs historical net deposit exceeds a threshold.
+
+class GapTradeSoRuleConfig(BaseModel):
+    """Settings for sub-detector A (SO + AB pair, rule_id = 71)."""
+
+    enabled: bool = True
+    max_open_diff_sec: int = Field(default=300, ge=1, le=3600)
+    min_lot_ratio: float = Field(default=0.5, ge=0.01, le=10.0)
+    max_lot_ratio: float = Field(default=2.0, ge=0.01, le=10.0)
+    # Strongly recommended True: AB-arbitrage is canonically cross-client
+    # (different userid, same groupsid). Setting False relaxes that and
+    # produces many same-client noise matches; only flip for investigation.
+    cross_client_only: bool = True
+
+
+class GapTradeGapRuleConfig(BaseModel):
+    """Settings for sub-detector B (per-client window profit, rule_id = 81)."""
+
+    enabled: bool = True
+    # Either threshold alone triggers the alert. Frontend renders the
+    # `triggered_by` badge so analysts know which one fired (or both).
+    profit_ratio_min: float = Field(default=1.0, ge=0.01, le=100.0)
+    min_profit_usd: float = Field(default=1000.0, ge=1.0, le=10_000_000.0)
+    # Drop clients with very small historical deposit so the ratio doesn't
+    # explode on tiny-account anomalies (e.g. $5 profit on $1 deposit).
+    min_net_deposit_hist: float = Field(default=100.0, ge=0.0, le=10_000_000.0)
+
+
+class GapTradeConfig(BaseModel):
+    """Top-level config persisted as a single JSON blob in SQLite.
+
+    Window times are MT hours (UTC+3, no DST). `weekdays_only` matches the
+    scheduler's cron `mon-fri`; flipping it to False would also accept
+    Sat/Sun scans but the cron still fires Mon-Fri unless you re-register.
+    """
+
+    window_start_hour_mt: int = Field(default=0, ge=0, le=23)
+    # Exclusive upper bound — `< 02:00` keeps the window a clean 2h.
+    window_end_hour_mt: int = Field(default=2, ge=1, le=24)
+    weekdays_only: bool = True
+    # MT4 (1) + MT5 (5) + MT4_Live2/CEN (6); kept configurable so analysts
+    # can narrow down to one server when debugging.
+    sid_list: List[int] = Field(default_factory=lambda: [1, 5, 6])
+    so_ab: GapTradeSoRuleConfig = Field(default_factory=GapTradeSoRuleConfig)
+    gap_profit: GapTradeGapRuleConfig = Field(default_factory=GapTradeGapRuleConfig)
+
+
 # ── Alert & Scan Result ───────────────────────────────────
 
 class BurstOrderDetail(BaseModel):
@@ -154,6 +206,50 @@ class AlertEvent(BaseModel):
     # "closed" | "open" | "mixed"; drives the status badge color and whether
     # the floating-refresh poller asks the backend to re-query this row.
     position_status: Optional[str] = None
+    # ── Gap Trade extras (rule_ids 71 / 81) ──
+    # rule 71 (SO + AB pair) — loser leg "L" already lives on the common
+    # fields (login = L_login, server, symbol, scanned_at). These add the
+    # counter-leg "C" plus pair relationship + IP overlap.
+    l_login_sid: Optional[str] = None
+    l_userid: Optional[int] = None
+    l_name: Optional[str] = None
+    l_groupsid: Optional[str] = None
+    l_ticket: Optional[int] = None
+    l_lots: Optional[float] = None
+    l_open_time: Optional[str] = None
+    l_close_time: Optional[str] = None
+    l_profit_usd: Optional[float] = None
+    l_balance_usd: Optional[float] = None
+    c_login_sid: Optional[str] = None
+    c_userid: Optional[int] = None
+    c_name: Optional[str] = None
+    c_ticket: Optional[int] = None
+    c_lots: Optional[float] = None
+    c_open_time: Optional[str] = None
+    c_close_time: Optional[str] = None
+    c_profit_usd: Optional[float] = None
+    open_diff_sec: Optional[int] = None
+    lot_ratio: Optional[float] = None
+    net_usd: Optional[float] = None
+    so_comment: Optional[str] = None
+    shared_ips: Optional[str] = None       # comma-joined; empty when none
+    shared_ip_count: Optional[int] = None
+    l_ip_count: Optional[int] = None
+    c_ip_count: Optional[int] = None
+    scan_days: Optional[int] = None
+    # rule 81 (per-client window profit) — client-level alert. The shared
+    # `login` field carries the primary contributing loginsid; the full
+    # set sits in `contributing_login_sids`.
+    client_userid: Optional[int] = None
+    client_name: Optional[str] = None
+    client_groupsid: Optional[str] = None
+    contributing_login_sids: Optional[str] = None     # comma-joined
+    contributing_account_count: Optional[int] = None
+    symbols: Optional[str] = None                     # comma-joined
+    symbol_count: Optional[int] = None
+    profit_ratio: Optional[float] = None
+    triggered_by: Optional[str] = None                # "ratio" | "absolute" | "both"
+    window_date: Optional[str] = None                 # "YYYY-MM-DD" (MT date)
 
 
 class AlertsResponse(BaseModel):
