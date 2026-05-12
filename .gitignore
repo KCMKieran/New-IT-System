@@ -35,3 +35,7 @@ backend/logs-prod/*.log.*
 backend/scripts/login_ip_deep_audit_*.html
 
 CLAUDE.md
+
+# Local-only notes (sensitive: infra details / vulnerability map — keep off git)
+SECURITY_VULNERABILITY_REVIEW.md
+SSH_Tunnel_Configuration.md
