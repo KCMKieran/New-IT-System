@@ -4361,10 +4361,13 @@ function GapTradeTab({ active }: { active: boolean }) {
           </div>
         </div>
 
-        {/* Per-rule summary cards — same compact pattern as 批量下单 / 快开快平.
-            Only the 2 sub-detectors are shown; the prior "同 IP 强信号" card is
-            removed since the table already conveys it via row highlight + column. */}
-        <div className="grid w-full gap-1.5 sm:gap-2 grid-cols-1 sm:grid-cols-2">
+        {/* Per-rule summary cards — same compact pattern as 批量下单 / 快开快平
+            (matching `grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4` so card width
+            tracks the other tabs at every breakpoint instead of stretching to
+            half-page on desktop). Only the 2 sub-detectors are shown; the
+            prior "同 IP 强信号" card was removed because the table already
+            conveys it via the row highlight + 是否同 IP column. */}
+        <div className="grid w-full gap-1.5 sm:gap-2 grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4">
           <SummaryCard
             compact
             label="检测 A · SO + AB 配对"
@@ -4573,20 +4576,31 @@ function GapTradeTab({ active }: { active: boolean }) {
         </SheetContent>
       </Sheet>
 
-      {/* Config Drawer */}
+      {/* Config Drawer — matches the other 3 tabs: side-slide on desktop
+          (`direction="right"` + `ml-auto h-full w-[480px]` for the content),
+          bottom-sheet on mobile. Without `direction` the Drawer would slide
+          from the bottom on every viewport which is inconsistent. */}
       <Drawer
         open={configOpen}
         onOpenChange={(o) => {
           if (!o) setEditConfig(null);
           setConfigOpen(o);
         }}
+        direction={isMobile ? "bottom" : "right"}
       >
-        <DrawerContent className="max-h-[90vh]">
-          <DrawerHeader>
-            <DrawerTitle>Gap Trade 配置</DrawerTitle>
+        <DrawerContent
+          className={cn(
+            isMobile
+              ? "max-h-[85vh]"
+              : "ml-auto h-full w-[480px] max-w-[90vw] rounded-l-xl rounded-r-none",
+          )}
+        >
+          <DrawerHeader className="border-b px-6">
+            <DrawerTitle>Gap Trade 规则配置</DrawerTitle>
           </DrawerHeader>
           {editConfig && (
-            <div className="space-y-4 overflow-y-auto px-4 pb-4 text-sm">
+            <>
+            <div className="flex-1 overflow-y-auto p-6 space-y-6 text-sm">
               <div>
                 <p className="font-medium mb-1">扫描窗口 (MT 时间)</p>
                 <div className="flex items-center gap-2">
@@ -4785,22 +4799,17 @@ function GapTradeTab({ active }: { active: boolean }) {
                   </div>
                 </div>
               </div>
-              <div className="flex justify-end gap-2 pt-2">
-                <DrawerClose asChild>
-                  <Button variant="outline" size="sm">
-                    取消
-                  </Button>
-                </DrawerClose>
-                <Button
-                  size="sm"
-                  onClick={handleSaveConfig}
-                  disabled={savingConfig}
-                >
-                  <Save className="h-4 w-4 mr-1" />
-                  保存
-                </Button>
-              </div>
             </div>
+            <div className="border-t p-4 flex justify-end gap-2">
+              <DrawerClose asChild>
+                <Button variant="outline">取消</Button>
+              </DrawerClose>
+              <Button onClick={handleSaveConfig} disabled={savingConfig}>
+                <Save className="h-4 w-4 mr-1.5" />
+                {savingConfig ? "保存中..." : "保存配置"}
+              </Button>
+            </div>
+            </>
           )}
         </DrawerContent>
       </Drawer>
