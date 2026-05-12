@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo, Fragment, useCallback } from "react";
+import { useNavigate } from "react-router-dom";
 import { apiFetch } from "@/lib/fetch";
 import {
   Card,
@@ -60,6 +61,7 @@ const IB_COMM_COLOR = "text-muted-foreground";
  * Time scope: MT Server natural day (今日 / 昨日).
  */
 export default function Past24hClientPnlByCountry() {
+  const navigate = useNavigate();
   const [items, setItems] = useState<SalesTeamPnlRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -131,6 +133,14 @@ export default function Past24hClientPnlByCountry() {
           </CardDescription>
         </div>
         <div className="flex flex-shrink-0 flex-wrap items-center gap-2">
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-7 px-2 text-xs"
+            onClick={() => navigate("/dashboard/pnl-history")}
+          >
+            历史
+          </Button>
           <Button
             size="sm"
             variant="outline"

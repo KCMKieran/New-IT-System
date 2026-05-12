@@ -4,17 +4,25 @@ Dashboard API: read-only endpoints for home page widgets.
 - GET /pnl-by-sales-team: Today/yesterday closed PnL per sales team with country.
 - GET /pnl-by-group: Today/yesterday closed PnL grouped by mt4_users.GROUP and sales team.
   Time scope: MT Server natural day.
+- GET /pnl-history: Per-(date, sales_team) Profit (excl. rbt) + IB commission within
+  [date_from, date_to]; max 30-day window.
 - GET /cn-payment-success-rate: CN payment channel deposit success rate (past N hours).
   Docs: docs/features/dashboard-pnl24h-by-country-sql.md
 """
 
+import json
+from datetime import date
+
 from fastapi import APIRouter, HTTPException, Query
+from pydantic import ValidationError
 
 from app.schemas.dashboard_pnl import DashboardPnlBySalesTeamResponse
 from app.schemas.dashboard_pnl_group import DashboardPnlByGroupResponse
+from app.schemas.dashboard_pnl_history import PnlHistoryQuery, PnlHistoryResponse
 from app.schemas.cn_payment import CnPaymentSuccessRateResponse
 from app.services.dashboard_pnl_service import get_pnl_by_sales_team
 from app.services.dashboard_pnl_group_service import get_pnl_by_group
+from app.services.dashboard_pnl_history_service import get_pnl_history
 from app.services.cn_payment_service import get_cn_payment_success_rate
 from app.core.logging_config import get_logger
 
@@ -48,6 +56,35 @@ def get_dashboard_pnl_by_group():
         return DashboardPnlByGroupResponse(items=items)
     except Exception as e:
         logger.exception("Error fetching dashboard pnl-by-group")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/pnl-history", response_model=PnlHistoryResponse)
+def get_dashboard_pnl_history(
+    date_from: date = Query(..., description="Start date (inclusive, MT Server day)"),
+    date_to: date = Query(..., description="End date (inclusive, MT Server day)"),
+):
+    """
+    Per-(date, sales_team) Profit (excl. rbt) + IB commission within [date_from, date_to].
+    Hard cap: window <= 30 days. Country derived from backend mapping.
+    """
+    try:
+        query = PnlHistoryQuery(date_from=date_from, date_to=date_to)
+    except ValidationError as e:
+        # e.errors() may contain non-JSON-safe values (e.g. date objects in `input`).
+        # Use Pydantic's own JSON serializer to keep the 422 body well-formed.
+        raise HTTPException(status_code=422, detail=json.loads(e.json()))
+
+    try:
+        rows, stats = get_pnl_history(query.date_from, query.date_to)
+        return PnlHistoryResponse(
+            rows=rows,
+            date_from=query.date_from,
+            date_to=query.date_to,
+            statistics=stats,
+        )
+    except Exception as e:
+        logger.exception("Error fetching dashboard pnl-history")
         raise HTTPException(status_code=500, detail=str(e))
 
 

@@ -7,6 +7,7 @@ const DashboardLayout = lazyWithRetry(() => import("@/layouts/DashboardLayout"))
 const LoginPage = lazyWithRetry(() => import("@/pages/Login"))
 const HomePage = lazyWithRetry(() => import("@/pages/Home"))
 const DashboardTemplatePage = lazyWithRetry(() => import("@/pages/Dashboard"))
+const DashboardPnlHistoryPage = lazyWithRetry(() => import("@/pages/DashboardPnlHistory"))
 // [HIDDEN] Basis page - 10.6.20.138:8050 service disabled
 // const BasisPage = lazyWithRetry(() => import("@/pages/Basis"))
 const GoldQuotePage = lazyWithRetry(() => import("@/pages/GoldQuote"))
@@ -61,6 +62,7 @@ function App() {
               <Route index element={<HomePage />} />
               <Route path="home" element={<HomePage />} />
               <Route path="template" element={<DashboardTemplatePage />} />
+              <Route path="dashboard/pnl-history" element={<DashboardPnlHistoryPage />} />
               {/* [REMOVED] EquityMonitor page deleted */}
               {/* <Route path="equity-monitor" element={<EquityMonitorPage />} /> */}
               <Route path="gold" element={<GoldQuotePage />} />
