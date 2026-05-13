@@ -4260,15 +4260,32 @@ function GapTradeTab({ active }: { active: boolean }) {
         },
       },
       {
-        headerName: "同 IP 数",
-        field: "shared_ip_count" as keyof AlertEvent,
-        colId: "shared_ip_count_num",
-        width: 100,
-        cellClass: "ag-right-aligned-cell",
-        cellRenderer: (params: { value?: number | null }) => {
-          const v = params.value ?? 0;
-          if (v === 0) return "—";
-          return <span className="font-bold">{v}</span>;
+        // Show the actual IPs (truncated visually, full list on hover /
+        // in detail Sheet). The numeric count was easier to scan but lost
+        // the substance — analysts now read e.g. "103.x.x.x, 27.x.x.x +5"
+        // straight from the row and recognise VPN exit ranges at a glance.
+        headerName: "同 IP 地址",
+        field: "shared_ips" as keyof AlertEvent,
+        colId: "shared_ips",
+        width: 240,
+        tooltipField: "shared_ips" as keyof AlertEvent,
+        cellRenderer: (params: { value?: string | null }) => {
+          const raw = params.value;
+          if (!raw) return <span className="text-muted-foreground">—</span>;
+          const ips = raw.split(",").map((s) => s.trim()).filter(Boolean);
+          if (ips.length === 0) return <span className="text-muted-foreground">—</span>;
+          const visible = ips.slice(0, 2);
+          const overflow = ips.length - visible.length;
+          return (
+            <span className="text-xs inline-flex items-center gap-1 font-mono">
+              <span className="font-semibold text-amber-700 dark:text-amber-400">
+                {visible.join(", ")}
+              </span>
+              {overflow > 0 ? (
+                <span className="text-muted-foreground">+{overflow}</span>
+              ) : null}
+            </span>
+          );
         },
       },
     ],
@@ -4524,17 +4541,25 @@ function GapTradeTab({ active }: { active: boolean }) {
         },
       },
       {
-        headerName: "触发",
+        // Triggered-by label spells out the current threshold values so
+        // analysts don't have to crack open the config drawer to know
+        // why a row fired. Falls back to short labels when the config
+        // hasn't loaded yet (gapColumns rebuilds when `config` settles).
+        headerName: "触发条件",
         field: "triggered_by" as keyof AlertEvent,
         colId: "triggered_by",
-        width: 100,
+        width: 240,
         cellRenderer: (params: { value?: string | null }) => {
           const v = params.value;
           if (!v) return null;
+          const usd = config?.gap_profit?.min_profit_usd;
+          const ratio = config?.gap_profit?.profit_ratio_min;
+          const usdLbl = usd != null ? `Profit > $${usd.toLocaleString()}` : "绝对";
+          const ratioLbl = ratio != null ? `Profit/净入金 > ${ratio}×` : "比率";
           const labelMap: Record<string, string> = {
-            ratio: "比率",
-            absolute: "绝对",
-            both: "双触发",
+            absolute: usdLbl,
+            ratio: ratioLbl,
+            both: `${usdLbl} + ${ratioLbl}`,
           };
           const variant =
             v === "both"
@@ -4550,7 +4575,10 @@ function GapTradeTab({ active }: { active: boolean }) {
         },
       },
     ],
-    [],
+    // Rebuild when gap_profit thresholds change so the "触发条件" badge
+    // tracks the live config (e.g. user lowers min_profit_usd in the
+    // drawer → existing rows immediately re-label without a reload).
+    [config?.gap_profit?.min_profit_usd, config?.gap_profit?.profit_ratio_min],
   );
 
   // Row class: yellow highlight for shared-IP SO+AB rows. Keeps the prior
@@ -4865,7 +4893,7 @@ function GapTradeTab({ active }: { active: boolean }) {
                 {detailRow.rule_id === GAP_TRADE_SO_RULE_ID ? (
                   <GapTradeSoDetail row={detailRow} />
                 ) : (
-                  <GapTradeGapDetail row={detailRow} />
+                  <GapTradeGapDetail row={detailRow} gapConfig={config?.gap_profit} />
                 )}
               </div>
             </>
@@ -5268,11 +5296,31 @@ function GapTradeSoDetail({ row }: { row: AlertEvent }) {
 }
 
 /** Per-client gap-profit detail panel — full contributing-account list + symbols. */
-function GapTradeGapDetail({ row }: { row: AlertEvent }) {
+function GapTradeGapDetail({
+  row,
+  gapConfig,
+}: {
+  row: AlertEvent;
+  gapConfig?: GapTradeGapRuleConfig;
+}) {
   const loginSids = (row.contributing_login_sids || "")
     .split(",")
     .filter(Boolean);
   const symbols = (row.symbols || "").split(",").filter(Boolean);
+  // Resolve "触发条件" to the actual threshold copy used in the table so
+  // the Sheet stays in lockstep with the table label.
+  const triggeredLabel = (() => {
+    const v = row.triggered_by;
+    if (!v) return "—";
+    const usd = gapConfig?.min_profit_usd;
+    const ratio = gapConfig?.profit_ratio_min;
+    const usdLbl = usd != null ? `Profit > $${usd.toLocaleString()}` : "绝对";
+    const ratioLbl = ratio != null ? `Profit/净入金 > ${ratio}×` : "比率";
+    if (v === "absolute") return usdLbl;
+    if (v === "ratio") return ratioLbl;
+    if (v === "both") return `${usdLbl} + ${ratioLbl}`;
+    return v;
+  })();
   return (
     <>
       <DetailGroup title="客户">
@@ -5303,7 +5351,7 @@ function GapTradeGapDetail({ row }: { row: AlertEvent }) {
           }
         />
         <DetailRow label="订单数" value={row.order_count ?? 0} />
-        <DetailRow label="触发条件" value={row.triggered_by ?? "—"} />
+        <DetailRow label="触发条件" value={triggeredLabel} />
       </DetailGroup>
       <Separator />
       <DetailGroup title={`涉及账户 (${loginSids.length})`}>
