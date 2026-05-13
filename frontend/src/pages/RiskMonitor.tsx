@@ -3728,7 +3728,7 @@ function QuickProfitConfigDrawer({
 // ── Gap Trade Tab ─────────────────────────────────────────
 // Rule 71 = SO + AB pair (双账户配对 + IP 共享高亮)
 // Rule 81 = per-client window profit (单客户聚合)
-// Scan window: each weekday MT 00:00–02:00 (cron at 02:05 MT)
+// Scan window: previous-MT-day 00:00–02:00 (cron Tue–Sat 05:20 HKT)
 // Time filter is DAY-based (Today / Yesterday default / 3d / 7d / custom)
 // because the data only updates once a day.
 
@@ -3986,7 +3986,7 @@ function GapTradeTab({ active }: { active: boolean }) {
 
   // Fetch on activation + when filters change. AbortController per React
   // 18 StrictMode rules — see CLAUDE.md. No interval poll: data only changes
-  // once a day at MT 02:05, so the active-tab fetch is enough.
+  // once a day at HKT 05:20, so the active-tab fetch is enough.
   useEffect(() => {
     if (!active) return;
     const controller = new AbortController();
@@ -4325,8 +4325,8 @@ function GapTradeTab({ active }: { active: boolean }) {
         <div className={RISK_MONITOR_HEADER_ROW}>
           <div className="min-w-0">
             <p className="text-sm text-muted-foreground">
-              每个工作日 MT 02:05 自动扫描前 2 小时（00:00–02:00）窗口的强平 AB
-              配对与客户级超额盈利，数据每日刷新一次。
+              每天 HKT 05:20 自动扫描前一个 MT 交易日 00:00–02:00 窗口的强平
+              AB 配对与客户级超额盈利，数据每日刷新一次（默认筛选「昨天」）。
             </p>
             <p className="text-sm text-muted-foreground">
               当前范围:{" "}

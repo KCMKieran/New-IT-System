@@ -228,9 +228,12 @@ def trigger_gap_trade_scan_now() -> None:
 def _run_gap_trade_scan() -> None:
     """Execute one Gap Trade daily scan (rules 71 + 81).
 
-    Window = [today 00:00 MT, today 02:00 MT) inclusive of close_time.
-    Runs Mon–Fri 02:05 MT via cron; on a weekday-off scan (manual trigger
-    on a weekend) the `weekdays_only` config flag aborts.
+    Window = [yesterday 00:00 MT, yesterday 02:00 MT) inclusive of close_time.
+    Runs Tue–Sat 05:20 HKT via cron — i.e. the morning after each MT
+    trading day, which is also after the login_ip job (HKT 05:10) has
+    written /app/data/login_ip/<yesterday>/, so SO+AB IP enrichment can
+    actually find a file. Manual trigger on a weekend day whose previous
+    MT day is Sat/Sun is aborted by the `weekdays_only` config flag.
 
     Both sub-detectors share one `append_scan_and_events` write so the
     scan_history row covers them together.
@@ -250,22 +253,28 @@ def _run_gap_trade_scan() -> None:
         config = GapTradeConfig(**load_gap_trade_config())
         settings = get_settings()
 
-        # MT is UTC+3 with no DST. Compute "now in MT" by adding 3h to
-        # `now UTC`, then snap to today's window. The cron itself fires
-        # at 02:05 MT so this branch normally lines up to today's window.
+        # MT is UTC+3 with no DST. Compute "yesterday in MT" by adding
+        # 3h to `now UTC` and subtracting one day, then snap to that
+        # day's [start,end) window. Scanning yesterday's window — not
+        # today's — is what makes the login_ip data line up: the daily
+        # login_ip job (HKT 05:10) emits a folder named with the day
+        # whose logins it analyzed, so by the time this cron runs at
+        # HKT 05:20, /app/data/login_ip/<yesterday>/ is ready.
         now_mt = (datetime.now(timezone.utc) + timedelta(hours=3)).replace(
             tzinfo=None, microsecond=0
         )
-        if config.weekdays_only and now_mt.weekday() >= 5:
-            logger.info("Gap Trade scan skipped: weekend (MT weekday=%d)", now_mt.weekday())
+        window_day = (now_mt - timedelta(days=1)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        if config.weekdays_only and window_day.weekday() >= 5:
+            logger.info(
+                "Gap Trade scan skipped: window day %s is weekend (weekday=%d)",
+                window_day.date(), window_day.weekday(),
+            )
             return
 
-        start_mt = now_mt.replace(
-            hour=config.window_start_hour_mt, minute=0, second=0, microsecond=0
-        )
-        end_mt = now_mt.replace(
-            hour=0, minute=0, second=0, microsecond=0
-        ) + timedelta(hours=config.window_end_hour_mt)
+        start_mt = window_day.replace(hour=config.window_start_hour_mt)
+        end_mt = window_day + timedelta(hours=config.window_end_hour_mt)
         if start_mt >= end_mt:
             logger.warning(
                 "Gap Trade invalid window: start_mt=%s end_mt=%s", start_mt, end_mt
@@ -375,22 +384,27 @@ def start_burst_scheduler() -> None:
         id=JOB_ID,
         replace_existing=True,
     )
-    # Gap Trade: Mon–Fri at 02:05 MT (UTC+3). The +5min after the window
-    # close lets MT finish writing the last batch of trades to mt4_trades.
-    # `Etc/GMT-3` is the IANA name for MT (sign is inverted; -3 means UTC+3).
+    # Gap Trade: Tue–Sat at 05:20 HKT (Asia/Hong_Kong). Cron fires the
+    # morning after each MT trading day (Mon-MT-data → scanned Tue HKT,
+    # Fri-MT-data → scanned Sat HKT), 10 min after the login_ip job
+    # (HKT 05:10) writes /app/data/login_ip/<yesterday>/ — without that
+    # ordering, SO+AB IP enrichment would silently degrade to 0-overlap.
     if os.getenv("GAP_TRADE_SCAN_ENABLED", "true").lower() != "false":
         _scheduler.add_job(
             _locked_gap_trade_scan,
             CronTrigger(
-                day_of_week="mon-fri",
-                hour=2,
-                minute=5,
-                timezone="Etc/GMT-3",
+                day_of_week="tue-sat",
+                hour=5,
+                minute=20,
+                timezone="Asia/Hong_Kong",
             ),
             id=GAP_TRADE_JOB_ID,
             replace_existing=True,
         )
-        logger.info("Gap Trade scanner started: Mon–Fri 02:05 MT")
+        logger.info(
+            "Gap Trade scanner started: Tue–Sat 05:20 HKT "
+            "(scans previous MT day 00:00–02:00 window)"
+        )
     _scheduler.start()
     logger.info("Burst scanner started: every %d minutes", interval_min)
 

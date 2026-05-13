@@ -7,14 +7,15 @@
 > **历史归档**: [risk-monitor-archive.md](./risk-monitor-archive.md) — 已完成的开发计划、探索性 SQL、已移除规则设计、已实施调研记录
 >
 > **变更记录**:
+> - 2026-05-13 **Gap Trade cron 时序对齐**：原计划 Mon–Fri MT 02:05 扫**当天** 00–02 窗口，但 login_ip job（HKT 05:10）生成的文件夹名是**前一天**的日期 → 当天 IP 文件永远不存在，SO+AB IP 富化永远 0（`shared_ip_count = 0`、「是否同 IP」永远「否」）。改成 **Tue–Sat HKT 05:20** cron（紧跟 login_ip 后 10 min）扫**前一 MT 日** 00–02 窗口，IP 富化即时可用，前端默认筛选「昨天」直接命中最新数据。同步修一个 `from datetime import datetime, timedelta, timezone` 漏写导致 cron / `trigger_gap_trade_scan_now()` 都 NameError 退出的 bug。
 > - 2026-05-12（同日两次迭代）Gap Trade Tab **UI 对齐 + 日志增强**：
->   - **UI 重构**：AG-Grid 切到 `risk-monitor-theme h-[420px]` + `gridOptions={{ theme: "legacy" }}`，跟前 3 个 tab 完全一致；时间筛选改成 `<Select>` 下拉（与其他 tab 同款 `h-9 sm:w-40`），选项 = 今天 / 昨天（默认）/ 最近 3 天 / 7 天 / 30 天 / 自定义；检测 A 首列从 `⚠` 图标改成「**是否同 IP**」（"是"琥珀色 / "否"灰色，整行同时黄色高亮保持不变）；删除「同 IP 强信号」summary 卡片（信息已由整行高亮 + 列表达）；删除「刷新」按钮（数据每天 02:05 才更新一次，刷新无意义；切 Tab 自动 fetch）；抽出 `renderLoginSidLink()` 共用渲染函数。
+>   - **UI 重构**：AG-Grid 切到 `risk-monitor-theme h-[420px]` + `gridOptions={{ theme: "legacy" }}`，跟前 3 个 tab 完全一致；时间筛选改成 `<Select>` 下拉（与其他 tab 同款 `h-9 sm:w-40`），选项 = 今天 / 昨天（默认）/ 最近 3 天 / 7 天 / 30 天 / 自定义；检测 A 首列从 `⚠` 图标改成「**是否同 IP**」（"是"琥珀色 / "否"灰色，整行同时黄色高亮保持不变）；删除「同 IP 强信号」summary 卡片（信息已由整行高亮 + 列表达）；删除「刷新」按钮（数据每天只更新一次，刷新无意义；切 Tab 自动 fetch）；抽出 `renderLoginSidLink()` 共用渲染函数。
 >   - **日志增强**：`rule_gap_trade_so_service` / `rule_gap_trade_gap_service` 新增 5 条 INFO（detect 开始 + SQL 行数 + IP enrich 摘要 + net_deposit 命中率 + done 耗时）+ 1 条 funnel 统计（gap-profit 的 "clients=N profitable=N dropped(no_deposit, low_deposit, below_threshold) → N alerts"），出问题时可一眼判断是 SQL 没数据 / IP 文件全缺 / 阈值卡死 / 净入金过滤掉了。Scheduler 最终汇总日志拆出 SO+AB 与 gap-profit 各自计数。
-> - 2026-05-12 **Gap Trade Tab 上线（第 4 个 Tab，rule_ids 71 / 81）**：休市开盘缺口监控，每个工作日 MT 02:05 cron 扫描前 2h 窗口（MT 00:00–02:00）。两个子检测同一 Tab 内分两段表展示：
+> - 2026-05-12 **Gap Trade Tab 上线（第 4 个 Tab，rule_ids 71 / 81）**：休市开盘缺口监控（原计划工作日 MT 02:05 cron，次日 2026-05-13 调整为 **Tue–Sat HKT 05:20** 扫前一 MT 日 00–02 窗口 — 见上条记录）。两个子检测同一 Tab 内分两段表展示：
 >   - **检测 A** `rule_id = 71` — SO + AB 配对（W04 `Azure_Function_BAU/W04_Blowup_Audit_Weekly.py` 移植）：找窗口内 COMMENT 前缀 `[so` / `so:` / `cso:` 的强平 L 腿，配同 symbol/反向/开仓 ±300s/手数 0.5–2× 的 C 腿，约束 **同 groupsid 但 userid 不同**（跨客户串通）。读取 `backend/data/login_ip/<YYYYMMDD>/analysis_ip_to_accounts.json`，L 与 C 在持仓期间共享 IP → 前端整行黄色高亮。
 >   - **检测 B** `rule_id = 81` — 按 `userid` 聚合窗口内**纯平仓** P&L（CEN ÷100 后），`total_profit / net_deposit_hist ≥ 1×` **或** `total_profit ≥ $1000` 任一满足即触发，`triggered_by` 字段记录是哪个条件命中。
 >
->   前端按天筛选（Today / Yesterday 默认 / 3d / 7d / 30d / Custom date range），点击行打开右侧 Sheet 详情面板（移动端从底部弹出）。`GapTradeConfig` 单行 JSON 存于 SQLite；scheduler 走独立 `CronTrigger(day_of_week="mon-fri", hour=2, minute=5, timezone="Etc/GMT-3")`，**不提供"立即扫描"按钮**（数据每天只更新一次）。CSV 导出列宽容两个子规则的字段。详见 [Skill](../../.cursor/skills/risk-monitor/SKILL.md) §"Rule 4: Gap Trade"。
+>   前端按天筛选（Today / Yesterday 默认 / 3d / 7d / 30d / Custom date range），点击行打开右侧 Sheet 详情面板（移动端从底部弹出）。`GapTradeConfig` 单行 JSON 存于 SQLite；scheduler 走独立 `CronTrigger(day_of_week="tue-sat", hour=5, minute=20, timezone="Asia/Hong_Kong")`，**不提供"立即扫描"按钮**（数据每天只更新一次）。CSV 导出列宽容两个子规则的字段。详见 [Skill](../../.cursor/skills/risk-monitor/SKILL.md) §"Rule 4: Gap Trade"。
 > - 2026-05-08 **三 Tab 页眉操作区移动端适配**：`RiskMonitor.tsx` 使用 `RISK_MONITOR_HEADER_ROW` / `RISK_MONITOR_HEADER_ACTIONS`（窄屏纵向堆叠 + 操作按钮 `flex-wrap`），避免「导出 CSV / 规则配置 / 立即扫描 / 刷新浮动盈亏」在单行 `flex` 下与 `Button` 的 `shrink-0` 组合导致横向溢出；根容器与 Tabs 增加 `min-w-0`。详见 [risk-monitor-reusable-patterns.md §11](./risk-monitor-reusable-patterns.md)。
 > - 2026-03-26 移除 Scale-In 规则代码，Tab 2 曾改为「缺口交易」占位；**后已移除该 Tab**（当前仅 **批量下单 + 快开快平** 两 Tab，见 §5）。
 > - 2026-04-23 归档已完成历史章节到 [risk-monitor-archive.md](./risk-monitor-archive.md)。

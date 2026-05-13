@@ -1033,7 +1033,8 @@ async def quick_profit_floating_refresh(
 # Daily scan window — frontend filter is day-based ("Yesterday" default, plus
 # 3d / 7d / 30d / custom date range). The default lookback is 24h instead of
 # the burst tab's 4h so the page is meaningful on first load (the cron runs
-# at 02:05 MT, so "Today's" alerts only exist after that time).
+# Tue-Sat 05:20 HKT scanning the previous MT day, so "Yesterday" is where the
+# fresh data lands; "Today's" filter is normally empty until tomorrow morning).
 _GAP_TRADE_DEFAULT_WINDOW = timedelta(days=1)
 
 
@@ -1066,7 +1067,7 @@ async def gap_trade_update_config(config: GapTradeConfig):
     """Persist new Gap Trade config. Takes effect from the next cron tick.
 
     No scheduler reschedule call here because the cron firing time is fixed
-    (Mon-Fri 02:05 MT); only the in-scan parameters change.
+    (Tue-Sat 05:20 HKT); only the in-scan parameters change.
     """
     if config.window_start_hour_mt >= config.window_end_hour_mt:
         raise HTTPException(

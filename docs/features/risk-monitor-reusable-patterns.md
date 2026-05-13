@@ -494,7 +494,10 @@ Gap Trade Tab (2026-05-12) is a precedent for a different shape — one tab,
   on row click, dispatches to `GapTradeSoDetail` or `GapTradeGapDetail` by `rule_id`.
 - **No pagination** — daily volume is small (≤ a few dozen), single `page_size=500` fetch.
 - **Day-based time presets** (今天 / 昨天 / 3d / 7d / 30d / 自定义) instead of hours.
-- **No 立即扫描 / 刷新 button** — cron is `mon-fri 02:05 MT` only, data updates 1×/day.
+- **No 立即扫描 / 刷新 button** — cron is `tue-sat 05:20 HKT` only, data updates 1×/day.
+  (Originally `mon-fri 02:05 MT` scanning the same-day window, but switched 2026-05-13
+  to scan the **previous** MT day so the cron fires 10 min after the daily login_ip
+  job and SO+AB IP enrichment finds a non-empty `analysis_ip_to_accounts.json`.)
 
 When adding another single-day cron-driven rule with multiple sub-detectors,
 copy GapTradeTab; for multi-rule tunable detectors (Martingale, Scale-In, etc.),
