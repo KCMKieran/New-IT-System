@@ -7,7 +7,18 @@
 > **历史归档**: [risk-monitor-archive.md](./risk-monitor-archive.md) — 已完成的开发计划、探索性 SQL、已移除规则设计、已实施调研记录
 >
 > **变更记录**:
-> - 2026-05-13 **Gap Trade cron 时序对齐**：原计划 Mon–Fri MT 02:05 扫**当天** 00–02 窗口，但 login_ip job（HKT 05:10）生成的文件夹名是**前一天**的日期 → 当天 IP 文件永远不存在，SO+AB IP 富化永远 0（`shared_ip_count = 0`、「是否同 IP」永远「否」）。改成 **Tue–Sat HKT 05:20** cron（紧跟 login_ip 后 10 min）扫**前一 MT 日** 00–02 窗口，IP 富化即时可用，前端默认筛选「昨天」直接命中最新数据。同步修一个 `from datetime import datetime, timedelta, timezone` 漏写导致 cron / `trigger_gap_trade_scan_now()` 都 NameError 退出的 bug。
+> - 2026-05-13 **Gap Trade 同日多轮迭代,定稿成生产可用状态**(commits a059925, 2fdae7f, 42c8de3, 6517a46, f62345d, a76046c, f13a963, ed98c2d, 8744d85, d7aa8fe):
+>   - **Cron 时序对齐**:原计划 Mon–Fri MT 02:05 扫**当天** 00–02 窗口,login_ip job(HKT 05:10)文件夹名带的是**前一天**的日期 → 当天 IP 文件永远不存在,SO+AB IP 富化永远 `shared_ip_count=0`。改成 **Tue–Sat HKT 05:20** cron(login_ip 后 10 min)扫**前一 MT 日** 00–02 窗口,IP 富化即时可用。同步修 `from datetime import datetime, timedelta, timezone` 漏写导致 cron / `trigger_gap_trade_scan_now()` 都 NameError 退出的 bug。
+>   - **降噪 + IP 旁路 + 客户对聚合三件套**:
+>     - 新增 `GapTradeSoRuleConfig.min_l_loss_usd`(默认 $100),把 1449 条/天的 dust SO 砍掉
+>     - **同 IP 旁路**:`shared_ip_count > 0` 的配对无视 `min_l_loss_usd` 阈值,实战中故意压在阈值之下的串通模式专门靠这个抓(5/11 backfill 抓到 16 对 $3 亏损 + 共享 7 个 VPN IP 的真实案例)
+>     - 工具栏新增「只看同 IP」Toggle Button(client-side `shared_ip_count > 0` 过滤)
+>     - 检测 A 顶部新增「客户对汇总」AG-Grid(按 `(l_userid, c_userid)` 聚合,显示所有 loginSid + `pair_count` + 累计 L/C + `shared_ip_pairs`),原 9 列表重命名为「逐笔明细」
+>   - **时间筛选切到 `window_date`**:之前 `query_alert_events` 默认按 `scanned_at`(扫描运行日)过滤,backfill 扫历史窗口时 alert 会被错误归类到「今天」。新增 `_ALERT_TIME_FIELDS = {scanned_at, window_date}` 白名单 + `_build_alert_filters(time_field)` 参数,gap-trade 3 个 endpoint 显式传 `"window_date"`,SO 服务也补上 `window_date = start_mt.date().isoformat()`(之前只有 rule 81 写)。默认筛选回到「昨天」,因为 fresh cron 输出的 `window_date` 正好是昨天 HKT
+>   - **拆分 fetch**:`/gap-trade/alerts` 限制 `page_size=500`,1449 条 SO+AB 会把 1 条 rule 81 挤到第 1450 名。前端改成并行发 `?rule_id=71` + `?rule_id=81`,各自独立 500 名额
+>   - **UI 文案去 L/C 缩写化**:UI 全部 `L 账户/腿 → 爆仓方/账户`、`C 账户/腿 → 对手方/账户`、`检测 A → 爆仓 AB 仓配对`、`检测 B → Gap Trade 超额获利客户`;DB/SQL/schema 保留 W04 兼容的 `L_*/C_*` 字段名(只在前端翻译)
+>   - **列调整**:删「净 (USD)」(L+C 心算就够);「同 IP 数」→「同 IP 地址」(直接列出 IP,前 2 个 + "+N" + tooltip);「触发」→「触发条件」(badge 动态显示当前阈值 `Profit > $1,000` 等);Detection B 新增「账户 ID」列(渲染 `contributing_login_sids`)
+>   - **`netDepositColDef` 工厂统一**:之前 3 个 tab 各自 inline 写绿/红配色,Gap Trade B 漏写变成纯灰。抽出 `netDepositColDef({headerName?,colId?,width?,filter?})` + `netDepositColorClass(v)`,4 个 tab + 2 个 Detail Sheet 全部复用
 > - 2026-05-12（同日两次迭代）Gap Trade Tab **UI 对齐 + 日志增强**：
 >   - **UI 重构**：AG-Grid 切到 `risk-monitor-theme h-[420px]` + `gridOptions={{ theme: "legacy" }}`，跟前 3 个 tab 完全一致；时间筛选改成 `<Select>` 下拉（与其他 tab 同款 `h-9 sm:w-40`），选项 = 今天 / 昨天（默认）/ 最近 3 天 / 7 天 / 30 天 / 自定义；检测 A 首列从 `⚠` 图标改成「**是否同 IP**」（"是"琥珀色 / "否"灰色，整行同时黄色高亮保持不变）；删除「同 IP 强信号」summary 卡片（信息已由整行高亮 + 列表达）；删除「刷新」按钮（数据每天只更新一次，刷新无意义；切 Tab 自动 fetch）；抽出 `renderLoginSidLink()` 共用渲染函数。
 >   - **日志增强**：`rule_gap_trade_so_service` / `rule_gap_trade_gap_service` 新增 5 条 INFO（detect 开始 + SQL 行数 + IP enrich 摘要 + net_deposit 命中率 + done 耗时）+ 1 条 funnel 统计（gap-profit 的 "clients=N profitable=N dropped(no_deposit, low_deposit, below_threshold) → N alerts"），出问题时可一眼判断是 SQL 没数据 / IP 文件全缺 / 阈值卡死 / 净入金过滤掉了。Scheduler 最终汇总日志拆出 SO+AB 与 gap-profit 各自计数。

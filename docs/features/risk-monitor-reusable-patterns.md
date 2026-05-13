@@ -535,12 +535,19 @@ Gap Trade Tab (2026-05-12) is a precedent for a different shape — one tab,
 **two fixed sub-detectors instead of N configurable rules**:
 
 - **2 cards** (one per sub-rule_id, not one per user-defined rule); no rule filter dropdown.
-- **2 AG-Grid sections** stacked in one tab (检测 A SO+AB + 检测 B 超额 Profit), each
-  with its own 9-column compact table. Section headers use `<Badge variant="outline">`.
+- **3 AG-Grid sections** stacked in one tab — rule 71 split into ① 爆仓 AB 仓配对·客户对汇总
+  (groupBy `(l_userid, c_userid)`) + ② 爆仓 AB 仓配对·逐笔明细 (per-pair),
+  rule 81 → ③ Gap Trade 超额获利客户. Section headers use `<Badge variant="outline">`.
 - **Detail Sheet** (right-side; mobile bottom 85vh) instead of an expansion row — opens
   on row click, dispatches to `GapTradeSoDetail` or `GapTradeGapDetail` by `rule_id`.
-- **No pagination** — daily volume is small (≤ a few dozen), single `page_size=500` fetch.
+- **Split fetch per sub-rule** — frontend sends two parallel `/gap-trade/alerts?rule_id=71`
+  + `?rule_id=81` requests so a noisy day on rule 71 (1k+ pairs after a real gap) can't
+  push rule 81 out of the page-size=500 cap.
 - **Day-based time presets** (今天 / 昨天 / 3d / 7d / 30d / 自定义) instead of hours.
+  Backend filters on `window_date` (trade day), not `scanned_at` — pass
+  `time_field="window_date"` to `query_alert_events` / `alert_events_stats` /
+  `stream_alert_events`. Without that, a backfill scan run today for last week's
+  window would appear under today's "今天" filter, which is semantically wrong.
 - **No 立即扫描 / 刷新 button** — cron is `tue-sat 05:20 HKT` only, data updates 1×/day.
   (Originally `mon-fri 02:05 MT` scanning the same-day window, but switched 2026-05-13
   to scan the **previous** MT day so the cron fires 10 min after the daily login_ip
