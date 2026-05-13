@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useCallback, Fragment } from "react";
-import { useSearchParams, useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import { format, subDays, differenceInCalendarDays } from "date-fns";
 import { DateRange } from "react-day-picker";
 import {
@@ -96,12 +96,6 @@ function pnlColor(value: number): string {
   return "text-muted-foreground";
 }
 
-function parseDateParam(raw: string | null): Date | undefined {
-  if (!raw) return undefined;
-  const d = new Date(raw + "T00:00:00");
-  return Number.isNaN(d.getTime()) ? undefined : d;
-}
-
 function defaultRange(): DateRange {
   const to = subDays(new Date(), 1);
   const from = subDays(to, MAX_RANGE_DAYS - 1);
@@ -110,19 +104,10 @@ function defaultRange(): DateRange {
 
 export default function DashboardPnlHistory() {
   const navigate = useNavigate();
-  const [searchParams, setSearchParams] = useSearchParams();
 
-  // Initialize from URL or defaults
-  const initialRange: DateRange = useMemo(() => {
-    const from = parseDateParam(searchParams.get("from"));
-    const to = parseDateParam(searchParams.get("to"));
-    if (from && to) return { from, to };
-    return defaultRange();
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const [range, setRange] = useState<DateRange>(initialRange);
+  const [range, setRange] = useState<DateRange>(() => defaultRange());
   const [pendingRange, setPendingRange] = useState<DateRange | undefined>(
-    initialRange,
+    () => defaultRange(),
   );
   const [rows, setRows] = useState<PnlHistoryRow[]>([]);
   const [loading, setLoading] = useState(false);
@@ -165,15 +150,6 @@ export default function DashboardPnlHistory() {
       .finally(() => setLoading(false));
     return () => controller.abort();
   }, [range.from, range.to]);
-
-  // Sync URL when applied range changes
-  useEffect(() => {
-    if (!range.from || !range.to) return;
-    const next = new URLSearchParams(searchParams);
-    next.set("from", format(range.from, "yyyy-MM-dd"));
-    next.set("to", format(range.to, "yyyy-MM-dd"));
-    setSearchParams(next, { replace: true });
-  }, [range.from, range.to]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Country order (stable across renders) — by |total profit| desc, so largest stack on bottom.
   // Chart shows client-perspective Profit (matches the dashboard card on Home).
@@ -257,7 +233,7 @@ export default function DashboardPnlHistory() {
       p += r.profit_excl_rbt;
       i += r.ib_commission;
     }
-    return { profit: p, ib: i, companyNet: -p - i };
+    return { profit: p, ib: i };
   }, [rows]);
 
   const applyQuick = useCallback((days: number) => {
@@ -549,17 +525,6 @@ export default function DashboardPnlHistory() {
                     {formatUsdPrecise(summary.ib)}
                   </span>
                 </span>
-                <span>
-                  <span className="text-muted-foreground">公司净利: </span>
-                  <span
-                    className={cn(
-                      "font-medium",
-                      pnlColor(summary.companyNet),
-                    )}
-                  >
-                    {formatUsdPrecise(summary.companyNet)}
-                  </span>
-                </span>
               </div>
 
               <div className="overflow-x-auto rounded-md border">
@@ -574,18 +539,11 @@ export default function DashboardPnlHistory() {
                       <TableHead className="text-left text-xs">
                         IB 佣金
                       </TableHead>
-                      <TableHead
-                        className="hidden sm:table-cell text-left text-xs"
-                        title="公司净利 = −Profit − IB"
-                      >
-                        公司净利
-                      </TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
                     {dateNodes.map((d, di) => {
                       const dateOpen = expandedDates.has(d.date);
-                      const dateCompanyNet = -d.profit - d.ib;
                       return (
                         <Fragment key={d.date}>
                           {/* Level 1: Date */}
@@ -626,14 +584,6 @@ export default function DashboardPnlHistory() {
                             <TableCell className="text-left text-xs text-muted-foreground">
                               {formatUsdPrecise(d.ib)}
                             </TableCell>
-                            <TableCell
-                              className={cn(
-                                "hidden sm:table-cell text-left text-xs font-medium",
-                                pnlColor(dateCompanyNet),
-                              )}
-                            >
-                              {formatUsdPrecise(dateCompanyNet)}
-                            </TableCell>
                           </TableRow>
                           {/* Level 2: Country (under expanded date) */}
                           {dateOpen &&
@@ -641,7 +591,6 @@ export default function DashboardPnlHistory() {
                               const countryKey = `${d.date}|${c.country}`;
                               const countryOpen =
                                 expandedCountries.has(countryKey);
-                              const countryCompanyNet = -c.profit - c.ib;
                               return (
                                 <Fragment key={countryKey}>
                                   <TableRow
@@ -677,52 +626,33 @@ export default function DashboardPnlHistory() {
                                     <TableCell className="text-left text-xs text-muted-foreground">
                                       {formatUsdPrecise(c.ib)}
                                     </TableCell>
-                                    <TableCell
-                                      className={cn(
-                                        "hidden sm:table-cell text-left text-xs",
-                                        pnlColor(countryCompanyNet),
-                                      )}
-                                    >
-                                      {formatUsdPrecise(countryCompanyNet)}
-                                    </TableCell>
                                   </TableRow>
                                   {/* Level 3: Sales Team (under expanded country) */}
                                   {countryOpen &&
-                                    c.teams.map((t) => {
-                                      const teamCompanyNet = -t.profit - t.ib;
-                                      return (
-                                        <TableRow
-                                          key={`${countryKey}|${t.sales_team}`}
-                                          className="bg-muted/10 hover:bg-muted/20"
+                                    c.teams.map((t) => (
+                                      <TableRow
+                                        key={`${countryKey}|${t.sales_team}`}
+                                        className="bg-muted/10 hover:bg-muted/20"
+                                      >
+                                        <TableCell className="w-7" />
+                                        <TableCell className="text-xs text-muted-foreground">
+                                          <span className="pl-12">
+                                            {t.sales_team}
+                                          </span>
+                                        </TableCell>
+                                        <TableCell
+                                          className={cn(
+                                            "text-left text-xs",
+                                            pnlColor(t.profit),
+                                          )}
                                         >
-                                          <TableCell className="w-7" />
-                                          <TableCell className="text-xs text-muted-foreground">
-                                            <span className="pl-12">
-                                              {t.sales_team}
-                                            </span>
-                                          </TableCell>
-                                          <TableCell
-                                            className={cn(
-                                              "text-left text-xs",
-                                              pnlColor(t.profit),
-                                            )}
-                                          >
-                                            {formatUsdPrecise(t.profit)}
-                                          </TableCell>
-                                          <TableCell className="text-left text-xs text-muted-foreground">
-                                            {formatUsdPrecise(t.ib)}
-                                          </TableCell>
-                                          <TableCell
-                                            className={cn(
-                                              "hidden sm:table-cell text-left text-xs",
-                                              pnlColor(teamCompanyNet),
-                                            )}
-                                          >
-                                            {formatUsdPrecise(teamCompanyNet)}
-                                          </TableCell>
-                                        </TableRow>
-                                      );
-                                    })}
+                                          {formatUsdPrecise(t.profit)}
+                                        </TableCell>
+                                        <TableCell className="text-left text-xs text-muted-foreground">
+                                          {formatUsdPrecise(t.ib)}
+                                        </TableCell>
+                                      </TableRow>
+                                    ))}
                                 </Fragment>
                               );
                             })}
