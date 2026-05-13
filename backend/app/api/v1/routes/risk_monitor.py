@@ -1045,11 +1045,11 @@ async def quick_profit_floating_refresh(
 
 
 # ── Gap Trade endpoints ────────────────────────────────────
-# Daily scan window — frontend filter is day-based ("Yesterday" default, plus
-# 3d / 7d / 30d / custom date range). The default lookback is 24h instead of
-# the burst tab's 4h so the page is meaningful on first load (the cron runs
-# Tue-Sat 05:20 HKT scanning the previous MT day, so "Yesterday" is where the
-# fresh data lands; "Today's" filter is normally empty until tomorrow morning).
+# Daily scan window — frontend filter is day-based ("Today" default + 昨天 /
+# 3d / 7d / 30d / 自定义). Default lookback 24h matches the daily cron cadence;
+# filter runs on the default `scanned_at` column, so today's HKT 05:20 cron
+# output (which represents MT-yesterday's gap event) lands under the "Today"
+# preset from the HK analyst's "this morning's report" mental model.
 _GAP_TRADE_DEFAULT_WINDOW = timedelta(days=1)
 
 
@@ -1159,11 +1159,17 @@ async def gap_trade_alerts(
             offset=effective_offset,
             sort_by=sort_by,
             sort_order=sort_order,
-            # Gap-trade filters on trade date (the MT window day each alert
-            # represents), not scan-run date. A backfill scan run today for
-            # last week's window will appear under last week's "Yesterday"
-            # filter, not today's — which is what the analyst expects.
-            time_field="window_date",
+            # Gap-trade filter sticks with the default `scanned_at` so the
+            # "今天" preset shows whatever the most recent cron run produced
+            # (HKT 05:20 today, scanning MT yesterday — from the analyst's HK
+            # perspective that's "this morning's report"). Filtering on
+            # `window_date` would technically be more correct calendar-wise
+            # (since the trades happened MT yesterday = HKT yesterday) but
+            # forces the analyst to flip to "昨天" every time they open the
+            # page, which doesn't match the daily-report mental model.
+            # Side effect: a manual backfill of an older window shows up
+            # under "Today" too, since its scanned_at is today. Acceptable —
+            # backfills are admin operations, not the routine path.
         )
         return AlertsResponse(
             entries=[AlertEvent(**e) for e in entries],
@@ -1206,9 +1212,8 @@ async def gap_trade_alerts_stats(
             rule_id_max=GAP_TRADE_RULE_ID_MAX,
             zipcode=zipcode_clean,
             include_rule_breakdown=True,
-            # Same time_field as the /alerts endpoint so the stats badges
-            # and the table rows stay in agreement.
-            time_field="window_date",
+            # Same time semantics as the /alerts endpoint (scanned_at) so the
+            # stats badges and the table rows stay in agreement.
         )
         return AlertsStats(**stats)
     except Exception as exc:
@@ -1281,7 +1286,6 @@ async def gap_trade_alerts_export(
                 sort_order=sort_order,
                 header=_GAP_TRADE_CSV_HEADER,
                 row_fn=_csv_row_from_gap_trade,
-                time_field="window_date",
             ),
             media_type="text/csv; charset=utf-8",
             headers={

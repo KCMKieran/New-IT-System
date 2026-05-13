@@ -3862,15 +3862,12 @@ function GapTradeTab({ active }: { active: boolean }) {
   const gridStyle = useGridThemeStyle(isDarkMode);
 
   // ── Filters ──
-  // Default "Today" per user preference. Backend gap-trade endpoints filter
-  // on `window_date` (the MT trade date each alert represents), so:
-  //   • before today's cron has fired (HKT 00:00–05:20): no `window_date=today`
-  //     rows yet → empty. Flip to "昨天" / "最近 3 天" for prior days' output.
-  //   • after today's cron (HKT 05:20): cron writes window_date = yesterday,
-  //     still empty for "Today". The "Today" filter only fills if someone
-  //     manually backfills the current day's window.
-  // This is intentional: the user prefers "Today" as the canonical reference
-  // point and explicitly switches to a wider preset when looking back.
+  // Default "Today". Backend filter runs on `scanned_at`, so HK office's
+  // mental model "今天 = 今早 cron 跑出来的报告" works directly — today's
+  // HKT 05:20 cron output (about MT-yesterday's gap event) lands under
+  // this preset, even though calendar-wise the gap happened yesterday MT.
+  // Manual backfills run today also show under "Today" (admin path,
+  // acceptable side effect).
   const [rangePreset, setRangePreset] = useState<GapTradeDayRange>("today");
   const [customRange, setCustomRange] = useState<DateRange | undefined>();
   const [datePickerOpen, setDatePickerOpen] = useState(false);
