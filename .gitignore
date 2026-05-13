@@ -42,3 +42,8 @@ CLAUDE.md
 # Local-only notes (sensitive: infra details / vulnerability map — keep off git)
 SECURITY_VULNERABILITY_REVIEW.md
 SSH_Tunnel_Configuration.md
+
+# Project docs are local-only (history preserved via past commits, but no
+# longer tracked going forward — keeps doc churn out of git log).
+# To browse historical versions: git log --all -- docs/<path>
+docs/
