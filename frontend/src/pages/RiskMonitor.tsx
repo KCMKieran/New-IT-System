@@ -3939,9 +3939,9 @@ function GapTradeTab({ active }: { active: boolean }) {
   interface ClientPairAggRow {
     key: string;
     l_userid: number | null;
-    l_name: string | null;
+    l_login_sids: string[];     // distinct L loginSids under this client pair
     c_userid: number | null;
-    c_name: string | null;
+    c_login_sids: string[];     // distinct C loginSids under this client pair
     pair_count: number;
     total_l_loss_usd: number;
     total_c_profit_usd: number;
@@ -3956,15 +3956,18 @@ function GapTradeTab({ active }: { active: boolean }) {
     for (const a of soAbAlerts) {
       const lUid = a.l_userid ?? null;
       const cUid = a.c_userid ?? null;
+      // Aggregation key stays on userid pair — same client with multiple
+      // MT accounts (loginsids) is still one "who's pairing with whom"
+      // signal. The actual loginsids are surfaced in the display below.
       const key = `${lUid ?? "?"}→${cUid ?? "?"}`;
       let row = map.get(key);
       if (!row) {
         row = {
           key,
           l_userid: lUid,
-          l_name: a.l_name ?? null,
+          l_login_sids: [],
           c_userid: cUid,
-          c_name: a.c_name ?? null,
+          c_login_sids: [],
           pair_count: 0,
           total_l_loss_usd: 0,
           total_c_profit_usd: 0,
@@ -3982,6 +3985,10 @@ function GapTradeTab({ active }: { active: boolean }) {
       if ((a.shared_ip_count ?? 0) > 0) row.shared_ip_pairs += 1;
       const sym = a.symbol ?? "";
       if (sym && !row.symbols.includes(sym)) row.symbols.push(sym);
+      const lLs = a.l_login_sid ?? "";
+      if (lLs && !row.l_login_sids.includes(lLs)) row.l_login_sids.push(lLs);
+      const cLs = a.c_login_sid ?? "";
+      if (cLs && !row.c_login_sids.includes(cLs)) row.c_login_sids.push(cLs);
       const lct = a.l_close_time ?? null;
       if (lct) {
         if (!row.first_close || lct < row.first_close) row.first_close = lct;
@@ -4279,21 +4286,34 @@ function GapTradeTab({ active }: { active: boolean }) {
   const clientPairColumns = useMemo<ColDef<ClientPairAggRow>[]>(
     () => [
       {
-        headerName: "L 客户 → C 客户",
+        headerName: "L 账户 → C 账户",
         colId: "pair",
-        width: 260,
+        width: 280,
         cellRenderer: (params: { data?: ClientPairAggRow }) => {
           const d = params.data;
           if (!d) return "—";
+          // Render each loginSid via the shared CRM-link helper so the
+          // aggregation row mirrors how loginSids look in the per-pair
+          // table below — keeps the analyst's eye moving smoothly between
+          // the two views.
+          const renderList = (sids: string[]) => {
+            if (sids.length === 0) return <span className="text-muted-foreground">—</span>;
+            return (
+              <span>
+                {sids.map((s, i) => (
+                  <span key={s}>
+                    {i > 0 ? <span className="text-muted-foreground">, </span> : null}
+                    {renderLoginSidLink(s)}
+                  </span>
+                ))}
+              </span>
+            );
+          };
           return (
-            <span className="text-xs">
-              <span className="font-medium">
-                {d.l_name || `userid=${d.l_userid ?? "?"}`}
-              </span>
+            <span className="text-xs inline-flex items-center gap-1">
+              {renderList(d.l_login_sids)}
               <span className="text-muted-foreground mx-1">→</span>
-              <span className="font-medium">
-                {d.c_name || `userid=${d.c_userid ?? "?"}`}
-              </span>
+              {renderList(d.c_login_sids)}
             </span>
           );
         },
