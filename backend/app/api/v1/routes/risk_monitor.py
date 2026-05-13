@@ -464,6 +464,7 @@ def _csv_stream(
     *,
     header: list[str] = _EXPORT_CSV_HEADER,
     row_fn=_csv_row_from_alert,
+    time_field: str = "scanned_at",
 ) -> Iterator[str]:
     """Yield the CSV response one row at a time.
 
@@ -498,6 +499,7 @@ def _csv_stream(
         zipcode=zipcode_clean,
         sort_by=sort_by,
         sort_order=sort_order,
+        time_field=time_field,
     ):
         writer.writerow(row_fn(entry))
         yield buf.getvalue()
@@ -1144,6 +1146,11 @@ async def gap_trade_alerts(
             offset=effective_offset,
             sort_by=sort_by,
             sort_order=sort_order,
+            # Gap-trade filters on trade date (the MT window day each alert
+            # represents), not scan-run date. A backfill scan run today for
+            # last week's window will appear under last week's "Yesterday"
+            # filter, not today's — which is what the analyst expects.
+            time_field="window_date",
         )
         return AlertsResponse(
             entries=[AlertEvent(**e) for e in entries],
@@ -1186,6 +1193,9 @@ async def gap_trade_alerts_stats(
             rule_id_max=GAP_TRADE_RULE_ID_MAX,
             zipcode=zipcode_clean,
             include_rule_breakdown=True,
+            # Same time_field as the /alerts endpoint so the stats badges
+            # and the table rows stay in agreement.
+            time_field="window_date",
         )
         return AlertsStats(**stats)
     except Exception as exc:
@@ -1258,6 +1268,7 @@ async def gap_trade_alerts_export(
                 sort_order=sort_order,
                 header=_GAP_TRADE_CSV_HEADER,
                 row_fn=_csv_row_from_gap_trade,
+                time_field="window_date",
             ),
             media_type="text/csv; charset=utf-8",
             headers={

@@ -870,6 +870,16 @@ def _escape_like(text: str) -> str:
     return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
+# Whitelist of columns the caller may pin the time range to. `scanned_at`
+# is the original (when the scan ran); `window_date` is the trade date
+# Gap Trade alerts also carry (so filters mean "MT trading day", not
+# "scan run day"). Both are ISO-comparable strings — for `window_date`
+# (YYYY-MM-DD), lexicographic compare against full ISO timestamps still
+# behaves like a date inclusion check because `'\0' < 'T'` makes
+# `'2026-05-12' < '2026-05-12T00:00Z'` true.
+_ALERT_TIME_FIELDS = frozenset({"scanned_at", "window_date"})
+
+
 def _build_alert_filters(
     since: str,
     until: str,
@@ -880,13 +890,23 @@ def _build_alert_filters(
     rule_id_min: int | None,
     rule_id_max: int | None,
     zipcode: str | None,
+    time_field: str = "scanned_at",
 ) -> tuple[str, list[Any]]:
     """Build a shared WHERE clause + params list for alert_events queries.
 
     Extracted so paginated, streaming, and stats queries stay in sync —
     any new filter only needs to be added here once.
+
+    ``time_field`` picks the column the [since, until) range applies to.
+    Default ``scanned_at`` matches every burst-tab; the gap-trade endpoint
+    overrides to ``window_date`` so the UI filter aligns with the actual
+    trading day instead of the scan-run day.
     """
-    where = ["scanned_at >= ?", "scanned_at < ?"]
+    if time_field not in _ALERT_TIME_FIELDS:
+        raise ValueError(
+            f"time_field must be one of {sorted(_ALERT_TIME_FIELDS)}, got {time_field!r}"
+        )
+    where = [f"{time_field} >= ?", f"{time_field} < ?"]
     params: list[Any] = [since, until]
 
     if server:
@@ -981,6 +1001,7 @@ def query_alert_events(
     offset: int = 0,
     sort_by: str | None = None,
     sort_order: str | None = None,
+    time_field: str = "scanned_at",
 ) -> tuple[list[dict], int]:
     """Query alert events by time range + optional filters.
 
@@ -1002,6 +1023,7 @@ def query_alert_events(
     """
     where_sql, params = _build_alert_filters(
         since, until, server, login, symbol, rule_id, rule_id_min, rule_id_max, zipcode,
+        time_field=time_field,
     )
     order_sql = _resolve_alert_order(sort_by, sort_order)
 
@@ -1038,6 +1060,7 @@ def stream_alert_events(
     sort_by: str | None = None,
     sort_order: str | None = None,
     batch_size: int = 5000,
+    time_field: str = "scanned_at",
 ) -> Iterator[dict]:
     """Yield alert events matching the filter, without a row-count cap.
 
@@ -1051,6 +1074,7 @@ def stream_alert_events(
     """
     where_sql, params = _build_alert_filters(
         since, until, server, login, symbol, rule_id, rule_id_min, rule_id_max, zipcode,
+        time_field=time_field,
     )
     order_sql = _resolve_alert_order(sort_by, sort_order)
 
@@ -1086,6 +1110,7 @@ def alert_events_stats(
     zipcode: str | None = None,
     *,
     include_rule_breakdown: bool = False,
+    time_field: str = "scanned_at",
 ) -> dict[str, Any]:
     """Aggregate stats over the time range for the summary cards.
 
@@ -1106,6 +1131,7 @@ def alert_events_stats(
     """
     where_sql, params = _build_alert_filters(
         since, until, server, login, None, None, rule_id_min, rule_id_max, zipcode,
+        time_field=time_field,
     )
 
     with get_risk_monitor_db() as conn:

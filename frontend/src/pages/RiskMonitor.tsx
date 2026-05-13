@@ -3871,12 +3871,13 @@ function GapTradeTab({ active }: { active: boolean }) {
   const gridStyle = useGridThemeStyle(isDarkMode);
 
   // ── Filters ──
-  // Default to "today" because every alert's `scanned_at` lands in today HKT
-  // (cron fires HKT 05:20 today scanning previous MT day's trades — `scanned_at`
-  // is when the row was written, not when the trade closed). Filtering by
-  // `scanned_at` and defaulting to "yesterday" would always paint an empty
-  // table on first open.
-  const [rangePreset, setRangePreset] = useState<GapTradeDayRange>("today");
+  // Default "Yesterday" — backend gap-trade endpoints filter on `window_date`
+  // (the MT trade date each alert represents), not `scanned_at`. Cron at
+  // HKT 05:20 today writes alerts with window_date = yesterday HKT, so the
+  // freshly-scanned data lands here on first open. Before today's cron has
+  // fired (HKT 00:00–05:20), this preset is empty; user can flip to
+  // "最近 3 天" to see the prior day's output.
+  const [rangePreset, setRangePreset] = useState<GapTradeDayRange>("yesterday");
   const [customRange, setCustomRange] = useState<DateRange | undefined>();
   const [datePickerOpen, setDatePickerOpen] = useState(false);
   const [serverFilter, setServerFilter] = useState<string>("all");

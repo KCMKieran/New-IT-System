@@ -399,6 +399,14 @@ def detect_gap_trade_so(
         logger.info("Gap Trade SO: reading IP overlap from %s", ip_dir)
         alerts: List[Dict[str, Any]] = []
         scanned_at_iso = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+        # window_date = the MT calendar date the scan window opens on.
+        # Same field name + format as rule 81 sets in
+        # `rule_gap_trade_gap_service.py`, so the API can filter both
+        # detections by the date the underlying trades happened (not by
+        # the date the scan was *run*). Without this, filtering by
+        # scanned_at on the gap-trade page would always tag freshly-scanned
+        # alerts as "today" regardless of which window they represent.
+        window_date_iso = start_mt.date().isoformat()
 
         # Telemetry counters for the IP-enrichment step. Logged once after
         # the loop so we have a single line saying "X pairs / Y shared / Z
@@ -481,6 +489,10 @@ def detect_gap_trade_so(
                 "scan_days": len(scan_days),
                 # L-side historical net deposit — client-level (resolved below)
                 "net_deposit_hist": None,
+                # See window_date_iso comment above — populated for both
+                # rule 71 and rule 81 so the gap-trade endpoints can filter
+                # by trade date instead of scan date.
+                "window_date": window_date_iso,
             })
 
         logger.info(
