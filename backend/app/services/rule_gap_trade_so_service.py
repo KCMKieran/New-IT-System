@@ -421,16 +421,22 @@ def detect_gap_trade_so(
             l_sid, l_login = _split_login_sid(r.get("L_loginSid"))
             c_sid, c_login = _split_login_sid(r.get("C_loginSid"))
 
-            # IP overlap. Falls back to empty set on missing JSON, so a
-            # day with no per-day file just doesn't contribute IPs.
+            # IP overlap — only the **open date** is checked, deliberately.
+            # Rationale: gap-trade cron fires HKT 07:20 (= MT 02:20) right
+            # after today's MT 00-02 window closes. login_ip downloads each
+            # day's file at HKT 05:10 NEXT day, so today MT's IP file isn't
+            # available yet. Open dates are always in the past (open <=
+            # close), so their files are guaranteed to exist; this is also
+            # exactly where the AB pre-positioning signal lives (the
+            # collusion is most visible when the two sides login from the
+            # same IP at OPEN time, well before the gap). Falls back to
+            # empty set on missing JSON (e.g., very old position whose
+            # open-day IP file we no longer keep).
             l_open_d = r.get("L_open_time")
             l_close_d = r.get("L_close_time")
             scan_days: List[date] = []
-            if isinstance(l_open_d, datetime) and isinstance(l_close_d, datetime):
-                scan_days = _daterange_inclusive(l_open_d.date(), l_close_d.date())
-                # Cap at 14 days so a stray bad timestamp can't blow up the scan.
-                if len(scan_days) > 14:
-                    scan_days = scan_days[-14:]
+            if isinstance(l_open_d, datetime):
+                scan_days = [l_open_d.date()]
             l_ips = _login_ip_set(ip_dir, scan_days, sid_v, l_login or "")
             c_ips = _login_ip_set(ip_dir, scan_days, sid_v, c_login or "")
             shared = sorted(l_ips & c_ips)
