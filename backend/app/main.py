@@ -8,6 +8,7 @@ This module initializes the FastAPI application with:
 - API routers
 """
 
+import fcntl
 import os
 from contextlib import asynccontextmanager
 
@@ -43,6 +44,45 @@ from app.core.scheduler import start_scheduler, stop_scheduler
 from app.core.burst_open_scheduler import start_burst_scheduler, stop_burst_scheduler
 
 
+# When running with `uvicorn --workers N`, only one worker should run the
+# APScheduler jobs (cron sends, burst-open scans, login-ip FTP pulls). We use a
+# non-blocking exclusive flock to elect one worker as scheduler owner; the
+# others serve HTTP only. When that worker dies the kernel releases the lock
+# automatically.
+#
+# IMPORTANT: the lock must live in container-local storage (/tmp), NOT in the
+# /app/data bind-mounted volume — dev and prod containers share that volume,
+# and a dev worker would otherwise hold the lock and starve prod.
+SCHEDULER_LOCK_PATH = "/tmp/.scheduler.lock"
+_scheduler_lock_fd = None
+
+
+def _try_acquire_scheduler_lock() -> bool:
+    """Return True if this process now owns the scheduler lock."""
+    global _scheduler_lock_fd
+    try:
+        fd = open(SCHEDULER_LOCK_PATH, "w")
+        fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fd.write(str(os.getpid()))
+        fd.flush()
+        _scheduler_lock_fd = fd
+        return True
+    except (BlockingIOError, OSError) as e:
+        logger.info(f"Scheduler lock not acquired by pid={os.getpid()}: {e!r}")
+        return False
+
+
+def _release_scheduler_lock() -> None:
+    global _scheduler_lock_fd
+    if _scheduler_lock_fd is not None:
+        try:
+            fcntl.flock(_scheduler_lock_fd.fileno(), fcntl.LOCK_UN)
+            _scheduler_lock_fd.close()
+        except OSError:
+            pass
+        _scheduler_lock_fd = None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage startup/shutdown lifecycle events."""
@@ -50,13 +90,27 @@ async def lifespan(app: FastAPI):
     init_risk_monitor_db()
     init_client_return_export_db()
     init_login_ip_db()
-    start_scheduler()
-    start_burst_scheduler()
-    start_login_ip_scheduler()
+
+    owns_scheduler = _try_acquire_scheduler_lock()
+    if owns_scheduler:
+        logger.info(
+            f"Worker pid={os.getpid()} owns scheduler lock — starting schedulers"
+        )
+        start_scheduler()
+        start_burst_scheduler()
+        start_login_ip_scheduler()
+    else:
+        logger.info(
+            f"Worker pid={os.getpid()} did not get scheduler lock — HTTP only"
+        )
+
     yield
-    stop_login_ip_scheduler()
-    stop_burst_scheduler()
-    stop_scheduler()
+
+    if owns_scheduler:
+        stop_login_ip_scheduler()
+        stop_burst_scheduler()
+        stop_scheduler()
+        _release_scheduler_lock()
 
 
 def create_app() -> FastAPI:

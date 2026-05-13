@@ -61,6 +61,7 @@ export default function ReturnRateSummary() {
   const [countryFilter, setCountryFilter] = useState("all");
   const [akcmFilter, setAkcmFilter] = useState("all");
   const [fetchedAt, setFetchedAt] = useState<Date | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   const filteredRows = useMemo(() => {
     let result = rows;
@@ -184,10 +185,13 @@ export default function ReturnRateSummary() {
       setRows(r.data || []);
       setTotal(r.total || 0);
       setFetchedAt(new Date());
+      setError(null);
     } catch (e) {
+      if (e instanceof DOMException && e.name === "AbortError") return;
       console.error("ReturnRateSummary fetch error", e);
       setRows([]);
       setTotal(0);
+      setError(e instanceof Error ? e.message : "加载失败");
     } finally {
       setLoading(false);
     }
@@ -270,6 +274,12 @@ export default function ReturnRateSummary() {
             <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
               <Clock className="h-3 w-3" />
               <span>数据获取时间: {fetchedAt.toLocaleString("zh-CN", { hour12: false })}</span>
+            </div>
+          )}
+
+          {error && (
+            <div className="flex items-center gap-1.5 text-xs text-red-600 dark:text-red-400">
+              <span>加载失败: {error}</span>
             </div>
           )}
         </div>

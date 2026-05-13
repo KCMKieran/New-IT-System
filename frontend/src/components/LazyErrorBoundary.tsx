@@ -1,9 +1,38 @@
 import React, { Component, type ReactNode } from "react"
 import { Loader2, RotateCw } from "lucide-react"
+import { apiFetch } from "@/lib/fetch"
 
 type ModuleDefault = { default: React.ComponentType<unknown> }
 
 const RELOAD_KEY = "lazy-chunk-reload"
+
+// Fire-and-forget — keepalive lets the request survive page navigation/unload
+// the same way navigator.sendBeacon does, while still letting us attach the
+// X-API-Key header that the backend API middleware requires.
+function reportClientError(kind: "chunk_load" | "render", error: Error): void {
+  try {
+    apiFetch(
+      "/api/v1/log/client-error",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          kind,
+          message: error.message?.slice(0, 1000) ?? "",
+          stack: error.stack?.slice(0, 2000) ?? "",
+          url: window.location.href.slice(0, 500),
+          ua: navigator.userAgent.slice(0, 300),
+        }),
+        keepalive: true,
+      },
+      { timeoutMs: 5000, retries: 0 },
+    ).catch(() => {
+      /* swallow — reporting must never break the error UI */
+    })
+  } catch {
+    /* ignore */
+  }
+}
 
 function isChunkLoadError(error: unknown): boolean {
   const msg = error instanceof Error ? error.message : String(error)
@@ -21,18 +50,25 @@ function importWithRetry(
   delay: number,
 ): Promise<ModuleDefault> {
   return importFn().catch((err: unknown) => {
-    if (retries <= 0) throw err
+    // Only retry on chunk load failures — render errors / module syntax errors
+    // would just fail the same way again and waste user wait time.
+    if (retries <= 0 || !isChunkLoadError(err)) throw err
     return new Promise<ModuleDefault>((resolve) =>
-      setTimeout(() => resolve(importWithRetry(importFn, retries - 1, delay)), delay),
+      setTimeout(
+        () => resolve(importWithRetry(importFn, retries - 1, delay * 1.5)),
+        delay,
+      ),
     )
   })
 }
 
-// Retry wrapper for lazy imports — auto-retries on network failure before throwing
+// Retry wrapper for lazy imports — auto-retries on chunk load failure before throwing.
+// 3 retries with exponential backoff (1.5s → 2.25s → 3.375s, ~7s total window)
+// covers QUIC reconnects and mobile network hiccups.
 export function lazyWithRetry(
   importFn: () => Promise<ModuleDefault>,
-  retries = 2,
-  delay = 1000,
+  retries = 3,
+  delay = 1500,
 ) {
   return React.lazy(() => importWithRetry(importFn, retries, delay))
 }
@@ -65,13 +101,19 @@ export class LazyErrorBoundary extends Component<Props, State> {
   }
 
   componentDidCatch(error: Error) {
+    reportClientError(isChunkLoadError(error) ? "chunk_load" : "render", error)
     if (isChunkLoadError(error)) {
       const lastReload = sessionStorage.getItem(RELOAD_KEY)
       const now = Date.now()
-      // Auto-reload once if we haven't reloaded in the last 10 seconds
+      // Auto-reload once if we haven't reloaded in the last 10 seconds.
+      // Append a cache-buster query so any CF edge / browser cache of the old
+      // index.html is bypassed — otherwise we'd reload into the same stale HTML
+      // and hit the same 404 chunk again.
       if (!lastReload || now - Number(lastReload) > 10_000) {
         sessionStorage.setItem(RELOAD_KEY, String(now))
-        window.location.reload()
+        const u = new URL(window.location.href)
+        u.searchParams.set("_cb", String(now))
+        window.location.replace(u.toString())
         return
       }
     }
@@ -79,7 +121,9 @@ export class LazyErrorBoundary extends Component<Props, State> {
 
   handleRetry = () => {
     sessionStorage.removeItem(RELOAD_KEY)
-    window.location.reload()
+    const u = new URL(window.location.href)
+    u.searchParams.set("_cb", String(Date.now()))
+    window.location.replace(u.toString())
   }
 
   render() {

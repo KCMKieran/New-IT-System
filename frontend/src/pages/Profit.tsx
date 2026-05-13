@@ -110,6 +110,7 @@ function useAnimatedNumber(target: number, durationMs = 600) {
 export default function ProfitPage() {
   const [rows, setRows] = useState<ProfitRow[]>([])
   const [loading, setLoading] = useState(true)
+  const [chartError, setChartError] = useState<string | null>(null)
   // fresh grad: date range fixed to one week before 2025-12-29
   const [range, setRange] = useState<DateRange | undefined>(() => {
     // fresh grad: fixed date range: 2025-12-22 to 2025-12-29
@@ -406,9 +407,11 @@ export default function ProfitPage() {
           }
         }
         setRows(data)
-      } catch {
-        // fresh grad: on any error, clear data and continue; loading will stop in finally
+        setChartError(null)
+      } catch (e) {
+        console.error("Profit chart data load failed", e)
         setRows([])
+        setChartError(e instanceof Error ? e.message : "加载图表数据失败")
       } finally {
         setLoading(false)
       }
@@ -694,6 +697,10 @@ export default function ProfitPage() {
         <CardContent className="pt-6">
           {loading ? (
             <div className="text-sm text-muted-foreground px-2 py-8">Loading…</div>
+          ) : chartError ? (
+            <div className="text-sm text-red-600 dark:text-red-400 px-2 py-8">
+              加载失败：{chartError}
+            </div>
           ) : (
             <div className="flex flex-col gap-4 sm:flex-row">
               <div className="w-full h-[200px] sm:h-[400px] lg:w-4/5">
