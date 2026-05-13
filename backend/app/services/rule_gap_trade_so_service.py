@@ -505,12 +505,32 @@ def detect_gap_trade_so(
         # already CEN-normalised (raw cents on .cent symbols, raw USD
         # on standard symbols, divided by 100 when needed). Filtering
         # in SQL would require duplicating the cent-symbol heuristic.
+        #
+        # IMPORTANT bypass: pairs that share at least 1 IP during the
+        # holding window survive the filter regardless of loss size.
+        # Empirically the strongest collusion patterns we've seen sit
+        # at $3-$5 per leg (small individual trades, coordinated across
+        # the same VPN exit nodes), and a flat USD floor designed to
+        # cut dust would silently drop them. IP overlap is a far higher-
+        # specificity signal than loss magnitude, so it always wins.
         if min_l_loss_usd > 0:
             before = len(alerts)
-            alerts = [a for a in alerts if abs(a.get("l_profit_usd") or 0) >= min_l_loss_usd]
+            alerts = [
+                a
+                for a in alerts
+                if abs(a.get("l_profit_usd") or 0) >= min_l_loss_usd
+                or (a.get("shared_ip_count") or 0) > 0
+            ]
+            kept_shared = sum(
+                1
+                for a in alerts
+                if abs(a.get("l_profit_usd") or 0) < min_l_loss_usd
+                and (a.get("shared_ip_count") or 0) > 0
+            )
             logger.info(
-                "Gap Trade SO: min_l_loss_usd=$%.2f filter dropped %d / %d alerts",
-                min_l_loss_usd, before - len(alerts), before,
+                "Gap Trade SO: min_l_loss_usd=$%.2f filter dropped %d / %d alerts "
+                "(kept %d shared-IP pairs that bypassed the floor)",
+                min_l_loss_usd, before - len(alerts), before, kept_shared,
             )
 
         # Client-level historical net deposit for the L side. We
