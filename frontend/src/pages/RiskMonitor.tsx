@@ -4441,6 +4441,42 @@ function GapTradeTab({ active }: { active: boolean }) {
         },
       },
       {
+        // `contributing_login_sids` is comma-joined in SQLite; render each
+        // loginSid as a CRM link, same style as the per-pair table and the
+        // client-pair aggregation above. Truncated with a count badge when
+        // a client has more than 2 accounts contributing to the window —
+        // full list lives in the right-side detail Sheet.
+        headerName: "账户 ID",
+        field: "contributing_login_sids" as keyof AlertEvent,
+        colId: "contributing_login_sids",
+        width: 200,
+        tooltipField: "contributing_login_sids" as keyof AlertEvent,
+        cellRenderer: (params: { value?: string | null }) => {
+          const raw = params.value;
+          if (!raw) return <span className="text-muted-foreground">—</span>;
+          const sids = raw
+            .split(",")
+            .map((s) => s.trim())
+            .filter(Boolean);
+          if (sids.length === 0) return <span className="text-muted-foreground">—</span>;
+          const visible = sids.slice(0, 2);
+          const overflow = sids.length - visible.length;
+          return (
+            <span className="text-xs inline-flex items-center gap-1">
+              {visible.map((s, i) => (
+                <span key={s}>
+                  {i > 0 ? <span className="text-muted-foreground">, </span> : null}
+                  {renderLoginSidLink(s)}
+                </span>
+              ))}
+              {overflow > 0 ? (
+                <span className="text-muted-foreground">+{overflow}</span>
+              ) : null}
+            </span>
+          );
+        },
+      },
+      {
         headerName: "产品",
         field: "symbols" as keyof AlertEvent,
         colId: "symbols",
