@@ -77,6 +77,13 @@ class GapTradeSoRuleConfig(BaseModel):
     # (different userid, same groupsid). Setting False relaxes that and
     # produces many same-client noise matches; only flip for investigation.
     cross_client_only: bool = True
+    # Minimum absolute USD loss on the L (stop-out) leg required for an
+    # alert. Without this floor the rule fires on dust SO events — a single
+    # cent-account symbol can produce 1k+ pair rows per day with
+    # |loss| ≤ $1 each, drowning real blowups. Default $100 cuts that
+    # ~99% while still catching anything that matters operationally;
+    # set to 0 to disable.
+    min_l_loss_usd: float = Field(default=100.0, ge=0.0, le=10_000_000.0)
 
 
 class GapTradeGapRuleConfig(BaseModel):

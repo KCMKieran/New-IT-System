@@ -3741,6 +3741,7 @@ interface GapTradeSoRuleConfig {
   min_lot_ratio: number;
   max_lot_ratio: number;
   cross_client_only: boolean;
+  min_l_loss_usd: number;
 }
 
 interface GapTradeGapRuleConfig {
@@ -3870,10 +3871,19 @@ function GapTradeTab({ active }: { active: boolean }) {
   const gridStyle = useGridThemeStyle(isDarkMode);
 
   // ── Filters ──
-  const [rangePreset, setRangePreset] = useState<GapTradeDayRange>("yesterday");
+  // Default to "today" because every alert's `scanned_at` lands in today HKT
+  // (cron fires HKT 05:20 today scanning previous MT day's trades — `scanned_at`
+  // is when the row was written, not when the trade closed). Filtering by
+  // `scanned_at` and defaulting to "yesterday" would always paint an empty
+  // table on first open.
+  const [rangePreset, setRangePreset] = useState<GapTradeDayRange>("today");
   const [customRange, setCustomRange] = useState<DateRange | undefined>();
   const [datePickerOpen, setDatePickerOpen] = useState(false);
   const [serverFilter, setServerFilter] = useState<string>("all");
+  // Client-side toggle. Backend would have to scan the IP files again to
+  // do this filter server-side; since `shared_ip_count` already lives on
+  // every rule-71 alert, filtering in-memory is free and avoids a refetch.
+  const [sharedIpOnly, setSharedIpOnly] = useState(false);
 
   // ── Data state ──
   const [alerts, setAlerts] = useState<AlertEvent[]>([]);
@@ -3900,14 +3910,90 @@ function GapTradeTab({ active }: { active: boolean }) {
     [rangePreset, customRange],
   );
 
-  const soAbAlerts = useMemo(
+  const soAbAlertsRaw = useMemo(
     () => alerts.filter((a) => a.rule_id === GAP_TRADE_SO_RULE_ID),
     [alerts],
+  );
+  // `sharedIpOnly` keeps only rows with `shared_ip_count > 0` — the strongest
+  // collusion signal. Applied AFTER the raw filter so the count badge below
+  // still reflects the unfiltered totals when the toggle is off.
+  const soAbAlerts = useMemo(
+    () =>
+      sharedIpOnly
+        ? soAbAlertsRaw.filter((a) => (a.shared_ip_count ?? 0) > 0)
+        : soAbAlertsRaw,
+    [soAbAlertsRaw, sharedIpOnly],
   );
   const gapAlerts = useMemo(
     () => alerts.filter((a) => a.rule_id === GAP_TRADE_GAP_RULE_ID),
     [alerts],
   );
+
+  // ── Aggregation: by (L_userid, C_userid) client pair ──
+  // The 1k+ per-pair rows on a busy day usually collapse to <10 client pairs
+  // because the same handful of L/C accounts repeat across hundreds of
+  // tickets. This view answers "which two clients are pairing up?" — the
+  // actual business question — without forcing the user to skim ticket-level
+  // rows. Reads from `soAbAlerts` (post IP filter) so the toggle applies here
+  // too.
+  interface ClientPairAggRow {
+    key: string;
+    l_userid: number | null;
+    l_name: string | null;
+    c_userid: number | null;
+    c_name: string | null;
+    pair_count: number;
+    total_l_loss_usd: number;
+    total_c_profit_usd: number;
+    shared_ip_pairs: number;
+    symbols: string[];
+    first_close: string | null;
+    last_close: string | null;
+    sample_rows: AlertEvent[];
+  }
+  const clientPairAgg = useMemo<ClientPairAggRow[]>(() => {
+    const map = new Map<string, ClientPairAggRow>();
+    for (const a of soAbAlerts) {
+      const lUid = a.l_userid ?? null;
+      const cUid = a.c_userid ?? null;
+      const key = `${lUid ?? "?"}→${cUid ?? "?"}`;
+      let row = map.get(key);
+      if (!row) {
+        row = {
+          key,
+          l_userid: lUid,
+          l_name: a.l_name ?? null,
+          c_userid: cUid,
+          c_name: a.c_name ?? null,
+          pair_count: 0,
+          total_l_loss_usd: 0,
+          total_c_profit_usd: 0,
+          shared_ip_pairs: 0,
+          symbols: [],
+          first_close: null,
+          last_close: null,
+          sample_rows: [],
+        };
+        map.set(key, row);
+      }
+      row.pair_count += 1;
+      row.total_l_loss_usd += a.l_profit_usd ?? 0;
+      row.total_c_profit_usd += a.c_profit_usd ?? 0;
+      if ((a.shared_ip_count ?? 0) > 0) row.shared_ip_pairs += 1;
+      const sym = a.symbol ?? "";
+      if (sym && !row.symbols.includes(sym)) row.symbols.push(sym);
+      const lct = a.l_close_time ?? null;
+      if (lct) {
+        if (!row.first_close || lct < row.first_close) row.first_close = lct;
+        if (!row.last_close || lct > row.last_close) row.last_close = lct;
+      }
+      if (row.sample_rows.length < 3) row.sample_rows.push(a);
+    }
+    return Array.from(map.values()).sort(
+      // Sort by absolute L loss descending — biggest blowups first.
+      (a, b) => Math.abs(b.total_l_loss_usd) - Math.abs(a.total_l_loss_usd),
+    );
+  }, [soAbAlerts]);
 
   // Per-rule event counts. `stats.by_rule` is authoritative; fall back to
   // local row counts when the backend omits the breakdown.
@@ -4187,6 +4273,106 @@ function GapTradeTab({ active }: { active: boolean }) {
     [],
   );
 
+  // Client-pair aggregation columns — same look-and-feel as soAbColumns
+  // but each row is one (L_userid, C_userid) combo rather than one ticket
+  // pair. The "→" in the header makes it visually obvious which side is L.
+  const clientPairColumns = useMemo<ColDef<ClientPairAggRow>[]>(
+    () => [
+      {
+        headerName: "L 客户 → C 客户",
+        colId: "pair",
+        width: 260,
+        cellRenderer: (params: { data?: ClientPairAggRow }) => {
+          const d = params.data;
+          if (!d) return "—";
+          return (
+            <span className="text-xs">
+              <span className="font-medium">
+                {d.l_name || `userid=${d.l_userid ?? "?"}`}
+              </span>
+              <span className="text-muted-foreground mx-1">→</span>
+              <span className="font-medium">
+                {d.c_name || `userid=${d.c_userid ?? "?"}`}
+              </span>
+            </span>
+          );
+        },
+      },
+      {
+        headerName: "配对次数",
+        field: "pair_count",
+        colId: "pair_count",
+        width: 100,
+        cellClass: "ag-right-aligned-cell font-semibold",
+      },
+      {
+        headerName: "L 累计亏损 (USD)",
+        field: "total_l_loss_usd",
+        colId: "total_l_loss_usd",
+        width: 150,
+        cellClass: "ag-right-aligned-cell text-rose-600 dark:text-rose-400",
+        valueFormatter: (p) => fmtCurrency(p.value as number | null | undefined),
+      },
+      {
+        headerName: "C 累计盈利 (USD)",
+        field: "total_c_profit_usd",
+        colId: "total_c_profit_usd",
+        width: 150,
+        cellClass: "ag-right-aligned-cell text-emerald-600 dark:text-emerald-400",
+        valueFormatter: (p) => fmtCurrency(p.value as number | null | undefined),
+      },
+      {
+        headerName: "同 IP 配对",
+        field: "shared_ip_pairs",
+        colId: "shared_ip_pairs",
+        width: 110,
+        cellClass: "ag-right-aligned-cell",
+        cellRenderer: (params: { value?: number; data?: ClientPairAggRow }) => {
+          const v = params.value ?? 0;
+          const total = params.data?.pair_count ?? 0;
+          if (v === 0) return <span className="text-muted-foreground">—</span>;
+          return (
+            <span className="font-semibold text-amber-700 dark:text-amber-400">
+              {v} / {total}
+            </span>
+          );
+        },
+      },
+      {
+        headerName: "产品",
+        field: "symbols",
+        colId: "symbols",
+        width: 180,
+        cellRenderer: (params: { value?: string[] }) => {
+          const list = params.value ?? [];
+          if (list.length === 0) return "—";
+          if (list.length <= 2) return list.join(", ");
+          return (
+            <span title={list.join(", ")}>
+              {list.slice(0, 2).join(", ")}{" "}
+              <span className="text-muted-foreground">+{list.length - 2}</span>
+            </span>
+          );
+        },
+      },
+      {
+        headerName: "首次强平 (GMT+8)",
+        field: "first_close",
+        colId: "first_close",
+        width: 165,
+        valueFormatter: (p) => fmtTime(p.value as string | null | undefined),
+      },
+      {
+        headerName: "末次强平 (GMT+8)",
+        field: "last_close",
+        colId: "last_close",
+        width: 165,
+        valueFormatter: (p) => fmtTime(p.value as string | null | undefined),
+      },
+    ],
+    [],
+  );
+
   const gapColumns = useMemo<ColDef<AlertEvent>[]>(
     () => [
       {
@@ -4343,7 +4529,7 @@ function GapTradeTab({ active }: { active: boolean }) {
           <div className="min-w-0">
             <p className="text-sm text-muted-foreground">
               每天 HKT 05:20 自动扫描前一个 MT 交易日 00:00–02:00 窗口的强平
-              AB 配对与客户级超额盈利，数据每日刷新一次（默认筛选「昨天」）。
+              AB 配对与客户级超额盈利，数据每日刷新一次。
             </p>
             <p className="text-sm text-muted-foreground">
               当前范围:{" "}
@@ -4488,17 +4674,59 @@ function GapTradeTab({ active }: { active: boolean }) {
             </SelectContent>
           </Select>
 
+          {/* IP-overlap quick filter — only affects 检测 A (rule 71). */}
+          <Button
+            variant={sharedIpOnly ? "default" : "outline"}
+            size="sm"
+            className="h-9 shrink-0"
+            onClick={() => setSharedIpOnly((v) => !v)}
+            title="仅显示 L / C 在持仓期间共享至少 1 个 IP 的配对"
+          >
+            {sharedIpOnly ? "✓ 只看同 IP" : "只看同 IP"}
+          </Button>
+
           <span className="text-sm text-muted-foreground sm:ml-auto sm:shrink-0 py-1.5">
             {loading
               ? "加载中..."
-              : `共 ${soAbAlerts.length + gapAlerts.length} 条告警 · A ${soAbAlerts.length} / B ${gapAlerts.length}`}
+              : `共 ${soAbAlerts.length + gapAlerts.length} 条告警 · A ${soAbAlerts.length}${
+                  sharedIpOnly ? ` / ${soAbAlertsRaw.length} 原始` : ""
+                } / B ${gapAlerts.length}`}
           </span>
         </div>
 
-        {/* Section A header */}
+        {/* Section A1 · client-pair aggregation (top-level "who's pairing
+            with whom" view — the actual business question). Stacked above
+            the per-ticket table below; both read from the same
+            `soAbAlerts` so the IP toggle and server filter affect both. */}
         <h3 className="text-sm font-semibold flex items-center gap-2">
-          <Badge variant="outline">检测 A</Badge>
-          <span>SO + AB 仓配对</span>
+          <Badge variant="outline">检测 A · 客户对汇总</Badge>
+          <span className="text-xs font-normal text-muted-foreground">
+            · 共 {clientPairAgg.length} 对客户 · 按 L 累计亏损降序
+          </span>
+        </h3>
+        <div
+          className={cn(
+            "risk-monitor-theme h-[280px] min-h-[200px] w-full",
+            isDarkMode ? "ag-theme-quartz-dark" : "ag-theme-quartz",
+          )}
+          style={gridStyle}
+        >
+          <AgGridReact<ClientPairAggRow>
+            rowData={clientPairAgg}
+            columnDefs={clientPairColumns}
+            defaultColDef={defaultColDef}
+            gridOptions={{ theme: "legacy" }}
+            animateRows={false}
+            enableCellTextSelection
+            suppressCellFocus
+            getRowId={(p) => `gap-pair-${p.data.key}`}
+            overlayNoRowsTemplate='<span class="text-sm text-muted-foreground">窗口内未发现 SO+AB 客户对</span>'
+          />
+        </div>
+
+        {/* Section A2 · per-ticket detail (the original Detection A). */}
+        <h3 className="text-sm font-semibold flex items-center gap-2">
+          <Badge variant="outline">检测 A · 逐笔配对</Badge>
           <span className="text-xs font-normal text-muted-foreground">
             · 共 {soAbAlerts.length} 条 · 点击行查看完整字段
           </span>
@@ -4736,6 +4964,30 @@ function GapTradeTab({ active }: { active: boolean }) {
                     />
                     仅跨客户配对(推荐)
                   </label>
+                  <div className="flex items-center gap-2 text-xs">
+                    <span className="w-44">L 腿最小亏损 (USD)</span>
+                    <Input
+                      type="number"
+                      step="50"
+                      min={0}
+                      value={editConfig.so_ab.min_l_loss_usd}
+                      onChange={(e) =>
+                        setEditConfig({
+                          ...editConfig,
+                          so_ab: {
+                            ...editConfig.so_ab,
+                            // Empty input keeps current value (avoid an NaN write);
+                            // a literal 0 disables the filter on purpose.
+                            min_l_loss_usd: e.target.value === ""
+                              ? editConfig.so_ab.min_l_loss_usd
+                              : Number(e.target.value),
+                          },
+                        })
+                      }
+                      className="w-24 h-8"
+                    />
+                    <span className="text-muted-foreground">默认 $100;设为 0 关闭</span>
+                  </div>
                 </div>
               </div>
               <Separator />

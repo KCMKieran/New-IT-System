@@ -295,6 +295,7 @@ def _run_gap_trade_scan() -> None:
                     min_lot_ratio=config.so_ab.min_lot_ratio,
                     max_lot_ratio=config.so_ab.max_lot_ratio,
                     cross_client_only=config.so_ab.cross_client_only,
+                    min_l_loss_usd=config.so_ab.min_l_loss_usd,
                 )
                 merged_alerts.extend(so_result["alerts"])
                 total_ms += int(so_result.get("scan_time_ms") or 0)
