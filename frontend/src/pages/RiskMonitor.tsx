@@ -4210,7 +4210,9 @@ function GapTradeTab({ active }: { active: boolean }) {
       },
       { headerName: "产品", field: "symbol", colId: "symbol", width: 120 },
       {
-        headerName: "L 账户 (强平)",
+        // "爆仓账户" — L-leg in W04 / DB schema (Loser / SO side). User-facing
+        // label spells it out so analysts don't have to guess what L means.
+        headerName: "爆仓账户",
         field: "l_login_sid" as keyof AlertEvent,
         colId: "l_login_sid",
         width: 140,
@@ -4218,7 +4220,8 @@ function GapTradeTab({ active }: { active: boolean }) {
           renderLoginSidLink(params.value),
       },
       {
-        headerName: "C 账户 (对手)",
+        // "对手账户" — C-leg (Counter / profitable opposite-direction trade).
+        headerName: "对手账户",
         field: "c_login_sid" as keyof AlertEvent,
         colId: "c_login_sid",
         width: 140,
@@ -4226,39 +4229,27 @@ function GapTradeTab({ active }: { active: boolean }) {
           renderLoginSidLink(params.value),
       },
       {
-        headerName: "L 亏损 (USD)",
+        headerName: "爆仓亏损 (USD)",
         field: "l_profit_usd" as keyof AlertEvent,
         colId: "l_profit_usd",
-        width: 130,
+        width: 140,
         cellClass: "ag-right-aligned-cell text-rose-600 dark:text-rose-400",
         valueFormatter: (p) =>
           fmtCurrency(p.value as number | null | undefined),
       },
       {
-        headerName: "C 盈利 (USD)",
+        headerName: "对手盈利 (USD)",
         field: "c_profit_usd" as keyof AlertEvent,
         colId: "c_profit_usd",
-        width: 130,
+        width: 140,
         cellClass:
           "ag-right-aligned-cell text-emerald-600 dark:text-emerald-400",
         valueFormatter: (p) =>
           fmtCurrency(p.value as number | null | undefined),
       },
-      {
-        headerName: "净 (USD)",
-        field: "net_usd" as keyof AlertEvent,
-        colId: "net_usd",
-        width: 110,
-        cellClass: "ag-right-aligned-cell",
-        cellRenderer: (params: { value?: number | null }) => {
-          const v = params.value;
-          if (v === null || v === undefined) return "—";
-          const strong = Math.abs(v) < 100;
-          return (
-            <span className={strong ? "font-bold" : ""}>{fmtCurrency(v)}</span>
-          );
-        },
-      },
+      // 「净 (USD)」column removed per UX feedback — it's just L+C and the
+      // analyst can do that arithmetic themselves; the column was eating
+      // 110px of horizontal real estate for low value.
       {
         // Show the actual IPs (truncated visually, full list on hover /
         // in detail Sheet). The numeric count was easier to scan but lost
@@ -4298,7 +4289,7 @@ function GapTradeTab({ active }: { active: boolean }) {
   const clientPairColumns = useMemo<ColDef<ClientPairAggRow>[]>(
     () => [
       {
-        headerName: "L 账户 → C 账户",
+        headerName: "爆仓方 → 对手方",
         colId: "pair",
         width: 280,
         cellRenderer: (params: { data?: ClientPairAggRow }) => {
@@ -4341,7 +4332,7 @@ function GapTradeTab({ active }: { active: boolean }) {
         cellClass: "ag-right-aligned-cell font-semibold",
       },
       {
-        headerName: "L 累计亏损 (USD)",
+        headerName: "爆仓方累计亏损 (USD)",
         field: "total_l_loss_usd",
         colId: "total_l_loss_usd",
         width: 150,
@@ -4350,7 +4341,7 @@ function GapTradeTab({ active }: { active: boolean }) {
           fmtCurrency(p.value as number | null | undefined),
       },
       {
-        headerName: "C 累计盈利 (USD)",
+        headerName: "对手方累计盈利 (USD)",
         field: "total_c_profit_usd",
         colId: "total_c_profit_usd",
         width: 150,
@@ -4606,8 +4597,9 @@ function GapTradeTab({ active }: { active: boolean }) {
         <div className={RISK_MONITOR_HEADER_ROW}>
           <div className="min-w-0">
             <p className="text-sm text-muted-foreground">
-              每天 HKT 05:20 自动扫描前一个 MT 交易日 00:00–02:00 窗口的强平 AB
-              配对与客户级超额盈利，数据每日刷新一次。
+              每天 HKT 05:20 自动扫描前一个 MT 交易日休市开盘 00:00–02:00 窗口,
+              监控两件事:① 爆仓账户是否与跨客户对手账户存在 AB 仓对敲;
+              ② 该窗口是否有客户拿到异常超额收益。数据每日刷新一次。
             </p>
             <p className="text-sm text-muted-foreground">
               当前范围:{" "}
@@ -4651,15 +4643,15 @@ function GapTradeTab({ active }: { active: boolean }) {
         <div className="grid w-full gap-1.5 sm:gap-2 grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4">
           <SummaryCard
             compact
-            label="检测 A · SO + AB 配对"
+            label="爆仓 AB 仓配对"
             value={soAbCount}
-            description="窗口内疑似对敲的强平 L + 获利 C 双账户对（同 IP 行黄色高亮）"
+            description="窗口内强平账户与跨客户对手账户的疑似对敲配对（同 IP 行黄色高亮）"
             dotColor={RULE_SUMMARY_CARD_STYLES[0].dot}
             textColor={RULE_SUMMARY_CARD_STYLES[0].value}
           />
           <SummaryCard
             compact
-            label="检测 B · 超额 Profit 客户"
+            label="Gap Trade 超额获利客户"
             value={gapClientCount}
             description={
               config
@@ -4752,7 +4744,7 @@ function GapTradeTab({ active }: { active: boolean }) {
             </SelectContent>
           </Select>
 
-          {/* IP-overlap quick filter — only affects 检测 A (rule 71). */}
+          {/* IP-overlap quick filter — only affects 爆仓 AB 仓配对 (rule 71). */}
           <Button
             variant={sharedIpOnly ? "default" : "outline"}
             size="sm"
@@ -4766,9 +4758,9 @@ function GapTradeTab({ active }: { active: boolean }) {
           <span className="text-sm text-muted-foreground sm:ml-auto sm:shrink-0 py-1.5">
             {loading
               ? "加载中..."
-              : `共 ${soAbAlerts.length + gapAlerts.length} 条告警 · A ${soAbAlerts.length}${
+              : `共 ${soAbAlerts.length + gapAlerts.length} 条 · 爆仓配对 ${soAbAlerts.length}${
                   sharedIpOnly ? ` / ${soAbAlertsRaw.length} 原始` : ""
-                } / B ${gapAlerts.length}`}
+                } · 超额获利 ${gapAlerts.length}`}
           </span>
         </div>
 
@@ -4777,7 +4769,7 @@ function GapTradeTab({ active }: { active: boolean }) {
             the per-ticket table below; both read from the same
             `soAbAlerts` so the IP toggle and server filter affect both. */}
         <h3 className="text-sm font-semibold flex items-center gap-2">
-          <Badge variant="outline">检测 A · 客户对汇总</Badge>
+          <Badge variant="outline">爆仓 AB 仓配对 · 客户对汇总</Badge>
           <span className="text-xs font-normal text-muted-foreground">
             · 共 {clientPairAgg.length} 对客户 · 按 L 累计亏损降序
           </span>
@@ -4798,13 +4790,13 @@ function GapTradeTab({ active }: { active: boolean }) {
             enableCellTextSelection
             suppressCellFocus
             getRowId={(p) => `gap-pair-${p.data.key}`}
-            overlayNoRowsTemplate='<span class="text-sm text-muted-foreground">窗口内未发现 SO+AB 客户对</span>'
+            overlayNoRowsTemplate='<span class="text-sm text-muted-foreground">窗口内未发现爆仓 AB 仓配对客户</span>'
           />
         </div>
 
         {/* Section A2 · per-ticket detail (the original Detection A). */}
         <h3 className="text-sm font-semibold flex items-center gap-2">
-          <Badge variant="outline">检测 A · 逐笔配对</Badge>
+          <Badge variant="outline">爆仓 AB 仓配对 · 逐笔明细</Badge>
           <span className="text-xs font-normal text-muted-foreground">
             · 共 {soAbAlerts.length} 条 · 点击行查看完整字段
           </span>
@@ -4829,14 +4821,13 @@ function GapTradeTab({ active }: { active: boolean }) {
             getRowClass={soAbRowClass}
             onRowClicked={(e) => e.data && setDetailRow(e.data)}
             getRowId={(p) => `gap-so-${p.data.id}`}
-            overlayNoRowsTemplate='<span class="text-sm text-muted-foreground">窗口内未发现 SO+AB 配对</span>'
+            overlayNoRowsTemplate='<span class="text-sm text-muted-foreground">窗口内未发现爆仓 AB 仓配对</span>'
           />
         </div>
 
         {/* Section B header */}
         <h3 className="text-sm font-semibold flex items-center gap-2">
-          <Badge variant="outline">检测 B</Badge>
-          <span>高开低开超额 Profit</span>
+          <Badge variant="outline">Gap Trade 超额获利客户</Badge>
           <span className="text-xs font-normal text-muted-foreground">
             · 共 {gapAlerts.length} 条 · 点击行查看完整字段
           </span>
@@ -4883,8 +4874,8 @@ function GapTradeTab({ active }: { active: boolean }) {
               <SheetHeader className="px-4 pt-4 pb-2">
                 <SheetTitle>
                   {detailRow.rule_id === GAP_TRADE_SO_RULE_ID
-                    ? "SO + AB 配对详情"
-                    : "客户超额 Profit 详情"}
+                    ? "爆仓 AB 仓配对详情"
+                    : "Gap Trade 超额获利详情"}
                 </SheetTitle>
                 <SheetDescription>{detailRow.rule_label}</SheetDescription>
               </SheetHeader>
@@ -4963,7 +4954,7 @@ function GapTradeTab({ active }: { active: boolean }) {
                 </div>
                 <Separator />
                 <div>
-                  <p className="font-medium mb-2">检测 A · SO + AB 配对</p>
+                  <p className="font-medium mb-2">爆仓 AB 仓配对</p>
                   <div className="space-y-2 ml-1">
                     <label className="flex items-center gap-2 text-xs">
                       <Checkbox
@@ -5047,7 +5038,7 @@ function GapTradeTab({ active }: { active: boolean }) {
                       仅跨客户配对(推荐)
                     </label>
                     <div className="flex items-center gap-2 text-xs">
-                      <span className="w-44">L 腿最小亏损 (USD)</span>
+                      <span className="w-44">爆仓方最小亏损 (USD)</span>
                       <Input
                         type="number"
                         step="50"
@@ -5070,14 +5061,14 @@ function GapTradeTab({ active }: { active: boolean }) {
                         className="w-24 h-8"
                       />
                       <span className="text-muted-foreground">
-                        默认 $100;设为 0 关闭; !相同IP则无限制
+                        默认 $100;设为 0 关闭;同 IP 配对不受此阈值限制
                       </span>
                     </div>
                   </div>
                 </div>
                 <Separator />
                 <div>
-                  <p className="font-medium mb-2">检测 B · 超额 Profit</p>
+                  <p className="font-medium mb-2">Gap Trade 超额获利</p>
                   <div className="space-y-2 ml-1">
                     <label className="flex items-center gap-2 text-xs">
                       <Checkbox
@@ -5203,7 +5194,7 @@ function GapTradeSoDetail({ row }: { row: AlertEvent }) {
   const sharedIps = (row.shared_ips || "").split(",").filter(Boolean);
   return (
     <>
-      <DetailGroup title="强平方 (L)">
+      <DetailGroup title="爆仓方">
         <DetailRow label="账户" value={row.l_login_sid ?? "—"} />
         <DetailRow label="客户 ID" value={row.l_userid ?? "—"} />
         <DetailRow label="客户名" value={row.l_name ?? "—"} />
@@ -5226,7 +5217,7 @@ function GapTradeSoDetail({ row }: { row: AlertEvent }) {
         <DetailRow label="SO 标记" value={row.so_comment ?? "—"} />
       </DetailGroup>
       <Separator />
-      <DetailGroup title="对手方 (C)">
+      <DetailGroup title="对手方">
         <DetailRow label="账户" value={row.c_login_sid ?? "—"} />
         <DetailRow label="客户 ID" value={row.c_userid ?? "—"} />
         <DetailRow label="客户名" value={row.c_name ?? "—"} />
