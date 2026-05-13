@@ -3944,24 +3944,41 @@ function GapTradeTab({ active }: { active: boolean }) {
       setLoading(true);
       try {
         const qs = buildFilterQs(effectiveRange);
-        // Single big page — Gap Trade output is small (≤ a few dozen per
-        // weekday). 500 is the API cap; if we ever exceed it we'll add paging.
-        const alertsQs = new URLSearchParams(qs);
-        alertsQs.set("page_size", "500");
-        alertsQs.set("sort_by", "scanned_at");
-        alertsQs.set("sort_order", "desc");
-        const [alertsRes, statsRes] = await Promise.all([
-          apiFetch(`/api/v1/risk-monitor/gap-trade/alerts?${alertsQs}`, {
-            signal,
-          }),
+        // Fetch each sub-rule with its own page so a noisy day on
+        // rule 71 (e.g. 1k+ SO+AB pairs after a real gap) can't push the
+        // rule 81 rows out of the first page. 500 is the per-request API
+        // cap. Stats endpoint is unchanged — it already exposes `by_rule`.
+        const buildAlertsQs = (ruleId: number) => {
+          const q = new URLSearchParams(qs);
+          q.set("rule_id", String(ruleId));
+          q.set("page_size", "500");
+          q.set("sort_by", "scanned_at");
+          q.set("sort_order", "desc");
+          return q;
+        };
+        const [soRes, gapRes, statsRes] = await Promise.all([
+          apiFetch(
+            `/api/v1/risk-monitor/gap-trade/alerts?${buildAlertsQs(GAP_TRADE_SO_RULE_ID)}`,
+            { signal },
+          ),
+          apiFetch(
+            `/api/v1/risk-monitor/gap-trade/alerts?${buildAlertsQs(GAP_TRADE_GAP_RULE_ID)}`,
+            { signal },
+          ),
           apiFetch(`/api/v1/risk-monitor/gap-trade/alerts/stats?${qs}`, {
             signal,
           }),
         ]);
-        if (alertsRes.ok) {
-          const json: AlertsResponse = await alertsRes.json();
-          setAlerts(json.entries);
+        const mergedEntries: AlertEvent[] = [];
+        if (soRes.ok) {
+          const json: AlertsResponse = await soRes.json();
+          mergedEntries.push(...json.entries);
         }
+        if (gapRes.ok) {
+          const json: AlertsResponse = await gapRes.json();
+          mergedEntries.push(...json.entries);
+        }
+        setAlerts(mergedEntries);
         if (statsRes.ok) {
           const json: AlertsStats = await statsRes.json();
           setStats(json);
