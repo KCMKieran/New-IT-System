@@ -75,6 +75,12 @@ QUICK_RULE_MAX_ID = QUICK_PROFIT_RULE_ID_BASE - 1
 # variants (e.g. EU-session gap variant).
 GAP_TRADE_RULE_ID_MIN = 71
 GAP_TRADE_RULE_ID_MAX = 90
+# Quick Profit's upper bound. Originally not set because Quick Profit was
+# the highest rule_id band (61-70) and `rule_id >= 61` was equivalent to
+# "Quick Profit only". After Gap Trade landed (71-90), unbounded was a
+# bug — the /quick-profit/* endpoints started leaking Gap Trade rows into
+# Quick Profit's table / stats / CSV / floating-refresh batch.
+QUICK_PROFIT_RULE_MAX_ID = GAP_TRADE_RULE_ID_MIN - 1
 
 # Default look-back window when the frontend omits `since`.
 # Aligns with the "最近 4 小时" default on the page.
@@ -876,6 +882,7 @@ async def quick_profit_alerts(
             symbol=symbol,
             rule_id=rule_id,
             rule_id_min=QUICK_PROFIT_RULE_ID_BASE,
+            rule_id_max=QUICK_PROFIT_RULE_MAX_ID,
             zipcode=zipcode_clean,
             limit=effective_limit,
             offset=effective_offset,
@@ -915,6 +922,7 @@ async def quick_profit_alerts_stats(
             server=server,
             login=login,
             rule_id_min=QUICK_PROFIT_RULE_ID_BASE,
+            rule_id_max=QUICK_PROFIT_RULE_MAX_ID,
             zipcode=zipcode_clean,
             include_rule_breakdown=True,
         )
@@ -952,7 +960,7 @@ async def quick_profit_alerts_export(
                 symbol=symbol,
                 rule_id=rule_id,
                 rule_id_min=QUICK_PROFIT_RULE_ID_BASE,
-                rule_id_max=None,
+                rule_id_max=QUICK_PROFIT_RULE_MAX_ID,
                 zipcode_clean=zipcode_clean,
                 sort_by=sort_by,
                 sort_order=sort_order,
@@ -1013,9 +1021,14 @@ async def quick_profit_floating_refresh(
         alerts = get_alerts_by_ids(parsed_ids)
         # Only Quick Profit rows are eligible — silently filter out anything
         # else so a misuse from another tab can't accidentally touch live MT.
+        # Bounded on both sides; before Gap Trade existed the "≥ base" check
+        # alone was correct, but rule_id 71/81 now sit above the band and
+        # must NOT be sent to the MT floating-refresh helper.
         qp_alerts = [
             a for a in alerts
-            if int(a.get("rule_id") or 0) >= QUICK_PROFIT_RULE_ID_BASE
+            if QUICK_PROFIT_RULE_ID_BASE
+            <= int(a.get("rule_id") or 0)
+            <= QUICK_PROFIT_RULE_MAX_ID
         ]
         items = refresh_floating_for_alerts(get_settings(), qp_alerts)
         return QuickProfitFloatingRefreshResponse(
