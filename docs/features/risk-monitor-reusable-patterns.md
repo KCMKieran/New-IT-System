@@ -244,6 +244,53 @@ const baseColumns: ColDef[] = [
 ];
 ```
 
+### Shared column factory — `netDepositColDef`
+
+`net_deposit_hist` is the most-referenced risk-control signal across the
+page (every tab shows it). Live in `RiskMonitor.tsx` next to `fmtCurrency`:
+
+```tsx
+function netDepositColorClass(v: number | null | undefined): string {
+  if (v === null || v === undefined) return "";
+  return v >= 0
+    ? "text-emerald-600 dark:text-emerald-400"   // ≥0  client still net-positive  → 正常
+    : "text-red-600 dark:text-red-400";          // <0  client has withdrawn more  → 风控关注
+}
+
+function netDepositColDef(opts: {
+  headerName?: string;       // "Net Deposit" (default) / "净入金 (USD)"
+  colId?: string;            // "net_deposit_hist"
+  width?: number;            // 130
+  filter?: string | boolean; // "agNumberColumnFilter" if the tab wires it
+} = {}): ColDef<AlertEvent> { /* see RiskMonitor.tsx */ }
+```
+
+Use it in every new alert table that surfaces `net_deposit_hist`:
+
+```tsx
+const columns = [
+  // ...
+  netDepositColDef(),                             // English header
+  netDepositColDef({ headerName: "净入金 (USD)" }), // Chinese header
+  // ...
+];
+```
+
+And in detail Sheet rows, reuse the same colour helper via `highlightClass`:
+
+```tsx
+<DetailRow
+  label="历史净入金"
+  value={fmtCurrency(row.net_deposit_hist)}
+  highlightClass={netDepositColorClass(row.net_deposit_hist)}
+/>
+```
+
+**Do NOT inline the green/red ternary in a new tab** — it drifts over
+time (we had 3 tabs with it inlined and 1 (Gap Trade B) plain grey for
+2 weeks before noticing). All four call sites are now collapsed to
+single-line `netDepositColDef(...)` calls.
+
 ### LoginCell — CRM link renderer
 
 ```tsx

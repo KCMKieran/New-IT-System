@@ -483,6 +483,54 @@ function fmtFilenameStamp(iso: string): string {
     .replace(":", "-");
 }
 
+// ── Shared net_deposit_hist helpers ───────────────────────
+// Historical net deposit (USD) is one of the most-referenced risk-control
+// signals across every tab on this page. We unify the visual semantics
+// here so every table cell, detail row, and future tab speaks the same
+// colour language:
+//   ≥0  → emerald (client still has net inflow on us, normal)
+//   <0  → red     (client has withdrawn more than deposited — 风控关注)
+//   NULL→ neutral (unresolved client; can't draw a signal from no data)
+
+/** Tailwind class for the value's colour, given the numeric value. */
+function netDepositColorClass(v: number | null | undefined): string {
+  if (v === null || v === undefined) return "";
+  return v >= 0
+    ? "text-emerald-600 dark:text-emerald-400"
+    : "text-red-600 dark:text-red-400";
+}
+
+/**
+ * `net_deposit_hist` AG-Grid column factory. Header / colId / width / filter
+ * are overridable so tabs with a Chinese header or a numeric column filter
+ * can customise without re-implementing the renderer.
+ */
+function netDepositColDef(
+  opts: {
+    headerName?: string;
+    colId?: string;
+    width?: number;
+    /** Pass "agNumberColumnFilter" when the tab has the right column filter UI wired up. */
+    filter?: string | boolean;
+  } = {},
+): ColDef<AlertEvent> {
+  const { headerName = "Net Deposit", colId = "net_deposit_hist", width = 130, filter } = opts;
+  const def: ColDef<AlertEvent> = {
+    headerName,
+    field: "net_deposit_hist" as keyof AlertEvent,
+    colId,
+    width,
+    cellClass: "ag-right-aligned-cell",
+    cellRenderer: (p: { value?: number | null }) => {
+      const v = p.value;
+      if (v === null || v === undefined) return "—";
+      return <span className={netDepositColorClass(v)}>{fmtCurrency(v)}</span>;
+    },
+  };
+  if (filter !== undefined) def.filter = filter;
+  return def;
+}
+
 // ── AG-Grid theme ─────────────────────────────────────────
 
 function useGridThemeStyle(isDarkMode: boolean) {
@@ -576,7 +624,11 @@ export default function RiskMonitor() {
 
   return (
     <div className="flex min-w-0 flex-col gap-4 p-4 lg:p-6">
-      <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full min-w-0">
+      <Tabs
+        value={activeTab}
+        onValueChange={setActiveTab}
+        className="w-full min-w-0"
+      >
         <TabsList className="grid w-full max-w-4xl grid-cols-4 sm:auto-cols-fr sm:grid-flow-col">
           <TabsTrigger
             value="burst-open"
@@ -1082,31 +1134,7 @@ function BurstOpenTab({ active }: { active: boolean }) {
           );
         },
       },
-      {
-        headerName: "Net Deposit",
-        field: "net_deposit_hist",
-        colId: "net_deposit_hist",
-        width: 130,
-        cellClass: "ag-right-aligned-cell",
-        filter: "agNumberColumnFilter",
-        cellRenderer: (p: { value: number | null }) => {
-          const v = p.value;
-          if (v === null || v === undefined) return "—";
-          // ≥0 means client still has net inflow on us (绿); <0 means
-          // client has withdrawn more than deposited (红, 风控关注).
-          return (
-            <span
-              className={
-                v >= 0
-                  ? "text-emerald-600 dark:text-emerald-400"
-                  : "text-red-600 dark:text-red-400"
-              }
-            >
-              {fmtCurrency(v)}
-            </span>
-          );
-        },
-      },
+      netDepositColDef({ filter: "agNumberColumnFilter" }),
       { headerName: "品种", field: "symbol", colId: "symbol", width: 110 },
       {
         headerName: "批量笔数",
@@ -1872,28 +1900,7 @@ function QuickOpenCloseTab({ active }: { active: boolean }) {
         cellRenderer: LoginCell,
       },
       { headerName: "币种", field: "currency", colId: "currency", width: 80 },
-      {
-        headerName: "Net Deposit",
-        field: "net_deposit_hist",
-        colId: "net_deposit_hist",
-        width: 130,
-        cellClass: "ag-right-aligned-cell",
-        cellRenderer: (p: { value: number | null }) => {
-          const v = p.value;
-          if (v === null || v === undefined) return "—";
-          return (
-            <span
-              className={
-                v >= 0
-                  ? "text-emerald-600 dark:text-emerald-400"
-                  : "text-red-600 dark:text-red-400"
-              }
-            >
-              {fmtCurrency(v)}
-            </span>
-          );
-        },
-      },
+      netDepositColDef(),
       { headerName: "品种", field: "symbol", colId: "symbol", width: 110 },
       {
         headerName: "开仓时间 (GMT+8)",
@@ -2690,7 +2697,11 @@ function PositionStatusBadge({ value }: { value?: string | null }) {
   if (!value) return <span className="text-muted-foreground">—</span>;
   const meta = POSITION_STATUS_META[value];
   if (!meta) return <span>{value}</span>;
-  return <Badge className={cn("border-transparent", meta.className)}>{meta.label}</Badge>;
+  return (
+    <Badge className={cn("border-transparent", meta.className)}>
+      {meta.label}
+    </Badge>
+  );
 }
 
 /** Localized renderer used inside AG-Grid cells (params-shaped). */
@@ -2771,7 +2782,10 @@ function QuickProfitTab({ active }: { active: boolean }) {
 
   const buildStatsFilterQs = useCallback(
     (range: { since: string; until: string }) => {
-      const qs = new URLSearchParams({ since: range.since, until: range.until });
+      const qs = new URLSearchParams({
+        since: range.since,
+        until: range.until,
+      });
       if (serverFilter !== "all") qs.set("server", serverFilter);
       if (loginQuery) qs.set("login", loginQuery);
       if (zipcodeQuery) qs.set("zipcode", zipcodeQuery);
@@ -3101,28 +3115,7 @@ function QuickProfitTab({ active }: { active: boolean }) {
         cellRenderer: LoginCell,
       },
       { headerName: "币种", field: "currency", colId: "currency", width: 80 },
-      {
-        headerName: "Net Deposit",
-        field: "net_deposit_hist",
-        colId: "net_deposit_hist",
-        width: 130,
-        cellClass: "ag-right-aligned-cell",
-        cellRenderer: (p: { value: number | null }) => {
-          const v = p.value;
-          if (v === null || v === undefined) return "—";
-          return (
-            <span
-              className={
-                v >= 0
-                  ? "text-emerald-600 dark:text-emerald-400"
-                  : "text-red-600 dark:text-red-400"
-              }
-            >
-              {fmtCurrency(v)}
-            </span>
-          );
-        },
-      },
+      netDepositColDef(),
       { headerName: "品种", field: "symbol", colId: "symbol", width: 110 },
       {
         // Main metric — bold + green when positive so it pops in the table.
@@ -3243,9 +3236,7 @@ function QuickProfitTab({ active }: { active: boolean }) {
               setEditConfig(
                 config
                   ? normalizeQuickProfitConfig(
-                      JSON.parse(
-                        JSON.stringify(config),
-                      ) as QuickProfitConfig,
+                      JSON.parse(JSON.stringify(config)) as QuickProfitConfig,
                     )
                   : {
                       enabled: true,
@@ -3940,9 +3931,9 @@ function GapTradeTab({ active }: { active: boolean }) {
   interface ClientPairAggRow {
     key: string;
     l_userid: number | null;
-    l_login_sids: string[];     // distinct L loginSids under this client pair
+    l_login_sids: string[]; // distinct L loginSids under this client pair
     c_userid: number | null;
-    c_login_sids: string[];     // distinct C loginSids under this client pair
+    c_login_sids: string[]; // distinct C loginSids under this client pair
     pair_count: number;
     total_l_loss_usd: number;
     total_c_profit_usd: number;
@@ -4240,15 +4231,18 @@ function GapTradeTab({ active }: { active: boolean }) {
         colId: "l_profit_usd",
         width: 130,
         cellClass: "ag-right-aligned-cell text-rose-600 dark:text-rose-400",
-        valueFormatter: (p) => fmtCurrency(p.value as number | null | undefined),
+        valueFormatter: (p) =>
+          fmtCurrency(p.value as number | null | undefined),
       },
       {
         headerName: "C 盈利 (USD)",
         field: "c_profit_usd" as keyof AlertEvent,
         colId: "c_profit_usd",
         width: 130,
-        cellClass: "ag-right-aligned-cell text-emerald-600 dark:text-emerald-400",
-        valueFormatter: (p) => fmtCurrency(p.value as number | null | undefined),
+        cellClass:
+          "ag-right-aligned-cell text-emerald-600 dark:text-emerald-400",
+        valueFormatter: (p) =>
+          fmtCurrency(p.value as number | null | undefined),
       },
       {
         headerName: "净 (USD)",
@@ -4298,12 +4292,15 @@ function GapTradeTab({ active }: { active: boolean }) {
           // table below — keeps the analyst's eye moving smoothly between
           // the two views.
           const renderList = (sids: string[]) => {
-            if (sids.length === 0) return <span className="text-muted-foreground">—</span>;
+            if (sids.length === 0)
+              return <span className="text-muted-foreground">—</span>;
             return (
               <span>
                 {sids.map((s, i) => (
                   <span key={s}>
-                    {i > 0 ? <span className="text-muted-foreground">, </span> : null}
+                    {i > 0 ? (
+                      <span className="text-muted-foreground">, </span>
+                    ) : null}
                     {renderLoginSidLink(s)}
                   </span>
                 ))}
@@ -4332,15 +4329,18 @@ function GapTradeTab({ active }: { active: boolean }) {
         colId: "total_l_loss_usd",
         width: 150,
         cellClass: "ag-right-aligned-cell text-rose-600 dark:text-rose-400",
-        valueFormatter: (p) => fmtCurrency(p.value as number | null | undefined),
+        valueFormatter: (p) =>
+          fmtCurrency(p.value as number | null | undefined),
       },
       {
         headerName: "C 累计盈利 (USD)",
         field: "total_c_profit_usd",
         colId: "total_c_profit_usd",
         width: 150,
-        cellClass: "ag-right-aligned-cell text-emerald-600 dark:text-emerald-400",
-        valueFormatter: (p) => fmtCurrency(p.value as number | null | undefined),
+        cellClass:
+          "ag-right-aligned-cell text-emerald-600 dark:text-emerald-400",
+        valueFormatter: (p) =>
+          fmtCurrency(p.value as number | null | undefined),
       },
       {
         headerName: "同 IP 配对",
@@ -4459,14 +4459,17 @@ function GapTradeTab({ active }: { active: boolean }) {
             .split(",")
             .map((s) => s.trim())
             .filter(Boolean);
-          if (sids.length === 0) return <span className="text-muted-foreground">—</span>;
+          if (sids.length === 0)
+            return <span className="text-muted-foreground">—</span>;
           const visible = sids.slice(0, 2);
           const overflow = sids.length - visible.length;
           return (
             <span className="text-xs inline-flex items-center gap-1">
               {visible.map((s, i) => (
                 <span key={s}>
-                  {i > 0 ? <span className="text-muted-foreground">, </span> : null}
+                  {i > 0 ? (
+                    <span className="text-muted-foreground">, </span>
+                  ) : null}
                   {renderLoginSidLink(s)}
                 </span>
               ))}
@@ -4497,15 +4500,7 @@ function GapTradeTab({ active }: { active: boolean }) {
         valueFormatter: (p) =>
           fmtCurrency(p.value as number | null | undefined),
       },
-      {
-        headerName: "净入金 (USD)",
-        field: "net_deposit_hist" as keyof AlertEvent,
-        colId: "net_deposit_hist",
-        width: 130,
-        cellClass: "ag-right-aligned-cell",
-        valueFormatter: (p) =>
-          fmtCurrency(p.value as number | null | undefined),
-      },
+      netDepositColDef({ headerName: "净入金 (USD)" }),
       {
         headerName: "倍数",
         field: "profit_ratio" as keyof AlertEvent,
@@ -4548,9 +4543,7 @@ function GapTradeTab({ active }: { active: boolean }) {
                 ? "secondary"
                 : "outline";
           return (
-            <Badge
-              variant={variant as "destructive" | "secondary" | "outline"}
-            >
+            <Badge variant={variant as "destructive" | "secondary" | "outline"}>
               {labelMap[v] ?? v}
             </Badge>
           );
@@ -4585,8 +4578,8 @@ function GapTradeTab({ active }: { active: boolean }) {
         <div className={RISK_MONITOR_HEADER_ROW}>
           <div className="min-w-0">
             <p className="text-sm text-muted-foreground">
-              每天 HKT 05:20 自动扫描前一个 MT 交易日 00:00–02:00 窗口的强平
-              AB 配对与客户级超额盈利，数据每日刷新一次。
+              每天 HKT 05:20 自动扫描前一个 MT 交易日 00:00–02:00 窗口的强平 AB
+              配对与客户级超额盈利，数据每日刷新一次。
             </p>
             <p className="text-sm text-muted-foreground">
               当前范围:{" "}
@@ -4852,7 +4845,9 @@ function GapTradeTab({ active }: { active: boolean }) {
           side={isMobile ? "bottom" : "right"}
           className={cn(
             "overflow-y-auto",
-            isMobile ? "h-[85vh] rounded-t-lg" : "w-full sm:max-w-md md:max-w-lg",
+            isMobile
+              ? "h-[85vh] rounded-t-lg"
+              : "w-full sm:max-w-md md:max-w-lg",
           )}
         >
           {detailRow && (
@@ -4902,239 +4897,248 @@ function GapTradeTab({ active }: { active: boolean }) {
           </DrawerHeader>
           {editConfig && (
             <>
-            <div className="flex-1 overflow-y-auto p-6 space-y-6 text-sm">
-              <div>
-                <p className="font-medium mb-1">扫描窗口 (MT 时间)</p>
-                <div className="flex items-center gap-2">
-                  <Input
-                    type="number"
-                    min={0}
-                    max={23}
-                    value={editConfig.window_start_hour_mt}
-                    onChange={(e) =>
-                      setEditConfig({
-                        ...editConfig,
-                        window_start_hour_mt: Number(e.target.value || 0),
-                      })
-                    }
-                    className="w-20 h-8"
-                  />
-                  <span className="text-muted-foreground">~</span>
-                  <Input
-                    type="number"
-                    min={1}
-                    max={24}
-                    value={editConfig.window_end_hour_mt}
-                    onChange={(e) =>
-                      setEditConfig({
-                        ...editConfig,
-                        window_end_hour_mt: Number(e.target.value || 2),
-                      })
-                    }
-                    className="w-20 h-8"
-                  />
-                  <span className="text-xs text-muted-foreground">小时 (默认 0–2)</span>
-                </div>
-              </div>
-              <Separator />
-              <div>
-                <p className="font-medium mb-2">检测 A · SO + AB 配对</p>
-                <div className="space-y-2 ml-1">
-                  <label className="flex items-center gap-2 text-xs">
-                    <Checkbox
-                      checked={editConfig.so_ab.enabled}
-                      onCheckedChange={(c) =>
+              <div className="flex-1 overflow-y-auto p-6 space-y-6 text-sm">
+                <div>
+                  <p className="font-medium mb-1">扫描窗口 (MT 时间)</p>
+                  <div className="flex items-center gap-2">
+                    <Input
+                      type="number"
+                      min={0}
+                      max={23}
+                      value={editConfig.window_start_hour_mt}
+                      onChange={(e) =>
                         setEditConfig({
                           ...editConfig,
-                          so_ab: { ...editConfig.so_ab, enabled: !!c },
+                          window_start_hour_mt: Number(e.target.value || 0),
                         })
                       }
+                      className="w-20 h-8"
                     />
-                    启用
-                  </label>
-                  <div className="flex flex-wrap items-center gap-2 text-xs">
-                    <span>开仓差秒数 ≤</span>
+                    <span className="text-muted-foreground">~</span>
                     <Input
                       type="number"
                       min={1}
-                      max={3600}
-                      value={editConfig.so_ab.max_open_diff_sec}
+                      max={24}
+                      value={editConfig.window_end_hour_mt}
                       onChange={(e) =>
                         setEditConfig({
                           ...editConfig,
-                          so_ab: {
-                            ...editConfig.so_ab,
-                            max_open_diff_sec: Number(e.target.value || 300),
-                          },
+                          window_end_hour_mt: Number(e.target.value || 2),
                         })
                       }
                       className="w-20 h-8"
                     />
-                    <span>秒</span>
+                    <span className="text-xs text-muted-foreground">
+                      AM (默认 0–2AM)
+                    </span>
                   </div>
-                  <div className="flex flex-wrap items-center gap-2 text-xs">
-                    <span>手数比范围</span>
-                    <Input
-                      type="number"
-                      step="0.1"
-                      value={editConfig.so_ab.min_lot_ratio}
-                      onChange={(e) =>
-                        setEditConfig({
-                          ...editConfig,
-                          so_ab: {
-                            ...editConfig.so_ab,
-                            min_lot_ratio: Number(e.target.value || 0.5),
-                          },
-                        })
-                      }
-                      className="w-20 h-8"
-                    />
-                    <span>~</span>
-                    <Input
-                      type="number"
-                      step="0.1"
-                      value={editConfig.so_ab.max_lot_ratio}
-                      onChange={(e) =>
-                        setEditConfig({
-                          ...editConfig,
-                          so_ab: {
-                            ...editConfig.so_ab,
-                            max_lot_ratio: Number(e.target.value || 2.0),
-                          },
-                        })
-                      }
-                      className="w-20 h-8"
-                    />
+                </div>
+                <Separator />
+                <div>
+                  <p className="font-medium mb-2">检测 A · SO + AB 配对</p>
+                  <div className="space-y-2 ml-1">
+                    <label className="flex items-center gap-2 text-xs">
+                      <Checkbox
+                        checked={editConfig.so_ab.enabled}
+                        onCheckedChange={(c) =>
+                          setEditConfig({
+                            ...editConfig,
+                            so_ab: { ...editConfig.so_ab, enabled: !!c },
+                          })
+                        }
+                      />
+                      启用
+                    </label>
+                    <div className="flex flex-wrap items-center gap-2 text-xs">
+                      <span>开仓差秒数 ≤</span>
+                      <Input
+                        type="number"
+                        min={1}
+                        max={3600}
+                        value={editConfig.so_ab.max_open_diff_sec}
+                        onChange={(e) =>
+                          setEditConfig({
+                            ...editConfig,
+                            so_ab: {
+                              ...editConfig.so_ab,
+                              max_open_diff_sec: Number(e.target.value || 300),
+                            },
+                          })
+                        }
+                        className="w-20 h-8"
+                      />
+                      <span>秒</span>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2 text-xs">
+                      <span>手数比范围</span>
+                      <Input
+                        type="number"
+                        step="0.1"
+                        value={editConfig.so_ab.min_lot_ratio}
+                        onChange={(e) =>
+                          setEditConfig({
+                            ...editConfig,
+                            so_ab: {
+                              ...editConfig.so_ab,
+                              min_lot_ratio: Number(e.target.value || 0.5),
+                            },
+                          })
+                        }
+                        className="w-20 h-8"
+                      />
+                      <span>~</span>
+                      <Input
+                        type="number"
+                        step="0.1"
+                        value={editConfig.so_ab.max_lot_ratio}
+                        onChange={(e) =>
+                          setEditConfig({
+                            ...editConfig,
+                            so_ab: {
+                              ...editConfig.so_ab,
+                              max_lot_ratio: Number(e.target.value || 2.0),
+                            },
+                          })
+                        }
+                        className="w-20 h-8"
+                      />
+                    </div>
+                    <label className="flex items-center gap-2 text-xs">
+                      <Checkbox
+                        checked={editConfig.so_ab.cross_client_only}
+                        onCheckedChange={(c) =>
+                          setEditConfig({
+                            ...editConfig,
+                            so_ab: {
+                              ...editConfig.so_ab,
+                              cross_client_only: !!c,
+                            },
+                          })
+                        }
+                      />
+                      仅跨客户配对(推荐)
+                    </label>
+                    <div className="flex items-center gap-2 text-xs">
+                      <span className="w-44">L 腿最小亏损 (USD)</span>
+                      <Input
+                        type="number"
+                        step="50"
+                        min={0}
+                        value={editConfig.so_ab.min_l_loss_usd}
+                        onChange={(e) =>
+                          setEditConfig({
+                            ...editConfig,
+                            so_ab: {
+                              ...editConfig.so_ab,
+                              // Empty input keeps current value (avoid an NaN write);
+                              // a literal 0 disables the filter on purpose.
+                              min_l_loss_usd:
+                                e.target.value === ""
+                                  ? editConfig.so_ab.min_l_loss_usd
+                                  : Number(e.target.value),
+                            },
+                          })
+                        }
+                        className="w-24 h-8"
+                      />
+                      <span className="text-muted-foreground">
+                        默认 $100;设为 0 关闭; !相同IP则无限制
+                      </span>
+                    </div>
                   </div>
-                  <label className="flex items-center gap-2 text-xs">
-                    <Checkbox
-                      checked={editConfig.so_ab.cross_client_only}
-                      onCheckedChange={(c) =>
-                        setEditConfig({
-                          ...editConfig,
-                          so_ab: {
-                            ...editConfig.so_ab,
-                            cross_client_only: !!c,
-                          },
-                        })
-                      }
-                    />
-                    仅跨客户配对(推荐)
-                  </label>
-                  <div className="flex items-center gap-2 text-xs">
-                    <span className="w-44">L 腿最小亏损 (USD)</span>
-                    <Input
-                      type="number"
-                      step="50"
-                      min={0}
-                      value={editConfig.so_ab.min_l_loss_usd}
-                      onChange={(e) =>
-                        setEditConfig({
-                          ...editConfig,
-                          so_ab: {
-                            ...editConfig.so_ab,
-                            // Empty input keeps current value (avoid an NaN write);
-                            // a literal 0 disables the filter on purpose.
-                            min_l_loss_usd: e.target.value === ""
-                              ? editConfig.so_ab.min_l_loss_usd
-                              : Number(e.target.value),
-                          },
-                        })
-                      }
-                      className="w-24 h-8"
-                    />
-                    <span className="text-muted-foreground">默认 $100;设为 0 关闭</span>
+                </div>
+                <Separator />
+                <div>
+                  <p className="font-medium mb-2">检测 B · 超额 Profit</p>
+                  <div className="space-y-2 ml-1">
+                    <label className="flex items-center gap-2 text-xs">
+                      <Checkbox
+                        checked={editConfig.gap_profit.enabled}
+                        onCheckedChange={(c) =>
+                          setEditConfig({
+                            ...editConfig,
+                            gap_profit: {
+                              ...editConfig.gap_profit,
+                              enabled: !!c,
+                            },
+                          })
+                        }
+                      />
+                      启用
+                    </label>
+                    <div className="flex flex-wrap items-center gap-2 text-xs">
+                      <span>Profit / 净入金 ≥</span>
+                      <Input
+                        type="number"
+                        step="0.1"
+                        value={editConfig.gap_profit.profit_ratio_min}
+                        onChange={(e) =>
+                          setEditConfig({
+                            ...editConfig,
+                            gap_profit: {
+                              ...editConfig.gap_profit,
+                              profit_ratio_min: Number(e.target.value || 1.0),
+                            },
+                          })
+                        }
+                        className="w-20 h-8"
+                      />
+                      <span className="text-muted-foreground">倍</span>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2 text-xs">
+                      <span>绝对 Profit ≥</span>
+                      <Input
+                        type="number"
+                        step="100"
+                        value={editConfig.gap_profit.min_profit_usd}
+                        onChange={(e) =>
+                          setEditConfig({
+                            ...editConfig,
+                            gap_profit: {
+                              ...editConfig.gap_profit,
+                              min_profit_usd: Number(e.target.value || 1000),
+                            },
+                          })
+                        }
+                        className="w-24 h-8"
+                      />
+                      <span className="text-muted-foreground">USD</span>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2 text-xs">
+                      <span>最小净入金 ≥</span>
+                      <Input
+                        type="number"
+                        step="50"
+                        value={editConfig.gap_profit.min_net_deposit_hist}
+                        onChange={(e) =>
+                          setEditConfig({
+                            ...editConfig,
+                            gap_profit: {
+                              ...editConfig.gap_profit,
+                              min_net_deposit_hist: Number(
+                                e.target.value || 100,
+                              ),
+                            },
+                          })
+                        }
+                        className="w-24 h-8"
+                      />
+                      <span className="text-muted-foreground">
+                        USD (过滤小账户)
+                      </span>
+                    </div>
                   </div>
                 </div>
               </div>
-              <Separator />
-              <div>
-                <p className="font-medium mb-2">检测 B · 超额 Profit</p>
-                <div className="space-y-2 ml-1">
-                  <label className="flex items-center gap-2 text-xs">
-                    <Checkbox
-                      checked={editConfig.gap_profit.enabled}
-                      onCheckedChange={(c) =>
-                        setEditConfig({
-                          ...editConfig,
-                          gap_profit: {
-                            ...editConfig.gap_profit,
-                            enabled: !!c,
-                          },
-                        })
-                      }
-                    />
-                    启用
-                  </label>
-                  <div className="flex flex-wrap items-center gap-2 text-xs">
-                    <span>Profit / 净入金 ≥</span>
-                    <Input
-                      type="number"
-                      step="0.1"
-                      value={editConfig.gap_profit.profit_ratio_min}
-                      onChange={(e) =>
-                        setEditConfig({
-                          ...editConfig,
-                          gap_profit: {
-                            ...editConfig.gap_profit,
-                            profit_ratio_min: Number(e.target.value || 1.0),
-                          },
-                        })
-                      }
-                      className="w-20 h-8"
-                    />
-                    <span className="text-muted-foreground">倍</span>
-                  </div>
-                  <div className="flex flex-wrap items-center gap-2 text-xs">
-                    <span>绝对 Profit ≥</span>
-                    <Input
-                      type="number"
-                      step="100"
-                      value={editConfig.gap_profit.min_profit_usd}
-                      onChange={(e) =>
-                        setEditConfig({
-                          ...editConfig,
-                          gap_profit: {
-                            ...editConfig.gap_profit,
-                            min_profit_usd: Number(e.target.value || 1000),
-                          },
-                        })
-                      }
-                      className="w-24 h-8"
-                    />
-                    <span className="text-muted-foreground">USD</span>
-                  </div>
-                  <div className="flex flex-wrap items-center gap-2 text-xs">
-                    <span>最小净入金 ≥</span>
-                    <Input
-                      type="number"
-                      step="50"
-                      value={editConfig.gap_profit.min_net_deposit_hist}
-                      onChange={(e) =>
-                        setEditConfig({
-                          ...editConfig,
-                          gap_profit: {
-                            ...editConfig.gap_profit,
-                            min_net_deposit_hist: Number(e.target.value || 100),
-                          },
-                        })
-                      }
-                      className="w-24 h-8"
-                    />
-                    <span className="text-muted-foreground">USD (过滤小账户)</span>
-                  </div>
-                </div>
+              <div className="border-t p-4 flex justify-end gap-2">
+                <DrawerClose asChild>
+                  <Button variant="outline">取消</Button>
+                </DrawerClose>
+                <Button onClick={handleSaveConfig} disabled={savingConfig}>
+                  <Save className="h-4 w-4 mr-1.5" />
+                  {savingConfig ? "保存中..." : "保存配置"}
+                </Button>
               </div>
-            </div>
-            <div className="border-t p-4 flex justify-end gap-2">
-              <DrawerClose asChild>
-                <Button variant="outline">取消</Button>
-              </DrawerClose>
-              <Button onClick={handleSaveConfig} disabled={savingConfig}>
-                <Save className="h-4 w-4 mr-1.5" />
-                {savingConfig ? "保存中..." : "保存配置"}
-              </Button>
-            </div>
             </>
           )}
         </DrawerContent>
@@ -5189,6 +5193,7 @@ function GapTradeSoDetail({ row }: { row: AlertEvent }) {
         <DetailRow
           label="历史净入金"
           value={fmtCurrency(row.net_deposit_hist)}
+          highlightClass={netDepositColorClass(row.net_deposit_hist)}
         />
         <DetailRow label="SO 标记" value={row.so_comment ?? "—"} />
       </DetailGroup>
@@ -5210,13 +5215,18 @@ function GapTradeSoDetail({ row }: { row: AlertEvent }) {
       <Separator />
       <DetailGroup title="配对关系">
         <DetailRow label="产品" value={row.symbol} />
-        <DetailRow label="开仓时间差" value={`${row.open_diff_sec ?? "—"} 秒`} />
+        <DetailRow
+          label="开仓时间差"
+          value={`${row.open_diff_sec ?? "—"} 秒`}
+        />
         <DetailRow label="手数比 C/L" value={row.lot_ratio ?? "—"} />
         <DetailRow
           label="净 P&L"
           value={fmtCurrency(row.net_usd)}
           highlightClass={
-            row.net_usd !== null && row.net_usd !== undefined && Math.abs(row.net_usd) < 100
+            row.net_usd !== null &&
+            row.net_usd !== undefined &&
+            Math.abs(row.net_usd) < 100
               ? "font-bold"
               : ""
           }
@@ -5241,7 +5251,11 @@ function GapTradeSoDetail({ row }: { row: AlertEvent }) {
             <p className="text-xs text-muted-foreground mb-1">共享 IP 列表:</p>
             <div className="flex flex-wrap gap-1">
               {sharedIps.map((ip) => (
-                <Badge key={ip} variant="outline" className="font-mono text-[10px]">
+                <Badge
+                  key={ip}
+                  variant="outline"
+                  className="font-mono text-[10px]"
+                >
                   {ip}
                 </Badge>
               ))}
@@ -5277,12 +5291,15 @@ function GapTradeGapDetail({ row }: { row: AlertEvent }) {
         <DetailRow
           label="历史净入金 (USD)"
           value={fmtCurrency(row.net_deposit_hist)}
+          highlightClass={netDepositColorClass(row.net_deposit_hist)}
         />
         <DetailRow
           label="倍数"
           value={fmtRatio(row.profit_ratio)}
           highlightClass={
-            (row.profit_ratio ?? 0) >= 2 ? "text-rose-600 dark:text-rose-400 font-bold" : ""
+            (row.profit_ratio ?? 0) >= 2
+              ? "text-rose-600 dark:text-rose-400 font-bold"
+              : ""
           }
         />
         <DetailRow label="订单数" value={row.order_count ?? 0} />
