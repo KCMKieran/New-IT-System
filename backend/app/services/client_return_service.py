@@ -145,8 +145,15 @@ GROUP BY mu.userId
 """
 
 
-def _build_phase2_sql(id_list_str: str, tm_inline: str, month_start: str, month_end: str, include_avg_equity: bool = False) -> str:
-    """Build Phase 2 SQL: equity, deposits, and realized trade profit (from stats_trading_running_totals)."""
+def _build_phase2_sql(id_list_str: str, month_start: str, month_end: str, include_avg_equity: bool = False) -> str:
+    """Build Phase 2 SQL: equity, deposits, and realized trade profit (from stats_trading_running_totals).
+
+    Anchored on fxbackoffice.users (PK = users.id = client_id) filtered by
+    id_list_str produced by Phase 1. `month_trade_profit` is **not** carried
+    through this SQL — the caller attaches it onto each fetched row from a
+    Python profit_map. This replaces the prior `SELECT ... UNION ALL ...`
+    derived table, so the SQL size no longer scales linearly with client count.
+    """
 
     # Conditionally add ROACE columns (avg_daily_equity + return_on_avg_equity)
     avg_equity_select = ""
@@ -174,12 +181,11 @@ LEFT JOIN (
       AND mu2.`GROUP` NOT LIKE '%demo%'
       AND sb.endingEquity > 0
     GROUP BY mu2.userId
-) AS ade ON tm.client_id = ade.client_id"""
+) AS ade ON tm.id = ade.client_id"""
 
     return f"""
 SELECT
-    tm.client_id,
-    ROUND(tm.month_trade_profit, 2) AS month_trade_profit,
+    tm.id AS client_id,
     ROUND(COALESCE(th.deposits_hist, 0) + COALESCE(th.withdrawals_hist, 0), 2) AS net_deposit_hist,
     ROUND(COALESCE(txm.deposits_month, 0) + COALESCE(txm.withdrawals_month, 0), 2) AS net_deposit_month,
     ROUND(COALESCE(eq.equity, 0), 2) AS equity,
@@ -236,7 +242,11 @@ SELECT
         NULL
     ) AS return_neg_adjusted{avg_equity_select}
 
-FROM ({tm_inline}) AS tm
+-- Anchor on users.id (PK). Phase 1's month_trade_profit is attached in Python
+-- after fetch, not carried through SQL. Replaces the prior N-row UNION ALL
+-- derived table (SQL size used to scale linearly with client count).
+-- WHERE clause is placed at the bottom, after all LEFT JOINs.
+FROM users tm
 
 LEFT JOIN (
     SELECT userId AS client_id,
@@ -246,7 +256,7 @@ LEFT JOIN (
       AND sid IN (1, 5, 6)
       AND `GROUP` NOT LIKE '%demo%'
     GROUP BY userId
-) AS eq ON tm.client_id = eq.client_id
+) AS eq ON tm.id = eq.client_id
 
 LEFT JOIN (
     SELECT st.userId AS client_id,
@@ -260,7 +270,7 @@ LEFT JOIN (
       AND mu.sid IN (1, 2, 5, 6)
       AND mu.`GROUP` NOT LIKE '%demo%'
     GROUP BY st.userId
-) AS th ON tm.client_id = th.client_id
+) AS th ON tm.id = th.client_id
 
 LEFT JOIN (
     SELECT st.userId AS client_id,
@@ -274,7 +284,7 @@ LEFT JOIN (
       AND mu.sid IN (1, 2, 5, 6)
       AND mu.`GROUP` NOT LIKE '%demo%'
     GROUP BY st.userId
-) AS txm ON tm.client_id = txm.client_id
+) AS txm ON tm.id = txm.client_id
 
 LEFT JOIN (
     SELECT st.userId AS client_id,
@@ -287,7 +297,7 @@ LEFT JOIN (
       AND mu.sid IN (1, 2, 5, 6)
       AND mu.`GROUP` NOT LIKE '%demo%'
     GROUP BY st.userId
-) AS dep90 ON tm.client_id = dep90.client_id
+) AS dep90 ON tm.id = dep90.client_id
 
 LEFT JOIN (
     SELECT userId AS client_id,
@@ -295,14 +305,14 @@ LEFT JOIN (
     FROM stats_trading_running_totals
     WHERE userId IN ({id_list_str})
     GROUP BY userId
-) AS rt ON tm.client_id = rt.client_id
+) AS rt ON tm.id = rt.client_id
 
 LEFT JOIN (
     SELECT id AS client_id,
            IF(cid = 0, 'CN', 'Global') AS country
     FROM users
     WHERE id IN ({id_list_str})
-) AS uc ON tm.client_id = uc.client_id
+) AS uc ON tm.id = uc.client_id
 
 -- Zipcode from fxbackoffice.mt4_users (same CRM field as risk-monitor). One row per
 -- client: pick the non-empty ZIPCODE on the account with highest equity (CEN-adjusted),
@@ -325,16 +335,20 @@ LEFT JOIN (
       AND sid IN (1, 5, 6)
       AND `GROUP` NOT LIKE '%demo%'
     GROUP BY userId
-) AS zc ON tm.client_id = zc.client_id
+) AS zc ON tm.id = zc.client_id
 
 LEFT JOIN (
     SELECT DISTINCT userid AS client_id, 1 AS is_akcm
     FROM user_tags
     WHERE tagid = 30154
       AND userid IN ({id_list_str})
-) AS akcm ON tm.client_id = akcm.client_id
+) AS akcm ON tm.id = akcm.client_id
 {avg_equity_join}
-ORDER BY tm.month_trade_profit IS NULL, tm.month_trade_profit DESC
+
+WHERE tm.id IN ({id_list_str})
+  AND COALESCE(tm.isEmployee, 0) = 0
+
+ORDER BY tm.id
 """
 
 
@@ -486,17 +500,30 @@ def get_client_return_rate_data(
                     }
 
                 client_ids = [r["client_id"] for r in active_rows]
-                profit_map = {r["client_id"]: r["month_trade_profit"] for r in active_rows}
+                # Keep Phase 1's profit values in Python; we attach them onto
+                # Phase 2 rows after fetch so the SQL no longer needs to carry
+                # an N-row UNION ALL derived table just to ship them through.
+                profit_map = {
+                    r["client_id"]: r["month_trade_profit"] for r in active_rows
+                }
                 id_list_str = ",".join(str(int(cid)) for cid in client_ids)
 
                 # --- Phase 2: full data query ---
-                tm_inline = " UNION ALL ".join(
-                    f"SELECT {int(cid)} AS client_id, {float(profit_map[cid])} AS month_trade_profit"
-                    for cid in client_ids
-                )
-                phase2_sql = _build_phase2_sql(id_list_str, tm_inline, month_start, month_end, include_avg_equity)
+                # Anchor on fxbackoffice.users (PK = users.id = client_id) instead
+                # of a synthetic `SELECT ... UNION ALL ...` derived table. Same
+                # client_id rows reached via PK lookup; SQL size shrinks ~11x and
+                # the optimizer can pick PK-driven joins. month_trade_profit is
+                # merged back in Python after fetch (see below).
+                phase2_sql = _build_phase2_sql(id_list_str, month_start, month_end, include_avg_equity)
                 cur.execute(phase2_sql)
                 all_data = cur.fetchall()
+
+                # Attach month_trade_profit from Phase 1 (no longer carried in SQL).
+                for row in all_data:
+                    raw_profit = profit_map.get(row["client_id"])
+                    row["month_trade_profit"] = (
+                        round(float(raw_profit), 2) if raw_profit is not None else 0.0
+                    )
 
         finally:
             conn.close()
