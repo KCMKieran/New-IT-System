@@ -18,9 +18,9 @@ Return rate columns:
   - return_non_adjusted:  (equity - net_deposit) / net_deposit × 100 (when net_deposit > 0)
   - return_neg_adjusted:  (equity - A) / A × 100, A = MAX(deposits_90d, |net_deposit|) (when net_deposit ≤ 0)
 
-CLOSE_TIME timezone: MT4 server = UTC+2 (winter) / UTC+3 (summer DST).
-Frontend sends HK time (UTC+8), converted here using MT4_TZ_OFFSET_HOURS.
-TODO: Update MT4_TZ_OFFSET_HOURS from 6 to 5 when switching to summer time (UTC+3).
+CLOSE_TIME timezone: MT4 server runs on EET (UTC+2 winter / UTC+3 summer).
+Conversion uses zoneinfo Europe/Athens, which handles EET/EEST DST automatically
+(last Sunday of March → UTC+3, last Sunday of October → UTC+2).
 
 Redis cache TTL: 3 hours. Clear via DELETE /api/v1/client-return-rate/cache.
 """
@@ -28,9 +28,11 @@ Redis cache TTL: 3 hours. Clear via DELETE /api/v1/client-return-rate/cache.
 import hashlib
 import json
 import math
+import re
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Dict, Optional
+from zoneinfo import ZoneInfo
 
 import pymysql
 
@@ -40,8 +42,11 @@ from app.services.clickhouse_service import clickhouse_service
 
 logger = get_logger(__name__)
 
-# MT4 CLOSE_TIME is UTC+2 (winter). HK is UTC+8. Offset = 8 - 2 = 6 hours.
-MT4_TZ_OFFSET_HOURS = 6
+_HK_TZ = ZoneInfo("Asia/Hong_Kong")
+_MT4_TZ = ZoneInfo("Europe/Athens")  # EET/EEST, DST 自动切换
+
+# month_start / month_end must be YYYY-MM-DD before being f-string'd into Phase 2 SQL.
+_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 def _json_default(obj: Any) -> Any:
@@ -377,6 +382,13 @@ def get_client_return_rate_data(
     if not month_end:
         month_end = datetime.now().strftime("%Y-%m-%d")
 
+    # Phase 2 SQL inlines month_start/month_end via f-string. Even though defaults
+    # are safe, callers may pass arbitrary strings — validate strictly here.
+    for _label, _val in (("month_start", month_start), ("month_end", month_end)):
+        if not _DATE_PATTERN.match(_val):
+            raise ValueError(f"{_label} 必须为 YYYY-MM-DD 格式")
+        datetime.strptime(_val, "%Y-%m-%d")
+
     allowed_sort_columns = {
         "client_id", "net_deposit_hist", "net_deposit_month", "equity",
         "profit_hist", "month_trade_profit", "deposit_avg", "deposit_bucket",
@@ -391,12 +403,14 @@ def get_client_return_rate_data(
     if sort_order.lower() not in ("asc", "desc"):
         sort_order = "desc"
 
-    # Convert HK close_time_start to MT4 server time (UTC+2 winter / UTC+3 summer)
+    # Convert HK close_time_start to MT4 server time. Europe/Athens auto-handles
+    # EET (UTC+2) ↔ EEST (UTC+3) DST so we no longer need a manual offset constant.
     close_time_mt4 = None
     if close_time_start:
         try:
-            hk_dt = datetime.strptime(close_time_start, "%Y-%m-%d %H:%M:%S")
-            close_time_mt4 = (hk_dt - timedelta(hours=MT4_TZ_OFFSET_HOURS)).strftime("%Y-%m-%d %H:%M:%S")
+            hk_naive = datetime.strptime(close_time_start, "%Y-%m-%d %H:%M:%S")
+            hk_aware = hk_naive.replace(tzinfo=_HK_TZ)
+            close_time_mt4 = hk_aware.astimezone(_MT4_TZ).strftime("%Y-%m-%d %H:%M:%S")
         except ValueError:
             logger.warning(f"Invalid close_time_start format: {close_time_start}")
 

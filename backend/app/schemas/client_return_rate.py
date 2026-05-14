@@ -92,10 +92,16 @@ class ClientReturnRateExportTaskCreateRequest(BaseModel):
         pattern="^(0-2000|2000-5000|5000-50000|50000\\+)?$",
         description="Filter by deposit bucket",
     )
-    month_start: Optional[str] = Field(None, description="Month start date (YYYY-MM-DD)")
-    month_end: Optional[str] = Field(None, description="Month end date (YYYY-MM-DD)")
+    month_start: Optional[str] = Field(
+        None, pattern=r"^\d{4}-\d{2}-\d{2}$", description="Month start date (YYYY-MM-DD)"
+    )
+    month_end: Optional[str] = Field(
+        None, pattern=r"^\d{4}-\d{2}-\d{2}$", description="Month end date (YYYY-MM-DD)"
+    )
     close_time_start: Optional[str] = Field(
-        None, description="Precise CLOSE_TIME filter (YYYY-MM-DD HH:MM:SS in HK time)"
+        None,
+        pattern=r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$",
+        description="Precise CLOSE_TIME filter (YYYY-MM-DD HH:MM:SS in HK time)",
     )
     include_avg_equity: bool = Field(
         True, description="Include avg_daily_equity and return_on_avg_equity"

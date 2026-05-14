@@ -53,9 +53,9 @@ async def query_client_return_rate(
     sort_order: str = Query("desc", pattern="^(asc|desc)$", description="Sort direction"),
     search: Optional[str] = Query(None, description="Search by client_id"),
     deposit_bucket: Optional[str] = Query(None, description="Filter by deposit bucket"),
-    month_start: Optional[str] = Query(None, description="Month start date (YYYY-MM-DD)"),
-    month_end: Optional[str] = Query(None, description="Month end date (YYYY-MM-DD)"),
-    close_time_start: Optional[str] = Query(None, description="Precise CLOSE_TIME filter (YYYY-MM-DD HH:MM:SS in HK time)"),
+    month_start: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$", description="Month start date (YYYY-MM-DD)"),
+    month_end: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$", description="Month end date (YYYY-MM-DD)"),
+    close_time_start: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$", description="Precise CLOSE_TIME filter (YYYY-MM-DD HH:MM:SS in HK time)"),
     include_avg_equity: bool = Query(False, description="Include avg_daily_equity and return_on_avg_equity (heavier query)"),
 ):
     """
@@ -81,6 +81,9 @@ async def query_client_return_rate(
             include_avg_equity=include_avg_equity,
         )
         return result
+    except ValueError as e:
+        # Surface 400 with the (Claude-authored) validation message; safe to expose.
+        raise HTTPException(status_code=400, detail=str(e))
     except OperationalError as e:
         # MySQL error 2013 = Lost connection (read timeout), 1028 = Sort aborted
         err_code = e.args[0] if e.args else 0
@@ -88,10 +91,10 @@ async def query_client_return_rate(
             logger.warning(f"Query timeout for client return rate: {e}")
             raise HTTPException(status_code=504, detail="查询超时，请缩小时间范围后重试")
         logger.exception("MySQL error querying client return rate")
-        raise HTTPException(status_code=500, detail=str(e))
-    except Exception as e:
+        raise HTTPException(status_code=500, detail="客户回报率查询失败，请稍后重试")
+    except Exception:
         logger.exception("Error querying client return rate")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="客户回报率查询失败，请稍后重试")
 
 
 @router.post(
@@ -109,9 +112,9 @@ async def create_client_return_rate_export_task(
             requested_ip=_get_client_ip(request),
         )
         return ClientReturnRateExportTaskCreateResponse(**result)
-    except Exception as e:
+    except Exception:
         logger.exception("Error creating client return export task")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="导出任务创建失败")
 
 
 @router.get(
@@ -127,9 +130,9 @@ async def get_client_return_rate_export_task_status(task_id: str):
         return ClientReturnRateExportTaskStatusResponse(**result)
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
         logger.exception("Error getting client return export task status")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="获取导出任务状态失败")
 
 
 @router.get("/export/tasks/{task_id}/download")
@@ -167,9 +170,9 @@ async def download_client_return_rate_export(task_id: str):
         )
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
         logger.exception("Error downloading client return export file")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="下载导出文件失败")
 
 
 @router.delete("/cache")
@@ -184,8 +187,8 @@ async def clear_client_return_rate_cache():
             deleted = clickhouse_service.redis_client.delete(*keys)
         logger.info(f"Cleared {deleted} client return rate cache entries")
         return {"deleted": deleted}
-    except Exception as e:
+    except Exception:
         logger.exception("Error clearing client return rate cache")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="清除缓存失败")
 
 
