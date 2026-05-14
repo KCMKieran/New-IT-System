@@ -59,6 +59,11 @@ class Settings:
     CLIENT_RETURN_EXPORT_MAX_WORKERS: int
     CLIENT_RETURN_EXPORT_CLEANUP_DAYS: int
 
+    # ROACE precompute scheduler (M2 / OPT-0006)
+    CLIENT_ROACE_SCHEDULER_ENABLED: bool
+    CLIENT_ROACE_REFRESH_HOUR: int
+    CLIENT_ROACE_REFRESH_MINUTE: int
+
     def __init__(self) -> None:
         self.DB_HOST = os.environ.get("DB_HOST")
         self.DB_USER = os.environ.get("DB_USER")
@@ -115,6 +120,19 @@ class Settings:
         )
         self.CLIENT_RETURN_EXPORT_CLEANUP_DAYS = int(
             os.environ.get("CLIENT_RETURN_EXPORT_CLEANUP_DAYS", "7")
+        )
+
+        # ROACE precompute (OPT-0006). Nightly cron writes avg_daily_equity into
+        # backend/data/client_roace.db so the web request doesn't have to join
+        # stats_balances (19M rows) on every hit.
+        self.CLIENT_ROACE_SCHEDULER_ENABLED = (
+            os.environ.get("CLIENT_ROACE_SCHEDULER_ENABLED", "false").lower() == "true"
+        )
+        self.CLIENT_ROACE_REFRESH_HOUR = int(
+            os.environ.get("CLIENT_ROACE_REFRESH_HOUR", "6")
+        )
+        self.CLIENT_ROACE_REFRESH_MINUTE = int(
+            os.environ.get("CLIENT_ROACE_REFRESH_MINUTE", "0")
         )
 
         # API Key for protecting /api/* endpoints (None = skip validation, for dev)

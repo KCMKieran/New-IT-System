@@ -175,6 +175,29 @@ async def download_client_return_rate_export(task_id: str):
         raise HTTPException(status_code=500, detail="下载导出文件失败")
 
 
+@router.post("/roace/refresh")
+async def trigger_roace_refresh():
+    """Manually trigger the ROACE SQLite snapshot refresh.
+
+    Same job that the nightly scheduler runs (06:00 HKT). Useful for backfilling
+    on first deployment, recomputing after a data fix, or debugging. Synchronous
+    — the request blocks until the refresh finishes (typically 1-3 min for a
+    full client base scan).
+    """
+    from app.core.client_roace_scheduler import trigger_manual_refresh
+
+    try:
+        result = trigger_manual_refresh()
+        if result.get("error"):
+            raise HTTPException(status_code=409, detail=result["error"])
+        return result
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("ROACE manual refresh failed")
+        raise HTTPException(status_code=500, detail="ROACE 刷新失败，请查日志")
+
+
 @router.delete("/cache")
 async def clear_client_return_rate_cache():
     """Delete all Redis cache entries for client return rate."""

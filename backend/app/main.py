@@ -35,6 +35,11 @@ from app.core.api_key_middleware import APIKeyMiddleware
 from app.core.database import init_db
 from app.core.risk_monitor_db import init_risk_monitor_db
 from app.core.client_return_export_db import init_client_return_export_db
+from app.core.client_roace_db import init_client_roace_db
+from app.core.client_roace_scheduler import (
+    start_client_roace_scheduler,
+    stop_client_roace_scheduler,
+)
 from app.core.login_ip_db import init_login_ip_db
 from app.core.login_ip_scheduler import (
     start_login_ip_scheduler,
@@ -89,6 +94,7 @@ async def lifespan(app: FastAPI):
     init_db()
     init_risk_monitor_db()
     init_client_return_export_db()
+    init_client_roace_db()
     init_login_ip_db()
 
     owns_scheduler = _try_acquire_scheduler_lock()
@@ -99,6 +105,7 @@ async def lifespan(app: FastAPI):
         start_scheduler()
         start_burst_scheduler()
         start_login_ip_scheduler()
+        start_client_roace_scheduler()
     else:
         logger.info(
             f"Worker pid={os.getpid()} did not get scheduler lock — HTTP only"
@@ -107,6 +114,7 @@ async def lifespan(app: FastAPI):
     yield
 
     if owns_scheduler:
+        stop_client_roace_scheduler()
         stop_login_ip_scheduler()
         stop_burst_scheduler()
         stop_scheduler()

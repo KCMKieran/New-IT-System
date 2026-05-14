@@ -153,35 +153,17 @@ def _build_phase2_sql(id_list_str: str, month_start: str, month_end: str, includ
     through this SQL — the caller attaches it onto each fetched row from a
     Python profit_map. This replaces the prior `SELECT ... UNION ALL ...`
     derived table, so the SQL size no longer scales linearly with client count.
+
+    avg_daily_equity / return_on_avg_equity (ROACE) are no longer joined here
+    either — they're read from the nightly SQLite snapshot in
+    client_roace_db (OPT-0006) and attached Python-side.
     """
 
-    # Conditionally add ROACE columns (avg_daily_equity + return_on_avg_equity)
+    # ROACE columns are filled from SQLite after fetch. Keep the f-string
+    # placeholders so the SELECT/JOIN shape stays identical to the pre-OPT-0006
+    # version and only one literal needs swapping if we ever revert.
     avg_equity_select = ""
     avg_equity_join = ""
-    if include_avg_equity:
-        avg_equity_select = """,
-    ROUND(COALESCE(ade.avg_daily_equity, 0), 2) AS avg_daily_equity,
-    IF(
-        COALESCE(ade.avg_daily_equity, 0) > 0,
-        ROUND(COALESCE(rt.profit_hist_trades, 0) / ade.avg_daily_equity * 100, 2),
-        NULL
-    ) AS return_on_avg_equity"""
-
-        avg_equity_join = f"""
-LEFT JOIN (
-    SELECT
-        mu2.userId AS client_id,
-        SUM(IF(sb.currency = 'CEN', sb.endingEquity / 100.0, sb.endingEquity))
-            / COUNT(DISTINCT sb.date) AS avg_daily_equity
-    FROM mt4_users mu2
-    INNER JOIN stats_balances sb ON sb.loginsid = mu2.loginsid
-    INNER JOIN stats_trading st2 ON st2.loginSid = mu2.loginsid AND st2.date = sb.date
-    WHERE mu2.userId IN ({id_list_str})
-      AND mu2.sid IN (1, 5, 6)
-      AND mu2.`GROUP` NOT LIKE '%demo%'
-      AND sb.endingEquity > 0
-    GROUP BY mu2.userId
-) AS ade ON tm.id = ade.client_id"""
 
     return f"""
 SELECT
@@ -527,6 +509,29 @@ def get_client_return_rate_data(
 
         finally:
             conn.close()
+
+        # Attach avg_daily_equity / return_on_avg_equity from the nightly SQLite
+        # snapshot (OPT-0006). Previously a LEFT JOIN against stats_balances on
+        # every request — now a single dict lookup keyed by client_id.
+        if include_avg_equity and all_data:
+            from app.core.client_roace_db import bulk_get_roace
+
+            try:
+                roace_map = bulk_get_roace(r["client_id"] for r in all_data)
+            except Exception:
+                logger.exception("ROACE snapshot lookup failed; columns will be NULL")
+                roace_map = {}
+
+            for row in all_data:
+                snap = roace_map.get(row["client_id"])
+                if snap and snap["avg_daily_equity"] > 0:
+                    avg_eq = float(snap["avg_daily_equity"])
+                    profit_hist = float(row.get("profit_hist") or 0)
+                    row["avg_daily_equity"] = round(avg_eq, 2)
+                    row["return_on_avg_equity"] = round(profit_hist / avg_eq * 100, 2)
+                else:
+                    row["avg_daily_equity"] = None
+                    row["return_on_avg_equity"] = None
 
         # Convert Decimal to float; cast is_akcm from int (0/1) to bool;
         # normalize zipcode like risk-monitor account_enrichment (empty -> None).
