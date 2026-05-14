@@ -67,12 +67,34 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/risk-monitor")
 
-MAX_RULES = 10
+# ── Rule ID allocation ────────────────────────────────────
+# Each Tab owns a contiguous rule_id band so /alerts /stats /export can
+# filter "this Tab's rows" with `rule_id BETWEEN min AND max`. Bands are
+# never reused even if a Tab uses fewer slots than reserved — historical
+# alert_events rows must keep their original rule_id forever.
+#
+# Current bands:
+#   Burst Open       1-50    (50 slots — see note below)
+#   Quick Open-Close 51-60   (10 slots)
+#   Quick Profit     61-70   (10 slots)
+#   Gap Trade        71-90   (20 slots, split 71-80 SO+AB / 81-90 profit)
+#   Future rule      91+     (next band)
+#
+# Convention going forward: reserve **10 IDs per new Tab**. If a Tab
+# genuinely needs >10 rules (rare — `MAX_RULES` caps user config at 10),
+# bump that Tab's band size AND every later Tab's BASE in one PR; do not
+# silently overflow into the next Tab's band.
+#
+# Why Burst is 50 (historical): Burst was the first detector (2026-03-28),
+# back when only one Tab existed and the author over-reserved. Compressing
+# it to 1-10 today would require migrating live alert_events rows, so the
+# 50-wide band is grandfathered. New Tabs follow the 10-wide convention.
+#
+# Canonical doc: `.cursor/skills/risk-monitor/SKILL.md` § "Adding a New Rule" Step 3.
+
+MAX_RULES = 10  # per-Tab cap on user-configurable rules; raise alongside the band size if a Tab ever needs more
 BURST_RULE_MAX_ID = QUICK_RULE_ID_BASE - 1
 QUICK_RULE_MAX_ID = QUICK_PROFIT_RULE_ID_BASE - 1
-# Gap Trade range. SO+AB = 71-80, per-client profit = 81-90 — we currently
-# allocate one rule_id per sub-detector but reserve the band for future
-# variants (e.g. EU-session gap variant).
 GAP_TRADE_RULE_ID_MIN = 71
 GAP_TRADE_RULE_ID_MAX = 90
 # Quick Profit's upper bound. Originally not set because Quick Profit was
