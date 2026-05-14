@@ -33,6 +33,10 @@ services:
       - TZ=Asia/Hong_Kong
       # Prod should run Login IP cron jobs; dev explicitly disables this switch.
       - LOGIN_IP_SCHEDULER_ENABLED=true
+      # OPT-0006: ROACE precompute scheduler — nightly 06:00 HKT refresh of
+      # backend/data/client_roace.db so the Client Return Rate page doesn't
+      # join stats_balances (19M rows) on every request. Dev keeps default off.
+      - CLIENT_ROACE_SCHEDULER_ENABLED=true
     restart: unless-stopped
     depends_on:
       - redis-prod
