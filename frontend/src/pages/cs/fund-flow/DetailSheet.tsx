@@ -200,7 +200,7 @@ export function DetailSheet({ alert, onClose }: Props) {
 
   return (
     <Sheet open={open} onOpenChange={(o) => !o && onClose()}>
-      <SheetContent className="!w-[820px] !max-w-[98vw] overflow-y-auto">
+      <SheetContent className="!w-[820px] !max-w-[98vw] overflow-y-auto px-8">
         <SheetHeader>
           <SheetTitle>
             客户 #

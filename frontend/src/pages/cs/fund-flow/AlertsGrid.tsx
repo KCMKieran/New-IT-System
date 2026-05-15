@@ -80,8 +80,6 @@ export function AlertsGrid({
           ),
       },
       { headerName: "姓名", field: "full_name", width: 160 },
-      { headerName: "Email", field: "email", width: 200 },
-      { headerName: "电话", field: "phone", width: 140 },
       {
         headerName: "MT 账号",
         field: "mt_logins",
