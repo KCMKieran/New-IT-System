@@ -656,16 +656,26 @@ export default function RiskMonitor() {
           </TabsTrigger>
         </TabsList>
 
-        <TabsContent value="burst-open">
+        {/*
+          forceMount keeps all 4 tabs in the DOM so AG-Grid state, fetched
+          alert rows, filters, and sort positions persist across tab
+          switches. The `active` prop guards inside each tab's useEffect
+          (e.g. `if (!active) return;`) already handle the "don't fetch
+          when hidden" logic — without forceMount those guards were dead
+          code because the component itself was being unmounted. Radix
+          automatically sets the `hidden` HTML attribute on inactive
+          panels, so no extra CSS is needed to hide them.
+        */}
+        <TabsContent value="burst-open" forceMount>
           <BurstOpenTab active={activeTab === "burst-open"} />
         </TabsContent>
-        <TabsContent value="quick-open-close">
+        <TabsContent value="quick-open-close" forceMount>
           <QuickOpenCloseTab active={activeTab === "quick-open-close"} />
         </TabsContent>
-        <TabsContent value="quick-profit">
+        <TabsContent value="quick-profit" forceMount>
           <QuickProfitTab active={activeTab === "quick-profit"} />
         </TabsContent>
-        <TabsContent value="gap-trade">
+        <TabsContent value="gap-trade" forceMount>
           <GapTradeTab active={activeTab === "gap-trade"} />
         </TabsContent>
       </Tabs>
