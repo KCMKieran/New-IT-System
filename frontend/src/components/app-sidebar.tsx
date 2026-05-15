@@ -50,6 +50,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
             // { title: t("nav.clientTrading"), url: "/client-trading" },
             { title: t("nav.loginIPs"), url: "/login-ips" },
             { title: t("nav.ibidLots"), url: "/ibid-lots" },
+            { title: t("nav.fundFlowMonitor"), url: "/cs/fund-flow-monitor" },
             // [HIDDEN] ClientPnLMonitor page hidden
             // { title: t("nav.clientPnLMonitor"), url: "/client-pnl-monitor" },
           ],

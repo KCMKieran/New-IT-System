@@ -47,6 +47,11 @@ from app.core.login_ip_scheduler import (
 )
 from app.core.scheduler import start_scheduler, stop_scheduler
 from app.core.burst_open_scheduler import start_burst_scheduler, stop_burst_scheduler
+from app.core.fund_flow_monitor_db import init_fund_flow_monitor_db
+from app.core.fund_flow_scheduler import (
+    start_fund_flow_scheduler,
+    stop_fund_flow_scheduler,
+)
 
 
 # When running with `uvicorn --workers N`, only one worker should run the
@@ -96,6 +101,7 @@ async def lifespan(app: FastAPI):
     init_client_return_export_db()
     init_client_roace_db()
     init_login_ip_db()
+    init_fund_flow_monitor_db()
 
     owns_scheduler = _try_acquire_scheduler_lock()
     if owns_scheduler:
@@ -106,6 +112,7 @@ async def lifespan(app: FastAPI):
         start_burst_scheduler()
         start_login_ip_scheduler()
         start_client_roace_scheduler()
+        start_fund_flow_scheduler()
     else:
         logger.info(
             f"Worker pid={os.getpid()} did not get scheduler lock — HTTP only"
@@ -114,6 +121,7 @@ async def lifespan(app: FastAPI):
     yield
 
     if owns_scheduler:
+        stop_fund_flow_scheduler()
         stop_client_roace_scheduler()
         stop_login_ip_scheduler()
         stop_burst_scheduler()

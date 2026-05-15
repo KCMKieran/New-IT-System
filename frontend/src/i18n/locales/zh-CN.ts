@@ -48,6 +48,7 @@ export const zhCN = {
     ibidLots: "IB及旗下客户交易查询",
     clientReturnRate: "客户收益率",
     ibFinancialMonitor: "IB 资金监控",
+    fundFlowMonitor: "频繁出入金监控",
     home: "首页",
   },
 

@@ -48,6 +48,7 @@ export const enUS = {
     ibidLots: "IBID Lots Lookup",
     clientReturnRate: "Client Return Rate",
     ibFinancialMonitor: "IB Financial Monitor",
+    fundFlowMonitor: "Frequent Fund Flow",
     home: "Home",
   },
   
