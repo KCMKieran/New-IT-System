@@ -275,6 +275,14 @@ CREATE INDEX IF NOT EXISTS idx_alert_events_login_scanned
     ON alert_events(login, scanned_at DESC);
 CREATE INDEX IF NOT EXISTS idx_alert_events_server_symbol
     ON alert_events(server, symbol, scanned_at DESC);
+-- Lets Gap Trade tab queries (rule_id=71/81 + COALESCE on detail.window_date)
+-- avoid a full alert_events scan: rule_id=71 is highly selective (~16 rows
+-- in 82k), so an index lookup beats SCAN ae by ~865×. Also speeds up the
+-- Quick Profit dedup seed at startup. Burst/QOC/QP normal queries are
+-- unaffected — SQLite optimizer keeps using idx_alert_events_scanned_at
+-- for those because scanned_at is more selective in their access patterns.
+CREATE INDEX IF NOT EXISTS idx_alert_events_rule_scanned
+    ON alert_events(rule_id, scanned_at DESC);
 """
 
 # Default rule seeded on first run (3s / 3 orders / 5 lots)
