@@ -51,3 +51,4 @@ SSH_Tunnel_Configuration.md
 # To browse historical versions: git log --all -- docs/<path>
 docs/
 backend/data/risk_monitor.db.bak-20260515-pre-q1opt
+backend/data/risk_monitor.db.bak-20260515-pre-q2split
