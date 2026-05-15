@@ -6,7 +6,7 @@ Stores burst-open detection rules, scan interval config, and a rolling
 backend/data/risk_monitor.db.
 
 Two levels of persistence:
-- `scan_history`  — one row per scan batch (metadata: timing, config snapshot)
+- `scan_history`  — one row per scan batch (metadata: scanned_at, accounts_scanned, scan_time_ms)
 - `alert_events`  — one row per alert (flattened for time-range queries)
 
 Uses Python built-in sqlite3 — no extra dependencies required.
@@ -125,9 +125,7 @@ CREATE TABLE IF NOT EXISTS scan_history (
     scan_interval_min   INTEGER NOT NULL,
     accounts_scanned    INTEGER NOT NULL,
     suspicious_count    INTEGER NOT NULL,
-    scan_time_ms        INTEGER NOT NULL,
-    rules_config        TEXT    NOT NULL,
-    alerts              TEXT    NOT NULL
+    scan_time_ms        INTEGER NOT NULL
 );
 
 -- Event-level alert table: one row per (scan, alert).
@@ -244,8 +242,9 @@ VALUES (30, 5000.0, 1, 0);
 def init_risk_monitor_db() -> None:
     """Create tables if they don't exist. Seed default rule on first run.
 
-    Also runs a one-time backfill from `scan_history.alerts` JSON into the
-    new `alert_events` table when upgrading from the pre-refactor schema.
+    Runs lightweight schema migrations and a startup retention purge so the
+    invariants ("only last 30 days" / "no legacy columns") hold after any
+    deploy.
     """
     _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(str(_DB_PATH)) as conn:
@@ -272,11 +271,7 @@ def init_risk_monitor_db() -> None:
         _migrate_quick_open_close_enabled_not_null(conn)
         _migrate_quick_profit_columns(conn)
         _migrate_gap_trade_config(conn)
-
-        # One-time backfill: if alert_events is empty but scan_history has
-        # rows, flatten their JSON alerts into the event table so existing
-        # history is queryable under the new view.
-        _backfill_alert_events_if_needed(conn)
+        scan_history_columns_dropped = _migrate_drop_scan_history_legacy_columns(conn)
 
         # Startup retention purge. The hot path in `append_scan_and_events`
         # already trims old rows on every scan, but if scanning was paused
@@ -299,6 +294,17 @@ def init_risk_monitor_db() -> None:
                 deleted_history,
                 _RETENTION_DAYS,
             )
+
+    # ALTER TABLE DROP COLUMN frees pages but leaves the file the same size
+    # until VACUUM runs. Do it once after migration, in a fresh autocommit
+    # connection (VACUUM cannot run inside a transaction).
+    if scan_history_columns_dropped:
+        try:
+            with sqlite3.connect(str(_DB_PATH), isolation_level=None) as vac:
+                vac.execute("VACUUM")
+            logger.info("Risk monitor DB VACUUM complete (post-migration page reclaim)")
+        except sqlite3.Error as exc:
+            logger.warning("VACUUM after scan_history migration failed: %s", exc)
 
     logger.info("Risk monitor SQLite database initialized at %s", _DB_PATH)
 
@@ -482,69 +488,27 @@ def _migrate_quick_open_close_enabled_not_null(conn: sqlite3.Connection) -> None
         pass
 
 
-def _backfill_alert_events_if_needed(conn: sqlite3.Connection) -> None:
-    """Populate alert_events from scan_history on first upgrade."""
-    events_count = conn.execute("SELECT COUNT(*) FROM alert_events").fetchone()[0]
-    if events_count > 0:
-        return
+def _migrate_drop_scan_history_legacy_columns(conn: sqlite3.Connection) -> bool:
+    """Drop scan_history.alerts + rules_config — legacy duplication of alert_events.
 
-    batches = conn.execute(
-        "SELECT id, scanned_at, alerts FROM scan_history"
-    ).fetchall()
-    if not batches:
-        return
-
-    inserted = 0
-    for batch_id, scanned_at, alerts_json in batches:
-        try:
-            alerts = json.loads(alerts_json) if alerts_json else []
-        except (ValueError, TypeError):
-            continue
-        for alert in alerts:
-            conn.execute(
-                """
-                INSERT INTO alert_events
-                    (scan_batch_id, scanned_at, rule_id, rule_label,
-                     server, login, symbol, order_count, total_lots,
-                     hold_duration_sec, total_profit_usd,
-                     first_open, last_open,
-                     equity, balance, equity_per_lot, total_open_lots,
-                     leverage, account_group, orders_json, currency, zipcode, net_deposit_hist)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    batch_id,
-                    scanned_at,
-                    alert.get("rule_id", 0),
-                    alert.get("rule_label", ""),
-                    alert.get("server", ""),
-                    alert.get("login", 0),
-                    alert.get("symbol", ""),
-                    alert.get("order_count", 0),
-                    alert.get("total_lots", 0.0),
-                    alert.get("hold_duration_sec"),
-                    alert.get("total_profit_usd"),
-                    alert.get("first_open"),
-                    alert.get("last_open"),
-                    alert.get("equity"),
-                    alert.get("balance"),
-                    alert.get("equity_per_lot"),
-                    alert.get("total_open_lots"),
-                    alert.get("leverage"),
-                    alert.get("group"),
-                    json.dumps(alert.get("orders", [])),
-                    alert.get("currency"),
-                    alert.get("zipcode"),
-                    alert.get("net_deposit_hist"),
-                ),
-            )
-            inserted += 1
-
-    conn.commit()
-    logger.info(
-        "Backfilled %d alert_events rows from %d scan_history batches",
-        inserted, len(batches),
-    )
+    Both columns were the early-version single source of truth before
+    alert_events existed. Today alerts are written to alert_events and
+    rules_config has zero readers. Idempotent — guarded by PRAGMA table_info.
+    Returns True iff at least one column was dropped (signal for caller to
+    schedule a VACUUM to reclaim freed pages).
+    """
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(scan_history)")}
+    dropped = False
+    if "alerts" in cols:
+        conn.execute("ALTER TABLE scan_history DROP COLUMN alerts")
+        dropped = True
+    if "rules_config" in cols:
+        conn.execute("ALTER TABLE scan_history DROP COLUMN rules_config")
+        dropped = True
+    if dropped:
+        conn.commit()
+        logger.info("Dropped scan_history.alerts + rules_config (legacy columns)")
+    return dropped
 
 
 @contextmanager
@@ -754,7 +718,6 @@ def append_scan_and_events(
     accounts_scanned: int,
     suspicious_count: int,
     scan_time_ms: int,
-    rules_config: Any,
     alerts: list[dict],
 ) -> int:
     """Persist one scan batch + its flattened alert events atomically.
@@ -767,16 +730,14 @@ def append_scan_and_events(
         cursor = conn.execute(
             "INSERT INTO scan_history "
             "(scanned_at, scan_interval_min, accounts_scanned, "
-            "suspicious_count, scan_time_ms, rules_config, alerts) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "suspicious_count, scan_time_ms) "
+            "VALUES (?, ?, ?, ?, ?)",
             (
                 scanned_at,
                 scan_interval_min,
                 accounts_scanned,
                 suspicious_count,
                 scan_time_ms,
-                json.dumps(rules_config),
-                json.dumps(alerts),
             ),
         )
         batch_id = cursor.lastrowid or 0

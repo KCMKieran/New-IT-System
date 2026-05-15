@@ -170,11 +170,6 @@ def _run_scan() -> None:
             accounts_scanned=_latest_result["summary"]["total_accounts_scanned"],
             suspicious_count=_latest_result["summary"]["suspicious_count"],
             scan_time_ms=_latest_result["scan_time_ms"],
-            rules_config={
-                "burst_open": config["rules"],
-                "quick_open_close": quick_config.get("rules", []),
-                "quick_profit": qp_config.get("rules", []),
-            },
             alerts=_latest_result["alerts"],
         )
 
@@ -334,15 +329,6 @@ def _run_gap_trade_scan() -> None:
             accounts_scanned=len({(a.get("server"), a.get("login")) for a in merged_alerts}),
             suspicious_count=len(merged_alerts),
             scan_time_ms=total_ms,
-            rules_config={
-                "gap_trade": {
-                    "window_start_hour_mt": config.window_start_hour_mt,
-                    "window_end_hour_mt": config.window_end_hour_mt,
-                    "sid_list": list(config.sid_list),
-                    "so_ab": config.so_ab.model_dump(),
-                    "gap_profit": config.gap_profit.model_dump(),
-                }
-            },
             alerts=merged_alerts,
         )
         so_count = sum(1 for a in merged_alerts if int(a.get("rule_id") or 0) == 71)

@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -91,11 +90,27 @@ def export_alerts(db_path: Path, output_csv: Path, window: ExportWindow) -> tupl
     try:
         rows = conn.execute(
             """
-            SELECT id, scanned_at, suspicious_count, alerts
-            FROM scan_history
-            WHERE scanned_at >= ?
-              AND scanned_at < ?
-            ORDER BY id DESC
+            SELECT
+                sh.id              AS scan_id,
+                sh.scanned_at      AS scanned_at_utc,
+                sh.suspicious_count AS scan_suspicious_count,
+                ae.rule_label,
+                ae.server,
+                ae.login,
+                ae.symbol,
+                ae.order_count,
+                ae.total_lots,
+                ae.first_open,
+                ae.last_open,
+                ae.equity,
+                ae.balance,
+                ae.equity_per_lot,
+                ae.account_group   AS "group"
+            FROM alert_events ae
+            JOIN scan_history sh ON sh.id = ae.scan_batch_id
+            WHERE ae.scanned_at >= ?
+              AND ae.scanned_at < ?
+            ORDER BY sh.id DESC, ae.id ASC
             """,
             (to_z(window.start_utc), to_z(window.end_utc)),
         ).fetchall()
@@ -104,7 +119,7 @@ def export_alerts(db_path: Path, output_csv: Path, window: ExportWindow) -> tupl
 
     output_csv.parent.mkdir(parents=True, exist_ok=True)
 
-    exported_alerts = 0
+    scan_ids: set[int] = set()
     with output_csv.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(
@@ -128,30 +143,28 @@ def export_alerts(db_path: Path, output_csv: Path, window: ExportWindow) -> tupl
         )
 
         for row in rows:
-            alerts = json.loads(row["alerts"]) if row["alerts"] else []
-            for alert in alerts:
-                writer.writerow(
-                    [
-                        row["id"],
-                        row["scanned_at"],
-                        row["suspicious_count"],
-                        alert.get("rule_label"),
-                        alert.get("server"),
-                        alert.get("login"),
-                        alert.get("symbol"),
-                        alert.get("order_count"),
-                        alert.get("total_lots"),
-                        alert.get("first_open"),
-                        alert.get("last_open"),
-                        alert.get("equity"),
-                        alert.get("balance"),
-                        alert.get("equity_per_lot"),
-                        alert.get("group"),
-                    ]
-                )
-                exported_alerts += 1
+            scan_ids.add(row["scan_id"])
+            writer.writerow(
+                [
+                    row["scan_id"],
+                    row["scanned_at_utc"],
+                    row["scan_suspicious_count"],
+                    row["rule_label"],
+                    row["server"],
+                    row["login"],
+                    row["symbol"],
+                    row["order_count"],
+                    row["total_lots"],
+                    row["first_open"],
+                    row["last_open"],
+                    row["equity"],
+                    row["balance"],
+                    row["equity_per_lot"],
+                    row["group"],
+                ]
+            )
 
-    return len(rows), exported_alerts
+    return len(scan_ids), len(rows)
 
 
 def main() -> None:
