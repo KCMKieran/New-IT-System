@@ -46,9 +46,55 @@ SORTABLE_ALERT_COLS: frozenset[str] = frozenset({
     "group",
 })
 
-# Frontend field name → actual DB column. Only needed where the two
-# differ; anything not present here is assumed to match verbatim.
-_SORT_COL_DB_NAME: dict[str, str] = {"group": "account_group"}
+# Frontend sort column name → fully-qualified SQL expression used in
+# ORDER BY. Each sortable column must point at the right table alias
+# after the alert_events split refactor. `window_date` lives on two
+# detail tables (one per gap-trade rule) and is unified via COALESCE.
+_SORT_COL_DB_NAME: dict[str, str] = {
+    # Common columns (alert_events ae)
+    "scanned_at":       "ae.scanned_at",
+    "rule_id":          "ae.rule_id",
+    "rule_label":       "ae.rule_label",
+    "server":           "ae.server",
+    "login":            "ae.login",
+    "symbol":           "ae.symbol",
+    "order_count":      "ae.order_count",
+    "total_lots":       "ae.total_lots",
+    "equity":           "ae.equity",
+    "balance":          "ae.balance",
+    "equity_per_lot":   "ae.equity_per_lot",
+    "total_open_lots":  "ae.total_open_lots",
+    "leverage":         "ae.leverage",
+    "currency":         "ae.currency",
+    "zipcode":          "ae.zipcode",
+    "first_open":       "ae.first_open",
+    "last_open":        "ae.last_open",
+    "net_deposit_hist": "ae.net_deposit_hist",
+    "total_profit_usd": "ae.total_profit_usd",
+    "group":            "ae.account_group",  # frontend alias
+    # Quick OC detail
+    "hold_duration_sec": "qoc.hold_duration_sec",
+    # Quick Profit detail
+    "realized_profit":          "qp.realized_profit",
+    "floating_profit_snapshot": "qp.floating_profit_snapshot",
+    "position_status":          "qp.position_status",
+    # Gap Trade SO+AB detail (rule 71)
+    "l_login_sid":     "gso.l_login_sid",
+    "c_login_sid":     "gso.c_login_sid",
+    "l_profit_usd":    "gso.l_profit_usd",
+    "c_profit_usd":    "gso.c_profit_usd",
+    "net_usd":         "gso.net_usd",
+    "open_diff_sec":   "gso.open_diff_sec",
+    "lot_ratio":       "gso.lot_ratio",
+    "shared_ip_count": "gso.shared_ip_count",
+    # Gap Trade gap-profit detail (rule 81)
+    "client_userid":              "gp.client_userid",
+    "contributing_account_count": "gp.contributing_account_count",
+    "profit_ratio":               "gp.profit_ratio",
+    "triggered_by":               "gp.triggered_by",
+    # window_date lives on both gap detail tables (one row only writes one)
+    "window_date": "COALESCE(gso.window_date, gp.window_date)",
+}
 
 _DB_PATH = Path(__file__).resolve().parents[2] / "data" / "risk_monitor.db"
 
@@ -129,7 +175,9 @@ CREATE TABLE IF NOT EXISTS scan_history (
 );
 
 -- Event-level alert table: one row per (scan, alert).
--- Powers the "time-range alert view" on the frontend.
+-- Common (rule-agnostic) columns only. Rule-specific fields live in
+-- detail tables (alert_quick_oc_detail / alert_quick_profit_detail /
+-- alert_gap_so_detail / alert_gap_profit_detail) joined 1:1 by `id`.
 CREATE TABLE IF NOT EXISTS alert_events (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
     scan_batch_id     INTEGER NOT NULL,
@@ -141,8 +189,6 @@ CREATE TABLE IF NOT EXISTS alert_events (
     symbol            TEXT    NOT NULL,
     order_count       INTEGER NOT NULL,
     total_lots        REAL    NOT NULL,
-    hold_duration_sec INTEGER,
-    total_profit_usd  REAL,
     first_open        TEXT,
     last_open         TEXT,
     equity            REAL,
@@ -155,58 +201,72 @@ CREATE TABLE IF NOT EXISTS alert_events (
     currency          TEXT,                -- "USD" or "CEN" (for display; equity/balance already USD)
     zipcode           TEXT,                -- client zipcode from fxbackoffice.mt4_users
     net_deposit_hist  REAL,                -- historical net deposit (client-return-rate formula)
-    -- Quick Profit-specific columns. NULL for burst-open / quick-open-close rows.
+    total_profit_usd  REAL                 -- written by Quick OC / Quick Profit / Gap Profit; NULL for Burst & Gap SO
+);
+
+-- Detail table for Quick Open-Close (rule_id 51-60).
+CREATE TABLE IF NOT EXISTS alert_quick_oc_detail (
+    id                INTEGER PRIMARY KEY,   -- = alert_events.id (1:1)
+    hold_duration_sec INTEGER
+);
+
+-- Detail table for Quick Profit (rule_id 61-70).
+CREATE TABLE IF NOT EXISTS alert_quick_profit_detail (
+    id                       INTEGER PRIMARY KEY,
     realized_profit          REAL,
     floating_profit_snapshot REAL,
-    position_status          TEXT,         -- "closed" | "open" | "mixed"
-    deposit_1d               REAL,
-    deposit_7d               REAL,
-    deposit_30d              REAL,
-    withdrawal_1d            REAL,
-    withdrawal_7d            REAL,
-    withdrawal_30d           REAL,
-    -- Gap Trade SO+AB pair (rule_id = 71). Loser leg "L" is also stored on
-    -- the common columns (server, login, symbol, scanned_at). These add
-    -- counter leg "C" + pair relationship + IP overlap metadata.
-    l_login_sid              TEXT,
-    l_userid                 INTEGER,
-    l_name                   TEXT,
-    l_groupsid               TEXT,
-    l_ticket                 INTEGER,
-    l_lots                   REAL,
-    l_open_time              TEXT,
-    l_close_time             TEXT,
-    l_profit_usd             REAL,
-    l_balance_usd            REAL,
-    c_login_sid              TEXT,
-    c_userid                 INTEGER,
-    c_name                   TEXT,
-    c_ticket                 INTEGER,
-    c_lots                   REAL,
-    c_open_time              TEXT,
-    c_close_time             TEXT,
-    c_profit_usd             REAL,
-    open_diff_sec            INTEGER,
-    lot_ratio                REAL,
-    net_usd                  REAL,
-    so_comment               TEXT,
-    shared_ips               TEXT,
-    shared_ip_count          INTEGER,
-    l_ip_count               INTEGER,
-    c_ip_count               INTEGER,
-    scan_days                INTEGER,
-    -- Gap Trade per-client window profit (rule_id = 81). client_userid
-    -- aggregates across multiple accounts of the same client.
-    client_userid                 INTEGER,
-    client_name                   TEXT,
-    client_groupsid               TEXT,
-    contributing_login_sids       TEXT,
-    contributing_account_count    INTEGER,
-    symbols                       TEXT,
-    symbol_count                  INTEGER,
-    profit_ratio                  REAL,
-    triggered_by                  TEXT,    -- "ratio" | "absolute" | "both"
-    window_date                   TEXT     -- "YYYY-MM-DD" MT date
+    position_status          TEXT      -- "closed" | "open" | "mixed"
+);
+
+-- Detail table for Gap Trade SO+AB pair (rule_id = 71). Loser leg "L"
+-- shares (server, login, symbol, scanned_at) on alert_events; this table
+-- adds counter leg "C" + pair relationship + IP overlap metadata.
+CREATE TABLE IF NOT EXISTS alert_gap_so_detail (
+    id              INTEGER PRIMARY KEY,
+    l_login_sid     TEXT,
+    l_userid        INTEGER,
+    l_name          TEXT,
+    l_groupsid      TEXT,
+    l_ticket        INTEGER,
+    l_lots          REAL,
+    l_open_time     TEXT,
+    l_close_time    TEXT,
+    l_profit_usd    REAL,
+    l_balance_usd   REAL,
+    c_login_sid     TEXT,
+    c_userid        INTEGER,
+    c_name          TEXT,
+    c_ticket        INTEGER,
+    c_lots          REAL,
+    c_open_time     TEXT,
+    c_close_time    TEXT,
+    c_profit_usd    REAL,
+    open_diff_sec   INTEGER,
+    lot_ratio       REAL,
+    net_usd         REAL,
+    so_comment      TEXT,
+    shared_ips      TEXT,
+    shared_ip_count INTEGER,
+    l_ip_count      INTEGER,
+    c_ip_count      INTEGER,
+    scan_days       INTEGER,
+    window_date     TEXT      -- "YYYY-MM-DD" MT trading day
+);
+
+-- Detail table for Gap Trade per-client window profit (rule_id = 81).
+-- client_userid aggregates across multiple accounts of the same client.
+CREATE TABLE IF NOT EXISTS alert_gap_profit_detail (
+    id                          INTEGER PRIMARY KEY,
+    client_userid               INTEGER,
+    client_name                 TEXT,
+    client_groupsid             TEXT,
+    contributing_login_sids     TEXT,
+    contributing_account_count  INTEGER,
+    symbols                     TEXT,
+    symbol_count                INTEGER,
+    profit_ratio                REAL,
+    triggered_by                TEXT,    -- "ratio" | "absolute" | "both"
+    window_date                 TEXT     -- "YYYY-MM-DD" MT trading day
 );
 
 CREATE INDEX IF NOT EXISTS idx_alert_events_scanned_at
@@ -272,6 +332,8 @@ def init_risk_monitor_db() -> None:
         _migrate_quick_profit_columns(conn)
         _migrate_gap_trade_config(conn)
         scan_history_columns_dropped = _migrate_drop_scan_history_legacy_columns(conn)
+        alert_events_split_done = _migrate_split_alert_events(conn)
+        orphan_cols_dropped = _migrate_drop_orphan_alert_events_columns(conn)
 
         # Startup retention purge. The hot path in `append_scan_and_events`
         # already trims old rows on every scan, but if scanning was paused
@@ -298,13 +360,13 @@ def init_risk_monitor_db() -> None:
     # ALTER TABLE DROP COLUMN frees pages but leaves the file the same size
     # until VACUUM runs. Do it once after migration, in a fresh autocommit
     # connection (VACUUM cannot run inside a transaction).
-    if scan_history_columns_dropped:
+    if scan_history_columns_dropped or alert_events_split_done or orphan_cols_dropped:
         try:
             with sqlite3.connect(str(_DB_PATH), isolation_level=None) as vac:
                 vac.execute("VACUUM")
             logger.info("Risk monitor DB VACUUM complete (post-migration page reclaim)")
         except sqlite3.Error as exc:
-            logger.warning("VACUUM after scan_history migration failed: %s", exc)
+            logger.warning("VACUUM after migration failed: %s", exc)
 
     logger.info("Risk monitor SQLite database initialized at %s", _DB_PATH)
 
@@ -320,70 +382,16 @@ def _migrate_alert_events_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE alert_events ADD COLUMN currency TEXT")
     if "zipcode" not in cols:
         conn.execute("ALTER TABLE alert_events ADD COLUMN zipcode TEXT")
-    if "hold_duration_sec" not in cols:
-        conn.execute("ALTER TABLE alert_events ADD COLUMN hold_duration_sec INTEGER")
     if "total_profit_usd" not in cols:
         conn.execute("ALTER TABLE alert_events ADD COLUMN total_profit_usd REAL")
-    # Quick Profit columns. Each ADD is independent so partial upgrades stay
-    # consistent (ALTER COLUMN is not supported in SQLite, only ADD).
-    qp_cols = [
-        ("net_deposit_hist", "REAL"),
-        ("realized_profit", "REAL"),
-        ("floating_profit_snapshot", "REAL"),
-        ("position_status", "TEXT"),
-        ("deposit_1d", "REAL"),
-        ("deposit_7d", "REAL"),
-        ("deposit_30d", "REAL"),
-        ("withdrawal_1d", "REAL"),
-        ("withdrawal_7d", "REAL"),
-        ("withdrawal_30d", "REAL"),
-    ]
-    for name, sqltype in qp_cols:
-        if name not in cols:
-            conn.execute(f"ALTER TABLE alert_events ADD COLUMN {name} {sqltype}")
-    # Gap Trade columns (rules 71 / 81) — added 2026-05-12.
-    gap_cols = [
-        ("l_login_sid", "TEXT"),
-        ("l_userid", "INTEGER"),
-        ("l_name", "TEXT"),
-        ("l_groupsid", "TEXT"),
-        ("l_ticket", "INTEGER"),
-        ("l_lots", "REAL"),
-        ("l_open_time", "TEXT"),
-        ("l_close_time", "TEXT"),
-        ("l_profit_usd", "REAL"),
-        ("l_balance_usd", "REAL"),
-        ("c_login_sid", "TEXT"),
-        ("c_userid", "INTEGER"),
-        ("c_name", "TEXT"),
-        ("c_ticket", "INTEGER"),
-        ("c_lots", "REAL"),
-        ("c_open_time", "TEXT"),
-        ("c_close_time", "TEXT"),
-        ("c_profit_usd", "REAL"),
-        ("open_diff_sec", "INTEGER"),
-        ("lot_ratio", "REAL"),
-        ("net_usd", "REAL"),
-        ("so_comment", "TEXT"),
-        ("shared_ips", "TEXT"),
-        ("shared_ip_count", "INTEGER"),
-        ("l_ip_count", "INTEGER"),
-        ("c_ip_count", "INTEGER"),
-        ("scan_days", "INTEGER"),
-        ("client_userid", "INTEGER"),
-        ("client_name", "TEXT"),
-        ("client_groupsid", "TEXT"),
-        ("contributing_login_sids", "TEXT"),
-        ("contributing_account_count", "INTEGER"),
-        ("symbols", "TEXT"),
-        ("symbol_count", "INTEGER"),
-        ("profit_ratio", "REAL"),
-        ("triggered_by", "TEXT"),
-        ("window_date", "TEXT"),
-    ]
-    for name, sqltype in gap_cols:
-        if name not in cols:
-            conn.execute(f"ALTER TABLE alert_events ADD COLUMN {name} {sqltype}")
+    if "net_deposit_hist" not in cols:
+        conn.execute("ALTER TABLE alert_events ADD COLUMN net_deposit_hist REAL")
+    # Note: rule-specific columns (hold_duration_sec, realized_profit, all
+    # gap_trade L/C/window_date cols, etc.) are intentionally NOT added here
+    # anymore. They live in detail tables since the alert_events split
+    # refactor (see _migrate_split_alert_events). Old installs that still
+    # carry these columns get cleaned up by the split migration which
+    # backfills detail tables and DROPs the wide columns.
     conn.commit()
 
 
@@ -509,6 +517,136 @@ def _migrate_drop_scan_history_legacy_columns(conn: sqlite3.Connection) -> bool:
         conn.commit()
         logger.info("Dropped scan_history.alerts + rules_config (legacy columns)")
     return dropped
+
+
+def _migrate_drop_orphan_alert_events_columns(conn: sqlite3.Connection) -> bool:
+    """Drop orphan columns that snuck into alert_events historically.
+
+    These columns were never declared in _SCHEMA_SQL nor referenced by any
+    code path (verified by grep + git log). They're pure historical leftovers
+    from experimental code that was reverted without cleaning the schema.
+    Idempotent — only drops what exists.
+
+    Returns True iff at least one column was dropped (triggers VACUUM).
+    """
+    orphans = ("lookback_rule_min", "include_floating_rule")
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(alert_events)")}
+    dropped = []
+    for col in orphans:
+        if col in cols:
+            conn.execute(f"ALTER TABLE alert_events DROP COLUMN {col}")
+            dropped.append(col)
+    if dropped:
+        conn.commit()
+        logger.info("Dropped orphan alert_events columns: %s", ", ".join(dropped))
+    return bool(dropped)
+
+
+def _migrate_split_alert_events(conn: sqlite3.Connection) -> bool:
+    """Split alert_events wide table into 1 common + 4 detail tables.
+
+    Idempotent — guarded by sqlite_master check on alert_quick_oc_detail.
+    Phases:
+      1. CREATE 4 detail tables (also handled by _SCHEMA_SQL on fresh installs).
+      2. Backfill from existing alert_events wide rows by rule_id range.
+      3. ALTER TABLE alert_events DROP COLUMN for the 47 migrated/deprecated
+         columns (also closes problem 8: 6 deprecated deposit/withdrawal cols).
+
+    Returns True iff at least one column was dropped (signal for caller to
+    schedule a VACUUM to reclaim freed pages).
+    """
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(alert_events)")}
+    # If wide columns already gone, this migration has run before (idempotent).
+    if "hold_duration_sec" not in cols and "l_login_sid" not in cols:
+        return False
+
+    # Phase 1: ensure detail tables exist (CREATE IF NOT EXISTS — defensive,
+    # _SCHEMA_SQL also runs first via executescript at init time).
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS alert_quick_oc_detail (
+            id INTEGER PRIMARY KEY,
+            hold_duration_sec INTEGER
+        );
+        CREATE TABLE IF NOT EXISTS alert_quick_profit_detail (
+            id INTEGER PRIMARY KEY,
+            realized_profit REAL,
+            floating_profit_snapshot REAL,
+            position_status TEXT
+        );
+        CREATE TABLE IF NOT EXISTS alert_gap_so_detail (
+            id INTEGER PRIMARY KEY,
+            l_login_sid TEXT, l_userid INTEGER, l_name TEXT, l_groupsid TEXT,
+            l_ticket INTEGER, l_lots REAL, l_open_time TEXT, l_close_time TEXT,
+            l_profit_usd REAL, l_balance_usd REAL,
+            c_login_sid TEXT, c_userid INTEGER, c_name TEXT,
+            c_ticket INTEGER, c_lots REAL, c_open_time TEXT, c_close_time TEXT,
+            c_profit_usd REAL,
+            open_diff_sec INTEGER, lot_ratio REAL, net_usd REAL,
+            so_comment TEXT, shared_ips TEXT, shared_ip_count INTEGER,
+            l_ip_count INTEGER, c_ip_count INTEGER, scan_days INTEGER,
+            window_date TEXT
+        );
+        CREATE TABLE IF NOT EXISTS alert_gap_profit_detail (
+            id INTEGER PRIMARY KEY,
+            client_userid INTEGER, client_name TEXT, client_groupsid TEXT,
+            contributing_login_sids TEXT, contributing_account_count INTEGER,
+            symbols TEXT, symbol_count INTEGER,
+            profit_ratio REAL, triggered_by TEXT, window_date TEXT
+        );
+    """)
+
+    # Phase 2: Backfill from existing alert_events wide rows. Use INSERT OR
+    # IGNORE so re-running after a partial backfill (PK collision) is safe.
+    qoc_csv = ", ".join(_QUICK_OC_DETAIL_COLS)
+    qp_csv  = ", ".join(_QUICK_PROFIT_DETAIL_COLS)
+    gso_csv = ", ".join(_GAP_SO_DETAIL_COLS)
+    gp_csv  = ", ".join(_GAP_PROFIT_DETAIL_COLS)
+
+    n_qoc = conn.execute(f"""
+        INSERT OR IGNORE INTO alert_quick_oc_detail (id, {qoc_csv})
+        SELECT id, {qoc_csv} FROM alert_events
+        WHERE rule_id BETWEEN 51 AND 60 AND hold_duration_sec IS NOT NULL
+    """).rowcount
+    n_qp = conn.execute(f"""
+        INSERT OR IGNORE INTO alert_quick_profit_detail (id, {qp_csv})
+        SELECT id, {qp_csv} FROM alert_events
+        WHERE rule_id BETWEEN 61 AND 70
+    """).rowcount
+    n_gso = conn.execute(f"""
+        INSERT OR IGNORE INTO alert_gap_so_detail (id, {gso_csv})
+        SELECT id, {gso_csv} FROM alert_events WHERE rule_id = 71
+    """).rowcount
+    n_gp = conn.execute(f"""
+        INSERT OR IGNORE INTO alert_gap_profit_detail (id, {gp_csv})
+        SELECT id, {gp_csv} FROM alert_events WHERE rule_id = 81
+    """).rowcount
+
+    # Phase 3: DROP migrated + 6 deprecated columns from alert_events.
+    cols_to_drop = (
+        # Quick OC
+        "hold_duration_sec",
+        # Quick Profit
+        "realized_profit", "floating_profit_snapshot", "position_status",
+        # Deprecated since 2026-05-07 (replaced by net_deposit_hist)
+        "deposit_1d", "deposit_7d", "deposit_30d",
+        "withdrawal_1d", "withdrawal_7d", "withdrawal_30d",
+        # Gap Trade SO+AB (rule 71)
+        *_GAP_SO_DETAIL_COLS,
+        # Gap Trade gap-profit (rule 81) — minus window_date which is
+        # also in _GAP_SO_DETAIL_COLS so already accounted for above
+        *(c for c in _GAP_PROFIT_DETAIL_COLS if c != "window_date"),
+    )
+    dropped_count = 0
+    for col in cols_to_drop:
+        if col in cols:
+            conn.execute(f"ALTER TABLE alert_events DROP COLUMN {col}")
+            dropped_count += 1
+    conn.commit()
+    logger.info(
+        "Split alert_events: backfilled qoc=%d, qp=%d, gso=%d, gp=%d; dropped %d wide columns",
+        n_qoc, n_qp, n_gso, n_gp, dropped_count,
+    )
+    return True
 
 
 @contextmanager
@@ -726,6 +864,12 @@ def append_scan_and_events(
     the batch if needed. Also purges rows older than the retention window
     from both tables so the DB stays small.
     """
+    common_placeholders = ", ".join(["?"] * len(_COMMON_INSERT_COLS))
+    common_insert_sql = (
+        f"INSERT INTO alert_events ({', '.join(_COMMON_INSERT_COLS)}) "
+        f"VALUES ({common_placeholders})"
+    )
+
     with get_risk_monitor_db() as conn:
         cursor = conn.execute(
             "INSERT INTO scan_history "
@@ -742,28 +886,10 @@ def append_scan_and_events(
         )
         batch_id = cursor.lastrowid or 0
 
-        # Build the INSERT statement once outside the loop so the column list
-        # and the `?` placeholders are derived from the same source. This
-        # eliminates a copy/paste vector for column-count mismatch.
-        _base_cols = (
-            "scan_batch_id", "scanned_at", "rule_id", "rule_label",
-            "server", "login", "symbol", "order_count", "total_lots",
-            "hold_duration_sec", "total_profit_usd",
-            "first_open", "last_open",
-            "equity", "balance", "equity_per_lot", "total_open_lots",
-            "leverage", "account_group", "orders_json", "currency", "zipcode",
-            "net_deposit_hist", "realized_profit", "floating_profit_snapshot",
-            "position_status",
-        )
-        _all_cols = _base_cols + _GAP_TRADE_INSERT_COLS
-        _placeholders = ", ".join(["?"] * len(_all_cols))
-        _insert_sql = (
-            f"INSERT INTO alert_events ({', '.join(_all_cols)}) "
-            f"VALUES ({_placeholders})"
-        )
-
         for alert in alerts:
-            base_values = (
+            # 1) INSERT common row, get the new alert_events.id for the
+            #    detail table FK linkage.
+            common_values = (
                 batch_id,
                 scanned_at,
                 alert.get("rule_id", 0),
@@ -773,8 +899,6 @@ def append_scan_and_events(
                 alert.get("symbol", ""),
                 alert.get("order_count", 0),
                 alert.get("total_lots", 0.0),
-                alert.get("hold_duration_sec"),
-                alert.get("total_profit_usd"),
                 alert.get("first_open"),
                 alert.get("last_open"),
                 alert.get("equity"),
@@ -787,17 +911,51 @@ def append_scan_and_events(
                 alert.get("currency"),
                 alert.get("zipcode"),
                 alert.get("net_deposit_hist"),
-                alert.get("realized_profit"),
-                alert.get("floating_profit_snapshot"),
-                alert.get("position_status"),
+                alert.get("total_profit_usd"),
             )
-            gap_values = tuple(alert.get(col) for col in _GAP_TRADE_INSERT_COLS)
-            conn.execute(_insert_sql, base_values + gap_values)
+            event_cursor = conn.execute(common_insert_sql, common_values)
+            event_id = event_cursor.lastrowid or 0
 
-        # Retention purge (both tables share the same window).
+            # 2) Route to the matching detail table by rule_id range.
+            #    Burst Open (1-50) has no detail table — common row only.
+            rule_id = int(alert.get("rule_id", 0) or 0)
+            if 51 <= rule_id <= 60:
+                conn.execute(
+                    _QUICK_OC_INSERT_SQL,
+                    (event_id, *(alert.get(c) for c in _QUICK_OC_DETAIL_COLS)),
+                )
+            elif 61 <= rule_id <= 70:
+                conn.execute(
+                    _QUICK_PROFIT_INSERT_SQL,
+                    (event_id, *(alert.get(c) for c in _QUICK_PROFIT_DETAIL_COLS)),
+                )
+            elif rule_id == 71:
+                conn.execute(
+                    _GAP_SO_INSERT_SQL,
+                    (event_id, *(alert.get(c) for c in _GAP_SO_DETAIL_COLS)),
+                )
+            elif rule_id == 81:
+                conn.execute(
+                    _GAP_PROFIT_INSERT_SQL,
+                    (event_id, *(alert.get(c) for c in _GAP_PROFIT_DETAIL_COLS)),
+                )
+
+        # Retention purge. Detail tables get cleaned via ON DELETE-style
+        # cascade in spirit: we delete from alert_events and from each
+        # detail table by `id NOT IN (SELECT id FROM alert_events)`.
         cutoff_expr = f"datetime('now', '-{_RETENTION_DAYS} days')"
         conn.execute(f"DELETE FROM scan_history WHERE scanned_at < {cutoff_expr}")
         conn.execute(f"DELETE FROM alert_events WHERE scanned_at < {cutoff_expr}")
+        for detail_table in (
+            "alert_quick_oc_detail",
+            "alert_quick_profit_detail",
+            "alert_gap_so_detail",
+            "alert_gap_profit_detail",
+        ):
+            conn.execute(
+                f"DELETE FROM {detail_table} "
+                f"WHERE id NOT IN (SELECT id FROM alert_events)"
+            )
 
     return batch_id
 
@@ -832,13 +990,17 @@ def _escape_like(text: str) -> str:
 
 
 # Whitelist of columns the caller may pin the time range to. `scanned_at`
-# is the original (when the scan ran); `window_date` is the trade date
-# Gap Trade alerts also carry (so filters mean "MT trading day", not
-# "scan run day"). Both are ISO-comparable strings — for `window_date`
+# (UTC, on alert_events ae) is the scan-run timestamp; `window_date` is
+# the MT trading day Gap Trade alerts carry — after the split refactor
+# it lives on the two gap-trade detail tables only, so we COALESCE
+# across them. Both are ISO-comparable strings — for `window_date`
 # (YYYY-MM-DD), lexicographic compare against full ISO timestamps still
 # behaves like a date inclusion check because `'\0' < 'T'` makes
 # `'2026-05-12' < '2026-05-12T00:00Z'` true.
-_ALERT_TIME_FIELDS = frozenset({"scanned_at", "window_date"})
+_ALERT_TIME_FIELDS: dict[str, str] = {
+    "scanned_at":  "ae.scanned_at",
+    "window_date": "COALESCE(gso.window_date, gp.window_date)",
+}
 
 
 def _build_alert_filters(
@@ -861,35 +1023,38 @@ def _build_alert_filters(
     ``time_field`` picks the column the [since, until) range applies to.
     Default ``scanned_at`` matches every burst-tab; the gap-trade endpoint
     overrides to ``window_date`` so the UI filter aligns with the actual
-    trading day instead of the scan-run day.
+    trading day instead of the scan-run day. All filters reference the
+    `ae` (alert_events) alias except `window_date` which uses COALESCE
+    across the two gap-trade detail tables.
     """
-    if time_field not in _ALERT_TIME_FIELDS:
+    time_col = _ALERT_TIME_FIELDS.get(time_field)
+    if time_col is None:
         raise ValueError(
             f"time_field must be one of {sorted(_ALERT_TIME_FIELDS)}, got {time_field!r}"
         )
-    where = [f"{time_field} >= ?", f"{time_field} < ?"]
+    where = [f"{time_col} >= ?", f"{time_col} < ?"]
     params: list[Any] = [since, until]
 
     if server:
-        where.append("server = ?")
+        where.append("ae.server = ?")
         params.append(server)
     if login is not None:
-        where.append("login = ?")
+        where.append("ae.login = ?")
         params.append(login)
     if symbol:
-        where.append("symbol = ?")
+        where.append("ae.symbol = ?")
         params.append(symbol)
     if rule_id is not None:
-        where.append("rule_id = ?")
+        where.append("ae.rule_id = ?")
         params.append(rule_id)
     if rule_id_min is not None:
-        where.append("rule_id >= ?")
+        where.append("ae.rule_id >= ?")
         params.append(rule_id_min)
     if rule_id_max is not None:
-        where.append("rule_id <= ?")
+        where.append("ae.rule_id <= ?")
         params.append(rule_id_max)
     if zipcode:
-        where.append("zipcode LIKE ? ESCAPE '\\'")
+        where.append("ae.zipcode LIKE ? ESCAPE '\\'")
         params.append(f"%{_escape_like(zipcode)}%")
 
     return " AND ".join(where), params
@@ -903,49 +1068,111 @@ def _resolve_alert_order(
 
     The column is validated against `SORTABLE_ALERT_COLS` (falls back to
     `scanned_at`). The direction is normalized to ASC / DESC. A secondary
-    `id DESC` tiebreaker is always appended to keep pagination stable
+    `ae.id DESC` tiebreaker is always appended to keep pagination stable
     when the primary sort key has duplicates.
+
+    After the alert_events split, every sortable column maps to an
+    explicit `<alias>.<col>` expression via `_SORT_COL_DB_NAME` so the
+    JOIN'd FROM clause picks the right table.
     """
     key = sort_by if sort_by in SORTABLE_ALERT_COLS else "scanned_at"
-    col = _SORT_COL_DB_NAME.get(key, key)
+    col = _SORT_COL_DB_NAME.get(key, f"ae.{key}")
     order = "ASC" if (sort_order or "").lower() == "asc" else "DESC"
-    return f"{col} {order}, id DESC"
+    return f"{col} {order}, ae.id DESC"
 
 
-_ALERT_SELECT_COLS = """
-    id, scan_batch_id, scanned_at, rule_id, rule_label,
-    server, login, symbol, order_count, total_lots, hold_duration_sec, total_profit_usd,
-    first_open, last_open,
-    equity, balance, equity_per_lot, total_open_lots,
-    leverage, account_group, orders_json, currency, zipcode,
-    net_deposit_hist,
-    realized_profit, floating_profit_snapshot, position_status,
-    l_login_sid, l_userid, l_name, l_groupsid, l_ticket, l_lots,
-    l_open_time, l_close_time, l_profit_usd, l_balance_usd,
-    c_login_sid, c_userid, c_name, c_ticket, c_lots,
-    c_open_time, c_close_time, c_profit_usd,
-    open_diff_sec, lot_ratio, net_usd, so_comment,
-    shared_ips, shared_ip_count, l_ip_count, c_ip_count, scan_days,
-    client_userid, client_name, client_groupsid,
-    contributing_login_sids, contributing_account_count,
-    symbols, symbol_count, profit_ratio, triggered_by, window_date
-"""
+# Common alert_events columns (rule-agnostic). These flow into the writer
+# unconditionally and are read back via the unified JOIN SELECT below.
+_COMMON_INSERT_COLS: tuple[str, ...] = (
+    "scan_batch_id", "scanned_at", "rule_id", "rule_label",
+    "server", "login", "symbol", "order_count", "total_lots",
+    "first_open", "last_open",
+    "equity", "balance", "equity_per_lot", "total_open_lots",
+    "leverage", "account_group", "orders_json", "currency", "zipcode",
+    "net_deposit_hist", "total_profit_usd",
+)
 
-# Field names that flow into alert_events through `append_scan_and_events`.
-# Kept as an ordered list because both the INSERT column list and the
-# matching `?` placeholders must line up — building both from the same
-# source removes a copy-paste failure mode.
-_GAP_TRADE_INSERT_COLS: tuple[str, ...] = (
+# Detail table columns. Each list excludes `id` (filled from
+# `alert_events.lastrowid`). Ordered so the INSERT column list and the
+# `?` placeholders can be built from the same source.
+_QUICK_OC_DETAIL_COLS: tuple[str, ...] = ("hold_duration_sec",)
+
+_QUICK_PROFIT_DETAIL_COLS: tuple[str, ...] = (
+    "realized_profit", "floating_profit_snapshot", "position_status",
+)
+
+_GAP_SO_DETAIL_COLS: tuple[str, ...] = (
     "l_login_sid", "l_userid", "l_name", "l_groupsid", "l_ticket", "l_lots",
     "l_open_time", "l_close_time", "l_profit_usd", "l_balance_usd",
     "c_login_sid", "c_userid", "c_name", "c_ticket", "c_lots",
     "c_open_time", "c_close_time", "c_profit_usd",
     "open_diff_sec", "lot_ratio", "net_usd", "so_comment",
     "shared_ips", "shared_ip_count", "l_ip_count", "c_ip_count", "scan_days",
+    "window_date",
+)
+
+_GAP_PROFIT_DETAIL_COLS: tuple[str, ...] = (
     "client_userid", "client_name", "client_groupsid",
     "contributing_login_sids", "contributing_account_count",
     "symbols", "symbol_count", "profit_ratio", "triggered_by", "window_date",
 )
+
+
+def _build_detail_insert_sql(table: str, cols: tuple[str, ...]) -> str:
+    """Compose `INSERT INTO <table> (id, <cols>) VALUES (?, ...)`."""
+    placeholders = ", ".join(["?"] * (1 + len(cols)))
+    cols_csv = ", ".join(("id",) + cols)
+    return f"INSERT INTO {table} ({cols_csv}) VALUES ({placeholders})"
+
+
+# Pre-computed INSERT statements for each detail table (rule_id-routed).
+_QUICK_OC_INSERT_SQL = _build_detail_insert_sql("alert_quick_oc_detail", _QUICK_OC_DETAIL_COLS)
+_QUICK_PROFIT_INSERT_SQL = _build_detail_insert_sql("alert_quick_profit_detail", _QUICK_PROFIT_DETAIL_COLS)
+_GAP_SO_INSERT_SQL = _build_detail_insert_sql("alert_gap_so_detail", _GAP_SO_DETAIL_COLS)
+_GAP_PROFIT_INSERT_SQL = _build_detail_insert_sql("alert_gap_profit_detail", _GAP_PROFIT_DETAIL_COLS)
+
+
+# Unified SELECT with 4 LEFT JOINs — used by every reader so the API-facing
+# dict shape stays identical to the pre-split schema. JOIN-on-PK is an
+# index lookup, so cost is negligible even when the rule's detail row
+# doesn't exist (LEFT JOIN keeps the alert_events row with NULLs).
+_ALERT_SELECT_SQL = """
+    ae.id, ae.scan_batch_id, ae.scanned_at, ae.rule_id, ae.rule_label,
+    ae.server, ae.login, ae.symbol, ae.order_count, ae.total_lots,
+    ae.first_open, ae.last_open,
+    ae.equity, ae.balance, ae.equity_per_lot, ae.total_open_lots,
+    ae.leverage, ae.account_group, ae.orders_json, ae.currency, ae.zipcode,
+    ae.net_deposit_hist, ae.total_profit_usd,
+
+    qoc.hold_duration_sec,
+
+    qp.realized_profit, qp.floating_profit_snapshot, qp.position_status,
+
+    gso.l_login_sid, gso.l_userid, gso.l_name, gso.l_groupsid,
+    gso.l_ticket, gso.l_lots, gso.l_open_time, gso.l_close_time,
+    gso.l_profit_usd, gso.l_balance_usd,
+    gso.c_login_sid, gso.c_userid, gso.c_name,
+    gso.c_ticket, gso.c_lots, gso.c_open_time, gso.c_close_time,
+    gso.c_profit_usd,
+    gso.open_diff_sec, gso.lot_ratio, gso.net_usd,
+    gso.so_comment, gso.shared_ips, gso.shared_ip_count,
+    gso.l_ip_count, gso.c_ip_count, gso.scan_days,
+
+    gp.client_userid, gp.client_name, gp.client_groupsid,
+    gp.contributing_login_sids, gp.contributing_account_count,
+    gp.symbols, gp.symbol_count,
+    gp.profit_ratio, gp.triggered_by,
+
+    COALESCE(gso.window_date, gp.window_date) AS window_date
+"""
+
+_ALERT_FROM_CLAUSE = """
+FROM alert_events ae
+LEFT JOIN alert_quick_oc_detail      qoc ON qoc.id = ae.id
+LEFT JOIN alert_quick_profit_detail  qp  ON qp.id  = ae.id
+LEFT JOIN alert_gap_so_detail        gso ON gso.id = ae.id
+LEFT JOIN alert_gap_profit_detail    gp  ON gp.id  = ae.id
+"""
 
 
 def query_alert_events(
@@ -990,14 +1217,14 @@ def query_alert_events(
 
     with get_risk_monitor_db() as conn:
         total = conn.execute(
-            f"SELECT COUNT(*) FROM alert_events WHERE {where_sql}",
+            f"SELECT COUNT(*) {_ALERT_FROM_CLAUSE} WHERE {where_sql}",
             params,
         ).fetchone()[0]
 
         rows = conn.execute(
             f"""
-            SELECT {_ALERT_SELECT_COLS}
-            FROM alert_events
+            SELECT {_ALERT_SELECT_SQL}
+            {_ALERT_FROM_CLAUSE}
             WHERE {where_sql}
             ORDER BY {order_sql}
             LIMIT ? OFFSET ?
@@ -1044,8 +1271,8 @@ def stream_alert_events(
     try:
         cursor = conn.execute(
             f"""
-            SELECT {_ALERT_SELECT_COLS}
-            FROM alert_events
+            SELECT {_ALERT_SELECT_SQL}
+            {_ALERT_FROM_CLAUSE}
             WHERE {where_sql}
             ORDER BY {order_sql}
             """,
@@ -1098,9 +1325,9 @@ def alert_events_stats(
     with get_risk_monitor_db() as conn:
         row = conn.execute(
             f"""
-            SELECT COUNT(DISTINCT login) AS suspicious_count,
-                   COUNT(*)              AS event_count
-            FROM alert_events
+            SELECT COUNT(DISTINCT ae.login) AS suspicious_count,
+                   COUNT(*)                 AS event_count
+            {_ALERT_FROM_CLAUSE}
             WHERE {where_sql}
             """,
             params,
@@ -1108,7 +1335,8 @@ def alert_events_stats(
 
         server_rows = conn.execute(
             f"""
-            SELECT DISTINCT server FROM alert_events
+            SELECT DISTINCT ae.server AS server
+            {_ALERT_FROM_CLAUSE}
             WHERE {where_sql}
             """,
             params,
@@ -1118,13 +1346,13 @@ def alert_events_stats(
         if include_rule_breakdown and (rule_id_min is not None or rule_id_max is not None):
             br_rows = conn.execute(
                 f"""
-                SELECT rule_id,
-                       COUNT(DISTINCT login) AS account_count,
-                       COUNT(*)              AS event_count
-                FROM alert_events
+                SELECT ae.rule_id              AS rule_id,
+                       COUNT(DISTINCT ae.login) AS account_count,
+                       COUNT(*)                 AS event_count
+                {_ALERT_FROM_CLAUSE}
                 WHERE {where_sql}
-                GROUP BY rule_id
-                ORDER BY rule_id
+                GROUP BY ae.rule_id
+                ORDER BY ae.rule_id
                 """,
                 params,
             ).fetchall()
@@ -1160,10 +1388,10 @@ def get_recent_quick_profit_alerts(minutes: int) -> list[dict[str, Any]]:
     with get_risk_monitor_db() as conn:
         rows = conn.execute(
             f"""
-            SELECT {_ALERT_SELECT_COLS}
-            FROM alert_events
-            WHERE rule_id BETWEEN 61 AND 70
-              AND scanned_at >= datetime('now', ?)
+            SELECT {_ALERT_SELECT_SQL}
+            {_ALERT_FROM_CLAUSE}
+            WHERE ae.rule_id BETWEEN 61 AND 70
+              AND ae.scanned_at >= datetime('now', ?)
             """,
             (f"-{int(minutes)} minutes",),
         ).fetchall()
@@ -1185,9 +1413,9 @@ def get_alerts_by_ids(ids: list[int]) -> list[dict[str, Any]]:
     with get_risk_monitor_db() as conn:
         rows = conn.execute(
             f"""
-            SELECT {_ALERT_SELECT_COLS}
-            FROM alert_events
-            WHERE id IN ({placeholders})
+            SELECT {_ALERT_SELECT_SQL}
+            {_ALERT_FROM_CLAUSE}
+            WHERE ae.id IN ({placeholders})
             """,
             list(ids),
         ).fetchall()
