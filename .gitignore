@@ -50,3 +50,4 @@ SSH_Tunnel_Configuration.md
 # longer tracked going forward — keeps doc churn out of git log).
 # To browse historical versions: git log --all -- docs/<path>
 docs/
+backend/data/risk_monitor.db.bak-20260515-pre-q1opt
