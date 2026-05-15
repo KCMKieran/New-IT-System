@@ -203,7 +203,20 @@ export function DetailSheet({ alert, onClose }: Props) {
       <SheetContent className="!w-[820px] !max-w-[98vw] overflow-y-auto">
         <SheetHeader>
           <SheetTitle>
-            客户 #{alert?.user_id} {detail?.full_name || alert?.full_name || ""}
+            客户 #
+            {alert?.user_id != null ? (
+              <a
+                href={`https://mt4.kohleglobal.com/crm/users/${alert.user_id}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-blue-600 hover:underline dark:text-blue-400"
+              >
+                {alert.user_id}
+              </a>
+            ) : (
+              "—"
+            )}{" "}
+            {detail?.full_name || alert?.full_name || ""}
           </SheetTitle>
           <SheetDescription>
             窗口：{fmtDate(alert?.window_start)} ~ {fmtDate(alert?.window_end)}
@@ -279,6 +292,7 @@ export function DetailSheet({ alert, onClose }: Props) {
                   rowData={detail.transactions}
                   columnDefs={txColumns}
                   defaultColDef={defaultColDef}
+                  gridOptions={{ theme: "legacy" }}
                   rowHeight={32}
                   headerHeight={36}
                   suppressCellFocus
@@ -303,6 +317,7 @@ export function DetailSheet({ alert, onClose }: Props) {
                   rowData={detail.trades}
                   columnDefs={tradeColumns}
                   defaultColDef={defaultColDef}
+                  gridOptions={{ theme: "legacy" }}
                   rowHeight={32}
                   headerHeight={36}
                   suppressCellFocus

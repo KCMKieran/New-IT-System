@@ -51,7 +51,23 @@ export function AlertsGrid({
 
   const columnDefs = useMemo<ColDef<FundFlowAlert>[]>(
     () => [
-      { headerName: "User ID", field: "user_id", width: 110, pinned: "left" },
+      {
+        headerName: "User ID",
+        field: "user_id",
+        width: 110,
+        pinned: "left",
+        cellRenderer: (p: { value: number }) => (
+          <a
+            href={`https://mt4.kohleglobal.com/crm/users/${p.value}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={(e) => e.stopPropagation()}
+            className="text-blue-600 hover:underline dark:text-blue-400"
+          >
+            {p.value}
+          </a>
+        ),
+      },
       {
         headerName: "国家",
         field: "country_label",
@@ -143,6 +159,7 @@ export function AlertsGrid({
         rowData={rows}
         columnDefs={columnDefs}
         defaultColDef={defaultColDef}
+        gridOptions={{ theme: "legacy" }}
         animateRows
         rowHeight={34}
         headerHeight={38}
