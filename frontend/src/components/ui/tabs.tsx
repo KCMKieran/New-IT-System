@@ -55,7 +55,12 @@ function TabsContent({
   return (
     <TabsPrimitive.Content
       data-slot="tabs-content"
-      className={cn("flex-1 outline-none", className)}
+      // data-[state=inactive]:hidden hides inactive panels when callers use
+      // `forceMount` to keep them in the DOM for state preservation. Radix
+      // sets `hidden` HTML attribute on inactive content but our Tailwind
+      // preflight / utility specificity overrode the UA `[hidden]{display:none}`
+      // rule, leaving the panels stacked. The data-attribute selector wins.
+      className={cn("flex-1 outline-none data-[state=inactive]:hidden", className)}
       {...props}
     />
   )
