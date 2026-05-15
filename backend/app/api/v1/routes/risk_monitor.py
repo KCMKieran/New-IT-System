@@ -477,6 +477,56 @@ def _csv_row_from_alert(entry: dict) -> list:
     ]
 
 
+# Quick Open-Close adds `hold_duration_sec` + `total_profit_usd` on top of the
+# shared shape — the frontend grid surfaces "合并利润(USD)" as the headline
+# column, so the export must carry it too. Column order mirrors the on-page
+# grid in `frontend/src/pages/RiskMonitor.tsx` (QuickOpenCloseTab columnDefs).
+_QUICK_OPEN_CLOSE_CSV_HEADER = [
+    "rule_label",
+    "scanned_at",
+    "server",
+    "zipcode",
+    "login",
+    "currency",
+    "net_deposit_hist",
+    "symbol",
+    "first_open",
+    "last_open",
+    "hold_duration_sec",
+    "order_count",
+    "total_profit_usd",
+    "total_lots",
+    "orders",
+    "rule_id",
+]
+
+
+def _csv_row_from_quick_open_close(entry: dict) -> list:
+    """Project an alert_events dict into the Quick Open-Close CSV column order."""
+    def _opt(key: str) -> Any:
+        v = entry.get(key)
+        return "" if v is None else v
+
+    return [
+        entry.get("rule_label", ""),
+        entry.get("scanned_at", ""),
+        entry.get("server", ""),
+        entry.get("zipcode") or "",
+        entry.get("login", ""),
+        entry.get("currency") or "",
+        _opt("net_deposit_hist"),
+        entry.get("symbol", ""),
+        entry.get("first_open") or "",
+        entry.get("last_open") or "",
+        _opt("hold_duration_sec"),
+        entry.get("order_count", ""),
+        _opt("total_profit_usd"),
+        entry.get("total_lots", ""),
+        _fmt_orders(entry.get("orders", [])),
+        entry.get("rule_id", ""),
+    ]
+
+
 def _csv_stream(
     since_iso: str,
     until_iso: str,
@@ -759,6 +809,8 @@ async def quick_open_close_alerts_export(
                 zipcode_clean=zipcode_clean,
                 sort_by=sort_by,
                 sort_order=sort_order,
+                header=_QUICK_OPEN_CLOSE_CSV_HEADER,
+                row_fn=_csv_row_from_quick_open_close,
             ),
             media_type="text/csv; charset=utf-8",
             headers={
