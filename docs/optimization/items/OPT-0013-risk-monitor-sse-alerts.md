@@ -1,7 +1,7 @@
 ---
 id: OPT-0013
 title: Risk-monitor 用 SSE 推送告警到前端（替代轮询）
-status: idea
+status: wip
 priority: P2
 area: mixed
 effort: M

@@ -10,7 +10,9 @@
 
 | ID | Branch | Claim 日期 | 备注 |
 |----|--------|-----------|------|
-| _空_ | | | |
+| [OPT-0011](./items/OPT-0011-risk-monitor-cursor-scan.md) | `feat/risk-monitor-realtime` | 2026-05-16 | Claude 周末 batch — 与 0012/0013 同 branch |
+| [OPT-0012](./items/OPT-0012-scheduler-fast-slow-tier.md) | `feat/risk-monitor-realtime` | 2026-05-16 | Claude 周末 batch — 依赖 0011 |
+| [OPT-0013](./items/OPT-0013-risk-monitor-sse-alerts.md) | `feat/risk-monitor-realtime` | 2026-05-16 | Claude 周末 batch — frontend 视觉留给用户 |
 
 ## ✅ 待领取（Ready）
 
@@ -29,6 +31,3 @@
 | ID | 区域 | 标题 | 备注 |
 |----|------|------|------|
 | [OPT-0004](./items/OPT-0004-risk-monitor-arch.md) | mixed | Risk-monitor 架构/框架重构 | 太宽，需要先拆 3~5 个子任务（路由分层 / service 抽象 / 配置集中 / 任务调度 …） |
-| [OPT-0011](./items/OPT-0011-risk-monitor-cursor-scan.md) | backend | Risk-monitor 游标式增量扫描 | 替代时间窗重叠轮询；为 fast tier（OPT-0012）做地基 |
-| [OPT-0012](./items/OPT-0012-scheduler-fast-slow-tier.md) | backend | Scheduler 拆 fast / slow / daily tier | Burst Open 提到 60s 节拍；依赖 OPT-0011 完成 |
-| [OPT-0013](./items/OPT-0013-risk-monitor-sse-alerts.md) | mixed | SSE 推送告警到前端 | 替代前端 setInterval 轮询；可独立上线，但收益与 0011/0012 协同 |
