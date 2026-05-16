@@ -1,7 +1,7 @@
 ---
 id: OPT-0014
 title: Risk-monitor SQLite 启用 WAL 模式（消除读写互阻塞）
-status: ready
+status: wip
 priority: P1
 area: db
 effort: S

@@ -10,7 +10,7 @@
 
 | ID | Branch | Claim 日期 | 备注 |
 |----|--------|-----------|------|
-| _空_ | | | |
+| [OPT-0014](./items/OPT-0014-sqlite-wal-mode.md) | `opt/sqlite-wal` | 2026-05-16 | Claude — 实施 WAL PRAGMAs + 测试 |
 
 ## ✅ 待领取（Ready）
 
@@ -21,7 +21,6 @@
 | [OPT-0001](./items/OPT-0001-risk-monitor-tab-cache.md) | P2 | frontend | M | Risk-monitor 四个 tab 切换状态/缓存优化 |
 | [OPT-0002](./items/OPT-0002-browser-cache-pattern-doc.md) | P2 | docs | S | 现有浏览器缓存模式归纳成复用文档 |
 | [OPT-0003](./items/OPT-0003-risk-monitor-sqlite-perf.md) | P1 | db | L | Risk-monitor SQLite 数据增长后的性能方案 |
-| [OPT-0014](./items/OPT-0014-sqlite-wal-mode.md) | P1 | db | S | Risk-monitor SQLite 启用 WAL 模式（消除读写互阻塞） |
 
 ## 💡 想法（Ideas）—— 还不能直接 claim
 
