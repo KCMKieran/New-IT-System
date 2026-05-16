@@ -23,6 +23,11 @@ from apscheduler.triggers.interval import IntervalTrigger
 logger = logging.getLogger(__name__)
 
 JOB_ID = "burst_open_scan"
+# OPT-0012: fast tier dedicated job id. Coexists with JOB_ID when
+# BURST_FAST_TIER_ENABLED=true — fast tier runs only burst-open (60s),
+# JOB_ID/_run_scan switches to slow-only mode (skips burst).
+BURST_FAST_JOB_ID = "burst_open_fast_tier"
+BURST_FAST_TIER_INTERVAL_SEC = 60
 GAP_TRADE_JOB_ID = "gap_trade_daily_scan"
 
 _scheduler: BackgroundScheduler | None = None
@@ -32,6 +37,12 @@ _scan_lock = threading.Lock()
 # tick (or vice versa). They write to the same `alert_events` table but
 # touch different rule_id ranges, so concurrent runs are safe.
 _gap_trade_lock = threading.Lock()
+
+
+def _fast_tier_enabled() -> bool:
+    # Default OFF — opt-in via env. Reads each call so test fixtures and
+    # rolling restarts can toggle without re-importing the module.
+    return os.getenv("BURST_FAST_TIER_ENABLED", "false").lower() == "true"
 
 
 def _build_quick_profit_prev_alerts(
@@ -67,11 +78,18 @@ def _build_quick_profit_prev_alerts(
         return prev
 
 
-def _run_scan() -> None:
-    """Execute one burst-open scan cycle.
+def _run_scan(*, tier: str = "all") -> None:
+    """Execute one scan cycle.
 
-    Reads config from SQLite, runs SQL + rule engine, updates the in-memory
-    cache, writes to scan_history, and cleans up old records.
+    OPT-0012 tier modes:
+    - 'all'         → legacy, runs burst + quick_oc + quick_profit (default
+                      when fast tier disabled; preserves prior behavior)
+    - 'fast_burst'  → burst only (called by fast tier 60s job)
+    - 'slow'        → quick_oc + quick_profit only (skips burst when fast
+                      tier owns it)
+
+    Reads config from SQLite, runs SQL + rule engine, merges into the
+    in-memory cache, writes to scan_history, and cleans up old records.
     """
     global _latest_result
 
@@ -87,6 +105,10 @@ def _run_scan() -> None:
     from ..services.rule_quick_profit_service import scan_quick_profit
     from ..services.risk_monitor_service import scan_burst_open
 
+    include_burst = tier in ("all", "fast_burst")
+    include_quick_oc = tier in ("all", "slow")
+    include_qp = tier in ("all", "slow")
+
     try:
         config = load_config()
         quick_config = load_quick_open_close_config()
@@ -101,14 +123,16 @@ def _run_scan() -> None:
             get_recent_quick_profit_alerts,
         )
 
-        burst_result = scan_burst_open(
-            settings,
-            scan_interval_min=config["scan_interval_min"],
-            rules=config["rules"],
-            previous_alerts=prev_alerts,
-        )
+        burst_result: dict[str, Any] | None = None
+        if include_burst:
+            burst_result = scan_burst_open(
+                settings,
+                scan_interval_min=config["scan_interval_min"],
+                rules=config["rules"],
+                previous_alerts=prev_alerts,
+            )
         quick_result: dict[str, Any] | None = None
-        if quick_config.get("enabled", True):
+        if include_quick_oc and quick_config.get("enabled", True):
             try:
                 quick_result = scan_quick_open_close(
                     settings,
@@ -123,7 +147,7 @@ def _run_scan() -> None:
         # max(rule.lookback_min) inside the service, so the scheduler just
         # forwards the rules and the previous-alert dedup pool.
         qp_result: dict[str, Any] | None = None
-        if qp_config.get("enabled", True) and qp_config.get("rules"):
+        if include_qp and qp_config.get("enabled", True) and qp_config.get("rules"):
             try:
                 qp_result = scan_quick_profit(
                     settings,
@@ -133,16 +157,46 @@ def _run_scan() -> None:
             except Exception:
                 logger.error("Quick profit scan failed", exc_info=True)
 
-        merged_alerts = list(burst_result["alerts"])
+        # Build this tick's alerts. For tiered modes ('fast_burst'/'slow'),
+        # we MERGE with the not-touched alerts from _latest_result so the
+        # cached snapshot stays consistent (frontend "立即扫描" reads it).
+        this_tick_alerts: list[dict[str, Any]] = []
+        if burst_result:
+            this_tick_alerts.extend(burst_result["alerts"])
         if quick_result:
-            merged_alerts.extend(quick_result["alerts"])
+            this_tick_alerts.extend(quick_result["alerts"])
         if qp_result:
-            merged_alerts.extend(qp_result["alerts"])
+            this_tick_alerts.extend(qp_result["alerts"])
 
-        burst_pairs = burst_result.pop("_universe_pairs", set())
+        if tier == "fast_burst":
+            # Keep slow-tier alerts (rule_id >= 51) from previous result;
+            # replace burst portion (rule_id 1-50)
+            kept = [
+                a for a in ((_latest_result or {}).get("alerts") or [])
+                if a.get("rule_id", 0) >= 51
+            ]
+            merged_alerts = list(this_tick_alerts) + kept
+        elif tier == "slow":
+            # Keep burst portion from previous result; replace slow portion
+            kept = [
+                a for a in ((_latest_result or {}).get("alerts") or [])
+                if a.get("rule_id", 0) < 51
+            ]
+            merged_alerts = kept + list(this_tick_alerts)
+        else:
+            merged_alerts = this_tick_alerts
+
+        burst_pairs = burst_result.pop("_universe_pairs", set()) if burst_result else set()
         quick_pairs = quick_result.pop("_universe_pairs", set()) if quick_result else set()
         qp_pairs = qp_result.pop("_universe_pairs", set()) if qp_result else set()
 
+        # For tier modes, the scan_time_ms reflects only what this tick ran.
+        ran_results = [r for r in (burst_result, quick_result, qp_result) if r]
+        if not ran_results:
+            # tier='slow' with everything disabled — nothing to persist, but
+            # still safe to return without touching state.
+            return
+        primary = ran_results[0]
         _latest_result = {
             "alerts": merged_alerts,
             "summary": {
@@ -151,46 +205,71 @@ def _run_scan() -> None:
                     set(burst_pairs) | set(quick_pairs) | set(qp_pairs)
                 ),
             },
-            "burst_summary": burst_result["summary"],
-            "config": burst_result["config"],
-            "scan_time_ms": (
-                burst_result["scan_time_ms"]
-                + (quick_result["scan_time_ms"] if quick_result else 0)
-                + (qp_result["scan_time_ms"] if qp_result else 0)
-            ),
-            "scanned_at": burst_result["scanned_at"],
+            "burst_summary": (burst_result["summary"] if burst_result
+                              else (_latest_result or {}).get("burst_summary")),
+            "config": (burst_result["config"] if burst_result
+                       else (_latest_result or {}).get("config")
+                       or {"scan_interval_min": config["scan_interval_min"],
+                           "rules": config["rules"]}),
+            "scan_time_ms": sum(r["scan_time_ms"] for r in ran_results),
+            "scanned_at": primary["scanned_at"],
+            "tier": tier,
         }
 
-        # Persist both the scan batch metadata and each alert as an
-        # event row. The alert_events table is what the new time-range
-        # view on the frontend reads from.
+        # Persist the alerts EMITTED THIS TICK (not the merged snapshot —
+        # the snapshot keeps stale alerts from the other tier visible in
+        # cache, but they were already written by their own tick).
         append_scan_and_events(
-            scanned_at=burst_result["scanned_at"],
+            scanned_at=primary["scanned_at"],
             scan_interval_min=config["scan_interval_min"],
             accounts_scanned=_latest_result["summary"]["total_accounts_scanned"],
-            suspicious_count=_latest_result["summary"]["suspicious_count"],
+            suspicious_count=len(this_tick_alerts),
             scan_time_ms=_latest_result["scan_time_ms"],
-            alerts=_latest_result["alerts"],
+            alerts=this_tick_alerts,
         )
 
         logger.info(
-            "Burst scan complete: %d suspicious, %d scanned, %dms",
-            _latest_result["summary"]["suspicious_count"],
+            "Scan complete [%s]: %d new (%d cached), %d scanned, %dms",
+            tier,
+            len(this_tick_alerts),
+            len(merged_alerts),
             _latest_result["summary"]["total_accounts_scanned"],
             _latest_result["scan_time_ms"],
         )
     except Exception:
-        logger.error("Burst scan failed", exc_info=True)
+        logger.error("Scan failed [tier=%s]", tier, exc_info=True)
 
 
 def _locked_scan() -> None:
-    """Run scan with lock to prevent concurrent executions."""
+    """Slow-tier (or all-in-one when fast tier disabled) scan with lock."""
     acquired = _scan_lock.acquire(blocking=False)
     if not acquired:
-        logger.info("Burst scan already running, skipping this tick")
+        logger.info("Slow-tier scan already running, skipping this tick")
         return
     try:
-        _run_scan()
+        # When fast tier owns burst, slow tier explicitly skips it; else
+        # legacy 'all' mode keeps prior behavior exactly.
+        _run_scan(tier="slow" if _fast_tier_enabled() else "all")
+    finally:
+        _scan_lock.release()
+
+
+def _locked_fast_burst_scan() -> None:
+    """OPT-0012 fast tier: burst-only scan, every 60s.
+
+    Uses the SAME _scan_lock as slow tier — they share `_latest_result`
+    state. If a slow tick is mid-flight, the fast tick skips (no big deal
+    at 60s cadence; next tick picks it up). Worst case under heavy load:
+    one fast tick skipped every ~10 min when slow tier runs.
+    """
+    if not _fast_tier_enabled():
+        return
+    acquired = _scan_lock.acquire(blocking=False)
+    if not acquired:
+        logger.debug("Fast tier: scan_lock held by slow tier, skipping")
+        return
+    try:
+        _run_scan(tier="fast_burst")
     finally:
         _scan_lock.release()
 
@@ -375,6 +454,20 @@ def start_burst_scheduler() -> None:
         id=JOB_ID,
         replace_existing=True,
     )
+    # OPT-0012: dedicated fast tier for Burst Open. Runs every 60s when
+    # BURST_FAST_TIER_ENABLED=true. The slow-tier job above switches to
+    # 'slow' mode (skips burst) so detectors don't double-run.
+    if _fast_tier_enabled():
+        _scheduler.add_job(
+            _locked_fast_burst_scan,
+            IntervalTrigger(seconds=BURST_FAST_TIER_INTERVAL_SEC),
+            id=BURST_FAST_JOB_ID,
+            replace_existing=True,
+        )
+        logger.info(
+            "Burst fast tier started: every %ds (slow tier skips burst)",
+            BURST_FAST_TIER_INTERVAL_SEC,
+        )
     # Gap Trade: Mon–Sat at 07:20 HKT (Asia/Hong_Kong). Cron fires
     # 20 min after the MT window closes (MT 02:00 = HKT 07:00), giving
     # real-time visibility on today's gap event (gold opens MT 01:00 =
