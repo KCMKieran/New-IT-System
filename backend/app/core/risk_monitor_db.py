@@ -98,6 +98,17 @@ _SORT_COL_DB_NAME: dict[str, str] = {
 
 _DB_PATH = Path(__file__).resolve().parents[2] / "data" / "risk_monitor.db"
 
+
+def _apply_pragmas(conn: sqlite3.Connection) -> None:
+    # WAL lets the scheduler write without blocking front-end reads (fixes
+    # the 200-500ms tab-switch stalls noted in risk-monitor SKILL.md). All
+    # PRAGMAs here are idempotent and safe to re-run on every connection.
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA synchronous = NORMAL")
+    conn.execute("PRAGMA busy_timeout = 5000")
+    conn.execute("PRAGMA cache_size = -64000")
+    conn.execute("PRAGMA temp_store = MEMORY")
+
 # Keep scan_history and alert_events for 30 days (was 7 days before the
 # history-centralization refactor). 30 days × 144 scans/day ~= 4320 batches,
 # each averaging <5 alert rows → well under 25 MB even in worst case.
@@ -316,6 +327,7 @@ def init_risk_monitor_db() -> None:
     """
     _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(str(_DB_PATH)) as conn:
+        _apply_pragmas(conn)
         conn.executescript(_SCHEMA_SQL)
         # Seed a default rule if the table is empty
         count = conn.execute("SELECT COUNT(*) FROM burst_open_rules").fetchone()[0]
@@ -371,6 +383,7 @@ def init_risk_monitor_db() -> None:
     if scan_history_columns_dropped or alert_events_split_done or orphan_cols_dropped:
         try:
             with sqlite3.connect(str(_DB_PATH), isolation_level=None) as vac:
+                _apply_pragmas(vac)
                 vac.execute("VACUUM")
             logger.info("Risk monitor DB VACUUM complete (post-migration page reclaim)")
         except sqlite3.Error as exc:
@@ -661,6 +674,7 @@ def _migrate_split_alert_events(conn: sqlite3.Connection) -> bool:
 def get_risk_monitor_db():
     """Yield a sqlite3 Connection with row_factory=Row."""
     conn = sqlite3.connect(str(_DB_PATH))
+    _apply_pragmas(conn)
     conn.row_factory = sqlite3.Row
     try:
         yield conn
@@ -1275,6 +1289,7 @@ def stream_alert_events(
     order_sql = _resolve_alert_order(sort_by, sort_order)
 
     conn = sqlite3.connect(str(_DB_PATH))
+    _apply_pragmas(conn)
     conn.row_factory = sqlite3.Row
     try:
         cursor = conn.execute(
