@@ -294,6 +294,23 @@ CREATE INDEX IF NOT EXISTS idx_alert_events_server_symbol
 -- for those because scanned_at is more selective in their access patterns.
 CREATE INDEX IF NOT EXISTS idx_alert_events_rule_scanned
     ON alert_events(rule_id, scanned_at DESC);
+
+-- Per-(rule_type, server) high-water-mark used by OPT-0011 cursor-mode
+-- scans (CURSOR_SCAN_ENABLED=true). Cold start: row missing → fall back
+-- to the old time-window SQL for one tick, then upsert. Subsequent scans
+-- pull strictly newer rows than the cursor, eliminating overlap re-scan
+-- and unblocking sub-minute fast-tier scheduling (OPT-0012).
+CREATE TABLE IF NOT EXISTS scan_cursors (
+    rule_type   TEXT NOT NULL,    -- 'burst_open' | 'quick_open_close'
+    server      TEXT NOT NULL,    -- 'MT4_Live' | 'MT4_Live2' | 'MT5'
+    -- MT4: 'YYYY-MM-DD HH:MM:SS' broker-local (compared raw against OPEN_TIME/CLOSE_TIME)
+    -- MT5: FILETIME tick count as decimal string (compared against d.Timestamp)
+    cursor_time TEXT NOT NULL,
+    -- Tiebreaker for same-second multi-fills: MT4 TICKET / MT5 Deal id
+    cursor_id   INTEGER NOT NULL DEFAULT 0,
+    updated_at  TEXT NOT NULL,
+    PRIMARY KEY (rule_type, server)
+);
 """
 
 # Default rule seeded on first run (3s / 3 orders / 5 lots)
@@ -868,6 +885,68 @@ def save_gap_trade_config(config: dict[str, Any]) -> None:
             "updated_at = datetime('now') WHERE id = 1",
             (json.dumps(config),),
         )
+
+
+# ── Scan cursors (OPT-0011 cursor-mode high-water-mark) ───────────────
+
+def get_scan_cursor(rule_type: str, server: str) -> tuple[str | None, int]:
+    # Returns (cursor_time, cursor_id). (None, 0) → cold start: caller falls
+    # back to the legacy time-window SQL for this tick only.
+    with get_risk_monitor_db() as conn:
+        row = conn.execute(
+            "SELECT cursor_time, cursor_id FROM scan_cursors "
+            "WHERE rule_type = ? AND server = ?",
+            (rule_type, server),
+        ).fetchone()
+    if row is None:
+        return (None, 0)
+    return (row["cursor_time"], int(row["cursor_id"]))
+
+
+def update_scan_cursor(
+    rule_type: str, server: str, cursor_time: str, cursor_id: int
+) -> None:
+    # UPSERT. Caller computes new HWM as max((time, id)) over fetched rows
+    # and only calls this when there's actually a new max to advance to.
+    from datetime import datetime, timezone
+    now_iso = (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z")
+    )
+    with get_risk_monitor_db() as conn:
+        conn.execute(
+            "INSERT INTO scan_cursors (rule_type, server, cursor_time, cursor_id, updated_at) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(rule_type, server) DO UPDATE SET "
+            "  cursor_time = excluded.cursor_time, "
+            "  cursor_id   = excluded.cursor_id, "
+            "  updated_at  = excluded.updated_at "
+            "WHERE excluded.cursor_time > scan_cursors.cursor_time "
+            "   OR (excluded.cursor_time = scan_cursors.cursor_time "
+            "       AND excluded.cursor_id > scan_cursors.cursor_id)",
+            (rule_type, server, cursor_time, cursor_id, now_iso),
+        )
+
+
+def reset_scan_cursor(rule_type: str | None = None, server: str | None = None) -> int:
+    # Debug helper: wipe one cursor / all cursors of a rule / all cursors.
+    # Returns deleted row count. Next scan after reset falls back to
+    # time-window mode for one tick, then re-seeds.
+    sql = "DELETE FROM scan_cursors"
+    params: list = []
+    if rule_type or server:
+        wheres = []
+        if rule_type:
+            wheres.append("rule_type = ?")
+            params.append(rule_type)
+        if server:
+            wheres.append("server = ?")
+            params.append(server)
+        sql += " WHERE " + " AND ".join(wheres)
+    with get_risk_monitor_db() as conn:
+        cur = conn.execute(sql, params)
+        return cur.rowcount
 
 
 # ── Scan history + alert events (write path) ──────────────

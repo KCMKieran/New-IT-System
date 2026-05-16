@@ -18,6 +18,7 @@ Rules:
 from __future__ import annotations
 
 import logging
+import os
 import time
 from datetime import datetime, timezone
 from itertools import groupby
@@ -26,6 +27,7 @@ from typing import Any, Dict, List, Optional
 import pymysql
 
 from ..core.config import Settings
+from ..core.risk_monitor_db import get_scan_cursor, update_scan_cursor
 from ..core.sql_helpers import (
     FILETIME_EPOCH_OFFSET,
     FILETIME_TICKS_PER_SEC,
@@ -74,41 +76,60 @@ def _query_mt4_recent_opens(
     db_name: str,
     server_label: str,
     check_interval_sec: int,
+    cursor_time: Optional[str] = None,
+    cursor_id: int = 0,
     login: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """Fetch orders opened in the last N seconds from an MT4 server.
 
     Does NOT filter by CLOSE_TIME — captures both still-open and already-closed.
     Uses INDEX_OPENTIME for fast range scan.
+
+    OPT-0011 cursor mode: when `cursor_time` is provided, fetch strictly
+    newer rows than the (cursor_time, cursor_id) HWM. Tiebreaker on
+    same-second multi-fills via t.TICKET. Result rows include the raw
+    broker-local OPEN_TIME + TICKET so the caller can advance the HWM.
     """
     open_time_col = broker_time_to_utc_iso("t.OPEN_TIME", "open_time")
+    if cursor_time is not None:
+        where_time = (
+            "(t.OPEN_TIME > %s OR (t.OPEN_TIME = %s AND t.TICKET > %s))"
+        )
+        time_params: list = [cursor_time, cursor_time, cursor_id]
+    else:
+        where_time = "t.OPEN_TIME >= DATE_SUB(NOW(), INTERVAL %s SECOND)"
+        time_params = [check_interval_sec]
     sql = f"""
         SELECT
             '{server_label}'                            AS server,
+            t.TICKET                                    AS ticket,
             t.LOGIN                                     AS login,
             u.`GROUP`                                   AS `group`,
             t.SYMBOL                                    AS symbol,
             CASE WHEN t.CMD = 0 THEN 'Buy'
                  ELSE 'Sell' END                        AS direction,
             t.VOLUME / 100                              AS lots,
+            t.OPEN_TIME                                 AS open_time_raw,
             {open_time_col},
             u.EQUITY                                    AS equity,
             u.BALANCE                                   AS balance,
             u.LEVERAGE                                  AS leverage
         FROM {db_name}.mt4_trades t
         INNER JOIN {db_name}.mt4_users u ON t.LOGIN = u.LOGIN
-        WHERE t.OPEN_TIME >= DATE_SUB(NOW(), INTERVAL %s SECOND)
+        WHERE {where_time}
           AND t.CMD IN (0, 1)
           AND t.LOGIN NOT LIKE '7%%'
           AND u.`GROUP` NOT LIKE '%%demo%%'
           AND u.`GROUP` NOT LIKE '%%test%%'
     """
-    params: list = [check_interval_sec]
+    params: list = list(time_params)
     if login is not None:
         sql += " AND t.LOGIN = %s"
         params.append(login)
 
-    sql += " ORDER BY t.LOGIN, t.OPEN_TIME"
+    # ORDER BY (OPEN_TIME, TICKET) so the cursor advance picks the true HWM,
+    # not just whatever happened to land last in the result set.
+    sql += " ORDER BY t.OPEN_TIME, t.TICKET"
 
     with conn.cursor() as cur:
         cur.execute(sql, params)
@@ -119,17 +140,35 @@ def _query_mt5_recent_opens(
     conn,
     *,
     check_interval_sec: int,
+    cursor_time: Optional[str] = None,
+    cursor_id: int = 0,
     login: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """Fetch opening deals from the last N seconds in MT5.
 
     Uses mt5_deals with Entry=0 (open) and the Timestamp index.
     Account info is fetched separately for matched accounts only.
+
+    OPT-0011 cursor mode: `cursor_time` is the FILETIME tick count as
+    decimal string. Tiebreaker uses d.Deal (deal id, monotonic).
     """
     open_time_col = broker_time_to_utc_iso("d.Time", "open_time")
+    if cursor_time is not None:
+        where_time = (
+            "(d.Timestamp > %s OR (d.Timestamp = %s AND d.Deal > %s))"
+        )
+        time_params: list = [cursor_time, cursor_time, cursor_id]
+    else:
+        where_time = (
+            f"d.Timestamp >= (UNIX_TIMESTAMP(DATE_SUB(NOW(), INTERVAL %s SECOND))"
+            f"                + {FILETIME_EPOCH_OFFSET}) * {FILETIME_TICKS_PER_SEC}"
+        )
+        time_params = [check_interval_sec]
     sql = f"""
         SELECT
             'MT5'                                       AS server,
+            d.Deal                                      AS deal_id,
+            d.Timestamp                                 AS timestamp_raw,
             d.Login                                     AS login,
             d.Symbol                                    AS symbol,
             CASE WHEN d.Action = 0 THEN 'Buy'
@@ -138,17 +177,16 @@ def _query_mt5_recent_opens(
             {open_time_col},
             d.PositionID                                AS position_id
         FROM mt5_live.mt5_deals d
-        WHERE d.Timestamp >= (UNIX_TIMESTAMP(DATE_SUB(NOW(), INTERVAL %s SECOND))
-                              + {FILETIME_EPOCH_OFFSET}) * {FILETIME_TICKS_PER_SEC}
+        WHERE {where_time}
           AND d.Entry = 0
           AND d.Action IN (0, 1)
     """
-    params: list = [check_interval_sec]
+    params: list = list(time_params)
     if login is not None:
         sql += " AND d.Login = %s"
         params.append(login)
 
-    sql += " ORDER BY d.Login, d.Time"
+    sql += " ORDER BY d.Timestamp, d.Deal"
 
     with conn.cursor() as cur:
         cur.execute(sql, params)
@@ -328,6 +366,45 @@ def _time_diff_sec(t1: Any, t2: Any) -> float:
     return abs((t2 - t1).total_seconds())
 
 
+def _compute_cursor_hwm(
+    rows: List[Dict[str, Any]], server_type: str
+) -> tuple[str, int]:
+    """Find the (cursor_time, cursor_id) HWM in a result batch.
+
+    MT4 rows carry `open_time_raw` (broker-local datetime / str) + `ticket`.
+    MT5 rows carry `timestamp_raw` (FILETIME int) + `deal_id`.
+
+    MT4 cursor_time format: 'YYYY-MM-DD HH:MM:SS' (lex-order = time-order).
+    MT5 cursor_time format: 20-char zero-padded decimal of FILETIME ticks
+    (so SQLite TEXT lex-compare matches numeric order; MySQL silently
+    coerces the string back to BIGINT in the next scan's WHERE clause).
+    """
+    if server_type == "mt5":
+        hwm_num, hwm_id = -1, 0
+        for r in rows:
+            try:
+                t_num = int(r.get("timestamp_raw") or 0)
+            except (TypeError, ValueError):
+                continue
+            i = int(r.get("deal_id") or 0)
+            if (t_num, i) > (hwm_num, hwm_id):
+                hwm_num, hwm_id = t_num, i
+        return (str(hwm_num).zfill(20), hwm_id) if hwm_num >= 0 else ("", 0)
+
+    # MT4: datetime → 'YYYY-MM-DD HH:MM:SS'
+    hwm_time, hwm_id = "", 0
+    for r in rows:
+        raw = r.get("open_time_raw")
+        if isinstance(raw, datetime):
+            t = raw.strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            t = str(raw) if raw is not None else ""
+        i = int(r.get("ticket") or 0)
+        if (t, i) > (hwm_time, hwm_id):
+            hwm_time, hwm_id = t, i
+    return hwm_time, hwm_id
+
+
 # ── Main Entry Point ───────────────────────────────────────
 
 # Fixed buffer (30 seconds) added to check_interval to catch bursts at scan boundaries
@@ -346,22 +423,44 @@ def scan_burst_open(
     """Run a full burst-open scan across all servers.
 
     check_interval = scan_interval_min * 60 + 30s boundary buffer.
+
+    OPT-0011: when env CURSOR_SCAN_ENABLED=true, switches to per-server HWM
+    cursor mode (no overlap re-scan). On cold start (no cursor row) we still
+    use the time-window for one tick, then upsert the HWM.
     """
     start = time.time()
     check_interval_sec = scan_interval_min * 60 + _BOUNDARY_BUFFER_SEC
+    cursor_enabled = (
+        os.getenv("CURSOR_SCAN_ENABLED", "false").lower() == "true"
+        and login is None  # per-login filter is a debug/inspection path; skip cursor
+        and server is None
+    )
 
     conn = _get_connection(settings)
     try:
         all_opens: List[Dict[str, Any]] = []
         unique_logins: set = set()
+        # Track new HWM candidates per server so we can upsert after the
+        # full scan (not partway — partial upsert would advance past rows
+        # we never processed if a downstream step crashed).
+        cursor_advance: Dict[str, tuple[str, int]] = {}
 
         for srv in _SERVERS:
             if server and srv["key"] != server:
                 continue
             try:
+                cur_time: Optional[str] = None
+                cur_id: int = 0
+                if cursor_enabled:
+                    cur_time, cur_id = get_scan_cursor("burst_open", srv["key"])
+
                 if srv["type"] == "mt5":
                     rows = _query_mt5_recent_opens(
-                        conn, check_interval_sec=check_interval_sec, login=login,
+                        conn,
+                        check_interval_sec=check_interval_sec,
+                        cursor_time=cur_time,
+                        cursor_id=cur_id,
+                        login=login,
                     )
                 else:
                     rows = _query_mt4_recent_opens(
@@ -369,11 +468,16 @@ def scan_burst_open(
                         db_name=srv["db"],
                         server_label=srv["label"],
                         check_interval_sec=check_interval_sec,
+                        cursor_time=cur_time,
+                        cursor_id=cur_id,
                         login=login,
                     )
                 all_opens.extend(rows)
                 for r in rows:
                     unique_logins.add((r["server"], r["login"]))
+
+                if cursor_enabled and rows:
+                    cursor_advance[srv["key"]] = _compute_cursor_hwm(rows, srv["type"])
             except Exception:
                 logger.error(
                     "Failed to query %s recent opens", srv["label"], exc_info=True
@@ -396,6 +500,19 @@ def scan_burst_open(
 
         # Enrich matched accounts with equity / balance / total open lots
         _enrich_account_info(conn, alerts)
+
+        # OPT-0011: advance HWM cursors AFTER successful enrich. If anything
+        # before this point raised, we keep the old cursor so the next scan
+        # retries the same window — at worst we re-emit (dedup catches it).
+        if cursor_enabled and cursor_advance:
+            for srv_key, (hwm_time, hwm_id) in cursor_advance.items():
+                try:
+                    update_scan_cursor("burst_open", srv_key, hwm_time, hwm_id)
+                except Exception:
+                    logger.exception(
+                        "Failed to upsert burst_open cursor for %s (will retry next scan)",
+                        srv_key,
+                    )
 
         elapsed_ms = int((time.time() - start) * 1000)
 
