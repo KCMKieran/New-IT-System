@@ -30,6 +30,9 @@ backend/logs-prod/*.log.*
 *.log
 
 *.db
+# SQLite WAL mode companion files (auto-created next to the .db)
+*.db-wal
+*.db-shm
 
 # Runtime artifacts (flock files etc.) — created by the app at startup
 .scheduler.lock
@@ -49,6 +52,12 @@ SSH_Tunnel_Configuration.md
 # Project docs are local-only (history preserved via past commits, but no
 # longer tracked going forward — keeps doc churn out of git log).
 # To browse historical versions: git log --all -- docs/<path>
-docs/
+# NOTE: use `docs/**` not `docs/`. The trailing-slash form excludes the
+# directory itself, making re-includes (`!docs/optimization/...`) impossible.
+docs/**
+# Exception: optimization tracker is committed so parallel Claude sessions
+# can see each other's claims (see docs/optimization/README.md §并行 session 安全).
+!docs/optimization
+!docs/optimization/**
 backend/data/risk_monitor.db.bak-20260515-pre-q1opt
 backend/data/risk_monitor.db.bak-20260515-pre-q2split
