@@ -13,16 +13,21 @@ Endpoints (all under /risk-monitor):
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
+import json
 import logging
+import os
+import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Iterator, Optional
+from typing import Any, AsyncIterator, Iterator, Optional
 from urllib.parse import quote
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 
+from ....core.alerts_pubsub import subscribe as sse_subscribe
 from ....core.burst_open_scheduler import (
     get_latest_result,
     reschedule_burst,
@@ -142,6 +147,72 @@ def _parse_iso_utc(value: str) -> datetime:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
+
+
+# ── GET /alerts/stream — OPT-0013 SSE push ────────────────
+
+# Keepalive ping interval. Cloudflare Tunnel / nginx tend to drop idle
+# long connections around 60s; 15s gives a wide safety margin.
+_SSE_KEEPALIVE_SEC = 15
+
+
+@router.get("/alerts/stream")
+async def alerts_stream(request: Request):
+    """Server-Sent Events stream pushing scan notifications.
+
+    Payload (one event per scan tick):
+      data: {"type":"scan","tier":"fast_burst","scanned_at":"...","new_alert_count":3,"rule_ids":[1,2]}
+
+    Gated by SSE_ENABLED=true (default off). When disabled returns 503 so
+    the frontend cleanly falls back to its existing setInterval polling.
+
+    Lightweight intentionally — clients do an incremental fetch from
+    /alerts on receipt rather than carrying full alert bodies on the wire.
+    """
+    if os.getenv("SSE_ENABLED", "false").lower() != "true":
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="SSE disabled (set SSE_ENABLED=true on the backend)",
+        )
+
+    async def _event_gen() -> AsyncIterator[bytes]:
+        # Initial hello so the client can flip its "connected" indicator
+        # without waiting for the first real scan.
+        yield b": connected\n\n"
+
+        sub = sse_subscribe()
+        sub_iter = sub.__aiter__()
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    # Wait at most _SSE_KEEPALIVE_SEC for the next event,
+                    # otherwise emit a keepalive comment to keep the
+                    # connection warm through proxies.
+                    event = await asyncio.wait_for(
+                        sub_iter.__anext__(), timeout=_SSE_KEEPALIVE_SEC
+                    )
+                    yield f"data: {json.dumps(event, default=str)}\n\n".encode("utf-8")
+                except asyncio.TimeoutError:
+                    yield b": ping\n\n"
+                except StopAsyncIteration:
+                    break
+        finally:
+            # subscribe() handles its own _subscribers cleanup in its
+            # finally block when the generator is closed.
+            await sub.aclose()
+
+    return StreamingResponse(
+        _event_gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            # Disable nginx response buffering for SSE streams
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 # ── GET /burst-open — read latest cached result ───────────

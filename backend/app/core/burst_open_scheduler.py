@@ -228,6 +228,23 @@ def _run_scan(*, tier: str = "all") -> None:
             alerts=this_tick_alerts,
         )
 
+        # OPT-0013: notify SSE subscribers of the new tick. Lightweight
+        # payload (no full alert bodies) — frontend does an incremental
+        # /alerts fetch on receipt. publish() is thread-safe.
+        if os.getenv("SSE_ENABLED", "false").lower() == "true":
+            try:
+                from .alerts_pubsub import publish as _sse_publish
+                _sse_publish({
+                    "type": "scan",
+                    "tier": tier,
+                    "scanned_at": primary["scanned_at"],
+                    "new_alert_count": len(this_tick_alerts),
+                    "rule_ids": sorted({a.get("rule_id") for a in this_tick_alerts
+                                        if a.get("rule_id") is not None}),
+                })
+            except Exception:
+                logger.exception("SSE publish failed (non-fatal)")
+
         logger.info(
             "Scan complete [%s]: %d new (%d cached), %d scanned, %dms",
             tier,
