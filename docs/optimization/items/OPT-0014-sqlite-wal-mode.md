@@ -1,7 +1,7 @@
 ---
 id: OPT-0014
 title: Risk-monitor SQLite 启用 WAL 模式（消除读写互阻塞）
-status: wip
+status: done
 priority: P1
 area: db
 effort: S
@@ -62,4 +62,20 @@ related: [[OPT-0003]] [[OPT-0011]] [[OPT-0012]]
 
 ## 结果
 
-_待填_
+**Commit**: `526af46` (feat) + `854ce22` (file) + `fe6ddb9` (claim)，merged to main 2026-05-16
+
+**实际交付**：
+- `backend/app/core/risk_monitor_db.py` 加 `_apply_pragmas()` helper（+15 行）；4 处 `sqlite3.connect(...)` 全部接入
+- `backend/tests/test_sqlite_pragmas.py` 6 个测试（PRAGMA 应用、数据持久、WAL 副生文件、并发读写不互锁）
+- 后端容器重启 → 实测验证：journal_mode=wal / synchronous=1 / busy_timeout=5000 / cache_size=-64000 / temp_store=2 全部正确生效
+- `.gitignore` 加 `*.db-wal` + `*.db-shm`
+
+**与 AC 偏差**：无，所有 AC 项均勾选
+
+**测试结果**：44/44 全部通过（38 旧 + 6 新）
+
+**意外发现**：现网 dev DB 文件在改动前**已经是 WAL 模式**（journal_mode 是文件级持久属性，可能某次历史调试或测试运行已切过）。本 item 的价值在于**显式应用 + 加上另外 4 个调优 PRAGMA**（synchronous=NORMAL、busy_timeout、cache_size、temp_store），并通过测试锁定，确保未来不会被任何代码路径意外回退。
+
+**Follow-up**：
+- 不阻塞 [[OPT-0012]] fast tier 上线了；fast tier 可以放心提速
+- 若未来 `-wal` 文件持续大于 10MB，可加 `PRAGMA wal_autocheckpoint = 500`

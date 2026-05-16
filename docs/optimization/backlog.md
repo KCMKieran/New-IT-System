@@ -10,7 +10,7 @@
 
 | ID | Branch | Claim 日期 | 备注 |
 |----|--------|-----------|------|
-| [OPT-0014](./items/OPT-0014-sqlite-wal-mode.md) | `opt/sqlite-wal` | 2026-05-16 | Claude — 实施 WAL PRAGMAs + 测试 |
+| _空_ | | | |
 
 ## ✅ 待领取（Ready）
 

@@ -7,6 +7,7 @@ Append-only 日志。最新的写在最上面。
 
 | 日期 | ID | Commit | 标题 |
 |------|----|--------|------|
+| 2026-05-16 | [OPT-0014](./items/OPT-0014-sqlite-wal-mode.md) | `526af46` | Risk-monitor SQLite 启用 WAL 模式 + 4 个调优 PRAGMA（synchronous=NORMAL / busy_timeout=5s / cache=64MB / temp_store=MEMORY）|
 | 2026-05-15 | [OPT-0010](./items/OPT-0010-tabs-content-forcemount.md) | `59cf44b` + `d8d29f3` | TabsContent forceMount 修切 Tab 1s 卡顿（含 Tailwind hidden 兜底）|
 | 2026-05-15 | [OPT-0009](./items/OPT-0009-alert-events-rule-scanned-index.md) | `7a9089b` | 加 (rule_id, scanned_at DESC) 索引（Gap SO 17ms→0.02ms, 865×）|
 | 2026-05-15 | [OPT-0008](./items/OPT-0008-alert-events-split-detail-tables.md) | `4fd0aa2` | 拆 alert_events 60 列宽表为 1 + 4 张 detail 表（顺手关问题 8 + 2 个孤儿列） |
