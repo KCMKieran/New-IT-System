@@ -258,6 +258,11 @@ def test_locked_fast_burst_noop_when_flag_off(monkeypatch, temp_db):
 
 def test_locked_fast_burst_runs_when_flag_on(monkeypatch, temp_db):
     monkeypatch.setenv("BURST_FAST_TIER_ENABLED", "true")
+    # Other tests in the suite call start_burst_scheduler() which fires a
+    # daemon _locked_scan thread that briefly holds _scan_lock. Replace
+    # the global lock with a fresh one so this test is hermetic.
+    import threading
+    monkeypatch.setattr(bs, "_scan_lock", threading.Lock())
 
     called = []
     monkeypatch.setattr(
@@ -268,6 +273,9 @@ def test_locked_fast_burst_runs_when_flag_on(monkeypatch, temp_db):
 
 
 def test_locked_scan_picks_tier_based_on_flag(monkeypatch, temp_db):
+    import threading
+    monkeypatch.setattr(bs, "_scan_lock", threading.Lock())
+
     called = []
     monkeypatch.setattr(
         bs, "_run_scan", lambda **kw: called.append(kw.get("tier"))

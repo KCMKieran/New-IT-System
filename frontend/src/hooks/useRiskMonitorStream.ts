@@ -19,6 +19,19 @@
  */
 
 import { useEffect, useRef, useState } from "react";
+import { apiFetch } from "@/lib/fetch";
+
+// EventSource cannot set custom headers, so when VITE_API_KEY is set we
+// fall back to passing the key as ?api_key=. The backend middleware
+// accepts the query param exclusively on /alerts/stream.
+const API_KEY = import.meta.env.VITE_API_KEY as string | undefined;
+const STREAM_URL = "/api/v1/risk-monitor/alerts/stream";
+
+function streamUrlWithKey(): string {
+  if (!API_KEY) return STREAM_URL;
+  const sep = STREAM_URL.includes("?") ? "&" : "?";
+  return `${STREAM_URL}${sep}api_key=${encodeURIComponent(API_KEY)}`;
+}
 
 export type StreamStatus =
   | "idle"           // hook just mounted, no attempt yet
@@ -69,20 +82,30 @@ export function useRiskMonitorStream(
     }
 
     let cancelled = false;
-    // Probe with a HEAD-like fetch first so we can distinguish "SSE off"
-    // (server 503) from "network down" — EventSource collapses both into
-    // a generic onerror, which would otherwise produce noisy reconnect
-    // attempts when the feature is intentionally disabled.
+    // Probe with apiFetch first (auto-injects X-API-Key when configured)
+    // so we can distinguish "SSE off" (503) from "auth issue" (403) from
+    // "network down" — EventSource collapses all of these into a generic
+    // onerror, producing noisy reconnect attempts when the feature is off.
     (async () => {
       try {
-        const probe = await fetch("/api/v1/risk-monitor/alerts/stream", {
-          method: "GET",
-          headers: { Accept: "text/event-stream" },
-          // Abort quickly — we just want the status code, not the stream
-          signal: AbortSignal.timeout(2000),
-        });
+        const probe = await apiFetch(
+          STREAM_URL,
+          {
+            method: "GET",
+            headers: { Accept: "text/event-stream" },
+            signal: AbortSignal.timeout(2000),
+          },
+          { timeoutMs: 2000, retries: 0 },
+        );
         if (cancelled) return;
         if (probe.status === 503) {
+          setStatus("unavailable");
+          return;
+        }
+        if (probe.status === 403 || probe.status === 401) {
+          // Wrong / missing key — treat as unavailable so we don't thrash
+          // the EventSource. Visible in the indicator tooltip via the
+          // "unavailable" message.
           setStatus("unavailable");
           return;
         }
@@ -101,7 +124,10 @@ export function useRiskMonitorStream(
 
       if (cancelled) return;
       setStatus("connecting");
-      const es = new EventSource("/api/v1/risk-monitor/alerts/stream");
+      // streamUrlWithKey() adds ?api_key=... so the middleware passes us
+      // through. EventSource can't set headers — the query param is the
+      // only auth channel we have for SSE.
+      const es = new EventSource(streamUrlWithKey());
       esRef.current = es;
 
       es.onopen = () => {
