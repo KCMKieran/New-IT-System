@@ -1,7 +1,7 @@
 ---
 id: OPT-0011
 title: Risk-monitor 游标式增量扫描（替代时间窗重叠轮询）
-status: idea
+status: wip
 priority: P1
 area: backend
 effort: L

@@ -36,6 +36,13 @@ services:
       # work; only the periodic background tick is suppressed here.
       - BURST_SCAN_ENABLED=false
       - GAP_TRADE_SCAN_ENABLED=false
+      # OPT-0011/0013 — dev preview of cursor scan + SSE push.
+      # Cursor mode is no-op when BURST_SCAN_ENABLED=false (no scheduler reads cursors),
+      # but harmless to enable. SSE endpoint becomes reachable so the
+      # RealtimeIndicator on /risk-monitor can show a real connection.
+      # Do NOT enable BURST_FAST_TIER_ENABLED here — dev shares SQLite with prod.
+      - CURSOR_SCAN_ENABLED=true
+      - SSE_ENABLED=true
     restart: unless-stopped
     depends_on:
       - redis

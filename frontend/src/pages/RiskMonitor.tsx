@@ -15,6 +15,7 @@
  * Skill: .cursor/skills/risk-monitor/SKILL.md
  */
 import { useEffect, useState, useRef, useCallback, useMemo } from "react";
+import { useRiskMonitorStream } from "@/hooks/useRiskMonitorStream";
 import { useSearchParams } from "react-router-dom";
 import { useTheme } from "@/components/theme-provider";
 import { apiFetch } from "@/lib/fetch";
@@ -582,6 +583,49 @@ function isRiskMonitorTab(s: string | null): s is RiskMonitorTab {
   );
 }
 
+// ── OPT-0013: realtime SSE connection indicator ──────────
+
+function RealtimeIndicator({
+  status,
+  eventCount,
+  lastEventAt,
+}: {
+  status: import("@/hooks/useRiskMonitorStream").StreamStatus;
+  eventCount: number;
+  lastEventAt: number | null;
+}) {
+  // Color + label per state. Keep visual intentionally tiny — this is
+  // an at-a-glance health pip, not a control.
+  const config: Record<typeof status, { color: string; label: string; title: string }> = {
+    idle:          { color: "bg-zinc-300",  label: "—",     title: "实时连接：等待初始化" },
+    connecting:    { color: "bg-amber-400", label: "连接中", title: "实时连接：正在建立 SSE" },
+    connected:     { color: "bg-emerald-500 animate-pulse", label: "实时", title: `实时连接已建立 (${eventCount} 次推送)` },
+    reconnecting:  { color: "bg-amber-500", label: "重连",   title: "实时连接已断开，浏览器自动重连中" },
+    unavailable:   { color: "bg-zinc-400",  label: "离线",   title: "SSE 在后端未启用 (SSE_ENABLED=false)；当前使用轮询模式" },
+    disabled:      { color: "bg-zinc-300",  label: "关闭",   title: "实时连接已手动关闭" },
+  };
+  const c = config[status];
+  // Last-event "X 秒前" — recomputed on each render (parent re-renders
+  // on each event arrival; that cadence is sufficient).
+  const ago = lastEventAt
+    ? Math.max(0, Math.round((Date.now() - lastEventAt) / 1000))
+    : null;
+
+  return (
+    <div
+      title={c.title}
+      className="flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground"
+    >
+      <span className={`inline-block h-2 w-2 rounded-full ${c.color}`} />
+      <span className="hidden whitespace-nowrap sm:inline">{c.label}</span>
+      {status === "connected" && ago !== null && ago < 600 && (
+        <span className="hidden whitespace-nowrap md:inline">· {ago}s ago</span>
+      )}
+    </div>
+  );
+}
+
+
 // ── Main Component ────────────────────────────────────────
 
 export default function RiskMonitor() {
@@ -622,6 +666,11 @@ export default function RiskMonitor() {
     );
   };
 
+  // OPT-0013: live SSE indicator. Falls back to "unavailable" when the
+  // backend has SSE_ENABLED=false, in which case nothing breaks — each
+  // tab's existing setInterval polling stays as the source of truth.
+  const stream = useRiskMonitorStream(true);
+
   return (
     <div className="flex min-w-0 flex-col gap-4 p-4 lg:p-6">
       <Tabs
@@ -629,7 +678,8 @@ export default function RiskMonitor() {
         onValueChange={setActiveTab}
         className="w-full min-w-0"
       >
-        <TabsList className="grid w-full max-w-4xl grid-cols-4 sm:auto-cols-fr sm:grid-flow-col">
+        <div className="flex items-center justify-between gap-2 max-w-4xl">
+          <TabsList className="grid w-full grid-cols-4 sm:auto-cols-fr sm:grid-flow-col">
           <TabsTrigger
             value="burst-open"
             className="px-2 text-xs sm:px-3 sm:text-sm whitespace-nowrap"
@@ -655,6 +705,12 @@ export default function RiskMonitor() {
             Gap Trade
           </TabsTrigger>
         </TabsList>
+        <RealtimeIndicator
+          status={stream.status}
+          eventCount={stream.eventCount}
+          lastEventAt={stream.lastEvent?.received_at ?? null}
+        />
+        </div>
 
         {/*
           forceMount keeps all 4 tabs in the DOM so AG-Grid state, fetched

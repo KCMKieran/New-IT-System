@@ -1,7 +1,7 @@
 ---
 id: OPT-0012
 title: Risk-monitor scheduler 拆 fast / slow / daily tier
-status: idea
+status: wip
 priority: P2
 area: backend
 effort: M

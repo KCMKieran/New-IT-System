@@ -31,7 +31,13 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
             if request.method == "OPTIONS":
                 return await call_next(request)
 
+            # EventSource (used by /risk-monitor/alerts/stream for SSE) cannot
+            # set custom headers, so we also accept the key as a query param on
+            # that one endpoint. Header path is still preferred for every other
+            # request — the query fallback is opt-in per path.
             provided_key = request.headers.get("X-API-Key")
+            if not provided_key and request.url.path.endswith("/alerts/stream"):
+                provided_key = request.query_params.get("api_key")
             if provided_key != settings.API_KEY:
                 client_ip = request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
                 if not client_ip:

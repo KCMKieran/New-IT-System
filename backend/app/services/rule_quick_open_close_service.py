@@ -10,6 +10,7 @@ There is no separate “profit window” config — the time range is that fetch
 from __future__ import annotations
 
 import logging
+import os
 import time
 from datetime import datetime, timezone
 from itertools import groupby
@@ -18,6 +19,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import pymysql
 
 from ..core.config import Settings
+from ..core.risk_monitor_db import get_scan_cursor, update_scan_cursor
 from ..core.sql_helpers import (
     FILETIME_EPOCH_OFFSET,
     FILETIME_TICKS_PER_SEC,
@@ -31,6 +33,36 @@ logger = logging.getLogger(__name__)
 QUICK_RULE_ID_BASE = 51
 MAX_QUICK_RULES = 10
 _BOUNDARY_BUFFER_SEC = 30
+
+
+def _compute_hwm_mt4(rows: List[Dict[str, Any]]) -> Tuple[str, int]:
+    """Find max (close_time_raw, ticket) HWM in MT4 Quick OC results."""
+    hwm_time, hwm_id = "", 0
+    for r in rows:
+        raw = r.get("close_time_raw")
+        t = raw.strftime("%Y-%m-%d %H:%M:%S") if isinstance(raw, datetime) else str(raw)
+        i = int(r.get("ticket") or 0)
+        if (t, i) > (hwm_time, hwm_id):
+            hwm_time, hwm_id = t, i
+    return hwm_time, hwm_id
+
+
+def _compute_hwm_mt5(rows: List[Dict[str, Any]]) -> Tuple[str, int]:
+    """Find max (timestamp_raw, deal_id) HWM in MT5 Quick OC results.
+    Timestamp is FILETIME tick count (int). Stored as 20-char zero-padded
+    decimal string so SQLite's TEXT lex-compare matches numeric order.
+    MySQL coerces the string back to BIGINT in the next scan's WHERE.
+    """
+    hwm_num, hwm_id = -1, 0
+    for r in rows:
+        try:
+            t_num = int(r.get("timestamp_raw") or 0)
+        except (TypeError, ValueError):
+            continue
+        i = int(r.get("deal_id") or 0)
+        if (t_num, i) > (hwm_num, hwm_id):
+            hwm_num, hwm_id = t_num, i
+    return (str(hwm_num).zfill(20), hwm_id) if hwm_num >= 0 else ("", 0)
 
 _SERVERS_MT4 = [
     {"db": "mt4_live", "label": "MT4_Live"},
@@ -72,9 +104,23 @@ def _query_mt4_recent_closed_short(
     db_name: str,
     server_label: str,
     check_interval_sec: int,
+    cursor_time: Optional[str] = None,
+    cursor_id: int = 0,
 ) -> List[Dict[str, Any]]:
+    """OPT-0011 cursor mode: when cursor_time is set, fetch trades whose
+    CLOSE_TIME is strictly after the HWM (TICKET tiebreaker). Otherwise
+    behave exactly like before.
+    """
     open_col = broker_time_to_utc_iso("t.OPEN_TIME", "open_time")
     close_col = broker_time_to_utc_iso("t.CLOSE_TIME", "close_time")
+    if cursor_time is not None:
+        where_time = (
+            "(t.CLOSE_TIME > %s OR (t.CLOSE_TIME = %s AND t.TICKET > %s))"
+        )
+        time_params: list = [cursor_time, cursor_time, cursor_id]
+    else:
+        where_time = "t.CLOSE_TIME >= DATE_SUB(NOW(), INTERVAL %s SECOND)"
+        time_params = [check_interval_sec]
     sql = f"""
         SELECT
             '{server_label}' AS server,
@@ -84,6 +130,7 @@ def _query_mt4_recent_closed_short(
             t.VOLUME / 100 AS lots,
             {open_col},
             {close_col},
+            t.CLOSE_TIME AS close_time_raw,
             TIMESTAMPDIFF(SECOND, t.OPEN_TIME, t.CLOSE_TIME) AS hold_sec,
             (COALESCE(t.PROFIT, 0) + COALESCE(t.SWAPS, 0) + COALESCE(t.COMMISSION, 0)) AS profit,
             t.TICKET AS ticket
@@ -91,16 +138,16 @@ def _query_mt4_recent_closed_short(
         INNER JOIN {db_name}.mt4_users u ON t.LOGIN = u.LOGIN
         WHERE t.CMD IN (0, 1)
           AND t.CLOSE_TIME > '1970-01-01 00:00:00'
-          AND t.CLOSE_TIME >= DATE_SUB(NOW(), INTERVAL %s SECOND)
+          AND {where_time}
           AND t.LOGIN NOT LIKE '7%%'
           AND u.`GROUP` NOT LIKE '%%demo%%'
           AND u.`GROUP` NOT LIKE '%%test%%'
           AND COALESCE(u.NAME, '') NOT LIKE '%%demo%%'
           AND COALESCE(u.NAME, '') NOT LIKE '%%test%%'
-        ORDER BY t.LOGIN, t.SYMBOL, t.CLOSE_TIME
+        ORDER BY t.CLOSE_TIME, t.TICKET
     """
     with conn.cursor() as cur:
-        cur.execute(sql, (check_interval_sec,))
+        cur.execute(sql, time_params)
         return cur.fetchall()
 
 
@@ -108,13 +155,24 @@ def _query_mt5_recent_closed_short(
     conn,
     *,
     check_interval_sec: int,
+    cursor_time: Optional[str] = None,
+    cursor_id: int = 0,
 ) -> List[Dict[str, Any]]:
+    """OPT-0011 cursor mode: when cursor_time is set, fetch deals whose
+    Timestamp is strictly after the HWM (c.Deal tiebreaker).
+    """
     open_col = broker_time_to_utc_iso("o.Time", "open_time")
     close_col = broker_time_to_utc_iso("c.Time", "close_time")
-    cutoff = (
-        f"(UNIX_TIMESTAMP(DATE_SUB(NOW(), INTERVAL %s SECOND))"
-        f" + {FILETIME_EPOCH_OFFSET}) * {FILETIME_TICKS_PER_SEC}"
-    )
+    if cursor_time is not None:
+        where_time = "(c.Timestamp > %s OR (c.Timestamp = %s AND c.Deal > %s))"
+        time_params: list = [cursor_time, cursor_time, cursor_id]
+    else:
+        cutoff = (
+            f"(UNIX_TIMESTAMP(DATE_SUB(NOW(), INTERVAL %s SECOND))"
+            f" + {FILETIME_EPOCH_OFFSET}) * {FILETIME_TICKS_PER_SEC}"
+        )
+        where_time = f"c.Timestamp >= {cutoff}"
+        time_params = [check_interval_sec]
     sql = f"""
         SELECT
             'MT5' AS server,
@@ -124,6 +182,8 @@ def _query_mt5_recent_closed_short(
             c.Volume / 10000 AS lots,
             {open_col},
             {close_col},
+            c.Timestamp AS timestamp_raw,
+            c.Deal AS deal_id,
             TIMESTAMPDIFF(SECOND, o.Time, c.Time) AS hold_sec,
             (COALESCE(c.Profit, 0) + COALESCE(c.Storage, 0) + COALESCE(c.Commission, 0)) AS profit,
             c.PositionID AS ticket
@@ -143,15 +203,15 @@ def _query_mt5_recent_closed_short(
            )
         WHERE c.Entry IN (1, 3)
           AND c.Action IN (0, 1)
-          AND c.Timestamp >= {cutoff}
+          AND {where_time}
           AND u.`Group` NOT LIKE '%%demo%%'
           AND u.`Group` NOT LIKE '%%test%%'
           AND COALESCE(u.Name, '') NOT LIKE '%%demo%%'
           AND COALESCE(u.Name, '') NOT LIKE '%%test%%'
-        ORDER BY c.Login, c.Symbol, c.Time
+        ORDER BY c.Timestamp, c.Deal
     """
     with conn.cursor() as cur:
-        cur.execute(sql, (check_interval_sec,))
+        cur.execute(sql, time_params)
         return cur.fetchall()
 
 
@@ -272,22 +332,37 @@ def scan_quick_open_close(
             "min_total_profit_usd": float(r.get("min_total_profit_usd", 0.0)),
         })
 
+    cursor_enabled = (
+        os.getenv("CURSOR_SCAN_ENABLED", "false").lower() == "true"
+    )
+
     conn = _get_connection(settings)
     try:
         all_rows: List[Dict[str, Any]] = []
         universe_pairs: Set[Tuple[str, int]] = set()
+        cursor_advance: Dict[str, Tuple[str, int]] = {}
 
         for srv in _SERVERS_MT4:
             try:
+                cur_time: Optional[str] = None
+                cur_id: int = 0
+                if cursor_enabled:
+                    cur_time, cur_id = get_scan_cursor(
+                        "quick_open_close", srv["label"]
+                    )
                 rows = _query_mt4_recent_closed_short(
                     conn,
                     db_name=srv["db"],
                     server_label=srv["label"],
                     check_interval_sec=check_interval_sec,
+                    cursor_time=cur_time,
+                    cursor_id=cur_id,
                 )
                 all_rows.extend(rows)
                 for row in rows:
                     universe_pairs.add((row["server"], int(row["login"])))
+                if cursor_enabled and rows:
+                    cursor_advance[srv["label"]] = _compute_hwm_mt4(rows)
             except Exception:
                 logger.error(
                     "Quick open-close MT4 query failed for %s",
@@ -296,12 +371,23 @@ def scan_quick_open_close(
                 )
 
         try:
+            mt5_cur_time: Optional[str] = None
+            mt5_cur_id: int = 0
+            if cursor_enabled:
+                mt5_cur_time, mt5_cur_id = get_scan_cursor(
+                    "quick_open_close", "MT5"
+                )
             rows5 = _query_mt5_recent_closed_short(
-                conn, check_interval_sec=check_interval_sec,
+                conn,
+                check_interval_sec=check_interval_sec,
+                cursor_time=mt5_cur_time,
+                cursor_id=mt5_cur_id,
             )
             all_rows.extend(rows5)
             for row in rows5:
                 universe_pairs.add((row["server"], int(row["login"])))
+            if cursor_enabled and rows5:
+                cursor_advance["MT5"] = _compute_hwm_mt5(rows5)
         except Exception:
             logger.error("Quick open-close MT5 query failed", exc_info=True)
 
@@ -345,6 +431,22 @@ def scan_quick_open_close(
                 a for a in alerts
                 if float(a.get("total_profit_usd") or 0) >= float(a.pop("_min_profit_usd", 0.0))
             ]
+
+        # OPT-0011: advance cursors AFTER successful processing. If anything
+        # earlier raised, the old cursor stays — we'd re-fetch the same window
+        # next tick (dedup catches the alert repeat).
+        if cursor_enabled and cursor_advance:
+            for srv_label, (hwm_time, hwm_id) in cursor_advance.items():
+                try:
+                    update_scan_cursor(
+                        "quick_open_close", srv_label, hwm_time, hwm_id
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to upsert quick_open_close cursor for %s "
+                        "(will retry next scan)",
+                        srv_label,
+                    )
 
         elapsed_ms = int((time.time() - start) * 1000)
         scanned_at = (

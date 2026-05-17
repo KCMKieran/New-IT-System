@@ -59,5 +59,6 @@ docs/**
 # can see each other's claims (see docs/optimization/README.md §并行 session 安全).
 !docs/optimization
 !docs/optimization/**
-backend/data/risk_monitor.db.bak-20260515-pre-q1opt
-backend/data/risk_monitor.db.bak-20260515-pre-q2split
+# Pre-migration SQLite backups (created ad-hoc before risky schema changes)
+backend/data/risk_monitor.db.bak-*
+frontend/tsconfig.app.tsbuildinfo
