@@ -37,6 +37,15 @@ services:
       # backend/data/client_roace.db so the Client Return Rate page doesn't
       # join stats_balances (19M rows) on every request. Dev keeps default off.
       - CLIENT_ROACE_SCHEDULER_ENABLED=true
+      # OPT-0013: enable Server-Sent Events push for the Risk Monitor page.
+      # Frontend's RealtimeIndicator (small pip next to the tab list) will
+      # turn green and increment its "pushed" counter once the scheduler
+      # publishes events. Additive change — REST /alerts endpoint and
+      # setInterval polling continue to work; SSE is a UX enhancement.
+      # If SSE proves unstable through Cloudflare Tunnel: flip back to
+      # false + `./deploy.sh` to revert. CURSOR_SCAN_ENABLED and
+      # BURST_FAST_TIER_ENABLED kept default (off) — staged rollout.
+      - SSE_ENABLED=true
     restart: unless-stopped
     depends_on:
       - redis-prod
