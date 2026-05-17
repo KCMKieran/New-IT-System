@@ -61,3 +61,4 @@ docs/**
 !docs/optimization/**
 # Pre-migration SQLite backups (created ad-hoc before risky schema changes)
 backend/data/risk_monitor.db.bak-*
+frontend/tsconfig.app.tsbuildinfo
