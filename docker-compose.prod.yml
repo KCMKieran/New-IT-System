@@ -43,9 +43,20 @@ services:
       # publishes events. Additive change — REST /alerts endpoint and
       # setInterval polling continue to work; SSE is a UX enhancement.
       # If SSE proves unstable through Cloudflare Tunnel: flip back to
-      # false + `./deploy.sh` to revert. CURSOR_SCAN_ENABLED and
-      # BURST_FAST_TIER_ENABLED kept default (off) — staged rollout.
+      # false + `./deploy.sh` to revert.
       - SSE_ENABLED=true
+      # OPT-0011: cursor-mode scanning. Per-(rule_type, server) HWM
+      # replaces the overlap time-window SQL — MySQL no longer re-scans
+      # the same rows on every tick. Cold-start row missing → 1 tick of
+      # legacy SQL then upsert. Quick Profit is intentionally untouched
+      # (its 30-min aggregation can't fit strict-greater-than cursor).
+      - CURSOR_SCAN_ENABLED=true
+      # OPT-0012: fast/slow tier split. Burst Open runs every 60s
+      # (fast tier); Quick OC + Quick Profit stay on scan_interval_min
+      # cadence (slow tier). Requires OPT-0011 — without cursor mode
+      # the 60s polling would 10× MySQL load. Both tiers share
+      # _scan_lock; collisions skip a tick (~1/10min, harmless).
+      - BURST_FAST_TIER_ENABLED=true
     restart: unless-stopped
     depends_on:
       - redis-prod
