@@ -1,7 +1,7 @@
 ---
 id: OPT-0013
 title: Risk-monitor 用 SSE 推送告警到前端（替代轮询）
-status: wip
+status: done
 priority: P2
 area: mixed
 effort: M
@@ -70,4 +70,28 @@ related: [[OPT-0011]] [[OPT-0012]]
 
 ## 结果
 
-_待填_
+**Commit**: `b687cfc` (impl) + `4539110` (dev SSE auth fix) + `edcd3a3` (nginx
+`?api_key=` + buffering off) on `feat/risk-monitor-realtime`,
+merged to main as `ceb21c4` on 2026-05-17. Prod live 2026-05-17 11:42 HKT.
+
+**实际交付**：
+- 后端 `app/core/alerts_pubsub.py`：thread-safe in-memory pub/sub，scheduler 线程通过 `loop.call_soon_threadsafe` 投到 asyncio.Queue；每 subscriber 100 上限的 bounded queue
+- 后端路由 `GET /api/v1/risk-monitor/alerts/stream`：用 FastAPI StreamingResponse 实现 SSE（无新依赖），15s keepalive `: ping` 避免 nginx/Cloudflare 切线，env flag off 时返回 503
+- 后端 `burst_open_scheduler._run_scan` 在 `append_scan_and_events` 后调 `publish({type, tier, scanned_at, new_alert_count, rule_ids})`（轻量通知）
+- 前端 hook `useRiskMonitorStream`：原生 EventSource，先 apiFetch probe 区分 503/403/网络，避免无 flag 时浏览器疯狂重连；URL 自动附 `?api_key=`
+- 前端 `RealtimeIndicator` 组件：tab 列表右上角小圆点（绿脉动 = 连上 / 黄 = 重连 / 灰 = SSE 后端关 / "X s ago"）
+- **后端 middleware** `api_key_middleware.py`：在 `/alerts/stream` 路径接受 `?api_key=` 查询参数（EventSource 无法发 header 的标准 workaround）
+- **nginx**：新增 `location = /api/v1/risk-monitor/alerts/stream` 块，相同的 header-or-query auth + `proxy_buffering off` + `proxy_read_timeout 3600s` + `proxy_http_version 1.1`
+- prod compose 加 `SSE_ENABLED=true`（cursor / fast tier 暂保持 OFF）
+
+**测试**：9 个 pub/sub 单元测试（test_alerts_pubsub.py）覆盖 fan-out、跨线程 publish、bounded queue、断开清理；前端 tsc + vite build 通过；端到端 curl 验证 4 条路径（无 auth / header / ?api_key= / 错 key）
+
+**Prod 状态**（2026-05-17 上线后）：
+- 已 merge + deploy；nginx + backend 双层 SSE auth 都通过
+- 第一次 prod scheduler 跑完日志：`Scan complete [all]: 0 new (0 cached), 9 scanned, 181ms`
+- 后续每次 prod scheduler 跑（默认 5min）会触发 SSE 推送；前端 RealtimeIndicator 应当 ≤2 秒变绿，「N 次推送」每个 tick 跳 1
+
+**Follow-up**：
+- 用户视觉验证生产页面绿脉动 ✓
+- Cloudflare Tunnel 长连接兼容性 — 实战验证中
+- 各 Tab `useEffect(() => refetch(), [lastEvent?.received_at])` 自动触发增量拉取（5 行/tab，留作下次小改动）

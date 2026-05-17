@@ -1,7 +1,7 @@
 ---
 id: OPT-0012
 title: Risk-monitor scheduler 拆 fast / slow / daily tier
-status: wip
+status: done
 priority: P2
 area: backend
 effort: M
@@ -67,4 +67,25 @@ Gap Trade   →  已独立 cron（Mon-Sat HKT 07:20）
 
 ## 结果
 
-_待填_
+**Commit**: `9fb5cca` (impl) + `c59e2f8` (claim) on `feat/risk-monitor-realtime`,
+merged to main as `ceb21c4` on 2026-05-17.
+
+**实际交付**：
+- `_run_scan(tier='all'|'fast_burst'|'slow')` — tier 参数控制哪些 detector 运行
+- 新 job `BURST_FAST_JOB_ID = "burst_open_fast_tier"`，60s 节拍，只跑 burst（`_locked_fast_burst_scan`）
+- 旧 job 在 fast tier 开启时自动切到 `tier='slow'`（跳过 burst）；关闭时保持 `tier='all'` 行为完全不变
+- `_latest_result.alerts` 缓存按 rule_id 分段合并（1-50 / 51+），切 tier 不丢另一边的告警快照
+- env flag `BURST_FAST_TIER_ENABLED`（默认 false）+ 严格 `true` 字面量判定
+- 两个 tier 共享 `_scan_lock`（避免分割 `_latest_result` mutation 复杂度，~1/10min 命中冲突可接受）
+- BURST_SCAN_ENABLED=false 仍是 master kill-switch（连 scheduler 都不起）
+
+**测试**：14 个 scheduler tier 测试（test_scheduler_tiers.py）覆盖 env flag、单/双 job 装配、tier dispatch、跨 tier 缓存保留、lock 隔离
+
+**Prod 状态**（2026-05-17 上线后）：
+- 代码已 merge + deploy；prod 用 `tier='all'` 路径（行为同上线前）
+- 日志已可见新格式：`Scan complete [all]: 0 new (0 cached), 9 scanned, 181ms`
+- env flag **未开**（staged rollout — 必须先开 [[OPT-0011]] 才能开本项，否则 fast tier 60s × MySQL ×10）
+
+**Follow-up**：
+- 上 OPT-0011 cursor flag 至少 1 天观察稳定后，再开本项
+- 想开启：`docker-compose.prod.yml` 加 `- BURST_FAST_TIER_ENABLED=true` + `./deploy.sh`

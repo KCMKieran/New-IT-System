@@ -1,7 +1,7 @@
 ---
 id: OPT-0011
 title: Risk-monitor 游标式增量扫描（替代时间窗重叠轮询）
-status: wip
+status: done
 priority: P1
 area: backend
 effort: L
@@ -62,4 +62,25 @@ WHERE OPEN_TIME >= NOW() - (scan_interval_min * 60 + 30) SECOND
 
 ## 结果
 
-_待填_
+**Commit**: `4ee87ae` (impl) + `c59e2f8` (claim) on `feat/risk-monitor-realtime`,
+merged to main as `ceb21c4` on 2026-05-17.
+
+**实际交付**：
+- 新表 `scan_cursors (rule_type, server, cursor_time, cursor_id, updated_at)` 加进 `risk_monitor_db.py` 主 schema（`IF NOT EXISTS`，prod 启动自动 migrate）
+- 助手 `get_scan_cursor / update_scan_cursor / reset_scan_cursor`，upsert WHERE 子句拒绝 HWM 回退
+- MT4/MT5 query 助手新增可选 `cursor_time / cursor_id` 参数：开启 cursor 时 SQL 改为 `WHERE (col > %s OR (col = %s AND id > %s))`；关闭时走旧 `WHERE col >= DATE_SUB(NOW(), INTERVAL ... SECOND)` 路径完全不变
+- MT5 cursor_time 用 20 字符 zero-pad 的 FILETIME（SQLite TEXT 字典序匹配数字序；MySQL 强转回 BIGINT）
+- HWM 计算函数 `_compute_cursor_hwm` (burst) + `_compute_hwm_mt4 / _compute_hwm_mt5` (quick OC)
+- env flag `CURSOR_SCAN_ENABLED`（默认 false，且只有 `true` 字面量触发）
+- Quick Profit 未游标化（聚合规则不适合 strict-greater-than）
+
+**测试**：17 个 cursor 单元测试（test_scan_cursors.py）+ 全量回归 84/84 通过
+
+**Prod 状态**（2026-05-17 上线后）：
+- 代码已 merge + deploy；schema 自动 migrate 完成
+- env flag **未开**（按 HANDOFF.md staged rollout 计划保留）
+- 想开启：`docker-compose.prod.yml` environment 块加 `- CURSOR_SCAN_ENABLED=true` + `./deploy.sh`
+
+**Follow-up**：
+- 上 flag 后观察 MySQL `rows scanned` 应该 ÷5 以上
+- 是 OPT-0012 fast tier 的前置条件（fast tier 60s 节拍若无 cursor 会 ×10 MySQL 压力）

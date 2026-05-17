@@ -10,9 +10,7 @@
 
 | ID | Branch | Claim 日期 | 备注 |
 |----|--------|-----------|------|
-| [OPT-0011](./items/OPT-0011-risk-monitor-cursor-scan.md) | `feat/risk-monitor-realtime` | 2026-05-16 | Claude 周末 batch — 与 0012/0013 同 branch |
-| [OPT-0012](./items/OPT-0012-scheduler-fast-slow-tier.md) | `feat/risk-monitor-realtime` | 2026-05-16 | Claude 周末 batch — 依赖 0011 |
-| [OPT-0013](./items/OPT-0013-risk-monitor-sse-alerts.md) | `feat/risk-monitor-realtime` | 2026-05-16 | Claude 周末 batch — frontend 视觉留给用户 |
+| _空_ | | | |
 
 ## ✅ 待领取（Ready）
 

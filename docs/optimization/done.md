@@ -7,6 +7,9 @@ Append-only 日志。最新的写在最上面。
 
 | 日期 | ID | Commit | 标题 |
 |------|----|--------|------|
+| 2026-05-17 | [OPT-0013](./items/OPT-0013-risk-monitor-sse-alerts.md) | `b687cfc` + nginx `edcd3a3` | Risk-monitor 用 SSE 推送告警到前端（含 nginx ?api_key= + buffering 修复，prod live SSE_ENABLED=true）|
+| 2026-05-17 | [OPT-0012](./items/OPT-0012-scheduler-fast-slow-tier.md) | `9fb5cca` | Risk-monitor scheduler 拆 fast / slow / daily tier（env-gated，prod 默认 OFF 保留）|
+| 2026-05-17 | [OPT-0011](./items/OPT-0011-risk-monitor-cursor-scan.md) | `4ee87ae` | Risk-monitor 游标式增量扫描（env-gated，prod 默认 OFF 保留）|
 | 2026-05-16 | [OPT-0014](./items/OPT-0014-sqlite-wal-mode.md) | `526af46` | Risk-monitor SQLite 启用 WAL 模式 + 4 个调优 PRAGMA（synchronous=NORMAL / busy_timeout=5s / cache=64MB / temp_store=MEMORY）|
 | 2026-05-15 | [OPT-0010](./items/OPT-0010-tabs-content-forcemount.md) | `59cf44b` + `d8d29f3` | TabsContent forceMount 修切 Tab 1s 卡顿（含 Tailwind hidden 兜底）|
 | 2026-05-15 | [OPT-0009](./items/OPT-0009-alert-events-rule-scanned-index.md) | `7a9089b` | 加 (rule_id, scanned_at DESC) 索引（Gap SO 17ms→0.02ms, 865×）|
