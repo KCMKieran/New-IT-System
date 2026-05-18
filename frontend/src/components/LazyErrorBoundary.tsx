@@ -40,7 +40,12 @@ function isChunkLoadError(error: unknown): boolean {
     msg.includes("Failed to fetch dynamically imported module") ||
     msg.includes("Loading chunk") ||
     msg.includes("Loading CSS chunk") ||
-    msg.includes("Importing a module script failed")
+    msg.includes("Importing a module script failed") ||
+    // WebKit (Safari / iOS Chrome via WKWebView) reports any failure to load a
+    // <script crossorigin> — 404, network drop, real CORS — with this exact
+    // string. Without this branch, post-deploy chunk 404s on iPhone fall
+    // through as "render" errors and skip the auto-reload recovery.
+    msg.includes("Cross-origin script load denied")
   )
 }
 
