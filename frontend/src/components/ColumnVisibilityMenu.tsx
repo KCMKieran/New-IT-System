@@ -1,4 +1,4 @@
-import { Settings2 } from "lucide-react";
+import { Columns3 } from "lucide-react";
 import type { ColDef } from "ag-grid-community";
 import { useCallback, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -120,7 +120,12 @@ export function ColumnVisibilityMenu({
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <Button
-          variant="outline"
+          // `variant="secondary"` (muted-grey fill) sets this UI-preference
+          // button apart from neighbouring data-action buttons that use
+          // `variant="outline"` (e.g. 导出 CSV / 规则配置 / 立即扫描).
+          // Icon is `Columns3` not `Settings2` to avoid clashing with the
+          // 规则配置 button that already owns Settings2 in the same toolbar.
+          variant="secondary"
           size={iconOnly ? "icon" : size}
           className={cn(
             iconOnly
@@ -130,7 +135,7 @@ export function ColumnVisibilityMenu({
           title={label}
           aria-label={label}
         >
-          <Settings2 className="h-4 w-4" />
+          <Columns3 className="h-4 w-4" />
           {iconOnly ? null : <span>{label}</span>}
         </Button>
       </DropdownMenuTrigger>
