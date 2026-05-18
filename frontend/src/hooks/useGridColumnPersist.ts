@@ -6,6 +6,132 @@ import type {
   GridReadyEvent,
 } from "ag-grid-community";
 
+// ─── Storage key registry ────────────────────────────────────────────────
+//
+// Single source of truth for every grid that uses the hook. Adding a new
+// grid means adding a new entry here; TypeScript will then reject any call
+// to useGridColumnPersist with a string not in this list, eliminating the
+// "two grids accidentally share a key" failure mode at compile time.
+//
+// Convention: `<SCREAMING_SNAKE_PAGE>_GRID_STATE_V1`. When a column rename
+// would break in-the-wild saved state, bump V<N> — pruneStaleGridKeys()
+// removes the orphaned old version on next app boot.
+export const GRID_STORAGE_KEYS = {
+  RISK_MONITOR_BURST_OPEN: "RISK_MONITOR_BURST_OPEN_GRID_STATE_V1",
+  RISK_MONITOR_QUICK_OPEN_CLOSE:
+    "RISK_MONITOR_QUICK_OPEN_CLOSE_GRID_STATE_V1",
+  RISK_MONITOR_QUICK_PROFIT: "RISK_MONITOR_QUICK_PROFIT_GRID_STATE_V1",
+  RISK_MONITOR_GAP_TRADE_CLIENT_PAIR:
+    "RISK_MONITOR_GAP_TRADE_CLIENT_PAIR_GRID_STATE_V1",
+  RISK_MONITOR_GAP_TRADE_SO_AB:
+    "RISK_MONITOR_GAP_TRADE_SO_AB_GRID_STATE_V1",
+  RISK_MONITOR_GAP_TRADE_GAP:
+    "RISK_MONITOR_GAP_TRADE_GAP_GRID_STATE_V1",
+  CLIENT_RETURN_RATE: "CLIENT_RETURN_RATE_GRID_STATE_V1",
+} as const;
+
+export type GridStorageKey =
+  (typeof GRID_STORAGE_KEYS)[keyof typeof GRID_STORAGE_KEYS];
+
+// Pattern that identifies "ours" in localStorage. Any key matching this
+// shape that isn't currently registered is treated as stale.
+const STALE_KEY_PATTERN = /_GRID_STATE_V\d+$/;
+const ACTIVE_KEYS: ReadonlySet<string> = new Set(
+  Object.values(GRID_STORAGE_KEYS),
+);
+
+/**
+ * Remove orphaned grid-state entries from localStorage. Call once at app
+ * boot (App.tsx useEffect) so renamed / removed grids don't accumulate
+ * dead entries forever.
+ *
+ * Heuristic: anything matching /_GRID_STATE_V\d+$/ that isn't in the
+ * current registry. Conservative — won't touch unrelated keys.
+ */
+export function pruneStaleGridKeys(): number {
+  let removed = 0;
+  // Iterate in reverse so removeItem doesn't shift the indices we still
+  // need to visit.
+  for (let i = localStorage.length - 1; i >= 0; i--) {
+    const key = localStorage.key(i);
+    if (!key) continue;
+    if (STALE_KEY_PATTERN.test(key) && !ACTIVE_KEYS.has(key)) {
+      try {
+        localStorage.removeItem(key);
+        removed++;
+      } catch {
+        // Private-mode / quota — skip and keep going.
+      }
+    }
+  }
+  return removed;
+}
+
+// ─── Schema validation ──────────────────────────────────────────────────
+
+function isValidColumnStateEntry(v: unknown): v is ColumnState {
+  return (
+    v !== null &&
+    typeof v === "object" &&
+    typeof (v as Record<string, unknown>).colId === "string"
+  );
+}
+
+/**
+ * Parse + validate a saved ColumnState array. If anything looks wrong —
+ * not JSON, not an array, or no entries have a string `colId` — the entry
+ * is removed from localStorage so the next reload starts clean instead of
+ * looping on a corrupt blob.
+ *
+ * Also filters out entries whose colId no longer exists in the current
+ * grid (column was deleted / renamed since the user last saved). Without
+ * this filter `applyColumnState` would receive ghost colIds and either
+ * silently drop them or — worse on some AG-Grid versions — throw.
+ */
+function loadValidState(
+  storageKey: string,
+  knownColIds: ReadonlySet<string>,
+): ColumnState[] | null {
+  let raw: string | null = null;
+  try {
+    raw = localStorage.getItem(storageKey);
+  } catch {
+    return null;
+  }
+  if (!raw) return null;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    try {
+      localStorage.removeItem(storageKey);
+    } catch {
+      /* no-op */
+    }
+    return null;
+  }
+
+  if (!Array.isArray(parsed)) {
+    try {
+      localStorage.removeItem(storageKey);
+    } catch {
+      /* no-op */
+    }
+    return null;
+  }
+
+  // Keep only entries that pass the type guard AND whose colId still
+  // exists in the live grid. Empty result counts as "nothing to restore".
+  const filtered = (parsed as unknown[])
+    .filter(isValidColumnStateEntry)
+    .filter((entry) => knownColIds.has(entry.colId as string));
+
+  return filtered.length > 0 ? filtered : null;
+}
+
+// ─── Hook ───────────────────────────────────────────────────────────────
+
 // Shape returned by useGridColumnPersist. Exported so component props (e.g.
 // ColumnVisibilityMenu) can take a typed handle to the persistence layer.
 export interface UseGridColumnPersistResult {
@@ -22,34 +148,43 @@ export interface UseGridColumnPersistResult {
   setColumnsVisible: (colIds: string[], visible: boolean) => void;
   getColumnState: () => ColumnState[];
   gridApiRef: React.MutableRefObject<GridApi | null>;
+  /**
+   * True while applyColumnState is restoring state on mount.
+   *
+   * Backend-sort consumers should guard their own handleSortChanged with
+   * this so the initial fetch isn't immediately re-fetched on restore:
+   *
+   *     onSortChanged={(e) => {
+   *       if (!persist.isApplying()) handleSortChanged(e);
+   *       persist.gridEventProps.onSortChanged();
+   *     }}
+   */
+  isApplying: () => boolean;
 }
 
 /**
- * Persist an AG-Grid's column state (order, visibility, width, pinning) to
- * localStorage so the user's layout survives reloads / new sessions.
+ * Persist an AG-Grid's column state (order, visibility, width, pinning,
+ * sort) to localStorage so the user's layout survives reloads / new
+ * sessions.
  *
- * Pattern stays in lockstep with `docs/features/client-pnl-column-toggle.md`
- * — single source of truth is AG Grid's own ColumnState (no second React
- * state to fall out of sync), 300ms trailing throttle to avoid hammering
- * localStorage during drags / resizes.
+ * Single source of truth is AG-Grid's own ColumnState — no shadow React
+ * state to fall out of sync. Saves are 300ms-throttled to avoid hammering
+ * localStorage during drags / resizes. Sort state is part of ColumnState,
+ * so it persists too (see OPT-0015 follow-up).
  *
- * Wiring (consumer):
- *   const persist = useGridColumnPersist("MY_PAGE_GRID_STATE_V1");
- *   <AgGridReact {...persist.gridEventProps} columnDefs={defs} />
- *   <ColumnVisibilityMenu persist={persist} columnDefs={defs} />
+ * Wiring (consumer): see docs/features/grid-column-persist.md §4.
  *
- * Storage key convention: `<SCREAMING_SNAKE_PAGE>_GRID_STATE_V1`. Bump V<N>
- * when a column rename would break restored state in the wild (rare —
- * adding/removing columns is forward-compatible).
- *
- * Persistence is **per browser** (not synced server-side). Switching machine
- * or browser starts from default columnDefs again. By design — see OPT-0015
- * for the trade-off discussion.
+ * Persistence is **per browser** (not synced server-side). Switching
+ * machines or browsers starts from default columnDefs. By design.
  */
 export function useGridColumnPersist(
-  storageKey: string,
+  storageKey: GridStorageKey,
 ): UseGridColumnPersistResult {
   const gridApiRef = useRef<GridApi | null>(null);
+  // True while applyColumnState's synchronous event burst is in flight.
+  // Throttled save short-circuits, and backend-sort consumers guard their
+  // handleSortChanged against it (OPT-0016 Fix #1).
+  const isApplyingRef = useRef(false);
 
   const saveState = useCallback(() => {
     const api = gridApiRef.current;
@@ -66,6 +201,9 @@ export function useGridColumnPersist(
     let last = 0;
     let timer: ReturnType<typeof setTimeout> | null = null;
     return () => {
+      // Short-circuit during applyColumnState — those events would
+      // otherwise immediately rewrite the same state we just loaded.
+      if (isApplyingRef.current) return;
       const now = Date.now();
       const run = () => {
         last = Date.now();
@@ -83,14 +221,31 @@ export function useGridColumnPersist(
   const onGridReady = useCallback(
     (e: GridReadyEvent) => {
       gridApiRef.current = e.api;
+
+      const knownColIds = new Set<string>();
+      e.api.getColumns()?.forEach((c) => knownColIds.add(c.getColId()));
+
+      const state = loadValidState(storageKey, knownColIds);
+      if (!state) return;
+
+      isApplyingRef.current = true;
       try {
-        const raw = localStorage.getItem(storageKey);
-        if (!raw) return;
-        const state = JSON.parse(raw) as ColumnState[];
-        if (!Array.isArray(state)) return;
         e.api.applyColumnState({ state, applyOrder: true });
       } catch {
-        // Corrupt JSON in storage — ignore so the grid still renders.
+        // Despite validation, AG-Grid still rejected the state (e.g.
+        // version-bump schema drift). Nuke it so next reload is clean.
+        try {
+          localStorage.removeItem(storageKey);
+        } catch {
+          /* no-op */
+        }
+      } finally {
+        // applyColumnState fires column events synchronously. By the time
+        // this microtask runs, every handler has already short-circuited
+        // via isApplyingRef. Clear the flag for normal operation.
+        queueMicrotask(() => {
+          isApplyingRef.current = false;
+        });
       }
     },
     [storageKey],
@@ -112,10 +267,7 @@ export function useGridColumnPersist(
       const api = gridApiRef.current;
       if (!api || colIds.length === 0) return;
       try {
-        // AG-Grid v34 method. Cast so we don't depend on a private overload.
-        (api as unknown as {
-          setColumnsVisible?: (ids: string[], visible: boolean) => void;
-        }).setColumnsVisible?.(colIds, visible);
+        api.setColumnsVisible(colIds, visible);
         throttledSave();
       } catch {
         /* no-op */
@@ -134,6 +286,8 @@ export function useGridColumnPersist(
     }
   }, []);
 
+  const isApplying = useCallback(() => isApplyingRef.current, []);
+
   const gridEventProps = useMemo(
     () => ({
       onGridReady,
@@ -144,10 +298,11 @@ export function useGridColumnPersist(
       onColumnResized: (e: ColumnResizedEvent) => {
         if (e.finished) throttledSave();
       },
-      // Sort lives in ColumnState too. Without persisting sort, a colleague
-      // who always reads "命中笔数 desc" loses it on every reload.
-      // Pages with backend sort must COMPOSE this with their existing
-      // onSortChanged handler — call both, not one (see grid-column-persist.md).
+      // Sort lives in ColumnState too — persisting it means "always view
+      // 命中笔数 desc" survives reload. Backend-sort consumers must
+      // compose this with their existing handler AND guard the handler
+      // with `if (!persist.isApplying())` to skip the initial refetch
+      // that would otherwise fire from applyColumnState.
       onSortChanged: throttledSave,
     }),
     [onGridReady, throttledSave],
@@ -160,5 +315,6 @@ export function useGridColumnPersist(
     setColumnsVisible,
     getColumnState,
     gridApiRef,
+    isApplying,
   };
 }

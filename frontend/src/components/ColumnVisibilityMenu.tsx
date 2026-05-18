@@ -154,7 +154,10 @@ export function ColumnVisibilityMenu({
         align="end"
         className="w-72 max-h-[60vh] overflow-auto"
       >
-        <DropdownMenuLabel>显示列</DropdownMenuLabel>
+        {/* Use the trigger label as the menu heading so multiple stacked
+            menus (Gap Trade's 3 grids) read with distinct section context
+            for screen readers instead of three identical "显示列" headings. */}
+        <DropdownMenuLabel>{label}</DropdownMenuLabel>
         <DropdownMenuSeparator />
         <div className="px-2 pb-2 flex items-center gap-2">
           <Button
