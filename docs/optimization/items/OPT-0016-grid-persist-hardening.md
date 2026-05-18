@@ -1,7 +1,7 @@
 ---
 id: OPT-0016
 title: useGridColumnPersist hardening（6 条 scaling-review 修复打包）
-status: wip
+status: done
 priority: P2
 area: frontend
 effort: M
@@ -88,4 +88,32 @@ related: [[OPT-0015]]
 
 ## 结果
 
-_待填_
+**合并到 main**：`8cce6f9` (2026-05-18)，单一 feature commit `55b2cf7` 承载 6 项修复 + 4 文件改动（hook +218/-36，组件 a11y 标签、RiskMonitor 3 处 sort compose 升级、App.tsx boot cleanup）。
+
+**实际交付 vs 原 AC**：
+
+| Fix | 状态 | 备注 |
+|---|---|---|
+| #1 `isApplyingRef` + `isApplying()` + 3 个 backend-sort tab compose | ✅ | 用户在浏览器 Network 面板**实测验证**：以前会发 2 个 `/alerts`（一次默认 sort + 一次 restored sort），现在只 1 个直接带 `sort_by=order_count&sort_order=desc` |
+| #2 typed `GRID_STORAGE_KEYS` 注册表 + `GridStorageKey` union | ✅ | TS 编译期撞 key 防护。注册表搬进代码（之前只在 gitignored 文档里——独立 reviewer 指出对 fresh clone 不可见） |
+| #3 schema validation + 自愈 | ✅ | `loadValidState()` 校验每条 entry 必须 `{colId: string}`，过滤当前 grid 不存在的 ghost colId，applyColumnState 抛 → `removeItem` |
+| #4 移除 `setColumnsVisible` cast | ✅ | AG-Grid v34 已公开 typed，cast 不必要 |
+| #5 文档删 spread 写法 | ✅ | `grid-column-persist.md` + `ag-grid-integration.md` + `frontend-ui-conventions.mdc` 全部改成 compose-only，配 callout 解释 spread 99% 都会出错 |
+| #6 `pruneStaleGridKeys()` boot 清理 | ✅ | App.tsx mount 时调一次，regex `/_GRID_STATE_V\d+$/` + 注册表差集移除孤儿 |
+| #7 `DropdownMenuLabel` 用 dynamic label | ✅ | Gap Trade 3 张表 a11y heading 各异，不再三遍「显示列」 |
+
+**额外做了（超出原 AC）**：
+
+- 文档 §9「已接入清单」改为指向代码常量而非维护重复列表（避免文档/代码漂移）—— §1 步骤 1 直接告诉开发者"去 hook 文件加常量"
+- 文档 §7「持久化存活范围」表格补充 OPT-0016 修复后的自愈行为
+- commit message + OPT 笔记里把 reviewer 的具体术语（"applyColumnState event loop"、"ghost colId"）记下来，方便将来 grep 历史
+
+**未做（明确推迟，已在 OPT 笔记中说明）**：
+
+- `bump()` re-render → AG-Grid 事件订阅模式（reviewer #8）：当前无跨 grid 联动需求，重构成本 > 收益
+- Vitest 单测基建（reviewer #9）：等项目整体前端测试规划
+- `as ColDef<unknown>[]` 类型清理（reviewer #10）：纯 smell，行为正确
+
+**用户浏览器验证**：✅ Fix #1 关键场景验证通过（只发 1 次 alerts），其他靠 typecheck + production build 通过 + 代码 review。Fix #3 / #6 用户跳过手工测试，依赖代码正确性。
+
+**Follow-up**：无新 OPT。本 hardening pass 完整闭环。下一波若 reviewer 再有发现可单独再开。

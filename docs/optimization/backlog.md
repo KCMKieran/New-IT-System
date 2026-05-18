@@ -10,7 +10,7 @@
 
 | ID | Branch | Claim 日期 | 备注 |
 |----|--------|-----------|------|
-| [OPT-0016](./items/OPT-0016-grid-persist-hardening.md) | `opt/grid-persist-hardening` | 2026-05-18 | 6 条 scaling-review fix 打包 |
+| _空_ | | | |
 
 ## ✅ 待领取（Ready）
 
