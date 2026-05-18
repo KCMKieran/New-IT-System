@@ -1,7 +1,8 @@
-import { Suspense } from "react"
+import { Suspense, useEffect } from "react"
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom"
 import { AuthProvider, useAuth } from "@/providers/auth-provider"
 import { LazyErrorBoundary, PageLoader, lazyWithRetry } from "@/components/LazyErrorBoundary"
+import { pruneStaleGridKeys } from "@/hooks/useGridColumnPersist"
 
 const DashboardLayout = lazyWithRetry(() => import("@/layouts/DashboardLayout"))
 const LoginPage = lazyWithRetry(() => import("@/pages/Login"))
@@ -44,6 +45,13 @@ function PrivateRoute({ children }: { children: React.ReactElement }) {
 }
 
 function App() {
+  // Boot-time housekeeping: remove orphaned grid-state entries from
+  // localStorage (renamed / removed grids leave dead keys behind). See
+  // docs/features/grid-column-persist.md and OPT-0016.
+  useEffect(() => {
+    pruneStaleGridKeys();
+  }, []);
+
   return (
     <AuthProvider>
       <BrowserRouter>

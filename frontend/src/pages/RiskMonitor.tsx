@@ -1536,7 +1536,12 @@ function BurstOpenTab({ active }: { active: boolean }) {
           // so `/alerts` stays deterministic.
           sortingOrder={["desc", "asc", null]}
           onSortChanged={(e) => {
-            handleSortChanged(e);
+            // Skip the consumer's backend-sort handler while the hook is
+            // restoring state on mount — otherwise the initial /alerts
+            // fetch fires twice (once with default sort, once with the
+            // restored sort_by). Persist save is gated separately inside
+            // the hook (isApplyingRef short-circuit).
+            if (!columnPersist.isApplying()) handleSortChanged(e);
             columnPersist.gridEventProps.onSortChanged();
           }}
           onGridReady={(e) => {
@@ -2321,7 +2326,12 @@ function QuickOpenCloseTab({ active }: { active: boolean }) {
           suppressCellFocus
           sortingOrder={["desc", "asc", null]}
           onSortChanged={(e) => {
-            handleSortChanged(e);
+            // Skip the consumer's backend-sort handler while the hook is
+            // restoring state on mount — otherwise the initial /alerts
+            // fetch fires twice (once with default sort, once with the
+            // restored sort_by). Persist save is gated separately inside
+            // the hook (isApplyingRef short-circuit).
+            if (!columnPersist.isApplying()) handleSortChanged(e);
             columnPersist.gridEventProps.onSortChanged();
           }}
           onGridReady={columnPersist.gridEventProps.onGridReady}
@@ -3569,7 +3579,12 @@ function QuickProfitTab({ active }: { active: boolean }) {
           suppressCellFocus
           sortingOrder={["desc", "asc", null]}
           onSortChanged={(e) => {
-            handleSortChanged(e);
+            // Skip the consumer's backend-sort handler while the hook is
+            // restoring state on mount — otherwise the initial /alerts
+            // fetch fires twice (once with default sort, once with the
+            // restored sort_by). Persist save is gated separately inside
+            // the hook (isApplyingRef short-circuit).
+            if (!columnPersist.isApplying()) handleSortChanged(e);
             columnPersist.gridEventProps.onSortChanged();
           }}
           onGridReady={(e) => {
