@@ -2067,6 +2067,7 @@ function QuickOpenCloseTab({ active }: { active: boolean }) {
             )
             .join(", ") ?? "",
       },
+      { headerName: "账户组", field: "group", colId: "group", width: 150 },
     ],
     [],
   );
@@ -3302,6 +3303,7 @@ function QuickProfitTab({ active }: { active: boolean }) {
         cellClass: "ag-right-aligned-cell",
         valueFormatter: (p) => p.value?.toFixed(2) ?? "",
       },
+      { headerName: "账户组", field: "group", colId: "group", width: 150 },
     ],
     [lookbackByRuleId],
   );
@@ -4086,6 +4088,9 @@ function GapTradeTab({ active }: { active: boolean }) {
     first_close: string | null;
     last_close: string | null;
     sample_rows: AlertEvent[];
+    // SO+AB SQL constraint `Cu.groupsid = Ls.L_groupsid` guarantees both legs
+    // share the same group, so one field is enough.
+    groupsid: string | null;
   }
   const clientPairAgg = useMemo<ClientPairAggRow[]>(() => {
     const map = new Map<string, ClientPairAggRow>();
@@ -4112,6 +4117,7 @@ function GapTradeTab({ active }: { active: boolean }) {
           first_close: null,
           last_close: null,
           sample_rows: [],
+          groupsid: a.l_groupsid ?? null,
         };
         map.set(key, row);
       }
@@ -4423,6 +4429,15 @@ function GapTradeTab({ active }: { active: boolean }) {
           );
         },
       },
+      {
+        // SO+AB SQL constrains `Cu.groupsid = Ls.L_groupsid` so both legs
+        // share one group — one column is enough.
+        headerName: "账户组",
+        field: "l_groupsid" as keyof AlertEvent,
+        colId: "l_groupsid",
+        width: 150,
+        sortable: false,
+      },
     ],
     [],
   );
@@ -4541,6 +4556,14 @@ function GapTradeTab({ active }: { active: boolean }) {
         colId: "last_close",
         width: 165,
         valueFormatter: (p) => fmtTime(p.value as string | null | undefined),
+      },
+      {
+        // Per-pair group — both legs share groupsid by SQL constraint.
+        headerName: "账户组",
+        field: "groupsid",
+        colId: "groupsid",
+        width: 150,
+        sortable: false,
       },
     ],
     [],
@@ -4708,6 +4731,13 @@ function GapTradeTab({ active }: { active: boolean }) {
             </Badge>
           );
         },
+      },
+      {
+        headerName: "账户组",
+        field: "client_groupsid" as keyof AlertEvent,
+        colId: "client_groupsid",
+        width: 150,
+        sortable: false,
       },
     ],
     // Rebuild when gap_profit thresholds change so the "触发条件" badge

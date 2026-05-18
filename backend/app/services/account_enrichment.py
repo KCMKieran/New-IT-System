@@ -27,7 +27,7 @@ def round_or_none(val: Any, ndigits: int = 2) -> float | None:
 def get_account_info_map(
     conn, alerts: List[Dict[str, Any]]
 ) -> Dict[str, Dict[str, Any]]:
-    """Batch-lookup CRM metadata (currency, zipcode) from
+    """Batch-lookup CRM metadata (currency, zipcode, group) from
     fxbackoffice.mt4_users in a single roundtrip.
 
     Args:
@@ -36,11 +36,12 @@ def get_account_info_map(
 
     Returns:
         Dict keyed by ``{sid}-{login}`` (e.g. ``"5-67035933"``):
-        ``{"currency": "CEN", "zipcode": "111 90"}``
+        ``{"currency": "CEN", "zipcode": "111 90", "group": "4sd_L1_AKCM"}``
 
     Missing loginsid → not in the returned dict.  Callers should default
     to ``"USD"`` and ``None`` zipcode so USD accounts are never accidentally
-    divided by 100.
+    divided by 100.  ``group`` is the MT account group name (substring
+    ``AKCM`` distinguishes AKCM accounts from regular B-book groups).
     """
     loginsids: set[str] = set()
     for a in alerts:
@@ -56,7 +57,8 @@ def get_account_info_map(
     sql = f"""
         SELECT loginsid,
                UPPER(CURRENCY) AS currency,
-               ZIPCODE         AS zipcode
+               ZIPCODE         AS zipcode,
+               `GROUP`         AS `group`
         FROM fxbackoffice.mt4_users
         WHERE loginsid IN ({placeholders})
     """
@@ -67,9 +69,11 @@ def get_account_info_map(
         result: Dict[str, Dict[str, Any]] = {}
         for r in rows:
             zipcode = (r.get("zipcode") or "").strip() or None
+            group = (r.get("group") or "").strip() or None
             result[r["loginsid"]] = {
                 "currency": r.get("currency") or None,
                 "zipcode": zipcode,
+                "group": group,
             }
         return result
     except Exception:

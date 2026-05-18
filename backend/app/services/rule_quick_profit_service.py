@@ -569,6 +569,7 @@ def scan_quick_profit(
                 currency = info.get("currency") or "USD"
                 alert["currency"] = currency
                 alert["zipcode"] = info.get("zipcode")
+                alert["group"] = info.get("group")
                 alert["net_deposit_hist"] = (
                     net_deposit_hist_map.get(loginsid) if loginsid else None
                 )
