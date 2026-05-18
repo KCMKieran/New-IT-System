@@ -987,6 +987,7 @@ export default function ClientReturnRate() {
             onColumnVisible={columnPersist.gridEventProps.onColumnVisible}
             onColumnPinned={columnPersist.gridEventProps.onColumnPinned}
             onColumnResized={columnPersist.gridEventProps.onColumnResized}
+            onSortChanged={columnPersist.gridEventProps.onSortChanged}
             animateRows
             pagination
             paginationPageSize={isMobile ? 20 : 50}

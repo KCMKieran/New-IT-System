@@ -16,6 +16,7 @@ export interface UseGridColumnPersistResult {
     onColumnVisible: () => void;
     onColumnPinned: () => void;
     onColumnResized: (e: ColumnResizedEvent) => void;
+    onSortChanged: () => void;
   };
   resetState: () => void;
   setColumnsVisible: (colIds: string[], visible: boolean) => void;
@@ -143,6 +144,11 @@ export function useGridColumnPersist(
       onColumnResized: (e: ColumnResizedEvent) => {
         if (e.finished) throttledSave();
       },
+      // Sort lives in ColumnState too. Without persisting sort, a colleague
+      // who always reads "命中笔数 desc" loses it on every reload.
+      // Pages with backend sort must COMPOSE this with their existing
+      // onSortChanged handler — call both, not one (see grid-column-persist.md).
+      onSortChanged: throttledSave,
     }),
     [onGridReady, throttledSave],
   );

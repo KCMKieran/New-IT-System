@@ -1535,7 +1535,10 @@ function BurstOpenTab({ active }: { active: boolean }) {
           // When sort is cleared, frontend falls back to `scanned_at DESC`
           // so `/alerts` stays deterministic.
           sortingOrder={["desc", "asc", null]}
-          onSortChanged={handleSortChanged}
+          onSortChanged={(e) => {
+            handleSortChanged(e);
+            columnPersist.gridEventProps.onSortChanged();
+          }}
           onGridReady={(e) => {
             gridApiRef.current = e.api;
             columnPersist.gridEventProps.onGridReady(e);
@@ -2317,7 +2320,10 @@ function QuickOpenCloseTab({ active }: { active: boolean }) {
           enableCellTextSelection
           suppressCellFocus
           sortingOrder={["desc", "asc", null]}
-          onSortChanged={handleSortChanged}
+          onSortChanged={(e) => {
+            handleSortChanged(e);
+            columnPersist.gridEventProps.onSortChanged();
+          }}
           onGridReady={columnPersist.gridEventProps.onGridReady}
           onColumnMoved={columnPersist.gridEventProps.onColumnMoved}
           onColumnVisible={columnPersist.gridEventProps.onColumnVisible}
@@ -3562,7 +3568,10 @@ function QuickProfitTab({ active }: { active: boolean }) {
           enableCellTextSelection
           suppressCellFocus
           sortingOrder={["desc", "asc", null]}
-          onSortChanged={handleSortChanged}
+          onSortChanged={(e) => {
+            handleSortChanged(e);
+            columnPersist.gridEventProps.onSortChanged();
+          }}
           onGridReady={(e) => {
             gridApiRef.current = e.api;
             columnPersist.gridEventProps.onGridReady(e);
@@ -4922,6 +4931,7 @@ function GapTradeTab({ active }: { active: boolean }) {
             onColumnVisible={clientPairPersist.gridEventProps.onColumnVisible}
             onColumnPinned={clientPairPersist.gridEventProps.onColumnPinned}
             onColumnResized={clientPairPersist.gridEventProps.onColumnResized}
+            onSortChanged={clientPairPersist.gridEventProps.onSortChanged}
             getRowId={(p) => `gap-pair-${p.data.key}`}
             overlayNoRowsTemplate='<span class="text-sm text-muted-foreground">窗口内未发现爆仓 AB 仓配对客户</span>'
           />
@@ -4966,6 +4976,7 @@ function GapTradeTab({ active }: { active: boolean }) {
             onColumnVisible={soAbPersist.gridEventProps.onColumnVisible}
             onColumnPinned={soAbPersist.gridEventProps.onColumnPinned}
             onColumnResized={soAbPersist.gridEventProps.onColumnResized}
+            onSortChanged={soAbPersist.gridEventProps.onSortChanged}
             getRowId={(p) => `gap-so-${p.data.id}`}
             overlayNoRowsTemplate='<span class="text-sm text-muted-foreground">窗口内未发现爆仓 AB 仓配对</span>'
           />
@@ -5008,6 +5019,7 @@ function GapTradeTab({ active }: { active: boolean }) {
             onColumnVisible={gapPersist.gridEventProps.onColumnVisible}
             onColumnPinned={gapPersist.gridEventProps.onColumnPinned}
             onColumnResized={gapPersist.gridEventProps.onColumnResized}
+            onSortChanged={gapPersist.gridEventProps.onSortChanged}
             getRowId={(p) => `gap-gp-${p.data.id}`}
             overlayNoRowsTemplate='<span class="text-sm text-muted-foreground">窗口内未发现超额 Profit 客户</span>'
           />
