@@ -1,7 +1,7 @@
 ---
 id: OPT-0015
 title: RiskMonitor / ClientReturnRate 列自定义 + localStorage 持久化
-status: wip
+status: done
 priority: P2
 area: frontend
 effort: M
@@ -110,4 +110,41 @@ V1 关键事件 / API：
 
 ## 结果
 
-_待填_
+**合并到 main**：`68838f9` (2026-05-18)，由 3 个 feature commit 组成：
+
+| Commit | 内容 |
+|---|---|
+| `891560b` | 新增 `useGridColumnPersist` hook + `<ColumnVisibilityMenu>` 组件；接入 7 个 grid；RiskMonitor `defaultColDef` 改 `suppressMovable: false` |
+| `a458588` | 列设置按钮图标 `Settings2` → `Columns3`（避免和 `规则配置` 撞 ⚙）；`variant="outline"` → `"secondary"`（视觉拉开数据动作 vs UI 偏好） |
+| `43de83f` | Dark mode 对比度提亮：`dark:bg-zinc-700` + `dark:ring-zinc-500/40 dark:ring-inset` —— shadcn `--secondary`（oklch 0.269）仅比 `--background`（0.145）亮 12pp，按钮会糊进背景 |
+
+**实际交付 vs 原 AC**：
+
+| AC | 状态 |
+|---|---|
+| RiskMonitor 4 个 tab 各有列设置入口 | ✅ Burst Open / Quick Open-Close / Quick Profit 各 1 个；Gap Trade tab 内 3 张表各自 icon-only |
+| Gap Trade 3 张表独立菜单 | ✅ 客户对汇总 / SO+AB 明细 / Gap 明细 3 个 icon-only 按钮分别贴 `<h3>` |
+| ClientReturnRate 顶部入口 | ✅ 工具栏「导出 CSV」旁 |
+| 7 个独立 localStorage key | ✅ 完全按 AC 命名 |
+| 关浏览器再开保留 | ✅ 用户已浏览器验证通过 |
+| 每处「重置」按钮 | ✅ `resetColumnState()` + 清 key |
+| valueGetter-only 列必须显式 colId | ✅ 审计 7 处 columnDefs，全部已带 colId（含 `burst_window` / `orders` / `lookback_min` / `pair` 等计算列） |
+| 切 tab 互不污染 | ✅ 浏览器验证通过 |
+| 不引入第二份 React state | ✅ 单 source of truth = AG Grid `ColumnState` |
+
+**额外做了（超出原 AC）**：
+
+- 抽公共 hook + 组件方案 (b) 落地，30 行 hook + 200 行组件就够（原估 effort M，实测确实 M）
+- 全套文档体系：新建 [`docs/features/grid-column-persist.md`](../../features/grid-column-persist.md) 作为唯一权威，更新 `CLAUDE.md` Key conventions、`.cursor/rules/ui-pitfalls.mdc`（新增 colId 陷阱章节）、`.cursor/rules/frontend-ui-conventions.mdc`、`.cursor/skills/risk-monitor/SKILL.md`（Step 5 增加列持久化必做项）、`docs/frontend/ag-grid-integration.md`、给老的 `client-pnl-column-toggle.md` 加历史标注 —— 后续开发新 tab/新列时会自动看到提醒
+- UI 视觉迭代两轮：第一轮 outline→secondary + 图标换 Columns3；第二轮 dark mode 对比度提亮（zinc-700 + ring）
+- 顺手清理一处 pre-existing lint 错：ClientReturnRate `_e: GridReadyEvent` 未用参数
+
+**未做（明确推迟）**：
+
+- 3 个老页（`ClientPnLAnalysis` / `IBReport` / 隐藏的 `ClientPnLMonitor`）的内联实现**没有迁移**到 hook —— 已在 `docs/features/client-pnl-column-toggle.md` 顶部加标注「历史文档，新代码别照抄」。如果未来要迁移，单独立 OPT
+- 跨设备同步（云端用户偏好）—— 当前不在需求范围，localStorage 浏览器隔离够用
+
+**Follow-up（值得追踪）**：
+
+- 无新 OPT。本 item 完整闭环。
+- 长期观察点：用户实际使用 7 个 key 的频率（dev 期间观察 + 用户反馈），如果发现某些 grid 大家几乎不动列，可以删掉那个菜单按钮节省工具栏空间

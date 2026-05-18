@@ -10,7 +10,7 @@
 
 | ID | Branch | Claim 日期 | 备注 |
 |----|--------|-----------|------|
-| [OPT-0015](./items/OPT-0015-customizable-grid-columns.md) | `opt/customizable-grid-columns` | 2026-05-18 | hook 化方案 (b)，7 个 grid，最后产出文档 |
+| _空_ | | | |
 
 ## ✅ 待领取（Ready）
 
