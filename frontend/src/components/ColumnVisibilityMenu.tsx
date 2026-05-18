@@ -125,12 +125,23 @@ export function ColumnVisibilityMenu({
           // `variant="outline"` (e.g. 导出 CSV / 规则配置 / 立即扫描).
           // Icon is `Columns3` not `Settings2` to avoid clashing with the
           // 规则配置 button that already owns Settings2 in the same toolbar.
+          //
+          // Dark-mode contrast bump: shadcn's --secondary (oklch 0.269) sits
+          // only ~12pp lighter than --background (oklch 0.145), so on dark
+          // pages the button blends with the page background. We lift the
+          // bg to zinc-700 and add an inset ring so the button actually
+          // reads against the page — ring (not border) avoids a 1px layout
+          // shift between modes. Stays grayscale per the original
+          // "secondary 克制" choice (no colour tint).
           variant="secondary"
           size={iconOnly ? "icon" : size}
           className={cn(
             iconOnly
               ? "h-8 w-8"
               : ["whitespace-nowrap gap-2", buttonClassName],
+            "dark:bg-zinc-700 dark:hover:bg-zinc-600",
+            "dark:ring-1 dark:ring-inset dark:ring-zinc-500/40",
+            "dark:text-zinc-100",
           )}
           title={label}
           aria-label={label}
