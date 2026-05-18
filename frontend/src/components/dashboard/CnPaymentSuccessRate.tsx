@@ -206,7 +206,7 @@ export default function CnPaymentSuccessRate() {
               </div>
 
               {/* Stats row */}
-              <div className="grid grid-cols-4 gap-1 text-center">
+              <div className="grid grid-cols-5 gap-1 text-center">
                 <div>
                   <div className="text-[10px] text-muted-foreground leading-tight">总数</div>
                   <div className="text-xs font-semibold">{ch.total}</div>
@@ -227,6 +227,12 @@ export default function CnPaymentSuccessRate() {
                   <div className="text-[10px] text-muted-foreground leading-tight">待处理</div>
                   <div className="text-xs font-semibold text-yellow-600 dark:text-yellow-400">
                     {ch.fresh}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-muted-foreground leading-tight">成功率</div>
+                  <div className="text-xs font-semibold text-red-600 dark:text-red-400">
+                    {ch.total > 0 ? `${((ch.approved / ch.total) * 100).toFixed(1)}%` : "—"}
                   </div>
                 </div>
               </div>
