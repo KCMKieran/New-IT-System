@@ -7,6 +7,7 @@ Append-only 日志。最新的写在最上面。
 
 | 日期 | ID | Commit | 标题 |
 |------|----|--------|------|
+| 2026-05-18 | [OPT-0017](./items/OPT-0017-risk-monitor-group-column.md) | `e5e102c` (merge of `e2b21ae`) | Risk Monitor 各 Tab 添加账户组列（Tab 2/3 后端 `get_account_info_map` extend；Tab 4 三段 grid 用现有 `l_groupsid` / `client_groupsid`）|
 | 2026-05-18 | [OPT-0016](./items/OPT-0016-grid-persist-hardening.md) | `8cce6f9` (merge of `55b2cf7`) | useGridColumnPersist hardening：6 条 scaling-review 修复（typed key 注册表 + applyColumnState 事件循环短路 + schema 自愈 + stale key cleanup + cast 移除 + 文档 compose-only + a11y label）|
 | 2026-05-18 | [OPT-0015](./items/OPT-0015-customizable-grid-columns.md) | `68838f9` (merge of `891560b` + `a458588` + `43de83f`) | RiskMonitor / ClientReturnRate 列自定义 + localStorage 持久化（`useGridColumnPersist` hook + `<ColumnVisibilityMenu>` 组件，7 个 grid 接入，dark-mode 对比度优化）|
 | 2026-05-17 | [OPT-0013](./items/OPT-0013-risk-monitor-sse-alerts.md) | `b687cfc` + nginx `edcd3a3` | Risk-monitor 用 SSE 推送告警到前端（含 nginx ?api_key= + buffering 修复，prod live SSE_ENABLED=true）|

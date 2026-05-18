@@ -10,7 +10,7 @@
 
 | ID | Branch | Claim 日期 | 备注 |
 |----|--------|-----------|------|
-| [OPT-0017](./items/OPT-0017-risk-monitor-group-column.md) | `opt/risk-monitor-group-column` | 2026-05-18 | Risk Monitor 各 Tab 添加账户组列 |
+| _空_ | | | |
 
 ## ✅ 待领取（Ready）
 

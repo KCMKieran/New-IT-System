@@ -1,7 +1,7 @@
 ---
 id: OPT-0017
 title: Risk Monitor 各 Tab 添加账户组（Group）列
-status: wip
+status: done
 priority: P2
 area: mixed
 effort: S
@@ -64,4 +64,37 @@ created: 2026-05-18
 
 ## 结果
 
-<!-- done 时填：commit SHA、实际交付了什么、和 AC 的偏差、follow-up -->
+**合并到 main**：`e5e102c` (2026-05-18)，单一 feature commit `e2b21ae`，4 文件 +40 / -4。
+
+**实际交付 vs 原 AC**：
+
+| AC | 状态 | 备注 |
+|---|---|---|
+| 后端 extend `get_account_info_map` 返回 group | ✅ | SELECT 加 `` `GROUP` AS `group` ``；返回 dict 第三个 key |
+| Tab 2 quick-open-close 写 `alert["group"]` | ✅ | enrichment 循环加一行 |
+| Tab 3 quick-profit 写 `alert["group"]` | ✅ | enrichment 循环加一行 |
+| Tab 2 columnDefs 加「账户组」 | ✅ | 表末尾追加，跟 Tab 1 一致 |
+| Tab 3 columnDefs 加「账户组」 | ✅ | 同上 |
+| Tab 4 clientPairColumns + soAbColumns 加「爆仓方组」+「对手方组」两列 | ⚠ 改为**一列**「账户组」 | SO+AB SQL 强制 `Cu.groupsid = Ls.L_groupsid`（`rule_gap_trade_so_service.py:223`），两腿必然同组，alert dict 也只存 `l_groupsid`。两列展示会显示完全相同的值，浪费宽度 |
+| Tab 4 gapColumns 加「账户组」 (`client_groupsid`) | ✅ | 表末尾追加 |
+| dev 验证 | ✅ | 用户在浏览器实测 4 个 tab 都能看到新列 |
+| `npx tsc -b --noEmit` 无新错 | ✅ | exit 0 |
+
+**与原 AC 偏差**：
+
+- SO+AB 两腿同组的 SQL 约束在 file 阶段没意识到，原 AC 写了两列。实施时发现 alert 只有 `l_groupsid`，于是：
+  - `soAbColumns`：直接用 `l_groupsid` 一列
+  - `clientPairColumns`：`ClientPairAggRow` 类型新加 `groupsid` 字段，聚合时从第一条 alert 的 `l_groupsid` 取
+  - `gapColumns`：照旧 `client_groupsid`
+
+**额外做了（超出原 AC）**：
+
+- `get_account_info_map` 的 docstring 同步更新：`Returns` 段加 group 示例、点出 AKCM substring 语义
+- `ClientPairAggRow` 接口加注释说明为什么只一个 groupsid 字段（SQL 约束 self-doc）
+
+**未做（明确推迟）**：
+
+- 历史 `alert_events` 行回填（用户已选「不回填」）：默认 4h 窗口，新数据不到 1 天就把历史挤出窗口
+- AKCM 派生 chip / 类型列 / CRM tag JOIN（用户已选「就原始字符串」）
+
+**Follow-up**：无新 OPT。若日后需要跨页面 AKCM/B-Group 筛选（zipcode 那种 backend like），再 file。
