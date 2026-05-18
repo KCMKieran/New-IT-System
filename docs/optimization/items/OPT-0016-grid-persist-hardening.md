@@ -1,7 +1,7 @@
 ---
 id: OPT-0016
 title: useGridColumnPersist hardening（6 条 scaling-review 修复打包）
-status: ready
+status: wip
 priority: P2
 area: frontend
 effort: M
