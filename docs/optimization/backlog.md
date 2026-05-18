@@ -10,7 +10,7 @@
 
 | ID | Branch | Claim 日期 | 备注 |
 |----|--------|-----------|------|
-| _空_ | | | |
+| [OPT-0015](./items/OPT-0015-customizable-grid-columns.md) | `opt/customizable-grid-columns` | 2026-05-18 | hook 化方案 (b)，7 个 grid，最后产出文档 |
 
 ## ✅ 待领取（Ready）
 
@@ -21,7 +21,6 @@
 | [OPT-0001](./items/OPT-0001-risk-monitor-tab-cache.md) | P2 | frontend | M | Risk-monitor 四个 tab 切换状态/缓存优化 |
 | [OPT-0002](./items/OPT-0002-browser-cache-pattern-doc.md) | P2 | docs | S | 现有浏览器缓存模式归纳成复用文档 |
 | [OPT-0003](./items/OPT-0003-risk-monitor-sqlite-perf.md) | P1 | db | L | Risk-monitor SQLite 数据增长后的性能方案 |
-| [OPT-0015](./items/OPT-0015-customizable-grid-columns.md) | P2 | frontend | M | RiskMonitor / ClientReturnRate 列自定义 + localStorage 持久化 |
 
 ## 💡 想法（Ideas）—— 还不能直接 claim
 
