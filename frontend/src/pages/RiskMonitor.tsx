@@ -69,6 +69,8 @@ import { DateRange } from "react-day-picker";
 import { format } from "date-fns";
 import { cn } from "@/lib/utils";
 import { useIsMobile } from "@/hooks/use-mobile";
+import { useGridColumnPersist } from "@/hooks/useGridColumnPersist";
+import { ColumnVisibilityMenu } from "@/components/ColumnVisibilityMenu";
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -560,7 +562,9 @@ const defaultColDef: ColDef = {
   resizable: true,
   filter: true,
   minWidth: 80,
-  suppressMovable: true,
+  // Columns are draggable so users can reorder them. Layout is persisted
+  // per-grid via useGridColumnPersist — see docs/features/grid-column-persist.md.
+  suppressMovable: false,
   wrapHeaderText: true,
   autoHeaderHeight: true,
 };
@@ -755,6 +759,9 @@ function BurstOpenTab({ active }: { active: boolean }) {
   const gridRef = useRef<AgGridReact<AlertEvent>>(null);
   const gridApiRef = useRef<GridApi<AlertEvent> | null>(null);
   const gridStyle = useGridThemeStyle(isDarkMode);
+  const columnPersist = useGridColumnPersist(
+    "RISK_MONITOR_BURST_OPEN_GRID_STATE_V1",
+  );
 
   // Time range state
   const [rangePreset, setRangePreset] = useState<RangePresetKey>("4h");
@@ -1324,6 +1331,11 @@ function BurstOpenTab({ active }: { active: boolean }) {
             <Settings2 className="h-4 w-4 mr-1.5" />
             规则配置
           </Button>
+          <ColumnVisibilityMenu
+            persist={columnPersist}
+            columnDefs={columnDefs as ColDef<unknown>[]}
+            size="sm"
+          />
           <Button
             variant="outline"
             size="sm"
@@ -1526,7 +1538,12 @@ function BurstOpenTab({ active }: { active: boolean }) {
           onSortChanged={handleSortChanged}
           onGridReady={(e) => {
             gridApiRef.current = e.api;
+            columnPersist.gridEventProps.onGridReady(e);
           }}
+          onColumnMoved={columnPersist.gridEventProps.onColumnMoved}
+          onColumnVisible={columnPersist.gridEventProps.onColumnVisible}
+          onColumnPinned={columnPersist.gridEventProps.onColumnPinned}
+          onColumnResized={columnPersist.gridEventProps.onColumnResized}
           getRowId={(p) => `evt-${p.data.id}`}
         />
       </div>
@@ -1636,6 +1653,9 @@ function QuickOpenCloseTab({ active }: { active: boolean }) {
   const isDarkMode = theme === "dark";
   const isMobile = useIsMobile();
   const gridStyle = useGridThemeStyle(isDarkMode);
+  const columnPersist = useGridColumnPersist(
+    "RISK_MONITOR_QUICK_OPEN_CLOSE_GRID_STATE_V1",
+  );
 
   const [rangePreset, setRangePreset] = useState<RangePresetKey>("4h");
   const [customRange, setCustomRange] = useState<DateRange | undefined>();
@@ -2109,6 +2129,11 @@ function QuickOpenCloseTab({ active }: { active: boolean }) {
             <Settings2 className="h-4 w-4 mr-1.5" />
             规则配置
           </Button>
+          <ColumnVisibilityMenu
+            persist={columnPersist}
+            columnDefs={columnDefs as ColDef<unknown>[]}
+            size="sm"
+          />
           <Button
             variant="outline"
             size="sm"
@@ -2293,6 +2318,11 @@ function QuickOpenCloseTab({ active }: { active: boolean }) {
           suppressCellFocus
           sortingOrder={["desc", "asc", null]}
           onSortChanged={handleSortChanged}
+          onGridReady={columnPersist.gridEventProps.onGridReady}
+          onColumnMoved={columnPersist.gridEventProps.onColumnMoved}
+          onColumnVisible={columnPersist.gridEventProps.onColumnVisible}
+          onColumnPinned={columnPersist.gridEventProps.onColumnPinned}
+          onColumnResized={columnPersist.gridEventProps.onColumnResized}
           getRowId={(p) => `evt-${p.data.id}`}
         />
       </div>
@@ -2781,6 +2811,9 @@ function QuickProfitTab({ active }: { active: boolean }) {
   const isMobile = useIsMobile();
   const gridStyle = useGridThemeStyle(isDarkMode);
   const gridApiRef = useRef<GridApi<AlertEvent> | null>(null);
+  const columnPersist = useGridColumnPersist(
+    "RISK_MONITOR_QUICK_PROFIT_GRID_STATE_V1",
+  );
 
   const [rangePreset, setRangePreset] = useState<RangePresetKey>("4h");
   const [customRange, setCustomRange] = useState<DateRange | undefined>();
@@ -3321,6 +3354,11 @@ function QuickProfitTab({ active }: { active: boolean }) {
             <Settings2 className="h-4 w-4 mr-1.5" />
             规则配置
           </Button>
+          <ColumnVisibilityMenu
+            persist={columnPersist}
+            columnDefs={columnDefs as ColDef<unknown>[]}
+            size="sm"
+          />
           <Button
             variant="outline"
             size="sm"
@@ -3527,7 +3565,12 @@ function QuickProfitTab({ active }: { active: boolean }) {
           onSortChanged={handleSortChanged}
           onGridReady={(e) => {
             gridApiRef.current = e.api;
+            columnPersist.gridEventProps.onGridReady(e);
           }}
+          onColumnMoved={columnPersist.gridEventProps.onColumnMoved}
+          onColumnVisible={columnPersist.gridEventProps.onColumnVisible}
+          onColumnPinned={columnPersist.gridEventProps.onColumnPinned}
+          onColumnResized={columnPersist.gridEventProps.onColumnResized}
           getRowId={(p) => `qp-evt-${p.data.id}`}
         />
       </div>
@@ -3926,6 +3969,17 @@ function GapTradeTab({ active }: { active: boolean }) {
   const isDarkMode = theme === "dark";
   const isMobile = useIsMobile();
   const gridStyle = useGridThemeStyle(isDarkMode);
+  // Gap Trade renders 3 stacked grids — each gets its own persistence key so
+  // column choices in one section don't leak into the others.
+  const clientPairPersist = useGridColumnPersist(
+    "RISK_MONITOR_GAP_TRADE_CLIENT_PAIR_GRID_STATE_V1",
+  );
+  const soAbPersist = useGridColumnPersist(
+    "RISK_MONITOR_GAP_TRADE_SO_AB_GRID_STATE_V1",
+  );
+  const gapPersist = useGridColumnPersist(
+    "RISK_MONITOR_GAP_TRADE_GAP_GRID_STATE_V1",
+  );
 
   // ── Filters ──
   // Default "Today". Backend filter runs on `scanned_at`, so HK office's
@@ -4839,6 +4893,14 @@ function GapTradeTab({ active }: { active: boolean }) {
           <span className="text-xs font-normal text-muted-foreground">
             · 共 {clientPairAgg.length} 对客户 · 按 L 累计亏损降序
           </span>
+          <span className="ml-auto">
+            <ColumnVisibilityMenu
+              persist={clientPairPersist}
+              columnDefs={clientPairColumns as ColDef<unknown>[]}
+              iconOnly
+              label="客户对汇总 · 列设置"
+            />
+          </span>
         </h3>
         <div
           className={cn(
@@ -4855,6 +4917,11 @@ function GapTradeTab({ active }: { active: boolean }) {
             animateRows={false}
             enableCellTextSelection
             suppressCellFocus
+            onGridReady={clientPairPersist.gridEventProps.onGridReady}
+            onColumnMoved={clientPairPersist.gridEventProps.onColumnMoved}
+            onColumnVisible={clientPairPersist.gridEventProps.onColumnVisible}
+            onColumnPinned={clientPairPersist.gridEventProps.onColumnPinned}
+            onColumnResized={clientPairPersist.gridEventProps.onColumnResized}
             getRowId={(p) => `gap-pair-${p.data.key}`}
             overlayNoRowsTemplate='<span class="text-sm text-muted-foreground">窗口内未发现爆仓 AB 仓配对客户</span>'
           />
@@ -4865,6 +4932,14 @@ function GapTradeTab({ active }: { active: boolean }) {
           <Badge variant="outline">爆仓 AB 仓配对 · 逐笔明细</Badge>
           <span className="text-xs font-normal text-muted-foreground">
             · 共 {soAbAlerts.length} 条 · 点击行查看完整字段
+          </span>
+          <span className="ml-auto">
+            <ColumnVisibilityMenu
+              persist={soAbPersist}
+              columnDefs={soAbColumns as ColDef<unknown>[]}
+              iconOnly
+              label="逐笔明细 · 列设置"
+            />
           </span>
         </h3>
         {/* AG-Grid — same theme + legacy mode + heights as the other 3 tabs */}
@@ -4886,6 +4961,11 @@ function GapTradeTab({ active }: { active: boolean }) {
             rowClass="cursor-pointer"
             getRowClass={soAbRowClass}
             onRowClicked={(e) => e.data && setDetailRow(e.data)}
+            onGridReady={soAbPersist.gridEventProps.onGridReady}
+            onColumnMoved={soAbPersist.gridEventProps.onColumnMoved}
+            onColumnVisible={soAbPersist.gridEventProps.onColumnVisible}
+            onColumnPinned={soAbPersist.gridEventProps.onColumnPinned}
+            onColumnResized={soAbPersist.gridEventProps.onColumnResized}
             getRowId={(p) => `gap-so-${p.data.id}`}
             overlayNoRowsTemplate='<span class="text-sm text-muted-foreground">窗口内未发现爆仓 AB 仓配对</span>'
           />
@@ -4896,6 +4976,14 @@ function GapTradeTab({ active }: { active: boolean }) {
           <Badge variant="outline">Gap Trade 超额获利客户</Badge>
           <span className="text-xs font-normal text-muted-foreground">
             · 共 {gapAlerts.length} 条 · 点击行查看完整字段
+          </span>
+          <span className="ml-auto">
+            <ColumnVisibilityMenu
+              persist={gapPersist}
+              columnDefs={gapColumns as ColDef<unknown>[]}
+              iconOnly
+              label="Gap Trade · 列设置"
+            />
           </span>
         </h3>
         <div
@@ -4915,6 +5003,11 @@ function GapTradeTab({ active }: { active: boolean }) {
             suppressCellFocus
             rowClass="cursor-pointer"
             onRowClicked={(e) => e.data && setDetailRow(e.data)}
+            onGridReady={gapPersist.gridEventProps.onGridReady}
+            onColumnMoved={gapPersist.gridEventProps.onColumnMoved}
+            onColumnVisible={gapPersist.gridEventProps.onColumnVisible}
+            onColumnPinned={gapPersist.gridEventProps.onColumnPinned}
+            onColumnResized={gapPersist.gridEventProps.onColumnResized}
             getRowId={(p) => `gap-gp-${p.data.id}`}
             overlayNoRowsTemplate='<span class="text-sm text-muted-foreground">窗口内未发现超额 Profit 客户</span>'
           />

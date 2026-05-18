@@ -40,7 +40,7 @@ import {
   Download,
 } from "lucide-react";
 import { AgGridReact } from "ag-grid-react";
-import { ColDef, GridReadyEvent } from "ag-grid-community";
+import { ColDef } from "ag-grid-community";
 import { format } from "date-fns";
 import { cn } from "@/lib/utils";
 import { Calendar } from "@/components/ui/calendar";
@@ -53,6 +53,8 @@ import { DateRange } from "react-day-picker";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { InfoHeader } from "@/components/ui/info-header";
 import { useIsMobile } from "@/hooks/use-mobile";
+import { useGridColumnPersist } from "@/hooks/useGridColumnPersist";
+import { ColumnVisibilityMenu } from "@/components/ColumnVisibilityMenu";
 
 interface ClientReturnRateRow {
   client_id: number;
@@ -150,6 +152,9 @@ export default function ClientReturnRate() {
   const isDarkMode = theme === "dark";
   const isMobile = useIsMobile();
   const gridRef = useRef<AgGridReact>(null);
+  const columnPersist = useGridColumnPersist(
+    "CLIENT_RETURN_RATE_GRID_STATE_V1",
+  );
 
   // Try to restore from sessionStorage on first render
   const cached = useRef(loadCachedState());
@@ -668,7 +673,8 @@ export default function ClientReturnRate() {
     () => ({ resizable: true, sortable: true, filter: true, wrapHeaderText: true, autoHeaderHeight: true }),
     [],
   );
-  const onGridReady = useCallback((_e: GridReadyEvent) => {}, []);
+  // No local onGridReady work beyond column persistence — delegate to the hook.
+  const onGridReady = columnPersist.gridEventProps.onGridReady;
 
   return (
     <div className="flex h-full w-full flex-col gap-2 p-1 sm:p-4">
@@ -865,6 +871,11 @@ export default function ClientReturnRate() {
                 )}
                 {exporting ? `${exportProgress}%` : "导出 CSV"}
               </Button>
+              <ColumnVisibilityMenu
+                persist={columnPersist}
+                columnDefs={columnDefs as ColDef<unknown>[]}
+                buttonClassName="w-full sm:w-[140px] h-9"
+              />
             </div>
           </div>
 
@@ -972,6 +983,10 @@ export default function ClientReturnRate() {
             defaultColDef={defaultColDef}
             gridOptions={{ theme: "legacy" }}
             onGridReady={onGridReady}
+            onColumnMoved={columnPersist.gridEventProps.onColumnMoved}
+            onColumnVisible={columnPersist.gridEventProps.onColumnVisible}
+            onColumnPinned={columnPersist.gridEventProps.onColumnPinned}
+            onColumnResized={columnPersist.gridEventProps.onColumnResized}
             animateRows
             pagination
             paginationPageSize={isMobile ? 20 : 50}
