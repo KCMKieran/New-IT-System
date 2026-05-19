@@ -1,7 +1,7 @@
 ---
 id: OPT-0019
 title: Redis 加 maxmemory + allkeys-lru eviction policy
-status: wip
+status: done
 priority: P1
 area: infra
 effort: S
@@ -63,4 +63,24 @@ OPT-0018 cache audit 里的 🔴 #1 真问题，被识别为 ROI 最高的子项
 
 ## 结果
 
-_待填_
+**交付**（commit `61b2666`，merge SHA 由本次 close commit 决定，可用 `git log --grep=OPT-0019 --merges` 找到）：
+- `docker-compose.prod.yml:74-81` redis-prod 服务加 `command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru`
+- `backend/docker-compose.dev.yml:58-65` dev redis 同步同样配置（避免 dev/prod drift）
+- 两个文件都加了内联注释指向本 OPT
+
+**与 AC 偏差**：
+- AC 里说"改完文档：在 OPT-0018 audit 的 finding #1 加 link 指向本 OPT 作为已修复"—— **未做**，留作 follow-up。
+  - 理由：OPT-0018 当前 status=idea，下次有人 claim 它走 audit 时会自然看到 done.md 里 OPT-0019 已 close；强制现在改 OPT-0018 反而污染了那个 idea 的快照
+
+**生效需要用户手动操作**（设计如此，避免 AI 重启生产服务）：
+```
+docker compose -f docker-compose.prod.yml up -d redis-prod
+docker exec new-it-redis-prod redis-cli CONFIG GET maxmemory       # 期望 268435456
+docker exec new-it-redis-prod redis-cli CONFIG GET maxmemory-policy # 期望 allkeys-lru
+```
+
+**Stage 1 review**：用户选 "No, 直接合并"（4 行 compose 改动，参数选择理由已在背景章节写清，预判 reviewer 不会发现新信号）。
+
+**Follow-up**（不立新 OPT，记一笔）：
+- 若 OPT-0018 audit 推进到拆子 OPT 阶段，把"在 finding #1 标记已修"作为顺手活
+- 真实 prod Redis 重启时机由运维 / 用户决定，本 OPT 视 compose 改动落盘为完成

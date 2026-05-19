@@ -59,4 +59,7 @@ services:
     image: redis:7-alpine
     container_name: new-it-redis
     restart: unless-stopped
+    # Match prod (OPT-0019): 256MB cap + LRU eviction, prevents
+    # silent OOM failure mode when cache fills up.
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
     # 内部通讯无需暴露端口到宿主机，更安全

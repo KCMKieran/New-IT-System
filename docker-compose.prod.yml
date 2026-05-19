@@ -75,3 +75,7 @@ services:
     image: redis:7-alpine
     container_name: new-it-redis-prod
     restart: unless-stopped
+    # 256MB cap + LRU eviction so a runaway cache writer can't OOM Redis
+    # (default maxmemory=0 + noeviction would silently fail new SETs).
+    # See docs/optimization/items/OPT-0019-redis-maxmemory-policy.md.
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
