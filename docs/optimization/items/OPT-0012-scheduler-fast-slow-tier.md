@@ -81,11 +81,14 @@ merged to main as `ceb21c4` on 2026-05-17.
 
 **测试**：14 个 scheduler tier 测试（test_scheduler_tiers.py）覆盖 env flag、单/双 job 装配、tier dispatch、跨 tier 缓存保留、lock 隔离
 
-**Prod 状态**（2026-05-17 上线后）：
-- 代码已 merge + deploy；prod 用 `tier='all'` 路径（行为同上线前）
-- 日志已可见新格式：`Scan complete [all]: 0 new (0 cached), 9 scanned, 181ms`
-- env flag **未开**（staged rollout — 必须先开 [[OPT-0011]] 才能开本项，否则 fast tier 60s × MySQL ×10）
+**Prod 状态**（2026-05-17 上线 / `719eb66` 当晚开 flag — 与 [[OPT-0011]] 同批）：
+- 代码已 merge + deploy
+- `BURST_FAST_TIER_ENABLED=true` 已写进 `docker-compose.prod.yml` + 容器 restart
+- 实际跑双 job：60s fast tier 只跑 burst，原 10min slow tier 跑 quick OC + quick profit
+- 日志格式：fast tick → `Scan complete [fast_burst]: ...`，slow tick → `Scan complete [slow]: ...`
+- Dev 端 `BURST_FAST_TIER_ENABLED` **故意不设**（dev compose 注释明写："Do NOT enable BURST_FAST_TIER_ENABLED here — dev shares SQLite with prod"），防止 dev + prod 两个 scheduler 同时写 `alert_events`
+
+**周末上线的玄机**（719eb66 commit message 备忘）：选周末跑是因为外汇市场 Sat 05:00 → Mon 05:00 HKT 休市 —— fast tier 60s 节拍整周末扫到 0 单，不会写 SQLite，但 scheduler 持续跑可以验证 SSE 推送链路（前端 "N 次推送" 计数每 60s 跳 1）。
 
 **Follow-up**：
-- 上 OPT-0011 cursor flag 至少 1 天观察稳定后，再开本项
-- 想开启：`docker-compose.prod.yml` 加 `- BURST_FAST_TIER_ENABLED=true` + `./deploy.sh`
+- 周一开盘后观察 fast tier 真实流量下的 MySQL 压力 + SQLite 写并发

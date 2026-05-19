@@ -10,7 +10,7 @@
 
 | ID | Branch | Claim 日期 | 备注 |
 |----|--------|-----------|------|
-| _空_ | | | |
+| [OPT-0021](./items/OPT-0021-risk-monitor-hedge-wash-tab.md) | `opt/risk-monitor-hedge-wash-tab` | 2026-05-19 | 对冲刷单新 tab，rule_id 91，复用 burst-open data |
 
 ## ✅ 待领取（Ready）
 
@@ -21,7 +21,6 @@
 | [OPT-0001](./items/OPT-0001-risk-monitor-tab-cache.md) | P2 | frontend | M | Risk-monitor 四个 tab 切换状态/缓存优化 |
 | [OPT-0002](./items/OPT-0002-browser-cache-pattern-doc.md) | P2 | docs | S | 现有浏览器缓存模式归纳成复用文档 |
 | [OPT-0003](./items/OPT-0003-risk-monitor-sqlite-perf.md) | P1 | db | L | Risk-monitor SQLite 数据增长后的性能方案 |
-| [OPT-0021](./items/OPT-0021-risk-monitor-hedge-wash-tab.md) | P1 | mixed | L | Risk-monitor 新增「对冲刷单」Tab（rule_id 91-100，单账户 buy+sell 严格 1:1） |
 
 ## 💡 想法（Ideas）—— 还不能直接 claim
 

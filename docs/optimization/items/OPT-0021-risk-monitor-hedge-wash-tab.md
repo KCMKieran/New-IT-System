@@ -1,7 +1,7 @@
 ---
 id: OPT-0021
 title: Risk-monitor 新增「对冲刷单」Tab — 抓同账户 buy+sell 同 symbol 锁仓刷单
-status: ready
+status: wip
 priority: P1
 area: mixed
 effort: L

@@ -82,14 +82,15 @@ merged to main as `ceb21c4` on 2026-05-17. Prod live 2026-05-17 11:42 HKT.
 - 前端 `RealtimeIndicator` 组件：tab 列表右上角小圆点（绿脉动 = 连上 / 黄 = 重连 / 灰 = SSE 后端关 / "X s ago"）
 - **后端 middleware** `api_key_middleware.py`：在 `/alerts/stream` 路径接受 `?api_key=` 查询参数（EventSource 无法发 header 的标准 workaround）
 - **nginx**：新增 `location = /api/v1/risk-monitor/alerts/stream` 块，相同的 header-or-query auth + `proxy_buffering off` + `proxy_read_timeout 3600s` + `proxy_http_version 1.1`
-- prod compose 加 `SSE_ENABLED=true`（cursor / fast tier 暂保持 OFF）
+- prod compose 加 `SSE_ENABLED=true`（同批 [[OPT-0011]] / [[OPT-0012]] 的 cursor + fast tier flag 在 `719eb66` 当晚也一并开了，三件套全量上线）
+- dev compose 同步 `SSE_ENABLED=true`（dev 端 scheduler 关着，SSE 推 0 事件，但端点可达 → 前端 RealtimeIndicator 在 dev 也能验证 happy path）
 
 **测试**：9 个 pub/sub 单元测试（test_alerts_pubsub.py）覆盖 fan-out、跨线程 publish、bounded queue、断开清理；前端 tsc + vite build 通过；端到端 curl 验证 4 条路径（无 auth / header / ?api_key= / 错 key）
 
-**Prod 状态**（2026-05-17 上线后）：
+**Prod 状态**（2026-05-17 上线后，`719eb66` 当晚 cursor + fast tier 也开 → 三件套全量）：
 - 已 merge + deploy；nginx + backend 双层 SSE auth 都通过
 - 第一次 prod scheduler 跑完日志：`Scan complete [all]: 0 new (0 cached), 9 scanned, 181ms`
-- 后续每次 prod scheduler 跑（默认 5min）会触发 SSE 推送；前端 RealtimeIndicator 应当 ≤2 秒变绿，「N 次推送」每个 tick 跳 1
+- 三件套上齐后：fast tier 60s → burst 的 SSE 每分钟一推；slow tier 10min → quick OC + quick profit 每 10 分钟一推。前端 RealtimeIndicator ≤2 秒变绿，「N 次推送」按两个节拍叠加跳
 
 **Follow-up**：
 - 用户视觉验证生产页面绿脉动 ✓

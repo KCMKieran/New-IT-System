@@ -76,10 +76,12 @@ merged to main as `ceb21c4` on 2026-05-17.
 
 **测试**：17 个 cursor 单元测试（test_scan_cursors.py）+ 全量回归 84/84 通过
 
-**Prod 状态**（2026-05-17 上线后）：
+**Prod 状态**（2026-05-17 上线 / `719eb66` 当晚开 flag）：
 - 代码已 merge + deploy；schema 自动 migrate 完成
-- env flag **未开**（按 HANDOFF.md staged rollout 计划保留）
-- 想开启：`docker-compose.prod.yml` environment 块加 `- CURSOR_SCAN_ENABLED=true` + `./deploy.sh`
+- `CURSOR_SCAN_ENABLED=true` 已写进 `docker-compose.prod.yml` + 容器 restart
+- Dev 也开了同 flag（`backend/docker-compose.dev.yml`），但 dev `BURST_SCAN_ENABLED=false`，所以 dev 端是 no-op（scheduler 根本不跑，cursor 不会被读到），开着只是为了让 dev SSE/UI 路径完整可观测
+
+**周末上线的玄机**（719eb66 commit message 备忘）：选周末跑 stage-2/3 是因为外汇市场 Sat 05:00 → Mon 05:00 HKT 休市 —— cold-start cursor 整周末维持空值，到周一首单时才被自然 seed，零数据风险；周一开盘前若有任何不对，flip 回 false + `./deploy.sh` 没有 row 被写入。
 
 **Follow-up**：
 - 上 flag 后观察 MySQL `rows scanned` 应该 ÷5 以上
