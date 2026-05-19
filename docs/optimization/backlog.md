@@ -10,7 +10,7 @@
 
 | ID | Branch | Claim 日期 | 备注 |
 |----|--------|-----------|------|
-| _空_ | | | |
+| [OPT-0019](./items/OPT-0019-redis-maxmemory-policy.md) | `opt/redis-maxmemory-policy` | 2026-05-19 | Redis 加 maxmemory 256mb + allkeys-lru（OPT-0018 sub-OPT） |
 
 ## ✅ 待领取（Ready）
 
