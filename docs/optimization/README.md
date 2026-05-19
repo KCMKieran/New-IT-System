@@ -41,12 +41,26 @@ idea ──scope──▶ ready ──claim──▶ wip ──finish──▶ d
 
 ## 工作流
 
-### A. 新增 idea（你，随手）
+> 设计原则：**单一 OPT 在 main 上的 commit 数最少化**，把 file/claim/close 三个流程节点压成尽量少的 git 事件，留出空间给真正的代码 commit。
+
+### A. 新增 idea（仅 file，留作 backlog）
+
+适用：只记一笔，未来再决定做不做。
 
 1. 打开 backlog.md，看现有最大的 OPT-NNNN，用下一个号。
 2. 在 **Ideas** 表加一行 —— 标题 + 一句话备注。
 3. 如果能写超过 2 行背景 → 用下面的模板新建 `items/OPT-NNNN-<slug>.md`。
 4. Commit：`docs(opt): file OPT-NNNN <slug>`
+
+### A+. file 后立刻开始干（file + claim 合并）
+
+适用：**OPT 的主流路径**。新想法立刻就要做，没必要分两步。
+
+1. 同 A 步骤 1–3，但 item frontmatter 直接写 `status: wip`，backlog.md 把行直接加进 **WIP** 表（跳过 Ready）。
+2. **写代码前立刻 commit**：`chore(opt): file+claim OPT-NNNN <slug>`。
+3. `git checkout -b opt/<slug>`，开干。
+
+> 跟原来"先 docs(opt): file 再 chore(opt): claim"两条 commit 比，这里合并成一条。砍掉的那条对未来的 reader 没价值（中间没有他人参与的 window），但给 main 历史挪出了空间。
 
 ### B. idea → ready（你或 Claude，scope 阶段）
 
@@ -55,22 +69,71 @@ idea ──scope──▶ ready ──claim──▶ wip ──finish──▶ d
 3. 改 item 文件 frontmatter：`status: ready`。
 4. Commit：`docs(opt): scope OPT-NNNN`
 
-### C. Claim 并开始（Claude session）
+### C. Claim 并开始（item 已在 Ideas/Ready，现在拿来做）
 
 1. **先读 backlog.md 的 WIP 表**。目标 ID 已在表里 → 换一个。
-2. 把行从 **Ready** 移到 **WIP**。填 `branch`（如 `opt/sqlite-perf`）和 `claimed` 日期。
+2. 把行从 **Ideas / Ready** 移到 **WIP**。填 `branch`（如 `opt/sqlite-perf`）和 `claimed` 日期。
 3. 改 item 文件：`status: wip`。
 4. **写代码前立刻 commit**：`chore(opt): claim OPT-NNNN`。这样其他 session `git pull` 能看到 claim。
 5. `git checkout -b opt/<slug>`
 6. 在 branch 上干活。
 
-### D. 完成（Claude session，合 main 之后）
+> 如果是**全新的 idea + 立刻就要做**，走 A+ 一步完成，不要拆成 A 然后 C。
 
-1. branch 合到 main。
-2. backlog.md 里把行从 **WIP** 删掉。
-3. done.md 追加：`| YYYY-MM-DD | OPT-NNNN | <commit SHA> | <标题> |`
-4. 改 item 文件：`status: done`，填 **结果**（实际交付什么、和 AC 的偏差、留下的 follow-up）。
-5. Commit：`docs(opt): close OPT-NNNN`
+### D. 完成（3 stage：review hook → merge+close → lesson hook）
+
+> **核心变化**：动作 4 不再是单步 close，而是 3 stage 流程，**两端各加一个用户决策 hook**：
+> - 前置 hook（Stage 1）：merge 前问要不要 outsider-review
+> - 收尾 hook（Stage 3）：close 后问要不要生成技术课件
+> - 中间（Stage 2）：合并 + close 一次性 commit，不再产出独立 `docs(opt): close`
+
+前置：opt branch 上代码全 committed，**还没 merge 到 main**。
+
+#### Stage 1 — outsider-review hook（merge 前）
+
+**总是问用户**（不基于 effort 隐式默认）。两个选项：
+- Yes → 跑 [`outsider-review`](../../.cursor/skills/outsider-review/SKILL.md)，对每条 finding 单独问处理方式：当场修 / 立新 hardening OPT / live with（记 follow-up）
+- No → 直接进 Stage 2
+
+#### Stage 2 — Merge + close
+
+```bash
+git checkout main && git pull
+git merge --no-commit --no-ff opt/<slug>
+# 此刻 working tree 已 staged 了 branch 所有改动，但 merge 还没落盘
+```
+
+编辑追踪器文件：
+- backlog.md：把行从 **WIP** 删掉。
+- done.md 追加：`| YYYY-MM-DD | OPT-NNNN | — | <标题> |`（SHA 列留 dash —— merge SHA 在 commit 写盘前不存在，未来用 `git log --grep="OPT-NNNN" --merges` 找回来）。
+- item 文件：`status: done`，填 **结果**（实际交付什么、和 AC 的偏差、Stage 1 review finding 处理记录、follow-up）。
+
+把 docs 改动 stage 然后一次 commit：
+
+```bash
+git add docs/optimization/
+git commit -m "Merge branch 'opt/<slug>' — OPT-NNNN closed: <一句话总结>
+
+<close body：实际交付、与 AC 偏差、follow-up、Stage 1 review 处理记录>
+
+Co-Authored-By: ..."
+```
+
+效果：单个 OPT 在 main 历史的 commit 总数从 5 条（file → claim → feat → merge → close）降到 **3 条**（file+claim → feat → merge）。流程税 -40%，零信息损失。
+
+#### Stage 3 — 课件生成 hook（close 后）
+
+**总是问用户，但 Claude 先给推荐**（yes / no + 一句话理由）。判断标准：
+
+| 信号 | 推荐 |
+|---|---|
+| 引入了未在 [learn-from-opt 索引](../../.cursor/skills/learn-from-opt/SKILL.md) 里讲过的新技术概念 | ✅ Yes |
+| 是现有技术的新组合或反直觉用法 | 🤔 看用户想不想存档 |
+| 纯加列 / 改 UI / 改文案 / 修小 bug | ❌ No |
+
+如果 yes：按 [`learn-from-opt`](../../.cursor/skills/learn-from-opt/SKILL.md) 的 7 段骨架生成 `docs/lessons/lesson-opt-NNNN-<slug>.md`，在索引表 append 一行，**留在本地不 commit**（`.gitignore` 排除了 `docs/lessons/` 和 `.cursor/`，课件是纯本地教学资产，跟工作区走 —— 不要 `git add -f` 强推）。
+
+如果 no：流程结束。未来想补课件，用户说「补一个 OPT-NNNN 的课件」即可走补课路径。
 
 ### E. 放弃
 
