@@ -17,6 +17,19 @@ related: [[OPT-0001]] [[OPT-0002]] [[OPT-0006]] [[OPT-0014]]
 
 ## 背景
 
+### 范围说明（2026-05-19 用户校准）
+
+**ClickHouse 当前低活**：PnL Analysis、IB Financial Report 这两个走 ClickHouse 的页面用户暂时几乎不使用。因此涉及 ClickHouse 的缓存层（PnL 30min Redis、IB 10min Redis、IB Groups 7-day 内存缓存、`singleflight` ClickHouse 去重）**不是本 audit 的优先级**。
+
+留在 scope 内的活跃路径：
+- Client Return Rate（**MySQL → Redis 3h**，日志日均 20+ 命中）—— 唯一被频繁打到的缓存路径
+- Risk-monitor 系列（SQLite WAL + 内存 `_latest_result`）
+- ROACE 快照（SQLite，OPT-0006）
+- Login IP 分析（SQLite + `@lru_cache`）
+- 前端 / Nginx / HTTP 全局策略
+
+未来如果 ClickHouse 路径被弃用 / 简化，IB Groups TTL、PnL/IB cache、singleflight 这些条款可能整体下线，**单独开 OPT 评估，不在本 audit 内决定**。
+
 ### 已知工作良好的层（不动）
 
 | 层 | 实现 | 文件 |
@@ -65,30 +78,30 @@ related: [[OPT-0001]] [[OPT-0002]] [[OPT-0006]] [[OPT-0014]]
 
 后果：即使数据 5 分钟内根本不变，浏览器仍然每次完整重发请求 + 服务端完整重新走一遍。配合 #3 影响放大。
 
-#### 🟡 5. PnL / IB Redis 缓存日志可见命中 = 0
+#### ⚪ 5. ~~PnL / IB Redis 缓存日志可见命中 = 0~~ → 已澄清，**不是 cache 问题**
 
-证据：
-- `grep "Redis cache hit"` 在 backend.log + 4 天历史里**只有 client_return** 的命中行（22 条）
-- PnL 30min（`clickhouse_service.py:401-405`）、IB 10min（`clickhouse_service.py:591-595`）**理论上**应该频繁命中但日志为空
-- Redis 全局 stats: `keyspace_hits=9 / misses=99`（8.3%）
-- 待诊断分支：(a) PnL/IB endpoint 真不被调用；(b) 日志 level 不对没打出来；(c) cache_key 含时间戳导致每次都 miss
+原假设：cache 命中率异常。**澄清后**：PnL / IB 是 ClickHouse 功能，目前 user 基本不用，"零命中" = 这俩 endpoint 几乎没被调用，不是 cache 实现问题。
 
-需要先打开 DEBUG 日志或加埋点验证，**不能盲目调 TTL**。
+留作 follow-up 信号：如果未来 PnL / IB 重新启用，再回头看命中率是否符合预期；当前不投入诊断。
 
 ### 已知的灰色地带（先记着，audit 时验证）
 
-- IB Groups 进程内内存缓存 TTL **7 天**（`clickhouse_service.py:114-183`）—— 组别中途变更怎么办？目前无 invalidation 路径
-- Burst Open `_latest_result` 模块级变量（`burst_open_scheduler.py:32-35`），**无 size / TTL 限制**
-- Client Return 3h TTL 业务上是否过长？（财务团队对实时性的要求需要确认）
-- `singleflight.py` 日志里搜不到任何信号 —— 是真没并发请求触发，还是日志被吞了？
+**活跃路径**：
+- Burst Open `_latest_result` 模块级变量（`burst_open_scheduler.py:32-35`），**无 size / TTL 限制** —— risk-monitor 在用，需评估
+- Client Return 3h TTL 业务上是否过长？（财务团队对实时性的要求需要确认）—— 唯一活跃的 Redis 缓存
+
+**ClickHouse 路径（低优先，等 feature 复活再看）**：
+- IB Groups 进程内内存缓存 TTL **7 天**（`clickhouse_service.py:114-183`）—— 组别中途变更无 invalidation 路径
+- `singleflight.py` 日志零信号 —— 是真没并发，还是日志被吞了，暂不深究
 
 ## 假设 / 待验证
 
-- [ ] PnL / IB cache 日志缺失的原因：endpoint 真没被调用 vs 日志 level vs cache_key 构造问题
-- [ ] Redis maxmemory 设多少合适：当前 peak 5.6M，但 1 年内业务增长后峰值估算
+- [ ] Redis maxmemory 设多少合适：当前 peak 5.6M（且 PnL/IB 几乎没在写），1 年内 Client Return + 未来新 feature 峰值估算
 - [ ] 是否引入 React Query：依赖体积 vs 收益（涉及全前端改造，可能要单独 L 级别 OPT）
 - [ ] HTTP ETag 是否值得加：要看典型 endpoint payload 大小（小 payload 时 ETag 协商开销可能 ≥ 收益）
-- [ ] IB Groups 7 天 TTL 是否要降到 1 小时或加 manual invalidation 入口
+- [ ] Burst Open `_latest_result` 内存边界：极端场景能涨多大？要不要加上限
+- [ ] Client Return 3h TTL 业务上是否过长：财务实时性需求确认
+- [ ] **ClickHouse 路径整体去留**：PnL/IB 长期低活的话，是否考虑下线（单独开 OPT 评估，不在本 audit 内决定）
 
 ## 验收标准
 
@@ -100,11 +113,12 @@ related: [[OPT-0001]] [[OPT-0002]] [[OPT-0006]] [[OPT-0014]]
 - [ ] 对上面 5 条真问题逐条决定：
   - 拆成独立 sub-OPT 立刻 file（priority + effort 都定下来），或
   - 写明"现状可接受、不动"的理由（live with）
-- [ ] 至少为以下 3 个先拆出子 OPT（优先级建议见下）：
+- [ ] 至少为以下先拆出子 OPT（优先级建议见下）：
   - Redis maxmemory + eviction policy 硬化（建议 P1 / S，1 行 compose + 选 policy）
   - Redis 显式 volume + 持久化策略（P2 / S，需和运维确认丢失容忍度）
-  - PnL/IB cache 命中率诊断（P2 / S，先加日志，不动逻辑）
+  - Burst Open `_latest_result` 内存边界评估（P3 / S，估值后决定是否加上限）
 - [ ] 决定 React Query 引入 yes/no（如果 yes，单开 L 级别 OPT；如果 no，写明判断依据）
+- [ ] （可选）独立开 OPT 评估 ClickHouse 路径去留 —— 不在本 audit 内决定
 
 ## 笔记
 
