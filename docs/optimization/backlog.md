@@ -10,7 +10,7 @@
 
 | ID | Branch | Claim 日期 | 备注 |
 |----|--------|-----------|------|
-| [OPT-0021](./items/OPT-0021-risk-monitor-hedge-wash-tab.md) | `opt/risk-monitor-hedge-wash-tab` | 2026-05-19 | 对冲刷单新 tab，rule_id 91，复用 burst-open data |
+| _空_ | | | |
 
 ## ✅ 待领取（Ready）
 

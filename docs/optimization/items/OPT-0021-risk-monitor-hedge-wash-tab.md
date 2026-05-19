@@ -1,7 +1,7 @@
 ---
 id: OPT-0021
 title: Risk-monitor 新增「对冲刷单」Tab — 抓同账户 buy+sell 同 symbol 锁仓刷单
-status: wip
+status: done
 priority: P1
 area: mixed
 effort: L
@@ -61,11 +61,10 @@ Risk team 手动发现真实案例 `loginsid='5-67038515'` 在 2026-05-18 19:28:
 
 | 环境 | 扫描模式 | 依据 |
 |---|---|---|
-| Dev (10.6.20.138:5173) | Cursor / HWM watermark | `docker-compose.dev.yml:44` `CURSOR_SCAN_ENABLED=true` |
-| Prod (analysis.kohleservices.com) | overlap window（`scan_interval + 30s`） | prod compose 没设 env，默认 `false` |
+| Dev (10.6.20.138:5173) | Cursor / HWM watermark | `backend/docker-compose.dev.yml` `CURSOR_SCAN_ENABLED=true` |
+| Prod (analysis.kohleservices.com) | Cursor / HWM watermark + fast tier + SSE 三件套全开 | `docker-compose.prod.yml` `CURSOR_SCAN_ENABLED=true` + `BURST_FAST_TIER_ENABLED=true` + `SSE_ENABLED=true`（2026-05-17 `719eb66` 上线） |
 
-→ dedup key 设计必须同时支持**两种模式**：cursor 下基本 no-op；overlap 下防同窗口重复触发。
-顺手在实施中提一个 SKILL.md 文档修正（标明 prod/dev 当前的实际状态）。
+→ dedup key 仍然作为**防御性写法**保留（cursor 模式下 HWM 严格大于已经天然防重复，dedup 实际是 no-op；但万一未来回滚 flag / cold-start cursor 缺失走 legacy fallback，dedup 是兜底）。
 
 ## AC（v1 范围）
 
@@ -241,4 +240,62 @@ Risk team 手动发现真实案例 `loginsid='5-67038515'` 在 2026-05-18 19:28:
 
 ## 结果
 
-（done 后填）
+完成日期：2026-05-19。
+
+### 实际交付（vs AC）
+
+后端（AC 1-8 全部完成）：
+- ✅ `rule_hedge_open_service.py` (~430 行) — `rule_hedge_open_detect` + `scan_hedge_open` + 独立 `hedge_open` cursor 命名空间
+- ✅ `alert_hedge_open_detail` 表 1:1 与 `alert_events` JOIN（OPT-0008 模式）
+- ✅ `HedgeOpenRule` + `HedgeOpenConfig` schema（含 `name` + per-rule `enabled`）
+- ✅ 4 个 API endpoints (config GET/POST, alerts, stats, export)
+- ✅ `HEDGE_OPEN_RULE_ID_MIN/MAX = 91/100` 常量
+- ✅ Scheduler slow tier 接线（`tier ∈ {'all', 'slow'}`）
+- ✅ Dedup key `(91, server, login, symbol, window_first_open_time)`
+- ✅ `rule_label = "Rule N — <name>"` 快照
+
+前端（AC 9-10 全部完成）：
+- ✅ 第 5 个 tab 插入快速获利和 Gap Trade 之间
+- ✅ `HedgeOpenTab` + `HedgeConfigDrawer` 组件
+- ✅ 列持久化 (`RISK_MONITOR_HEDGE_OPEN_GRID_STATE_V1`)
+- ✅ 4 个 UI consistency fix（用户验收发现）：
+  - 单 rule card 不再居中（4 tab 全部统一）
+  - 「立即扫描」按钮加上（共用 burst-open scan-now）
+  - Drawer 启用 UI 跟 QOC/QP 对齐
+  - Header 行 breakpoint sm:→lg: 防 description 被挤压
+
+测试（AC 11）：
+- ✅ 12 个单元测试，全套 96/96 pass
+
+文档（AC 12-14）：
+- ✅ SKILL.md File Map / API Contracts / Data Model / Rule 列表 / Env Flags / Rule ID 表 / Implementation Status 全部更新
+- ✅ risk-monitor.md §3.5 + §4 Roadmap v2/v3/v4 + Rule 命名反向移植项
+- ✅ **额外交付**：page-style-conventions §9「多 Tab 数据页（Risk Monitor 模板）」沉淀 5 条跨 tab 设计规范
+
+### 偏差
+
+- ❌ AC §1 写「复用 burst data 零 SQL 增量」 → 实际：**改成独立 SQL + 共享 collector 函数 + 独立 cursor 命名空间**。原因：burst 在 fast tier (60s) 跑，hedge 在 slow tier (5-10min) 跑，不在同 tick；共享 data 会让 burst-fast-tier 的 HWM 推进吃掉 hedge 还没处理的行。代价：每个 slow tick 多 3 个 query（MT4×2 + MT5×1），cursor 模式下增量微小。
+- ➕ 额外引入「per-rule name 字段」(fund-flow 模板) — 第一次在 risk-monitor 出现。未来反向移植到其他 4 tab 是单独 follow-up。
+- ➕ 额外修了 OPT-0021 内 4 条 UI consistency issue + 文档化进 page-style-conventions §9。
+
+### Stage 1 outsider-review 处理记录
+
+Reviewer 提了 5 条 finding，全部 **live with** —— 经过深度核查发现：
+
+1. **跨模块 underscore import（reviewer P0 → 我 P1 → live with）** — `_query_mt4/mt5_recent_opens` 等 4 个借用。Codebase 已有先例（`test_scan_cursors.py` 早就这么用）。真问题是耦合而非约定。修复时机选在下一个 detector 上线 (Scale-In) 时一并抽 `services/mt_open_collector.py` 公共模块（~2hr 前置）。
+2. **hedge dedup 不 seed SQLite（reviewer P1 → 我 P3 → live with）** — 跟 QOC 和 burst 完全一致。`_build_quick_profit_prev_alerts` 是 QP 专属设计（滑动窗口跨 scan 状态），burst/QOC/hedge 都靠 cursor 模式天然防重。Reviewer 没看到 codebase parity。
+3. **schema migration helper（reviewer P2 → 撤销）** — 4 个已有 detail 表（QOC/QP/Gap SO/Gap Profit）**都没有** PRAGMA-check helper。给 hedge 加反而不一致。
+4. **`_ALERT_SELECT_SQL` 5-way JOIN 扩展（reviewer P1 → 我 P2 → live with）** — 当前 80k 行 paginate 50/页完全无感。500k+ 行 CSV 流式导出会感觉到。等 detector #6 触发再修。
+5. **前端 monolith 6700 行（reviewer P3 → live with）** — tab #6 之前必须拆 `RiskMonitor.tsx` → 每个 tab 一个文件。本 OPT 不做。
+
+→ 结论：5 条全部 live with，0 当场修，0 立新 hardening OPT。
+
+### Follow-up（留给未来）
+
+- 上线后 1-2 周观察 hedge 告警量：若 >100/day，提高 `min_orders_per_side` 默认（drawer 配置即可，不需要代码改动）
+- Scale-In OPT 启动时：先抽 `services/mt_open_collector.py` 公共模块，burst + Scale-In + hedge 都吃公共 API（fix Stage 1 finding #1）
+- Detector #6 上线前：refactor `query_alert_events` 接 `rule_id_min/max` hint，按需 JOIN 单一 detail 表（fix finding #4）
+- Tab #6 上线前：拆 `frontend/src/pages/RiskMonitor.tsx` monolith → 每个 tab 一个文件 + 共享 types（fix finding #5）
+- 反向移植 per-rule `name` 字段到 burst / QOC / QP 的 rule 配置（小 hr 工作，独立 OPT）
+- 若 `CURSOR_SCAN_ENABLED` 回滚：统一给 burst + QOC + hedge 加 `get_recent_<rule>_alerts(minutes)` SQLite seed pattern（参考 QP `_build_quick_profit_prev_alerts`）（fix finding #2 时机性触发）
+- Snapshot 偶尔会显示空 burst 段一次 tick — 仅 `BURST_FAST_TIER_ENABLED` true→false flip 瞬间，且仅影响 `/burst-open` GET 元数据，`/alerts` 走 SQLite 不受影响
