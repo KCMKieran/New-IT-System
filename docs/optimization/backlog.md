@@ -31,3 +31,4 @@
 | [OPT-0004](./items/OPT-0004-risk-monitor-arch.md) | mixed | Risk-monitor 架构/框架重构 | 太宽，需要先拆 3~5 个子任务（路由分层 / service 抽象 / 配置集中 / 任务调度 …） |
 | [OPT-0018](./items/OPT-0018-cache-layer-audit.md) | mixed | 全链路缓存审计与硬化（HTTP / 应用 / Redis / DB） | 已扫描出 5 条真问题（Redis 无 maxmemory、匿名 volume、PnL/IB hit rate 异常等），audit 完成后拆 3-5 个子 OPT |
 | [OPT-0020](./items/OPT-0020-client-return-rate-risk-signals.md) | mixed | Client Return Rate 加 4 个风控判断列（过夜 / USDT / Sharpe / Consistency） | 8 列分两 Drop 上线，复用 OPT-0006 的夜间预计算 SQLite 模式；claim 前需用户审 AC、回答 4 个开放问题 |
+| [OPT-0021](./items/OPT-0021-risk-monitor-hedge-wash-tab.md) | mixed | Risk-monitor 新增「对冲刷单」Tab（rule_id 91-100） | v1 覆盖单账户内部对冲 + 跨账户同 userid 对冲；触发自真实案例 `5-67038515`（NZDCHF.cent 同秒 120 单 buy+sell）；claim 前需确认默认阈值 |
