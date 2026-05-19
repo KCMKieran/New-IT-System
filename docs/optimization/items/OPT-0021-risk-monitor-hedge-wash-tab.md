@@ -61,11 +61,10 @@ Risk team 手动发现真实案例 `loginsid='5-67038515'` 在 2026-05-18 19:28:
 
 | 环境 | 扫描模式 | 依据 |
 |---|---|---|
-| Dev (10.6.20.138:5173) | Cursor / HWM watermark | `docker-compose.dev.yml:44` `CURSOR_SCAN_ENABLED=true` |
-| Prod (analysis.kohleservices.com) | overlap window（`scan_interval + 30s`） | prod compose 没设 env，默认 `false` |
+| Dev (10.6.20.138:5173) | Cursor / HWM watermark | `backend/docker-compose.dev.yml` `CURSOR_SCAN_ENABLED=true` |
+| Prod (analysis.kohleservices.com) | Cursor / HWM watermark + fast tier + SSE 三件套全开 | `docker-compose.prod.yml` `CURSOR_SCAN_ENABLED=true` + `BURST_FAST_TIER_ENABLED=true` + `SSE_ENABLED=true`（2026-05-17 `719eb66` 上线） |
 
-→ dedup key 设计必须同时支持**两种模式**：cursor 下基本 no-op；overlap 下防同窗口重复触发。
-顺手在实施中提一个 SKILL.md 文档修正（标明 prod/dev 当前的实际状态）。
+→ dedup key 仍然作为**防御性写法**保留（cursor 模式下 HWM 严格大于已经天然防重复，dedup 实际是 no-op；但万一未来回滚 flag / cold-start cursor 缺失走 legacy fallback，dedup 是兜底）。
 
 ## AC（v1 范围）
 
