@@ -477,10 +477,16 @@ const RETENTION_DAYS = 30;
  * action buttons use flex-wrap so they flow to new lines instead of overflowing.
  * (Project Button uses shrink-0 + whitespace-nowrap — a nowrap parent row overflows easily.)
  */
+// `lg:` (not `sm:`) so the side-by-side layout only kicks in at ≥1024px.
+// At sm/md widths (640–1023px), description and actions stack vertically
+// — otherwise a tab with 4–5 buttons (e.g. Quick Profit 立即扫描 + 刷新
+// 浮动 + 规则配置 + 列菜单 + 导出 CSV) eats so much horizontal space that
+// the description column degrades to one-character-per-line. Sticking to
+// vertical stack until full desktop width keeps the description readable.
 const RISK_MONITOR_HEADER_ROW =
-  "flex min-w-0 w-full max-w-full flex-col gap-3 sm:flex-row sm:items-start sm:justify-between";
+  "flex min-w-0 w-full max-w-full flex-col gap-3 lg:flex-row lg:items-start lg:justify-between";
 const RISK_MONITOR_HEADER_ACTIONS =
-  "flex min-w-0 w-full flex-wrap items-center gap-2 sm:w-auto sm:flex-nowrap sm:justify-end sm:shrink-0";
+  "flex min-w-0 w-full flex-wrap items-center gap-2 lg:w-auto lg:flex-nowrap lg:justify-end lg:shrink-0";
 
 function clampToRetention(since: Date): Date {
   const earliest = new Date(Date.now() - RETENTION_DAYS * 24 * 3600 * 1000);
@@ -1412,7 +1418,12 @@ function BurstOpenTab({ active }: { active: boolean }) {
             "grid w-full gap-1.5 sm:gap-2",
             config.rules.length > 1
               ? "grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4"
-              : "grid-cols-1 mx-auto max-w-md",
+              // Single rule still uses the multi-rule grid so the card
+              // lands top-left (consistent with the 2+ rule layout) instead
+              // of being centered with mx-auto — center-align made a single
+              // rule look like a "lonely floating card" especially on the
+              // freshly seeded 对冲刷单 tab.
+              : "grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4",
           )}
         >
           {config.rules.map((rule, idx) => {
@@ -2218,7 +2229,12 @@ function QuickOpenCloseTab({ active }: { active: boolean }) {
             "grid w-full gap-1.5 sm:gap-2",
             config.rules.length > 1
               ? "grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4"
-              : "grid-cols-1 mx-auto max-w-md",
+              // Single rule still uses the multi-rule grid so the card
+              // lands top-left (consistent with the 2+ rule layout) instead
+              // of being centered with mx-auto — center-align made a single
+              // rule look like a "lonely floating card" especially on the
+              // freshly seeded 对冲刷单 tab.
+              : "grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4",
           )}
         >
           {config.rules.map((rule, idx) => {
@@ -3472,7 +3488,12 @@ function QuickProfitTab({ active }: { active: boolean }) {
             "grid w-full gap-1.5 sm:gap-2",
             config.rules.length > 1
               ? "grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4"
-              : "grid-cols-1 mx-auto max-w-md",
+              // Single rule still uses the multi-rule grid so the card
+              // lands top-left (consistent with the 2+ rule layout) instead
+              // of being centered with mx-auto — center-align made a single
+              // rule look like a "lonely floating card" especially on the
+              // freshly seeded 对冲刷单 tab.
+              : "grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4",
           )}
         >
           {config.rules.map((rule, idx) => {
@@ -3936,6 +3957,7 @@ function HedgeOpenTab({ active }: { active: boolean }) {
   const [latestMeta, setLatestMeta] = useState<LatestScanMeta | null>(null);
   const [loading, setLoading] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [scanningNow, setScanningNow] = useState(false);
   const [lastRefresh, setLastRefresh] = useState<string | null>(null);
   const [config, setConfig] = useState<HedgeOpenConfig | null>(null);
   const [editConfig, setEditConfig] = useState<HedgeOpenConfig | null>(null);
@@ -4161,6 +4183,27 @@ function HedgeOpenTab({ active }: { active: boolean }) {
     }
   };
 
+  // Shares the burst-open scan-now endpoint: trigger_scan_now() runs
+  // _run_scan(tier='all') which fires every detector — burst + QOC +
+  // QP + hedge — in one tick. So the hedge tab's "立即扫描" delivers
+  // the same UX as the other tabs without a dedicated endpoint.
+  const handleScanNow = async () => {
+    setScanningNow(true);
+    try {
+      const res = await apiFetch("/api/v1/risk-monitor/burst-open/scan-now", {
+        method: "POST",
+      });
+      if (res.ok) {
+        setPageIndex(0);
+        await fetchAlerts();
+      }
+    } catch (err) {
+      console.error("Hedge-open scan-now failed:", err);
+    } finally {
+      setScanningNow(false);
+    }
+  };
+
   const handleSortChanged = useCallback((e: SortChangedEvent) => {
     const activeCol = e.api.getColumnState().find((c) => c.sort);
     const nextSortBy =
@@ -4370,6 +4413,17 @@ function HedgeOpenTab({ active }: { active: boolean }) {
             columnDefs={columnDefs as ColDef<unknown>[]}
             size="sm"
           />
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleScanNow}
+            disabled={scanningNow}
+          >
+            <RefreshCw
+              className={cn("h-4 w-4 mr-1.5", scanningNow && "animate-spin")}
+            />
+            {scanningNow ? "扫描中..." : "立即扫描"}
+          </Button>
         </div>
       </div>
 
@@ -4379,7 +4433,12 @@ function HedgeOpenTab({ active }: { active: boolean }) {
             "grid w-full gap-1.5 sm:gap-2",
             config.rules.length > 1
               ? "grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4"
-              : "grid-cols-1 mx-auto max-w-md",
+              // Single rule still uses the multi-rule grid so the card
+              // lands top-left (consistent with the 2+ rule layout) instead
+              // of being centered with mx-auto — center-align made a single
+              // rule look like a "lonely floating card" especially on the
+              // freshly seeded 对冲刷单 tab.
+              : "grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4",
           )}
         >
           {config.rules.map((rule, idx) => {
@@ -4693,23 +4752,25 @@ function HedgeConfigDrawer({
         )}
       >
         <DrawerHeader className="border-b px-6">
-          <DrawerTitle>对冲刷单 · 规则配置</DrawerTitle>
+          <DrawerTitle>对冲刷单规则配置</DrawerTitle>
         </DrawerHeader>
 
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
-          <div className="space-y-2">
-            <label className="flex items-center gap-2 text-sm font-medium">
+          {/* Master enable — matches the QOC / Quick Profit pattern:
+              label on the left, Checkbox right-aligned, small grey hint
+              underneath. See page-style-conventions §9. */}
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between">
+              <label className="text-sm font-medium">启用对冲刷单检测</label>
               <Checkbox
                 checked={config.enabled}
                 onCheckedChange={(v) =>
-                  setConfig({ ...config, enabled: !!v })
+                  setConfig({ ...config, enabled: v === true })
                 }
               />
-              启用对冲刷单检测（总开关）
-            </label>
+            </div>
             <p className="text-xs text-muted-foreground">
-              关闭后所有规则停用，但已有告警保留。扫描节奏跟随批量下单（slow tier，
-              每 5–10 分钟一次），不进入 60s fast tier。
+              关闭后仅停止新告警扫描，不影响历史告警展示。
             </p>
           </div>
 
