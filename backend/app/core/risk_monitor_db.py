@@ -40,6 +40,9 @@ SORTABLE_ALERT_COLS: frozenset[str] = frozenset({
     "open_diff_sec", "lot_ratio", "shared_ip_count",
     "client_userid", "contributing_account_count", "profit_ratio",
     "triggered_by", "window_date",
+    # Hedge Open columns (rule 91-100)
+    "buy_count", "sell_count", "buy_lots", "sell_lots",
+    "window_start", "window_end",
     # Frontend alias for the `account_group` DB column. We map it in
     # `_resolve_alert_order` so the API stays consistent with the
     # field name the React component already uses.
@@ -94,6 +97,13 @@ _SORT_COL_DB_NAME: dict[str, str] = {
     "triggered_by":               "gp.triggered_by",
     # window_date lives on both gap detail tables (one row only writes one)
     "window_date": "COALESCE(gso.window_date, gp.window_date)",
+    # Hedge Open detail (rule 91-100)
+    "buy_count":    "ho.buy_count",
+    "sell_count":   "ho.sell_count",
+    "buy_lots":     "ho.buy_lots",
+    "sell_lots":    "ho.sell_lots",
+    "window_start": "ho.window_start",
+    "window_end":   "ho.window_end",
 }
 
 _DB_PATH = Path(__file__).resolve().parents[2] / "data" / "risk_monitor.db"
@@ -280,6 +290,40 @@ CREATE TABLE IF NOT EXISTS alert_gap_profit_detail (
     window_date                 TEXT     -- "YYYY-MM-DD" MT trading day
 );
 
+-- Hedge Open detection (对冲刷单, rule_id 91-100). Single-row enabled flag
+-- plus a rules table mirroring the burst-open / quick-open-close pattern.
+-- `name` is user-supplied (fund-flow style) — analysts label each rule so
+-- the alert's `rule_label` reads "Rule 1 — <name>" instead of just "Rule 1".
+CREATE TABLE IF NOT EXISTS hedge_open_config (
+    id          INTEGER PRIMARY KEY CHECK (id = 1),
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    updated_at  DATETIME
+);
+INSERT OR IGNORE INTO hedge_open_config (id) VALUES (1);
+
+CREATE TABLE IF NOT EXISTS hedge_open_rules (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    name                 TEXT    NOT NULL DEFAULT '',
+    enabled              INTEGER NOT NULL DEFAULT 1,
+    window_sec           INTEGER NOT NULL DEFAULT 3,
+    min_orders_per_side  INTEGER NOT NULL DEFAULT 1,
+    min_total_lots       REAL    NOT NULL DEFAULT 0.01,
+    sort_order           INTEGER NOT NULL DEFAULT 0
+);
+
+-- Detail table for Hedge Open (rule_id 91-100). Per-side counts and lots
+-- plus window bounds; the common `total_lots` carries buy + sell sum so
+-- the existing total_lots column shows total wash volume.
+CREATE TABLE IF NOT EXISTS alert_hedge_open_detail (
+    id           INTEGER PRIMARY KEY,
+    buy_count    INTEGER,
+    sell_count   INTEGER,
+    buy_lots     REAL,
+    sell_lots    REAL,
+    window_start TEXT,
+    window_end   TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_alert_events_scanned_at
     ON alert_events(scanned_at DESC);
 CREATE INDEX IF NOT EXISTS idx_alert_events_login_scanned
@@ -334,6 +378,15 @@ INSERT INTO quick_profit_rules
 VALUES (30, 5000.0, 1, 0);
 """
 
+# Default Hedge Open rule: 3s window, ≥1 order each side, 0.01 lot floor
+# (catch even micro-lot wash trades). Pre-named so the UI label is meaningful
+# from first install.
+_SEED_HEDGE_OPEN_RULE_SQL = """
+INSERT INTO hedge_open_rules
+    (name, enabled, window_sec, min_orders_per_side, min_total_lots, sort_order)
+VALUES ('默认对冲检测', 1, 3, 1, 0.01, 0);
+"""
+
 
 def init_risk_monitor_db() -> None:
     """Create tables if they don't exist. Seed default rule on first run.
@@ -356,7 +409,10 @@ def init_risk_monitor_db() -> None:
         qp_count = conn.execute("SELECT COUNT(*) FROM quick_profit_rules").fetchone()[0]
         if qp_count == 0:
             conn.execute(_SEED_QUICK_PROFIT_RULE_SQL)
-        if count == 0 or quick_count == 0 or qp_count == 0:
+        ho_count = conn.execute("SELECT COUNT(*) FROM hedge_open_rules").fetchone()[0]
+        if ho_count == 0:
+            conn.execute(_SEED_HEDGE_OPEN_RULE_SQL)
+        if count == 0 or quick_count == 0 or qp_count == 0 or ho_count == 0:
             conn.commit()
 
         # Lightweight column migrations for installations created before
@@ -850,6 +906,66 @@ def save_quick_profit_config(enabled: bool, rules: list[dict]) -> None:
             )
 
 
+def load_hedge_open_config() -> dict[str, Any]:
+    """Read Hedge Open enabled flag + rules from SQLite.
+
+    NULL ``enabled`` (legacy rows; defensive) is treated as True so the UI
+    doesn't show the feature as disabled when nothing was explicitly stored.
+    Rule rows always come with ``name`` and per-rule ``enabled`` — the
+    scheduler skips rows with enabled=False so analysts can park a draft
+    rule without it firing.
+    """
+    with get_risk_monitor_db() as conn:
+        cfg_row = conn.execute(
+            "SELECT enabled FROM hedge_open_config WHERE id = 1"
+        ).fetchone()
+        if not cfg_row:
+            enabled = True
+        else:
+            raw = cfg_row["enabled"]
+            enabled = True if raw is None else bool(raw)
+
+        rule_rows = conn.execute(
+            "SELECT id, name, enabled, window_sec, min_orders_per_side, min_total_lots "
+            "FROM hedge_open_rules ORDER BY sort_order, id"
+        ).fetchall()
+        rules: list[dict[str, Any]] = []
+        for r in rule_rows:
+            d = dict(r)
+            d["enabled"] = True if d.get("enabled") is None else bool(d["enabled"])
+            rules.append(d)
+
+    return {"enabled": enabled, "rules": rules}
+
+
+def save_hedge_open_config(enabled: bool, rules: list[dict]) -> None:
+    """Overwrite Hedge Open enabled flag + rules atomically."""
+    with get_risk_monitor_db() as conn:
+        conn.execute(
+            "UPDATE hedge_open_config SET enabled = ?, "
+            "updated_at = datetime('now') WHERE id = 1",
+            (1 if enabled else 0,),
+        )
+        conn.execute("DELETE FROM hedge_open_rules")
+        conn.execute(
+            "DELETE FROM sqlite_sequence WHERE name = 'hedge_open_rules'"
+        )
+        for i, r in enumerate(rules):
+            conn.execute(
+                "INSERT INTO hedge_open_rules "
+                "(name, enabled, window_sec, min_orders_per_side, min_total_lots, sort_order) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    str(r.get("name", "")).strip(),
+                    1 if r.get("enabled", True) else 0,
+                    int(r["window_sec"]),
+                    int(r["min_orders_per_side"]),
+                    float(r["min_total_lots"]),
+                    i,
+                ),
+            )
+
+
 # ── Gap Trade config (JSON-blob single row) ───────────────
 
 
@@ -1040,6 +1156,11 @@ def append_scan_and_events(
                     _GAP_PROFIT_INSERT_SQL,
                     (event_id, *(alert.get(c) for c in _GAP_PROFIT_DETAIL_COLS)),
                 )
+            elif 91 <= rule_id <= 100:
+                conn.execute(
+                    _HEDGE_OPEN_INSERT_SQL,
+                    (event_id, *(alert.get(c) for c in _HEDGE_OPEN_DETAIL_COLS)),
+                )
 
         # Retention purge. Detail tables get cleaned via ON DELETE-style
         # cascade in spirit: we delete from alert_events and from each
@@ -1052,6 +1173,7 @@ def append_scan_and_events(
             "alert_quick_profit_detail",
             "alert_gap_so_detail",
             "alert_gap_profit_detail",
+            "alert_hedge_open_detail",
         ):
             conn.execute(
                 f"DELETE FROM {detail_table} "
@@ -1218,6 +1340,11 @@ _GAP_PROFIT_DETAIL_COLS: tuple[str, ...] = (
     "symbols", "symbol_count", "profit_ratio", "triggered_by", "window_date",
 )
 
+_HEDGE_OPEN_DETAIL_COLS: tuple[str, ...] = (
+    "buy_count", "sell_count", "buy_lots", "sell_lots",
+    "window_start", "window_end",
+)
+
 
 def _build_detail_insert_sql(table: str, cols: tuple[str, ...]) -> str:
     """Compose `INSERT INTO <table> (id, <cols>) VALUES (?, ...)`."""
@@ -1231,6 +1358,7 @@ _QUICK_OC_INSERT_SQL = _build_detail_insert_sql("alert_quick_oc_detail", _QUICK_
 _QUICK_PROFIT_INSERT_SQL = _build_detail_insert_sql("alert_quick_profit_detail", _QUICK_PROFIT_DETAIL_COLS)
 _GAP_SO_INSERT_SQL = _build_detail_insert_sql("alert_gap_so_detail", _GAP_SO_DETAIL_COLS)
 _GAP_PROFIT_INSERT_SQL = _build_detail_insert_sql("alert_gap_profit_detail", _GAP_PROFIT_DETAIL_COLS)
+_HEDGE_OPEN_INSERT_SQL = _build_detail_insert_sql("alert_hedge_open_detail", _HEDGE_OPEN_DETAIL_COLS)
 
 
 # Unified SELECT with 4 LEFT JOINs — used by every reader so the API-facing
@@ -1264,6 +1392,9 @@ _ALERT_SELECT_SQL = """
     gp.symbols, gp.symbol_count,
     gp.profit_ratio, gp.triggered_by,
 
+    ho.buy_count, ho.sell_count, ho.buy_lots, ho.sell_lots,
+    ho.window_start, ho.window_end,
+
     COALESCE(gso.window_date, gp.window_date) AS window_date
 """
 
@@ -1273,6 +1404,7 @@ LEFT JOIN alert_quick_oc_detail      qoc ON qoc.id = ae.id
 LEFT JOIN alert_quick_profit_detail  qp  ON qp.id  = ae.id
 LEFT JOIN alert_gap_so_detail        gso ON gso.id = ae.id
 LEFT JOIN alert_gap_profit_detail    gp  ON gp.id  = ae.id
+LEFT JOIN alert_hedge_open_detail    ho  ON ho.id  = ae.id
 """
 
 

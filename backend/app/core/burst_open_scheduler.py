@@ -98,9 +98,11 @@ def _run_scan(*, tier: str = "all") -> None:
         append_scan_and_events,
         get_recent_quick_profit_alerts,
         load_config,
+        load_hedge_open_config,
         load_quick_open_close_config,
         load_quick_profit_config,
     )
+    from ..services.rule_hedge_open_service import scan_hedge_open
     from ..services.rule_quick_open_close_service import scan_quick_open_close
     from ..services.rule_quick_profit_service import scan_quick_profit
     from ..services.risk_monitor_service import scan_burst_open
@@ -108,11 +110,16 @@ def _run_scan(*, tier: str = "all") -> None:
     include_burst = tier in ("all", "fast_burst")
     include_quick_oc = tier in ("all", "slow")
     include_qp = tier in ("all", "slow")
+    # Hedge Open (rule_id 91-100): goes in slow tier next to QOC + QP.
+    # Wash-trading detection doesn't need sub-minute responsiveness; 5-10
+    # min cadence matches its analyst-followup mental model.
+    include_hedge = tier in ("all", "slow")
 
     try:
         config = load_config()
         quick_config = load_quick_open_close_config()
         qp_config = load_quick_profit_config()
+        hedge_config = load_hedge_open_config()
         settings = get_settings()
 
         # Always merge SQLite-recent QP alerts into the dedup pool — see
@@ -157,6 +164,22 @@ def _run_scan(*, tier: str = "all") -> None:
             except Exception:
                 logger.error("Quick profit scan failed", exc_info=True)
 
+        # Hedge Open (rule_id 91-100). Independent SQL because burst-fast-tier
+        # owns its own cursor — sharing data with burst would fail when burst
+        # advances HWM past data hedge hasn't yet processed. Own cursor
+        # namespace ("hedge_open") keeps the two scans isolated.
+        hedge_result: dict[str, Any] | None = None
+        if include_hedge and hedge_config.get("enabled", True) and hedge_config.get("rules"):
+            try:
+                hedge_result = scan_hedge_open(
+                    settings,
+                    scan_interval_min=config["scan_interval_min"],
+                    rules=hedge_config["rules"],
+                    previous_alerts=prev_alerts,
+                )
+            except Exception:
+                logger.error("Hedge open scan failed", exc_info=True)
+
         # Build this tick's alerts. For tiered modes ('fast_burst'/'slow'),
         # we MERGE with the not-touched alerts from _latest_result so the
         # cached snapshot stays consistent (frontend "立即扫描" reads it).
@@ -167,6 +190,8 @@ def _run_scan(*, tier: str = "all") -> None:
             this_tick_alerts.extend(quick_result["alerts"])
         if qp_result:
             this_tick_alerts.extend(qp_result["alerts"])
+        if hedge_result:
+            this_tick_alerts.extend(hedge_result["alerts"])
 
         if tier == "fast_burst":
             # Keep slow-tier alerts (rule_id >= 51) from previous result;
@@ -189,9 +214,10 @@ def _run_scan(*, tier: str = "all") -> None:
         burst_pairs = burst_result.pop("_universe_pairs", set()) if burst_result else set()
         quick_pairs = quick_result.pop("_universe_pairs", set()) if quick_result else set()
         qp_pairs = qp_result.pop("_universe_pairs", set()) if qp_result else set()
+        hedge_pairs = hedge_result.pop("_universe_pairs", set()) if hedge_result else set()
 
         # For tier modes, the scan_time_ms reflects only what this tick ran.
-        ran_results = [r for r in (burst_result, quick_result, qp_result) if r]
+        ran_results = [r for r in (burst_result, quick_result, qp_result, hedge_result) if r]
         if not ran_results:
             # tier='slow' with everything disabled — nothing to persist, but
             # still safe to return without touching state.
@@ -202,7 +228,7 @@ def _run_scan(*, tier: str = "all") -> None:
             "summary": {
                 "suspicious_count": len(merged_alerts),
                 "total_accounts_scanned": len(
-                    set(burst_pairs) | set(quick_pairs) | set(qp_pairs)
+                    set(burst_pairs) | set(quick_pairs) | set(qp_pairs) | set(hedge_pairs)
                 ),
             },
             "burst_summary": (burst_result["summary"] if burst_result

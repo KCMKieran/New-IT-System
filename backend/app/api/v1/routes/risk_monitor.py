@@ -38,11 +38,13 @@ from ....core.risk_monitor_db import (
     get_alerts_by_ids,
     load_config,
     load_gap_trade_config,
+    load_hedge_open_config,
     load_quick_open_close_config,
     load_quick_profit_config,
     query_alert_events,
     save_config,
     save_gap_trade_config,
+    save_hedge_open_config,
     save_quick_open_close_config,
     save_quick_profit_config,
     stream_alert_events,
@@ -62,6 +64,7 @@ from ....schemas.risk_monitor import (
     BurstOpenScanResult,
     BurstOpenSummary,
     GapTradeConfig,
+    HedgeOpenConfig,
     QuickOpenCloseConfig,
     QuickProfitConfig,
     QuickProfitFloatingRefreshItem,
@@ -108,6 +111,11 @@ GAP_TRADE_RULE_ID_MAX = 90
 # bug — the /quick-profit/* endpoints started leaking Gap Trade rows into
 # Quick Profit's table / stats / CSV / floating-refresh batch.
 QUICK_PROFIT_RULE_MAX_ID = GAP_TRADE_RULE_ID_MIN - 1
+# Hedge Open (对冲刷单, OPT-0021): 91-100, 10-slot band per convention.
+# v1 only fires rule 91; 92-100 reserved for future variants without
+# requiring another band shift.
+HEDGE_OPEN_RULE_ID_MIN = 91
+HEDGE_OPEN_RULE_ID_MAX = 100
 
 # Default look-back window when the frontend omits `since`.
 # Aligns with the "最近 4 小时" default on the page.
@@ -1442,6 +1450,236 @@ async def gap_trade_alerts_export(
         )
     except Exception as exc:
         logger.error("Failed to export gap-trade alerts: %s", exc, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        ) from exc
+
+
+# ── Hedge Open endpoints (对冲刷单, OPT-0021) ──────────────
+# Single-account wash trading detection: same (server, login, symbol) opens
+# both buy and sell within a 3s window with exactly balanced lot sums.
+# Rule IDs 91-100 — v1 only uses 91.
+
+# Hedge alerts carry per-side counts/lots + window bounds on top of the
+# common alert_events shape. CSV order mirrors the on-page grid in
+# HedgeOpenTab so analysts see the same columns wherever they pull data.
+_HEDGE_OPEN_CSV_HEADER = [
+    "rule_label",
+    "scanned_at",
+    "server",
+    "zipcode",
+    "login",
+    "currency",
+    "net_deposit_hist",
+    "symbol",
+    "buy_count",
+    "sell_count",
+    "buy_lots",
+    "sell_lots",
+    "total_lots",
+    "window_start",
+    "window_end",
+    "group",
+    "rule_id",
+]
+
+
+def _csv_row_from_hedge_open(entry: dict) -> list:
+    def _opt(key: str) -> Any:
+        v = entry.get(key)
+        return "" if v is None else v
+    return [
+        entry.get("rule_label", ""),
+        entry.get("scanned_at", ""),
+        entry.get("server", ""),
+        entry.get("zipcode") or "",
+        entry.get("login", ""),
+        entry.get("currency") or "",
+        _opt("net_deposit_hist"),
+        entry.get("symbol", ""),
+        _opt("buy_count"),
+        _opt("sell_count"),
+        _opt("buy_lots"),
+        _opt("sell_lots"),
+        entry.get("total_lots", ""),
+        entry.get("window_start") or "",
+        entry.get("window_end") or "",
+        entry.get("group") or "",
+        entry.get("rule_id", ""),
+    ]
+
+
+@router.get("/hedge-open/config", response_model=HedgeOpenConfig)
+async def hedge_open_get_config():
+    try:
+        cfg = load_hedge_open_config()
+        return HedgeOpenConfig(**cfg)
+    except Exception as exc:
+        logger.error("Failed to read hedge-open config: %s", exc, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        ) from exc
+
+
+@router.post("/hedge-open/config", response_model=HedgeOpenConfig)
+async def hedge_open_update_config(config: HedgeOpenConfig):
+    if len(config.rules) > MAX_RULES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Maximum {MAX_RULES} rules allowed.",
+        )
+    if len(config.rules) == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="At least one rule is required.",
+        )
+    try:
+        rules_dicts = [r.model_dump(exclude={"id"}) for r in config.rules]
+        save_hedge_open_config(config.enabled, rules_dicts)
+        return HedgeOpenConfig(**load_hedge_open_config())
+    except Exception as exc:
+        logger.error("Failed to update hedge-open config: %s", exc, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        ) from exc
+
+
+@router.get("/hedge-open/alerts", response_model=AlertsResponse)
+async def hedge_open_alerts(
+    since: Optional[str] = Query(default=None),
+    until: Optional[str] = Query(default=None),
+    server: Optional[str] = Query(default=None),
+    login: Optional[int] = Query(default=None),
+    symbol: Optional[str] = Query(default=None),
+    rule_id: Optional[int] = Query(default=None),
+    zipcode: Optional[str] = Query(default=None, max_length=64),
+    page: Optional[int] = Query(default=None, ge=1),
+    page_size: int = Query(default=50, ge=1, le=_MAX_PAGE_SIZE),
+    limit: Optional[int] = Query(default=None, ge=1, le=_MAX_PAGE_SIZE),
+    offset: Optional[int] = Query(default=None, ge=0),
+    sort_by: Optional[str] = Query(default=None),
+    sort_order: Optional[str] = Query(default=None),
+):
+    since_iso, until_iso = _default_since_until(since, until)
+    zipcode_clean = _clean_zipcode(zipcode)
+
+    if page is not None:
+        effective_limit = page_size
+        effective_offset = (page - 1) * page_size
+        effective_page = page
+    else:
+        effective_limit = limit if limit is not None else page_size
+        effective_offset = offset or 0
+        effective_page = (effective_offset // effective_limit) + 1 if effective_limit else 1
+        page_size = effective_limit
+
+    try:
+        entries, total = query_alert_events(
+            since=since_iso,
+            until=until_iso,
+            server=server,
+            login=login,
+            symbol=symbol,
+            rule_id=rule_id,
+            rule_id_min=HEDGE_OPEN_RULE_ID_MIN,
+            rule_id_max=HEDGE_OPEN_RULE_ID_MAX,
+            zipcode=zipcode_clean,
+            limit=effective_limit,
+            offset=effective_offset,
+            sort_by=sort_by,
+            sort_order=sort_order,
+        )
+        return AlertsResponse(
+            entries=[AlertEvent(**e) for e in entries],
+            total=total,
+            since=since_iso,
+            until=until_iso,
+            page=effective_page,
+            page_size=page_size,
+        )
+    except Exception as exc:
+        logger.error("Failed to query hedge-open alerts: %s", exc, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        ) from exc
+
+
+@router.get("/hedge-open/alerts/stats", response_model=AlertsStats)
+async def hedge_open_alerts_stats(
+    since: Optional[str] = Query(default=None),
+    until: Optional[str] = Query(default=None),
+    server: Optional[str] = Query(default=None),
+    login: Optional[int] = Query(default=None),
+    zipcode: Optional[str] = Query(default=None, max_length=64),
+):
+    since_iso, until_iso = _default_since_until(since, until)
+    zipcode_clean = _clean_zipcode(zipcode)
+    try:
+        stats = alert_events_stats(
+            since=since_iso,
+            until=until_iso,
+            server=server,
+            login=login,
+            rule_id_min=HEDGE_OPEN_RULE_ID_MIN,
+            rule_id_max=HEDGE_OPEN_RULE_ID_MAX,
+            zipcode=zipcode_clean,
+            include_rule_breakdown=True,
+        )
+        return AlertsStats(**stats)
+    except Exception as exc:
+        logger.error("Failed to compute hedge-open stats: %s", exc, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        ) from exc
+
+
+@router.get("/hedge-open/alerts/export")
+async def hedge_open_alerts_export(
+    since: Optional[str] = Query(default=None),
+    until: Optional[str] = Query(default=None),
+    server: Optional[str] = Query(default=None),
+    login: Optional[int] = Query(default=None),
+    symbol: Optional[str] = Query(default=None),
+    rule_id: Optional[int] = Query(default=None),
+    zipcode: Optional[str] = Query(default=None, max_length=64),
+    sort_by: Optional[str] = Query(default=None),
+    sort_order: Optional[str] = Query(default=None),
+):
+    since_iso, until_iso = _default_since_until(since, until)
+    zipcode_clean = _clean_zipcode(zipcode)
+    filename = "risk-monitor-hedge-open.csv"
+    try:
+        return StreamingResponse(
+            _csv_stream(
+                since_iso=since_iso,
+                until_iso=until_iso,
+                server=server,
+                login=login,
+                symbol=symbol,
+                rule_id=rule_id,
+                rule_id_min=HEDGE_OPEN_RULE_ID_MIN,
+                rule_id_max=HEDGE_OPEN_RULE_ID_MAX,
+                zipcode_clean=zipcode_clean,
+                sort_by=sort_by,
+                sort_order=sort_order,
+                header=_HEDGE_OPEN_CSV_HEADER,
+                row_fn=_csv_row_from_hedge_open,
+            ),
+            media_type="text/csv; charset=utf-8",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="{filename}"; '
+                    f"filename*=UTF-8''{quote(filename)}"
+                ),
+            },
+        )
+    except Exception as exc:
+        logger.error("Failed to export hedge-open alerts: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(exc),

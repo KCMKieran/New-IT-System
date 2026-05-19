@@ -59,6 +59,39 @@ class QuickProfitConfig(BaseModel):
     rules: List[QuickProfitRule] = []
 
 
+# Hedge Open detection (对冲刷单, rule_ids 91-100).
+# Per (server, login, symbol) sliding window over OPEN_TIME: trigger when
+# buy & sell sides both have orders AND total lots are exactly balanced
+# (|buy_lots - sell_lots| < EPS, EPS hard-coded at 0.01 lot for v1) AND
+# the matched side ≥ min_total_lots. Catches wash trading via lock-position
+# even at small lot sizes (Burst Open would miss when min_lots_per_order is
+# raised — the user case that motivated this was 199 lots so burst caught
+# it, but 0.5-lot wash trading would slip through).
+#
+# Single-account v1: same `login` opens both directions. Cross-loginsid /
+# cross-clientid kept for v2+ pending real-world false-positive evaluation.
+class HedgeOpenRule(BaseModel):
+    id: Optional[int] = None
+    # Free-text rule name (fund-flow style) so analysts can label what each
+    # rule is meant to catch, e.g. "高频小手数刷单" vs "大额完美对冲". Stored
+    # alongside rule_id; the snapshot is written into AlertEvent.rule_label
+    # as f"Rule {idx} — {name}" at trigger time.
+    name: str = Field(min_length=1, max_length=100)
+    enabled: bool = True
+    window_sec: int = Field(default=3, ge=1, le=60)
+    # Both sides need ≥ N orders. 1 = any pair qualifies (loosest); tightening
+    # here primarily filters out coincidental opposite stop orders.
+    min_orders_per_side: int = Field(default=1, ge=1, le=50)
+    # Floor on min(buy_lots, sell_lots) — the "matched hedge size".
+    # 0.01 = MT4 minimum lot step (catch even micro wash); raise to ignore noise.
+    min_total_lots: float = Field(default=0.01, ge=0.01, le=10000.0)
+
+
+class HedgeOpenConfig(BaseModel):
+    enabled: bool = True
+    rules: List[HedgeOpenRule] = []
+
+
 # ── Gap Trade (rule_ids 71-90) ────────────────────────────
 # Two sub-detectors share one config + scheduled scan window (MT 00:00–02:00
 # Mon–Fri). Sub-detector A finds Stop-out trades and pairs them with a
@@ -257,6 +290,16 @@ class AlertEvent(BaseModel):
     profit_ratio: Optional[float] = None
     triggered_by: Optional[str] = None                # "ratio" | "absolute" | "both"
     window_date: Optional[str] = None                 # "YYYY-MM-DD" (MT date)
+    # ── Hedge Open extras (rule_ids 91-100) ──
+    # Per-side counts and total lots within the matched 3s window. The
+    # shared `total_lots` field carries buy_lots + sell_lots (= 2× matched
+    # hedge size). `orders` holds the full ticket list for the Sheet drill-down.
+    buy_count: Optional[int] = None
+    sell_count: Optional[int] = None
+    buy_lots: Optional[float] = None
+    sell_lots: Optional[float] = None
+    window_start: Optional[str] = None                # ISO8601 UTC (first OPEN_TIME in window)
+    window_end: Optional[str] = None                  # ISO8601 UTC (last OPEN_TIME in window)
 
 
 class AlertsResponse(BaseModel):
