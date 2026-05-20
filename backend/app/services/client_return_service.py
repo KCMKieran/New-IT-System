@@ -175,6 +175,7 @@ SELECT
     COALESCE(uc.country, 'Unknown') AS country,
     zc.zipcode AS zipcode,
     COALESCE(akcm.is_akcm, 0) AS is_akcm,
+    COALESCE(usdt.has_usdt_tag, 0) AS has_usdt_tag,
 
     CASE
         WHEN COALESCE(th.deposits_hist, 0) / GREATEST(COALESCE(th.deposit_count, 1), 1) < 2000 THEN '0-2000'
@@ -325,6 +326,16 @@ LEFT JOIN (
     WHERE tagid = 30154
       AND userid IN ({id_list_str})
 ) AS akcm ON tm.id = akcm.client_id
+
+-- USDT tag (any of 6148 / 214 / 172). Mirrors AKCM template; user_tags has a
+-- composite (tagId, userId) index, so this is an index range scan bounded by
+-- the Phase-1 active client_id list, not a per-user lookup. See OPT-0022.
+LEFT JOIN (
+    SELECT DISTINCT userid AS client_id, 1 AS has_usdt_tag
+    FROM user_tags
+    WHERE tagid IN (6148, 214, 172)
+      AND userid IN ({id_list_str})
+) AS usdt ON tm.id = usdt.client_id
 {avg_equity_join}
 
 WHERE tm.id IN ({id_list_str})
@@ -364,6 +375,7 @@ def get_client_return_rate_data(
     include_avg_equity: bool = False,
     country_filter: Optional[str] = None,
     akcm_filter: Optional[str] = None,
+    usdt_filter: Optional[str] = None,
     return_all: bool = False,
     use_cache: bool = True,
 ) -> Dict[str, Any]:
@@ -392,7 +404,7 @@ def get_client_return_rate_data(
         "adj_0_2000", "adj_2000_5000", "adj_5000_50000", "adj_50000_plus",
         "deposits_90d", "return_neg_adjusted",
         "avg_daily_equity", "return_on_avg_equity",
-        "zipcode",
+        "zipcode", "is_akcm", "has_usdt_tag",
     }
     if sort_by not in allowed_sort_columns:
         sort_by = "month_trade_profit"
@@ -412,10 +424,10 @@ def get_client_return_rate_data(
 
     # Redis cache
     cache_params = (
-        "client_return_v4_zipcode_"
+        "client_return_v5_usdt_"
         f"{month_start}_{month_end}_{search}_{deposit_bucket}_{sort_by}_{sort_order}_"
         f"{page}_{page_size}_{close_time_start}_{include_avg_equity}_"
-        f"{country_filter}_{akcm_filter}_{return_all}"
+        f"{country_filter}_{akcm_filter}_{usdt_filter}_{return_all}"
     )
     cache_key = f"app:client_return:cache:{hashlib.md5(cache_params.encode()).hexdigest()}"
 
@@ -540,6 +552,7 @@ def get_client_return_rate_data(
                 if isinstance(v, Decimal):
                     row[k] = float(v)
             row["is_akcm"] = bool(row.get("is_akcm", 0))
+            row["has_usdt_tag"] = bool(row.get("has_usdt_tag", 0))
             zc = row.get("zipcode")
             if zc is not None and isinstance(zc, str):
                 row["zipcode"] = zc.strip() or None
@@ -556,6 +569,11 @@ def get_client_return_rate_data(
             all_data = [r for r in all_data if not bool(r.get("is_akcm"))]
         elif akcm_filter == "only":
             all_data = [r for r in all_data if bool(r.get("is_akcm"))]
+
+        if usdt_filter == "exclude":
+            all_data = [r for r in all_data if not bool(r.get("has_usdt_tag"))]
+        elif usdt_filter == "only":
+            all_data = [r for r in all_data if bool(r.get("has_usdt_tag"))]
 
         all_data = _sort_client_return_rows(all_data, sort_by=sort_by, sort_order=sort_order)
 

@@ -50,7 +50,6 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { DateRange } from "react-day-picker";
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { InfoHeader } from "@/components/ui/info-header";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { useGridColumnPersist } from "@/hooks/useGridColumnPersist";
@@ -76,6 +75,8 @@ interface ClientReturnRateRow {
   /** CRM zipcode from mt4_users.ZIPCODE (same source as risk-monitor); null if empty. */
   zipcode?: string | null;
   is_akcm: boolean;
+  /** True if client carries any USDT tag (tagid IN 6148/214/172). OPT-0022. */
+  has_usdt_tag: boolean;
 }
 
 interface CachedState {
@@ -186,6 +187,7 @@ export default function ClientReturnRate() {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [countryFilter, setCountryFilter] = useState<string>("all");
   const [akcmFilter, setAkcmFilter] = useState<string>("all");
+  const [usdtFilter, setUsdtFilter] = useState<string>("all");
   const [exportTaskId, setExportTaskId] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
   const [exportStatusText, setExportStatusText] = useState<string>("");
@@ -202,8 +204,13 @@ export default function ClientReturnRate() {
     } else if (akcmFilter === "only") {
       result = result.filter((r) => r.is_akcm);
     }
+    if (usdtFilter === "exclude") {
+      result = result.filter((r) => !r.has_usdt_tag);
+    } else if (usdtFilter === "only") {
+      result = result.filter((r) => r.has_usdt_tag);
+    }
     return result;
-  }, [rows, countryFilter, akcmFilter]);
+  }, [rows, countryFilter, akcmFilter, usdtFilter]);
 
   const getDateRange = useCallback(() => {
     const now = new Date();
@@ -395,6 +402,7 @@ export default function ClientReturnRate() {
         include_avg_equity: true,
         country_filter: countryFilter,
         akcm_filter: akcmFilter,
+        usdt_filter: usdtFilter,
       };
       const res = await apiFetch("/api/v1/client-return-rate/export/tasks", {
         method: "POST",
@@ -426,6 +434,7 @@ export default function ClientReturnRate() {
     timeRange,
     countryFilter,
     akcmFilter,
+    usdtFilter,
   ]);
 
   useEffect(() => {
@@ -539,6 +548,29 @@ export default function ClientReturnRate() {
         headerName: "zipcode",
         width: 120,
         valueFormatter: (p) => (p.value == null || p.value === "" ? "" : String(p.value)),
+      },
+      {
+        // OPT-0022: client carries any USDT tag (tagid IN 6148/214/172).
+        // colId required by useGridColumnPersist convention (see CLAUDE.md).
+        // Underlying value is 0/1 (number) so the number filter operates on
+        // 1/0 directly; display is formatted to 是/否 via valueFormatter.
+        colId: "has_usdt_tag",
+        field: "has_usdt_tag",
+        headerName: "U入金",
+        headerComponent: InfoHeader,
+        headerComponentParams: {
+          tooltip:
+            "含 tag：U_ERC20, U_TRC20, U_电汇TT\n" +
+            "如有更新，请联系 Kieran 添加",
+        },
+        width: 90,
+        valueGetter: (p) => (p.data?.has_usdt_tag ? 1 : 0),
+        valueFormatter: (p) => (p.value === 1 ? "是" : "否"),
+        cellClass: (p) =>
+          p.value === 1
+            ? "text-center text-emerald-600 dark:text-emerald-400 font-medium"
+            : "text-center text-muted-foreground",
+        filter: "agNumberColumnFilter",
       },
       {
         field: "net_deposit_hist",
@@ -693,9 +725,9 @@ export default function ClientReturnRate() {
           </p>
         </CardHeader>
         <CardContent>
-          <div className="flex flex-col sm:flex-row gap-3 items-center justify-between">
-            {/* Filter controls */}
-            <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 w-full sm:w-auto">
+          <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
+            {/* Filter controls — flex-wrap so 3 dropdowns + date + time + search reflow on narrow screens */}
+            <div className="flex flex-col gap-2 w-full sm:flex-row sm:flex-wrap sm:items-center sm:gap-3 sm:w-auto sm:flex-1 max-w-full">
               {/* Date Range Picker */}
               <Popover>
                 <PopoverTrigger asChild>
@@ -783,65 +815,59 @@ export default function ClientReturnRate() {
                 )}
               </div>
 
-              {/* Country Filter (CN / Global) */}
-              <ToggleGroup
-                type="single"
-                value={countryFilter}
-                onValueChange={(v) => v && setCountryFilter(v)}
-                className="flex w-full sm:w-[300px] items-center rounded-full bg-muted p-1"
-              >
-                <ToggleGroupItem
-                  value="all"
-                  className="flex-1 rounded-full first:rounded-l-full last:rounded-r-full py-1 text-center text-sm text-muted-foreground
-                             data-[state=on]:bg-background data-[state=on]:text-foreground data-[state=on]:shadow"
+              {/* Country Filter (CN / Global) — risk-monitor style dropdown */}
+              <Select value={countryFilter} onValueChange={setCountryFilter}>
+                <SelectTrigger
+                  className="w-full min-w-0 h-9 sm:w-40 sm:shrink-0"
+                  aria-label="按国家筛选"
                 >
-                  全部
-                </ToggleGroupItem>
-                <ToggleGroupItem
-                  value="CN"
-                  className="flex-1 rounded-full first:rounded-l-full last:rounded-r-full py-1 text-center text-sm text-muted-foreground
-                             data-[state=on]:bg-background data-[state=on]:text-foreground data-[state=on]:shadow"
-                >
-                  CN
-                </ToggleGroupItem>
-                <ToggleGroupItem
-                  value="Global"
-                  className="flex-1 rounded-full first:rounded-l-full last:rounded-r-full py-1 text-center text-sm text-muted-foreground
-                             data-[state=on]:bg-background data-[state=on]:text-foreground data-[state=on]:shadow"
-                >
-                  Global
-                </ToggleGroupItem>
-              </ToggleGroup>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">全部国家</SelectItem>
+                  <SelectItem value="CN">CN</SelectItem>
+                  <SelectItem value="Global">Global</SelectItem>
+                </SelectContent>
+              </Select>
 
               {/* AKCM Tag Filter */}
-              <ToggleGroup
-                type="single"
-                value={akcmFilter}
-                onValueChange={(v) => v && setAkcmFilter(v)}
-                className="flex w-full sm:w-[300px] items-center rounded-full bg-muted p-1"
-              >
-                <ToggleGroupItem
-                  value="all"
-                  className="flex-1 rounded-full first:rounded-l-full last:rounded-r-full py-1 text-center text-sm text-muted-foreground
-                             data-[state=on]:bg-background data-[state=on]:text-foreground data-[state=on]:shadow"
+              <Select value={akcmFilter} onValueChange={setAkcmFilter}>
+                <SelectTrigger
+                  className="w-full min-w-0 h-9 sm:w-40 sm:shrink-0"
+                  aria-label="按 AKCM 标签筛选"
                 >
-                  全部
-                </ToggleGroupItem>
-                <ToggleGroupItem
-                  value="exclude"
-                  className="flex-1 rounded-full first:rounded-l-full last:rounded-r-full py-1 text-center text-sm text-muted-foreground
-                             data-[state=on]:bg-background data-[state=on]:text-foreground data-[state=on]:shadow"
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">全部 AKCM</SelectItem>
+                  <SelectItem value="only">仅 AKCM</SelectItem>
+                  <SelectItem value="exclude">排除 AKCM</SelectItem>
+                </SelectContent>
+              </Select>
+
+              {/* 入金渠道 (USDT) Tag Filter — OPT-0022.
+                  Trigger 显示类目名「入金渠道」（非 "全部 X" 句式），点开是
+                  全部 / 仅U入金 / 非U入金。SelectValue children 覆盖默认展示，
+                  当选了具体值时显示该选项的文字，否则维持类目名。 */}
+              <Select value={usdtFilter} onValueChange={setUsdtFilter}>
+                <SelectTrigger
+                  className="w-full min-w-0 h-9 sm:w-40 sm:shrink-0"
+                  aria-label="按入金渠道筛选"
                 >
-                  排除AKCM
-                </ToggleGroupItem>
-                <ToggleGroupItem
-                  value="only"
-                  className="flex-1 rounded-full first:rounded-l-full last:rounded-r-full py-1 text-center text-sm text-muted-foreground
-                             data-[state=on]:bg-background data-[state=on]:text-foreground data-[state=on]:shadow"
-                >
-                  仅AKCM
-                </ToggleGroupItem>
-              </ToggleGroup>
+                  <SelectValue>
+                    {usdtFilter === "only"
+                      ? "仅 U入金"
+                      : usdtFilter === "exclude"
+                        ? "非 U入金"
+                        : "入金渠道"}
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">全部</SelectItem>
+                  <SelectItem value="only">仅 U入金</SelectItem>
+                  <SelectItem value="exclude">非 U入金</SelectItem>
+                </SelectContent>
+              </Select>
             </div>
 
             {/* Action buttons */}

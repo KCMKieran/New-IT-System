@@ -48,6 +48,7 @@ class ClientReturnRateRow(BaseModel):
     # we expose the zipcode on the client's highest-equity live account in sid 1/5/6).
     zipcode: Optional[str] = Field(None, description="Client zipcode from mt4_users; null if unset")
     is_akcm: bool = Field(False, description="Whether client has AKCM tag (tagid=30154)")
+    has_usdt_tag: bool = Field(False, description="Whether client has any USDT tag (tagid IN 6148/214/172)")
 
 
 class ClientReturnRateRequest(BaseModel):
@@ -111,6 +112,9 @@ class ClientReturnRateExportTaskCreateRequest(BaseModel):
     )
     akcm_filter: Literal["all", "exclude", "only"] = Field(
         "all", description="AKCM tag filter for export snapshot"
+    )
+    usdt_filter: Literal["all", "exclude", "only"] = Field(
+        "all", description="USDT (U入金) tag filter for export snapshot"
     )
 
 
