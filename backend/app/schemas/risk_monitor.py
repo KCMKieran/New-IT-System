@@ -331,6 +331,42 @@ class AlertsStats(BaseModel):
     by_rule: Optional[List[QuickRuleBreakdownItem]] = None
 
 
+class HedgeOpenAggregatedRow(BaseModel):
+    """One row of the per-loginsid aggregated view for the 对冲刷单 tab.
+
+    Folds multiple alert_events rows that share `(server, login)` into a
+    single summary so analysts comparing one account's activity across a
+    multi-day range don't have to scroll through repeated entries.
+    """
+    server: str
+    login: int
+    alert_count: int                       # number of folded alert_events rows
+    total_count: int                       # SUM(buy_count + sell_count) across alerts
+    total_lots: float                      # SUM(total_lots) — note: double-sided sum
+    buy_lots_sum: float                    # SUM(buy_lots)
+    sell_lots_sum: float                   # SUM(sell_lots)
+    first_alert_at: Optional[str] = None   # earliest scanned_at (UTC ISO8601)
+    last_alert_at: Optional[str] = None    # most recent scanned_at (UTC ISO8601)
+    symbols: Optional[str] = None          # comma-joined distinct symbols
+    symbol_count: int = 0
+    # Enrichment snapshot taken from the most recent alert for this
+    # (server, login). These can drift over time so we always show the
+    # latest known value rather than aggregating.
+    group: Optional[str] = None
+    currency: Optional[str] = None
+    zipcode: Optional[str] = None
+    net_deposit_hist: Optional[float] = None
+
+
+class HedgeOpenAggregatedResponse(BaseModel):
+    entries: List[HedgeOpenAggregatedRow]
+    total: int                              # distinct (server, login) count in range
+    since: str
+    until: str
+    page: int = 1
+    page_size: int = 50
+
+
 class QuickProfitFloatingRefreshItem(BaseModel):
     """Single row in the floating-refresh response.
 

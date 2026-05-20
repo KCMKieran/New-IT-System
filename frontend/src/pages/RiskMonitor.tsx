@@ -62,6 +62,7 @@ import {
   Settings2,
   Calendar as CalendarIcon,
   Download,
+  Layers,
 } from "lucide-react";
 import { AgGridReact } from "ag-grid-react";
 import { ColDef, GridApi, SortChangedEvent } from "ag-grid-community";
@@ -207,6 +208,20 @@ const SORTABLE_COL_IDS = new Set<string>([
   "window_end",
 ]);
 
+/** Sortable columns for the hedge-open aggregated view. Mirrors backend
+ *  `_HEDGE_AGG_SORT_COLS`; anything else falls back to `total_lots desc`. */
+const HEDGE_AGG_SORTABLE_COL_IDS = new Set<string>([
+  "total_lots",
+  "total_count",
+  "alert_count",
+  "buy_lots_sum",
+  "sell_lots_sum",
+  "last_alert_at",
+  "first_alert_at",
+  "login",
+  "server",
+]);
+
 /** Backend `QUICK_RULE_ID_BASE` — alert `rule_id` for quick rules is 51, 52, ... */
 const QUICK_RULE_ID_BASE = 51;
 
@@ -331,6 +346,36 @@ interface HedgeOpenRule {
 interface HedgeOpenConfig {
   enabled: boolean;
   rules: HedgeOpenRule[];
+}
+
+/** One row in the per-loginsid aggregated view (hedge-open tab only).
+ *  Folds multiple `AlertEvent` rows sharing `(server, login)` into a
+ *  single summary so multi-day filters don't repeat the same account. */
+interface HedgeOpenAggregatedRow {
+  server: string;
+  login: number;
+  alert_count: number;
+  total_count: number;            // SUM(buy_count + sell_count)
+  total_lots: number;             // SUM(total_lots) — double-sided sum
+  buy_lots_sum: number;
+  sell_lots_sum: number;
+  first_alert_at: string | null;
+  last_alert_at: string | null;
+  symbols: string | null;         // comma-joined distinct
+  symbol_count: number;
+  group: string | null;           // latest enrichment snapshot
+  currency: string | null;
+  zipcode: string | null;
+  net_deposit_hist: number | null;
+}
+
+interface HedgeOpenAggregatedResponse {
+  entries: HedgeOpenAggregatedRow[];
+  total: number;
+  since: string;
+  until: string;
+  page: number;
+  page_size: number;
 }
 
 /** SQLite NULL / missing `enabled` must not show as "disabled" in the UI. */
@@ -3942,12 +3987,27 @@ function HedgeOpenTab({ active }: { active: boolean }) {
   const columnPersist = useGridColumnPersist(
     "RISK_MONITOR_HEDGE_OPEN_GRID_STATE_V1",
   );
+  // Separate persist key for the aggregated view — columns differ from
+  // the detail grid (loginsid/累计笔数/累计手数/etc.), so sharing one key
+  // would mis-apply user pinning/hiding across views.
+  const aggColumnPersist = useGridColumnPersist(
+    "RISK_MONITOR_HEDGE_OPEN_AGG_GRID_STATE_V1",
+  );
+
+  /** View mode toggle. Default = detail (raw alert_events rows); when on,
+   *  the grid renders one row per (server, login) via /alerts/aggregated. */
+  const [aggregated, setAggregated] = useState(false);
+  // Aggregated view has its own sort state (sortable columns are
+  // different — e.g. there is no scanned_at, just last_alert_at).
+  const [aggSortBy, setAggSortBy] = useState<string>("total_lots");
+  const [aggSortOrder, setAggSortOrder] = useState<"asc" | "desc">("desc");
 
   const [rangePreset, setRangePreset] = useState<RangePresetKey>("4h");
   const [customRange, setCustomRange] = useState<DateRange | undefined>();
   const [datePickerOpen, setDatePickerOpen] = useState(false);
 
   const [alerts, setAlerts] = useState<AlertEvent[]>([]);
+  const [aggRows, setAggRows] = useState<HedgeOpenAggregatedRow[]>([]);
   const [totalCount, setTotalCount] = useState(0);
   const [stats, setStats] = useState<AlertsStats>({
     suspicious_count: 0,
@@ -4064,13 +4124,21 @@ function HedgeOpenTab({ active }: { active: boolean }) {
         const alertsQs = new URLSearchParams(tableQs);
         alertsQs.set("page", String(pageIndex + 1));
         alertsQs.set("page_size", String(pageSize));
-        alertsQs.set("sort_by", sortBy);
-        alertsQs.set("sort_order", sortOrder);
+        // Pick which sort state applies to whichever endpoint we're firing.
+        // The /aggregated endpoint accepts a different set of sortable cols
+        // (total_lots, total_count, last_alert_at, ...) so we keep its sort
+        // state separate from the detail view.
+        alertsQs.set("sort_by", aggregated ? aggSortBy : sortBy);
+        alertsQs.set("sort_order", aggregated ? aggSortOrder : sortOrder);
+
+        const alertsPath = aggregated
+          ? "/api/v1/risk-monitor/hedge-open/alerts/aggregated"
+          : "/api/v1/risk-monitor/hedge-open/alerts";
 
         const [alertsRes, statsRes, latestRes] = await Promise.all([
-          apiFetch(`/api/v1/risk-monitor/hedge-open/alerts?${alertsQs}`, {
-            signal,
-          }),
+          apiFetch(`${alertsPath}?${alertsQs}`, { signal }),
+          // Stats endpoint stays the same — summary cards count distinct
+          // accounts + per-rule breakdown regardless of view mode.
           apiFetch(
             `/api/v1/risk-monitor/hedge-open/alerts/stats?${statsQs}`,
             { signal },
@@ -4080,9 +4148,15 @@ function HedgeOpenTab({ active }: { active: boolean }) {
           ),
         ]);
         if (alertsRes.ok) {
-          const json: AlertsResponse = await alertsRes.json();
-          setAlerts(json.entries);
-          setTotalCount(json.total);
+          if (aggregated) {
+            const json: HedgeOpenAggregatedResponse = await alertsRes.json();
+            setAggRows(json.entries);
+            setTotalCount(json.total);
+          } else {
+            const json: AlertsResponse = await alertsRes.json();
+            setAlerts(json.entries);
+            setTotalCount(json.total);
+          }
         }
         if (statsRes.ok) {
           const json: AlertsStats = await statsRes.json();
@@ -4119,6 +4193,9 @@ function HedgeOpenTab({ active }: { active: boolean }) {
       pageSize,
       sortBy,
       sortOrder,
+      aggregated,
+      aggSortBy,
+      aggSortOrder,
     ],
   );
 
@@ -4137,6 +4214,9 @@ function HedgeOpenTab({ active }: { active: boolean }) {
     pageSize,
     sortBy,
     sortOrder,
+    aggregated,
+    aggSortBy,
+    aggSortOrder,
   ]);
 
   useEffect(() => {
@@ -4241,10 +4321,14 @@ function HedgeOpenTab({ active }: { active: boolean }) {
     () => [
       {
         headerName: "规则",
-        field: "rule_label",
         colId: "rule_label",
-        width: 180,
+        width: 90,
         pinned: "left",
+        valueGetter: (p) => {
+          const rid = p.data?.rule_id;
+          if (typeof rid !== "number") return "—";
+          return `Rule ${rid - HEDGE_OPEN_RULE_ID_BASE + 1}`;
+        },
       },
       {
         headerName: "发现时间 (GMT+8)",
@@ -4342,6 +4426,111 @@ function HedgeOpenTab({ active }: { active: boolean }) {
     [],
   );
 
+  // Columns for the aggregated view. Distinct from `columnDefs` so:
+  //  - the row type is HedgeOpenAggregatedRow (no scanned_at / window_*)
+  //  - sortable column ids match `_HEDGE_AGG_SORT_COLS` on the backend
+  //  - the column-persist key is a separate slot (see aggColumnPersist)
+  const aggregatedColumnDefs: ColDef<HedgeOpenAggregatedRow>[] = useMemo(
+    () => [
+      { headerName: "服务器", field: "server", colId: "server", width: 110, pinned: "left" },
+      {
+        headerName: "账户",
+        field: "login",
+        colId: "login",
+        width: 130,
+        pinned: "left",
+        cellRenderer: LoginCell,
+      },
+      {
+        headerName: "Zipcode",
+        field: "zipcode",
+        colId: "zipcode",
+        width: 110,
+        cellRenderer: (p: { value: string | null }) => p.value || "—",
+      },
+      { headerName: "币种", field: "currency", colId: "currency", width: 80 },
+      netDepositColDef(),
+      {
+        headerName: "累计笔数",
+        field: "total_count",
+        colId: "total_count",
+        width: 110,
+        cellClass: "ag-right-aligned-cell",
+        // Subtle red tint (red-500 @ 8%) — same pattern as 日均净值 /
+        // 长期收益率 on /client-return-rate (blue / purple at 8%). Low
+        // opacity lets the AG-Grid zebra + hover show through, and the
+        // single rgba works in both light and dark mode without a
+        // dedicated .dark selector.
+        cellStyle: { backgroundColor: "rgba(239, 68, 68, 0.08)" },
+        headerTooltip: "窗口内 buy + sell 订单数加总",
+      },
+      {
+        headerName: "累计手数",
+        field: "total_lots",
+        colId: "total_lots",
+        width: 120,
+        sort: "desc",
+        cellClass: "ag-right-aligned-cell",
+        cellStyle: { backgroundColor: "rgba(239, 68, 68, 0.08)" },
+        valueFormatter: (p) =>
+          typeof p.value === "number" ? p.value.toFixed(2) : "—",
+        headerTooltip: "buy_lots + sell_lots 加总（双向计数，= 2× 实际对冲量）",
+      },
+      {
+        headerName: "告警次数",
+        field: "alert_count",
+        colId: "alert_count",
+        width: 100,
+        cellClass: "ag-right-aligned-cell",
+      },
+      {
+        headerName: "Buy 手数",
+        field: "buy_lots_sum",
+        colId: "buy_lots_sum",
+        width: 110,
+        cellClass: "ag-right-aligned-cell",
+        valueFormatter: (p) =>
+          typeof p.value === "number" ? p.value.toFixed(2) : "—",
+      },
+      {
+        headerName: "Sell 手数",
+        field: "sell_lots_sum",
+        colId: "sell_lots_sum",
+        width: 110,
+        cellClass: "ag-right-aligned-cell",
+        valueFormatter: (p) =>
+          typeof p.value === "number" ? p.value.toFixed(2) : "—",
+      },
+      {
+        headerName: "涉及品种",
+        colId: "symbols",
+        width: 240,
+        sortable: false,
+        valueGetter: (p) => {
+          const s = p.data?.symbols ?? "";
+          const n = p.data?.symbol_count ?? 0;
+          return n > 1 ? `${s} (${n})` : s;
+        },
+      },
+      {
+        headerName: "首次告警 (GMT+8)",
+        field: "first_alert_at",
+        colId: "first_alert_at",
+        width: 165,
+        valueFormatter: (p) => fmtTime(p.value),
+      },
+      {
+        headerName: "最近告警 (GMT+8)",
+        field: "last_alert_at",
+        colId: "last_alert_at",
+        width: 165,
+        valueFormatter: (p) => fmtTime(p.value),
+      },
+      { headerName: "账户组", field: "group", colId: "group", width: 160 },
+    ],
+    [],
+  );
+
   const rangeLabel =
     rangePreset === "custom" && customRange?.from
       ? customRange.to
@@ -4409,8 +4598,10 @@ function HedgeOpenTab({ active }: { active: boolean }) {
             规则配置
           </Button>
           <ColumnVisibilityMenu
-            persist={columnPersist}
-            columnDefs={columnDefs as ColDef<unknown>[]}
+            persist={aggregated ? aggColumnPersist : columnPersist}
+            columnDefs={
+              (aggregated ? aggregatedColumnDefs : columnDefs) as ColDef<unknown>[]
+            }
             size="sm"
           />
           <Button
@@ -4423,6 +4614,39 @@ function HedgeOpenTab({ active }: { active: boolean }) {
               className={cn("h-4 w-4 mr-1.5", scanningNow && "animate-spin")}
             />
             {scanningNow ? "扫描中..." : "立即扫描"}
+          </Button>
+          {/* "聚合 / 已聚合" toggle.
+              - Off (default): amber background + 「聚合」 — affordance, draws
+                attention to a less-common view.
+              - On (active):  emerald background + 「已聚合」 — color change is
+                the strongest signal that the view has switched; the label
+                change reinforces it for low-color-contrast users.
+              Dark-mode uses a darker base on both because the *-300 / *-500
+              light shades wash out against the dark card background. */}
+          <Button
+            type="button"
+            size="sm"
+            onClick={() => setAggregated((v) => !v)}
+            aria-pressed={aggregated}
+            title={
+              aggregated
+                ? "已按账户聚合 — 再点切换回明细"
+                : "按账户聚合：把同账户多条告警折叠成一行"
+            }
+            className={cn(
+              "border border-transparent",
+              aggregated
+                ? "bg-emerald-500 hover:bg-emerald-600 text-emerald-50 " +
+                    "ring-2 ring-emerald-700/40 " +
+                    "dark:bg-emerald-700 dark:hover:bg-emerald-800 " +
+                    "dark:text-emerald-50 dark:ring-emerald-300/30"
+                : "bg-amber-300 hover:bg-amber-400 text-amber-950 " +
+                    "dark:bg-amber-500 dark:hover:bg-amber-600 " +
+                    "dark:text-amber-50",
+            )}
+          >
+            <Layers className="h-4 w-4 mr-1.5" />
+            {aggregated ? "已聚合" : "聚合"}
           </Button>
         </div>
       </div>
@@ -4488,14 +4712,12 @@ function HedgeOpenTab({ active }: { active: boolean }) {
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="all">全部规则</SelectItem>
-            {config?.rules.map((r, idx) => (
+            {config?.rules.map((_r, idx) => (
               <SelectItem
                 key={HEDGE_OPEN_RULE_ID_BASE + idx}
                 value={String(HEDGE_OPEN_RULE_ID_BASE + idx)}
               >
-                {r.name?.trim()
-                  ? `Rule ${idx + 1} — ${r.name}`
-                  : `Rule ${idx + 1}`}
+                {`Rule ${idx + 1}`}
               </SelectItem>
             ))}
           </SelectContent>
@@ -4586,7 +4808,11 @@ function HedgeOpenTab({ active }: { active: boolean }) {
           />
         </div>
         <span className="text-sm text-muted-foreground sm:ml-auto sm:shrink-0 py-1.5">
-          {loading ? "加载中..." : `共 ${totalCount} 条告警`}
+          {loading
+            ? "加载中..."
+            : aggregated
+              ? `共 ${totalCount} 个账户`
+              : `共 ${totalCount} 条告警`}
         </span>
       </div>
 
@@ -4597,26 +4823,60 @@ function HedgeOpenTab({ active }: { active: boolean }) {
         )}
         style={gridStyle}
       >
-        <AgGridReact<AlertEvent>
-          rowData={alerts}
-          columnDefs={columnDefs}
-          defaultColDef={defaultColDef}
-          gridOptions={{ theme: "legacy" }}
-          animateRows={false}
-          enableCellTextSelection
-          suppressCellFocus
-          sortingOrder={["desc", "asc", null]}
-          onSortChanged={(e) => {
-            if (!columnPersist.isApplying()) handleSortChanged(e);
-            columnPersist.gridEventProps.onSortChanged();
-          }}
-          onGridReady={columnPersist.gridEventProps.onGridReady}
-          onColumnMoved={columnPersist.gridEventProps.onColumnMoved}
-          onColumnVisible={columnPersist.gridEventProps.onColumnVisible}
-          onColumnPinned={columnPersist.gridEventProps.onColumnPinned}
-          onColumnResized={columnPersist.gridEventProps.onColumnResized}
-          getRowId={(p) => `evt-${p.data.id}`}
-        />
+        {aggregated ? (
+          <AgGridReact<HedgeOpenAggregatedRow>
+            rowData={aggRows}
+            columnDefs={aggregatedColumnDefs}
+            defaultColDef={defaultColDef}
+            gridOptions={{ theme: "legacy" }}
+            animateRows={false}
+            enableCellTextSelection
+            suppressCellFocus
+            sortingOrder={["desc", "asc", null]}
+            onSortChanged={(e) => {
+              if (!aggColumnPersist.isApplying()) {
+                const activeCol = e.api.getColumnState().find((c) => c.sort);
+                const nextSortBy =
+                  activeCol?.colId &&
+                  HEDGE_AGG_SORTABLE_COL_IDS.has(activeCol.colId)
+                    ? activeCol.colId
+                    : "total_lots";
+                const nextSortOrder =
+                  activeCol?.sort === "asc" ? "asc" : "desc";
+                setAggSortBy(nextSortBy);
+                setAggSortOrder(nextSortOrder);
+              }
+              aggColumnPersist.gridEventProps.onSortChanged();
+            }}
+            onGridReady={aggColumnPersist.gridEventProps.onGridReady}
+            onColumnMoved={aggColumnPersist.gridEventProps.onColumnMoved}
+            onColumnVisible={aggColumnPersist.gridEventProps.onColumnVisible}
+            onColumnPinned={aggColumnPersist.gridEventProps.onColumnPinned}
+            onColumnResized={aggColumnPersist.gridEventProps.onColumnResized}
+            getRowId={(p) => `agg-${p.data.server}-${p.data.login}`}
+          />
+        ) : (
+          <AgGridReact<AlertEvent>
+            rowData={alerts}
+            columnDefs={columnDefs}
+            defaultColDef={defaultColDef}
+            gridOptions={{ theme: "legacy" }}
+            animateRows={false}
+            enableCellTextSelection
+            suppressCellFocus
+            sortingOrder={["desc", "asc", null]}
+            onSortChanged={(e) => {
+              if (!columnPersist.isApplying()) handleSortChanged(e);
+              columnPersist.gridEventProps.onSortChanged();
+            }}
+            onGridReady={columnPersist.gridEventProps.onGridReady}
+            onColumnMoved={columnPersist.gridEventProps.onColumnMoved}
+            onColumnVisible={columnPersist.gridEventProps.onColumnVisible}
+            onColumnPinned={columnPersist.gridEventProps.onColumnPinned}
+            onColumnResized={columnPersist.gridEventProps.onColumnResized}
+            getRowId={(p) => `evt-${p.data.id}`}
+          />
+        )}
       </div>
 
       <Card>
@@ -4626,8 +4886,8 @@ function HedgeOpenTab({ active }: { active: boolean }) {
               {totalCount === 0
                 ? "暂无数据"
                 : isMobile
-                  ? `共 ${totalCount} 条`
-                  : `第 ${pageIndex * pageSize + 1}-${Math.min((pageIndex + 1) * pageSize, totalCount)} 条 / 共 ${totalCount} 条`}
+                  ? `共 ${totalCount} ${aggregated ? "个账户" : "条"}`
+                  : `第 ${pageIndex * pageSize + 1}-${Math.min((pageIndex + 1) * pageSize, totalCount)} ${aggregated ? "个" : "条"} / 共 ${totalCount} ${aggregated ? "个账户" : "条"}`}
             </div>
             <div className="flex items-center flex-wrap gap-2">
               {!isMobile && (

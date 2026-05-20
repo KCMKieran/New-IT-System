@@ -1632,6 +1632,160 @@ def get_recent_quick_profit_alerts(minutes: int) -> list[dict[str, Any]]:
     return [_row_to_alert_dict(r) for r in rows]
 
 
+# ── Hedge Open aggregated view ────────────────────────────
+
+# Sortable columns for the aggregated view. Keys are what the frontend
+# sends; values are the SQL expressions (defined inside the CTE below).
+_HEDGE_AGG_SORT_COLS: dict[str, str] = {
+    "total_lots":     "total_lots",
+    "total_count":    "total_count",
+    "alert_count":    "alert_count",
+    "buy_lots_sum":   "buy_lots_sum",
+    "sell_lots_sum":  "sell_lots_sum",
+    "last_alert_at":  "last_alert_at",
+    "first_alert_at": "first_alert_at",
+    "login":          "login",
+    "server":         "server",
+}
+
+
+def aggregate_hedge_open_by_login(
+    since: str,
+    until: str,
+    *,
+    rule_id_min: int,
+    rule_id_max: int,
+    server: str | None = None,
+    login: int | None = None,
+    symbol: str | None = None,
+    rule_id: int | None = None,
+    zipcode: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+    sort_by: str | None = None,
+    sort_order: str | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    """Fold hedge-open alerts in the time range by `(server, login)`.
+
+    Returns one row per loginsid with summed counts/lots, distinct symbols,
+    and an enrichment snapshot from the most recent alert (group, currency,
+    zipcode, net_deposit_hist drift across scans so "latest" beats SUM /
+    MAX on those columns).
+
+    Filters are kept compatible with `query_alert_events`: `symbol` /
+    `login` narrow which rows enter the fold, NOT the post-fold result.
+    A loginsid that traded `XAUUSD` and `NZDCHF.cent` will only show
+    `NZDCHF.cent` in the aggregate if `symbol='NZDCHF.cent'` was passed.
+
+    Args:
+        sort_by: one of `_HEDGE_AGG_SORT_COLS` keys; else falls back to
+            `total_lots` (the "biggest offender" default).
+        sort_order: "asc" | "desc"; default desc.
+
+    Returns:
+        (entries, total) where total = distinct (server, login) count.
+    """
+    where_sql, params = _build_alert_filters(
+        since, until, server, login, symbol, rule_id,
+        rule_id_min, rule_id_max, zipcode,
+    )
+
+    sort_key = sort_by if sort_by in _HEDGE_AGG_SORT_COLS else "total_lots"
+    sort_col = _HEDGE_AGG_SORT_COLS[sort_key]
+    direction = "ASC" if (sort_order or "").lower() == "asc" else "DESC"
+    # Stable secondary key so identical primary values paginate deterministically.
+    # Always qualify with `agg.` — the outer SELECT JOINs `ranked latest`
+    # which exposes columns of the same name (e.g. `total_lots`, `server`,
+    # `login`) and the bare reference becomes ambiguous to SQLite.
+    order_sql = f"agg.{sort_col} {direction}, agg.server ASC, agg.login ASC"
+
+    sql = f"""
+        WITH ranked AS (
+            SELECT
+                ae.server                          AS server,
+                ae.login                           AS login,
+                ae.scanned_at                      AS scanned_at,
+                ae.id                              AS id,
+                ae.account_group                   AS account_group,
+                ae.currency                        AS currency,
+                ae.zipcode                         AS zipcode,
+                ae.net_deposit_hist                AS net_deposit_hist,
+                ae.symbol                          AS symbol,
+                ae.total_lots                      AS total_lots,
+                ho.buy_count                       AS buy_count,
+                ho.sell_count                      AS sell_count,
+                ho.buy_lots                        AS buy_lots,
+                ho.sell_lots                       AS sell_lots,
+                ROW_NUMBER() OVER (
+                    PARTITION BY ae.server, ae.login
+                    ORDER BY ae.scanned_at DESC, ae.id DESC
+                )                                  AS rn
+            {_ALERT_FROM_CLAUSE}
+            WHERE {where_sql}
+        ),
+        agg AS (
+            SELECT
+                server,
+                login,
+                COUNT(*)                                                    AS alert_count,
+                COALESCE(SUM(COALESCE(buy_count, 0) + COALESCE(sell_count, 0)), 0) AS total_count,
+                COALESCE(SUM(total_lots),  0.0)                             AS total_lots,
+                COALESCE(SUM(buy_lots),    0.0)                             AS buy_lots_sum,
+                COALESCE(SUM(sell_lots),   0.0)                             AS sell_lots_sum,
+                MIN(scanned_at)                                             AS first_alert_at,
+                MAX(scanned_at)                                             AS last_alert_at,
+                GROUP_CONCAT(DISTINCT symbol)                               AS symbols,
+                COUNT(DISTINCT symbol)                                      AS symbol_count
+            FROM ranked
+            GROUP BY server, login
+        )
+        SELECT
+            agg.server,
+            agg.login,
+            agg.alert_count,
+            agg.total_count,
+            agg.total_lots,
+            agg.buy_lots_sum,
+            agg.sell_lots_sum,
+            agg.first_alert_at,
+            agg.last_alert_at,
+            agg.symbols,
+            agg.symbol_count,
+            latest.account_group  AS group_,
+            latest.currency       AS currency,
+            latest.zipcode        AS zipcode,
+            latest.net_deposit_hist AS net_deposit_hist
+        FROM agg
+        JOIN ranked latest
+          ON latest.server = agg.server
+         AND latest.login  = agg.login
+         AND latest.rn     = 1
+        ORDER BY {order_sql}
+        LIMIT ? OFFSET ?
+    """
+
+    count_sql = f"""
+        SELECT COUNT(*) FROM (
+            SELECT 1
+            {_ALERT_FROM_CLAUSE}
+            WHERE {where_sql}
+            GROUP BY ae.server, ae.login
+        )
+    """
+
+    with get_risk_monitor_db() as conn:
+        total = conn.execute(count_sql, params).fetchone()[0] or 0
+        rows = conn.execute(sql, params + [limit, offset]).fetchall()
+
+    entries = []
+    for r in rows:
+        d = dict(r)
+        # Rename SQL alias back to API-facing field.
+        d["group"] = d.pop("group_", None)
+        entries.append(d)
+    return entries, int(total)
+
+
 def get_alerts_by_ids(ids: list[int]) -> list[dict[str, Any]]:
     """Look up specific alert_events rows by primary key.
 
