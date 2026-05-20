@@ -525,11 +525,10 @@ const RETENTION_DAYS = 30;
  */
 // `lg:` (not `sm:`) so the side-by-side layout only kicks in at ≥1024px.
 // At sm/md widths (640–1023px), description and actions stack vertically
-// — even with the OPT-0023 simplification (headers now hold 2–3 buttons:
-// 导出CSV + 设置, plus optional tab-specific actions like hedge 聚合 or
-// QP 刷新浮动盈亏), the description column would still degrade to
-// one-character-per-line at narrow widths. Sticking to vertical stack
-// until full desktop width keeps the description readable.
+// — even with the OPT-0023 simplification (headers now hold 2 buttons:
+// 导出CSV + 设置, plus hedge's extra 聚合 toggle), the description column
+// would still degrade to one-character-per-line at narrow widths.
+// Sticking to vertical stack until full desktop width keeps it readable.
 const RISK_MONITOR_HEADER_ROW =
   "flex min-w-0 w-full max-w-full flex-col gap-3 lg:flex-row lg:items-start lg:justify-between";
 const RISK_MONITOR_HEADER_ACTIONS =
@@ -1752,8 +1751,14 @@ function BurstOpenTab({ active }: { active: boolean }) {
             columnDefs: columnDefs as ColDef<unknown>[],
           },
         ]}
-        onScanNow={handleScanNow}
-        scanningNow={scanningNow}
+        manualActions={[
+          {
+            label: "立即扫描",
+            runningLabel: "扫描中...",
+            onClick: handleScanNow,
+            running: scanningNow,
+          },
+        ]}
       />
     </div>
   );
@@ -2506,8 +2511,14 @@ function QuickOpenCloseTab({ active }: { active: boolean }) {
             columnDefs: columnDefs as ColDef<unknown>[],
           },
         ]}
-        onScanNow={handleScanNow}
-        scanningNow={scanningNow}
+        manualActions={[
+          {
+            label: "立即扫描",
+            runningLabel: "扫描中...",
+            onClick: handleScanNow,
+            running: scanningNow,
+          },
+        ]}
       />
     </div>
   );
@@ -2516,14 +2527,18 @@ function QuickOpenCloseTab({ active }: { active: boolean }) {
 // ── Settings drawer shared sections ───────────────────────
 //
 // The 5 *ConfigDrawer components each render their own "rules" body, but
-// the column-visibility and manual-scan sections are identical across them.
-// This component is plugged into every drawer right after the rules block
-// so the layout, copy, and behavior stay in lockstep.
+// the column-visibility and manual-action sections are identical across
+// them. This component is plugged into every drawer right after the rules
+// block so the layout, copy, and behavior stay in lockstep.
 //
 // `columnGroups` is rendered as a single section when length === 1 and as
 // multiple labeled sub-sections when length > 1 (Gap Trade has 3 grids).
-// `onScanNow` is omitted on Gap Trade — that tab is daily-refresh and has
-// no on-demand scan endpoint.
+//
+// `manualActions` is an array of "one-shot button" descriptors — burst /
+// quick / hedge pass [立即扫描]; QP passes [立即扫描, 刷新浮动盈亏];
+// gap-trade passes []. Generalizing this away from a hard-coded `onScanNow`
+// prop means future tabs can add their own buttons (e.g. hedge "重算聚合")
+// without bloating this component's prop surface.
 
 interface ColumnSettingGroup {
   /** Used as the sub-section heading when there are multiple groups. */
@@ -2532,19 +2547,33 @@ interface ColumnSettingGroup {
   columnDefs: ColDef<unknown>[];
 }
 
+interface ManualAction {
+  /** Button label when idle (e.g. "立即扫描"). */
+  label: string;
+  /** Button label while running (e.g. "扫描中..."). Defaults to `label`. */
+  runningLabel?: string;
+  onClick: () => void;
+  running: boolean;
+  /** Independent of `running` — e.g. QP "刷新浮动盈亏" disables when all
+   *  alerts are closed positions (nothing to refresh). */
+  disabled?: boolean;
+  /** Hover tooltip — used to explain non-obvious actions like
+   *  "刷新浮动盈亏" (refreshes existing rows without re-scanning). */
+  title?: string;
+}
+
 function UnifiedSettingsExtras({
   columnGroups,
-  onScanNow,
-  scanningNow,
+  manualActions = [],
 }: {
   columnGroups: ColumnSettingGroup[];
-  onScanNow?: () => void;
-  scanningNow?: boolean;
+  /** Optional — Gap Trade has no on-demand actions and just omits. */
+  manualActions?: ManualAction[];
 }) {
-  const showScan = typeof onScanNow === "function";
+  const hasActions = manualActions.length > 0;
   const hasColumns = columnGroups.length > 0;
 
-  if (!hasColumns && !showScan) return null;
+  if (!hasColumns && !hasActions) return null;
 
   // Heading + group ids — used for `aria-labelledby` so the column
   // checkboxes are announced under the right group name. Single-group
@@ -2624,27 +2653,36 @@ function UnifiedSettingsExtras({
           </section>
         </>
       )}
-      {showScan && (
+      {hasActions && (
         <>
           <Separator />
           <section className="space-y-2">
             <div>
-              <h3 className="text-sm font-medium">手动扫描</h3>
+              <h3 className="text-sm font-medium">手动操作</h3>
               <p className="text-xs text-muted-foreground mt-1">
-                立即触发一次扫描（不影响定时扫描节奏）。
+                立即触发以下操作（不影响定时扫描节奏）。
               </p>
             </div>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={onScanNow}
-              disabled={scanningNow}
-            >
-              <RefreshCw
-                className={cn("h-4 w-4 mr-1.5", scanningNow && "animate-spin")}
-              />
-              {scanningNow ? "扫描中..." : "立即扫描"}
-            </Button>
+            <div className="flex flex-wrap gap-2">
+              {manualActions.map((action) => (
+                <Button
+                  key={action.label}
+                  variant="outline"
+                  size="sm"
+                  onClick={action.onClick}
+                  disabled={action.running || action.disabled}
+                  title={action.title}
+                >
+                  <RefreshCw
+                    className={cn(
+                      "h-4 w-4 mr-1.5",
+                      action.running && "animate-spin",
+                    )}
+                  />
+                  {action.running ? action.runningLabel ?? action.label : action.label}
+                </Button>
+              ))}
+            </div>
           </section>
         </>
       )}
@@ -2662,8 +2700,7 @@ function ConfigDrawer({
   onSave,
   saving,
   columnGroups,
-  onScanNow,
-  scanningNow,
+  manualActions,
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
@@ -2672,8 +2709,7 @@ function ConfigDrawer({
   onSave: () => void;
   saving: boolean;
   columnGroups: ColumnSettingGroup[];
-  onScanNow: () => void;
-  scanningNow: boolean;
+  manualActions: ManualAction[];
 }) {
   const isMobile = useIsMobile();
   if (!config) return null;
@@ -2838,8 +2874,7 @@ function ConfigDrawer({
 
           <UnifiedSettingsExtras
             columnGroups={columnGroups}
-            onScanNow={onScanNow}
-            scanningNow={scanningNow}
+            manualActions={manualActions}
           />
         </div>
 
@@ -2865,8 +2900,7 @@ function QuickConfigDrawer({
   onSave,
   saving,
   columnGroups,
-  onScanNow,
-  scanningNow,
+  manualActions,
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
@@ -2875,8 +2909,7 @@ function QuickConfigDrawer({
   onSave: () => void;
   saving: boolean;
   columnGroups: ColumnSettingGroup[];
-  onScanNow: () => void;
-  scanningNow: boolean;
+  manualActions: ManualAction[];
 }) {
   const isMobile = useIsMobile();
   if (!config) return null;
@@ -3031,8 +3064,7 @@ function QuickConfigDrawer({
 
           <UnifiedSettingsExtras
             columnGroups={columnGroups}
-            onScanNow={onScanNow}
-            scanningNow={scanningNow}
+            manualActions={manualActions}
           />
         </div>
 
@@ -3641,26 +3673,6 @@ function QuickProfitTab({ active }: { active: boolean }) {
             <Settings2 className="h-4 w-4 mr-1.5" />
             设置
           </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={handleRefreshFloating}
-            disabled={
-              refreshingFloating ||
-              alerts.every(
-                (r) => !r.position_status || r.position_status === "closed",
-              )
-            }
-            title="只刷新非已平仓告警的浮动盈亏，不重新扫描"
-          >
-            <RefreshCw
-              className={cn(
-                "h-4 w-4 mr-1.5",
-                refreshingFloating && "animate-spin",
-              )}
-            />
-            {refreshingFloating ? "刷新中..." : "刷新浮动盈亏"}
-          </Button>
         </div>
       </div>
 
@@ -3927,8 +3939,28 @@ function QuickProfitTab({ active }: { active: boolean }) {
             columnDefs: columnDefs as ColDef<unknown>[],
           },
         ]}
-        onScanNow={handleScanNow}
-        scanningNow={scanningNow}
+        manualActions={[
+          {
+            label: "立即扫描",
+            runningLabel: "扫描中...",
+            onClick: handleScanNow,
+            running: scanningNow,
+          },
+          {
+            // QP-specific: refresh floating PnL on currently-open positions
+            // without re-running the full scan. Disabled when no open
+            // positions remain in the visible alert list (nothing to
+            // refresh — every row is already settled).
+            label: "刷新浮动盈亏",
+            runningLabel: "刷新中...",
+            onClick: handleRefreshFloating,
+            running: refreshingFloating,
+            disabled: alerts.every(
+              (r) => !r.position_status || r.position_status === "closed",
+            ),
+            title: "只刷新非已平仓告警的浮动盈亏，不重新扫描",
+          },
+        ]}
       />
     </div>
   );
@@ -3942,8 +3974,7 @@ function QuickProfitConfigDrawer({
   onSave,
   saving,
   columnGroups,
-  onScanNow,
-  scanningNow,
+  manualActions,
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
@@ -3952,8 +3983,7 @@ function QuickProfitConfigDrawer({
   onSave: () => void;
   saving: boolean;
   columnGroups: ColumnSettingGroup[];
-  onScanNow: () => void;
-  scanningNow: boolean;
+  manualActions: ManualAction[];
 }) {
   const isMobile = useIsMobile();
   if (!config) return null;
@@ -4111,8 +4141,7 @@ function QuickProfitConfigDrawer({
 
           <UnifiedSettingsExtras
             columnGroups={columnGroups}
-            onScanNow={onScanNow}
-            scanningNow={scanningNow}
+            manualActions={manualActions}
           />
         </div>
         <div className="border-t p-4 flex justify-end gap-2">
@@ -5095,8 +5124,14 @@ function HedgeOpenTab({ active }: { active: boolean }) {
               : columnDefs) as ColDef<unknown>[],
           },
         ]}
-        onScanNow={handleScanNow}
-        scanningNow={scanningNow}
+        manualActions={[
+          {
+            label: "立即扫描",
+            runningLabel: "扫描中...",
+            onClick: handleScanNow,
+            running: scanningNow,
+          },
+        ]}
       />
     </div>
   );
@@ -5115,8 +5150,7 @@ function HedgeConfigDrawer({
   onSave,
   saving,
   columnGroups,
-  onScanNow,
-  scanningNow,
+  manualActions,
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
@@ -5125,8 +5159,7 @@ function HedgeConfigDrawer({
   onSave: () => void;
   saving: boolean;
   columnGroups: ColumnSettingGroup[];
-  onScanNow: () => void;
-  scanningNow: boolean;
+  manualActions: ManualAction[];
 }) {
   const isMobile = useIsMobile();
   if (!config) return null;
@@ -5311,8 +5344,7 @@ function HedgeConfigDrawer({
 
           <UnifiedSettingsExtras
             columnGroups={columnGroups}
-            onScanNow={onScanNow}
-            scanningNow={scanningNow}
+            manualActions={manualActions}
           />
         </div>
 
@@ -6644,6 +6676,8 @@ function GapTradeConfigDrawer({
   saving: boolean;
   columnGroups: ColumnSettingGroup[];
 }) {
+  // Gap Trade is daily-refresh — no on-demand actions, hence no
+  // manualActions prop. UnifiedSettingsExtras renders [] = no section.
   const isMobile = useIsMobile();
   if (!config) return null;
 
