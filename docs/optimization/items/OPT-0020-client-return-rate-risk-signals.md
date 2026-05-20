@@ -9,6 +9,10 @@ created: 2026-05-19
 related: [[OPT-0006]]
 ---
 
+> **Update 2026-05-20**: USDT tag 列已拆到 [OPT-0022](OPT-0022-client-return-usdt-tag.md) 独立完成。
+> 本 OPT 剩余 7 列：过夜比例 + Sharpe ×3 + Consistency ×3。
+> 下方涉及 USDT 的 AC 条目已 ~~strikethrough~~。
+
 ## 问题
 
 Risk team 用 `/client-return-rate` 决定客户 A-book / B-book 归类,现有列不够支撑这个判断:
@@ -62,7 +66,7 @@ Risk team 需要在同一张表里看到这 4 个补充信号,不要再开第二
 | Consistency 窗口 | 全历史 / 30d / 90d 三列 | 跟 Sharpe 对齐 |
 | 窗口语义 | 自然日(`date >= CURDATE() - INTERVAL N DAY`),不是"最近 N 个活跃日" | 跟 deposits_90d 已有口径一致 |
 | Daily PnL 数据源 | `stats_trading.totalPlClosed` (已含 swap+commission,CEN÷100) | 跟 month_trade_profit / profit_hist 同口径 |
-| USDT tag | `tagid IN (6148, 214, 172)` 任一命中 | 用户明确指定 |
+| ~~USDT tag~~ | ~~`tagid IN (6148, 214, 172)` 任一命中~~ | ~~用户明确指定~~ → **OPT-0022** |
 | 列布局 | 8 列默认全可见(方案 B) | 用户明确选择 |
 
 ### 性能预估
@@ -97,23 +101,23 @@ Risk team 需要在同一张表里看到这 4 个补充信号,不要再开第二
 **后端 web 层**
 
 - [ ] `client_return_service.py`:
-  - Phase 2 SQL 加 USDT LEFT JOIN(模板抄 `client_return_service.py:322-327` 的 AKCM block)
+  - ~~Phase 2 SQL 加 USDT LEFT JOIN(模板抄 `client_return_service.py:322-327` 的 AKCM block)~~ → **OPT-0022**
   - `bulk_get_overnight()` 调用放在 `bulk_get_roace()` 旁边
   - Python 端算 `overnight_ratio = overnight_count / total_count`(带 `total_count > 0` 守卫,否则 None)
-  - cache key prefix `v4` → `v5`
-  - `expected_columns` 列表加 `overnight_count / overnight_total / overnight_ratio / has_usdt_tag`
+  - cache key prefix `v4` → `v5`（注：OPT-0022 已经 bump 过；本 OPT 继续 bump 或保持 `v5` 待定）
+  - `expected_columns` 列表加 `overnight_count / overnight_total / overnight_ratio` ~~`/ has_usdt_tag`~~
   - `allowed_sort_columns` set 加新列(支持服务端排序)
 - [ ] `schemas/client_return_rate.py` `ClientReturnRateRow` 加字段:
   - `overnight_count: Optional[int]`
   - `overnight_total: Optional[int]`
   - `overnight_ratio: Optional[float]`
-  - `has_usdt_tag: bool = False`
+  - ~~`has_usdt_tag: bool = False`~~ → **OPT-0022**
 
 **前端**
 
-- [ ] `ClientReturnRate.tsx` 加 2 列,**显式 `colId`**(CLAUDE.md grid-column-persist 规则要求):
+- [ ] `ClientReturnRate.tsx` 加 ~~2~~ **1** 列,**显式 `colId`**(CLAUDE.md grid-column-persist 规则要求):
   - 过夜比例列: `valueFormatter` 渲染百分比、`tooltipValueGetter` 返回 "X / Y trades"、null 时显示 "—"
-  - USDT 列: 布尔图标渲染器(copy `is_akcm` 那列)
+  - ~~USDT 列: 布尔图标渲染器(copy `is_akcm` 那列)~~ → **OPT-0022**
 - [ ] 用 `useGridColumnPersist` hook 注册新 colId,默认可见(方案 B)
 
 **冒烟验收**
@@ -132,6 +136,7 @@ INNER JOIN fxbackoffice.mt4_users mu ON mu.loginSid = t.loginSid
 WHERE mu.userId = 130130 AND mu.sid IN (1,5,6) AND mu.`GROUP` NOT LIKE '%demo%'
   AND t.CMD IN (0,1) AND (t.isDeleted = 0 OR t.isDeleted IS NULL);
 
+-- ↓ USDT 验证 SQL 已迁移到 OPT-0022（本 OPT 不做）
 SELECT tagid FROM fxbackoffice.user_tags
 WHERE userid = 130130 AND tagid IN (6148, 214, 172);
 ```
