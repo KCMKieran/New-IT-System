@@ -10,7 +10,7 @@
 
 | ID | Branch | Claim 日期 | 备注 |
 |----|--------|-----------|------|
-| _空_ | | | |
+| [OPT-0023](./items/OPT-0023-risk-monitor-unified-settings.md) | `opt/risk-monitor-unified-settings` | 2026-05-20 | Risk-monitor header 化繁为简：列设置 + 立即扫描 合进设置抽屉 |
 
 ## ✅ 待领取（Ready）
 
