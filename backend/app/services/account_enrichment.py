@@ -58,7 +58,8 @@ def get_account_info_map(
         SELECT loginsid,
                UPPER(CURRENCY) AS currency,
                ZIPCODE         AS zipcode,
-               `GROUP`         AS `group`
+               `GROUP`         AS `group`,
+               NAME            AS name
         FROM fxbackoffice.mt4_users
         WHERE loginsid IN ({placeholders})
     """
@@ -70,10 +71,12 @@ def get_account_info_map(
         for r in rows:
             zipcode = (r.get("zipcode") or "").strip() or None
             group = (r.get("group") or "").strip() or None
+            name = (r.get("name") or "").strip() or None
             result[r["loginsid"]] = {
                 "currency": r.get("currency") or None,
                 "zipcode": zipcode,
                 "group": group,
+                "name": name,
             }
         return result
     except Exception:

@@ -429,4 +429,20 @@ def _enrich_account_info(conn, alerts: List[Dict[str, Any]]) -> None:
             net_deposit_map.get(loginsid) if loginsid else None
         )
         if currency == "CEN":
-            apply_cen_conversion(alert)
+            apply_cen_conversion(alert, currency)
+
+        # MT5 demo/test accounts slip past the SQL filter because
+        # _query_mt5_recent_opens hits mt5_deals only (no JOIN with mt5_users).
+        # Drop them post-enrichment by checking BOTH group and name — mirrors
+        # the SQL-level filter used in rule_quick_open_close / rule_quick_profit
+        # which excludes any account whose GROUP or NAME contains demo/test.
+        grp = (alert.get("group") or "").lower()
+        nm = (info.get("name") or "").lower()
+        if (
+            "demo" in grp or "test" in grp
+            or "demo" in nm or "test" in nm
+        ):
+            alert["_skip"] = True
+
+    # Remove demo/test accounts that slipped through the MT5 SQL query.
+    alerts[:] = [a for a in alerts if not a.pop("_skip", False)]
