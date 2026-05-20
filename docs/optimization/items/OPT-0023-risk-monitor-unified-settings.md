@@ -38,8 +38,9 @@ created: 2026-05-20
 ## 验收标准
 
 ### Header 简化
-- [ ] burst-open / quick-open-close / quick-profit / gap-trade：header 只剩 `导出CSV` + `设置`（2 个按钮）
-- [ ] hedge-open：header 只剩 `导出CSV` + `聚合` + `设置`（3 个按钮）
+- [ ] burst-open / quick-open-close / gap-trade：header 只剩 `导出CSV` + `设置`（2 个按钮）
+- [ ] quick-profit：header 留 `导出CSV` + `刷新浮动盈亏`（tab-specific，类似 hedge 聚合）+ `设置`（3 个按钮）
+- [ ] hedge-open：header 留 `导出CSV` + `聚合` + `设置`（3 个按钮）
 - [ ] 「规则配置」按钮文案 → 「设置」（Settings icon 保留）
 
 ### 设置抽屉（5 个 drawer 都升级）
@@ -49,6 +50,7 @@ created: 2026-05-20
   2. **列设置** — **内联 checkbox 列表**（不再用 DropdownMenu 二次弹出）。即时存 localStorage，复用 `useGridColumnPersist`。
      - gap-trade 抽屉特殊：分 3 段折叠分组（客户对汇总 / 逐笔明细 / Gap Trade 表格）
   3. **立即扫描** — 抽屉底部的 action 块，点击立即触发扫描；扫描中按钮 disabled + spinner
+     - gap-trade 抽屉**不放**该段（gap-trade 是每日刷新，没有 on-demand 扫描）
 
 ### 行为不变
 - [ ] 列可见性持久化逻辑（`useGridColumnPersist`）行为不变，localStorage key 不变 → 老用户切换后保留原选择
