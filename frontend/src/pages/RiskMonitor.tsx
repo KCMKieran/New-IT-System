@@ -71,7 +71,8 @@ import { format } from "date-fns";
 import { cn } from "@/lib/utils";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { useGridColumnPersist } from "@/hooks/useGridColumnPersist";
-import { ColumnVisibilityMenu } from "@/components/ColumnVisibilityMenu";
+import { ColumnVisibilityInline } from "@/components/ColumnVisibilityMenu";
+import type { UseGridColumnPersistResult } from "@/hooks/useGridColumnPersist";
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -524,10 +525,11 @@ const RETENTION_DAYS = 30;
  */
 // `lg:` (not `sm:`) so the side-by-side layout only kicks in at ≥1024px.
 // At sm/md widths (640–1023px), description and actions stack vertically
-// — otherwise a tab with 4–5 buttons (e.g. Quick Profit 立即扫描 + 刷新
-// 浮动 + 规则配置 + 列菜单 + 导出 CSV) eats so much horizontal space that
-// the description column degrades to one-character-per-line. Sticking to
-// vertical stack until full desktop width keeps the description readable.
+// — even with the OPT-0023 simplification (headers now hold 2–3 buttons:
+// 导出CSV + 设置, plus optional tab-specific actions like hedge 聚合 or
+// QP 刷新浮动盈亏), the description column would still degrade to
+// one-character-per-line at narrow widths. Sticking to vertical stack
+// until full desktop width keeps the description readable.
 const RISK_MONITOR_HEADER_ROW =
   "flex min-w-0 w-full max-w-full flex-col gap-3 lg:flex-row lg:items-start lg:justify-between";
 const RISK_MONITOR_HEADER_ACTIONS =
@@ -1435,23 +1437,7 @@ function BurstOpenTab({ active }: { active: boolean }) {
           </Button>
           <Button variant="outline" size="sm" onClick={openConfigPanel}>
             <Settings2 className="h-4 w-4 mr-1.5" />
-            规则配置
-          </Button>
-          <ColumnVisibilityMenu
-            persist={columnPersist}
-            columnDefs={columnDefs as ColDef<unknown>[]}
-            size="sm"
-          />
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={handleScanNow}
-            disabled={scanningNow}
-          >
-            <RefreshCw
-              className={cn("h-4 w-4 mr-1.5", scanningNow && "animate-spin")}
-            />
-            {scanningNow ? "扫描中..." : "立即扫描"}
+            设置
           </Button>
         </div>
       </div>
@@ -1495,7 +1481,7 @@ function BurstOpenTab({ active }: { active: boolean }) {
         <Card className="border-dashed">
           <CardContent className="p-4 text-sm text-muted-foreground">
             {config && config.rules.length === 0
-              ? "请先在「规则配置」中添加至少一条规则。"
+              ? "请先在「设置」中添加至少一条规则。"
               : "正在加载规则…"}
           </CardContent>
         </Card>
@@ -1752,7 +1738,7 @@ function BurstOpenTab({ active }: { active: boolean }) {
         </CardContent>
       </Card>
 
-      {/* Config Drawer */}
+      {/* Settings drawer (rules + columns + manual scan) */}
       <ConfigDrawer
         open={configOpen}
         onOpenChange={setConfigOpen}
@@ -1760,6 +1746,14 @@ function BurstOpenTab({ active }: { active: boolean }) {
         setConfig={setEditConfig}
         onSave={handleSaveConfig}
         saving={savingConfig}
+        columnGroups={[
+          {
+            persist: columnPersist,
+            columnDefs: columnDefs as ColDef<unknown>[],
+          },
+        ]}
+        onScanNow={handleScanNow}
+        scanningNow={scanningNow}
       />
     </div>
   );
@@ -2247,23 +2241,7 @@ function QuickOpenCloseTab({ active }: { active: boolean }) {
             }}
           >
             <Settings2 className="h-4 w-4 mr-1.5" />
-            规则配置
-          </Button>
-          <ColumnVisibilityMenu
-            persist={columnPersist}
-            columnDefs={columnDefs as ColDef<unknown>[]}
-            size="sm"
-          />
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={handleScanNow}
-            disabled={scanningNow}
-          >
-            <RefreshCw
-              className={cn("h-4 w-4 mr-1.5", scanningNow && "animate-spin")}
-            />
-            {scanningNow ? "扫描中..." : "立即扫描"}
+            设置
           </Button>
         </div>
       </div>
@@ -2309,7 +2287,7 @@ function QuickOpenCloseTab({ active }: { active: boolean }) {
         <Card className="border-dashed">
           <CardContent className="p-4 text-sm text-muted-foreground">
             {config && config.rules.length === 0
-              ? "请先在「规则配置」中添加至少一条规则。"
+              ? "请先在「设置」中添加至少一条规则。"
               : "正在加载规则…"}
           </CardContent>
         </Card>
@@ -2522,8 +2500,155 @@ function QuickOpenCloseTab({ active }: { active: boolean }) {
         setConfig={setEditConfig}
         onSave={handleSaveConfig}
         saving={savingConfig}
+        columnGroups={[
+          {
+            persist: columnPersist,
+            columnDefs: columnDefs as ColDef<unknown>[],
+          },
+        ]}
+        onScanNow={handleScanNow}
+        scanningNow={scanningNow}
       />
     </div>
+  );
+}
+
+// ── Settings drawer shared sections ───────────────────────
+//
+// The 5 *ConfigDrawer components each render their own "rules" body, but
+// the column-visibility and manual-scan sections are identical across them.
+// This component is plugged into every drawer right after the rules block
+// so the layout, copy, and behavior stay in lockstep.
+//
+// `columnGroups` is rendered as a single section when length === 1 and as
+// multiple labeled sub-sections when length > 1 (Gap Trade has 3 grids).
+// `onScanNow` is omitted on Gap Trade — that tab is daily-refresh and has
+// no on-demand scan endpoint.
+
+interface ColumnSettingGroup {
+  /** Used as the sub-section heading when there are multiple groups. */
+  label?: string;
+  persist: UseGridColumnPersistResult;
+  columnDefs: ColDef<unknown>[];
+}
+
+function UnifiedSettingsExtras({
+  columnGroups,
+  onScanNow,
+  scanningNow,
+}: {
+  columnGroups: ColumnSettingGroup[];
+  onScanNow?: () => void;
+  scanningNow?: boolean;
+}) {
+  const showScan = typeof onScanNow === "function";
+  const hasColumns = columnGroups.length > 0;
+
+  if (!hasColumns && !showScan) return null;
+
+  // Heading + group ids — used for `aria-labelledby` so the column
+  // checkboxes are announced under the right group name. Single-group
+  // case binds to the section heading; multi-group case binds each
+  // sub-list to its own <h4>.
+  const columnsHeadingId = "settings-drawer-columns-heading";
+
+  return (
+    <>
+      {hasColumns && (
+        <>
+          <Separator />
+          <section className="space-y-3" aria-labelledby={columnsHeadingId}>
+            <div>
+              <h3 id={columnsHeadingId} className="text-sm font-medium">
+                列设置
+              </h3>
+              {/* Disambiguate save semantics: the drawer footer has a
+                  「取消」 button that reverts rule edits, but column toggles
+                  are persisted to localStorage on every click — they do
+                  NOT undo on cancel. Call this out explicitly so analysts
+                  don't expect transactional behavior here. */}
+              <p className="text-xs text-muted-foreground mt-1">
+                勾选实时保存到浏览器，不受底部「取消」影响。
+              </p>
+            </div>
+            {columnGroups.length === 1 ? (
+              <div
+                role="group"
+                aria-labelledby={
+                  columnGroups[0].label
+                    ? `${columnsHeadingId}-0`
+                    : columnsHeadingId
+                }
+              >
+                {columnGroups[0].label && (
+                  <p
+                    id={`${columnsHeadingId}-0`}
+                    className="text-xs font-medium text-muted-foreground mb-2"
+                  >
+                    当前对应：{columnGroups[0].label}
+                  </p>
+                )}
+                <ColumnVisibilityInline
+                  persist={columnGroups[0].persist}
+                  columnDefs={columnGroups[0].columnDefs}
+                />
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {columnGroups.map((g, i) => {
+                  const groupHeadingId = `${columnsHeadingId}-${i}`;
+                  return (
+                    <div
+                      key={g.label ?? i}
+                      role="group"
+                      aria-labelledby={g.label ? groupHeadingId : undefined}
+                      className="space-y-2"
+                    >
+                      {g.label && (
+                        <h4
+                          id={groupHeadingId}
+                          className="text-xs font-medium text-muted-foreground uppercase tracking-wide"
+                        >
+                          {g.label}
+                        </h4>
+                      )}
+                      <ColumnVisibilityInline
+                        persist={g.persist}
+                        columnDefs={g.columnDefs}
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </section>
+        </>
+      )}
+      {showScan && (
+        <>
+          <Separator />
+          <section className="space-y-2">
+            <div>
+              <h3 className="text-sm font-medium">手动扫描</h3>
+              <p className="text-xs text-muted-foreground mt-1">
+                立即触发一次扫描（不影响定时扫描节奏）。
+              </p>
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onScanNow}
+              disabled={scanningNow}
+            >
+              <RefreshCw
+                className={cn("h-4 w-4 mr-1.5", scanningNow && "animate-spin")}
+              />
+              {scanningNow ? "扫描中..." : "立即扫描"}
+            </Button>
+          </section>
+        </>
+      )}
+    </>
   );
 }
 
@@ -2536,6 +2661,9 @@ function ConfigDrawer({
   setConfig,
   onSave,
   saving,
+  columnGroups,
+  onScanNow,
+  scanningNow,
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
@@ -2543,6 +2671,9 @@ function ConfigDrawer({
   setConfig: (c: BurstOpenConfig | null) => void;
   onSave: () => void;
   saving: boolean;
+  columnGroups: ColumnSettingGroup[];
+  onScanNow: () => void;
+  scanningNow: boolean;
 }) {
   const isMobile = useIsMobile();
   if (!config) return null;
@@ -2584,53 +2715,56 @@ function ConfigDrawer({
         )}
       >
         <DrawerHeader className="border-b px-6">
-          <DrawerTitle>规则配置</DrawerTitle>
+          <DrawerTitle>设置</DrawerTitle>
         </DrawerHeader>
 
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
-          {/* Scan interval */}
-          <div className="space-y-2">
-            <label className="text-sm font-medium">扫描间隔（分钟）</label>
-            <Input
-              type="number"
-              min={5}
-              max={60}
-              value={config.scan_interval_min}
-              onChange={(e) =>
-                setConfig({
-                  ...config,
-                  scan_interval_min: Number(e.target.value) || 10,
-                })
-              }
-              className="w-32"
-            />
-            <p className="text-xs text-muted-foreground">
-              后端每隔 N 分钟自动执行一次扫描，最小 5 分钟
-            </p>
-          </div>
+          <section className="space-y-4">
+            <h3 className="text-sm font-medium">启用规则</h3>
 
-          {/* Rules */}
-          <div className="space-y-3">
-            <div className="flex items-center justify-between">
-              <label className="text-sm font-medium">
-                检测规则（最多 10 条）
-              </label>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={addRule}
-                disabled={config.rules.length >= 10}
-              >
-                <Plus className="h-3.5 w-3.5 mr-1" />
-                添加规则
-              </Button>
+            {/* Scan interval */}
+            <div className="space-y-2">
+              <label className="text-sm font-medium">扫描间隔（分钟）</label>
+              <Input
+                type="number"
+                min={5}
+                max={60}
+                value={config.scan_interval_min}
+                onChange={(e) =>
+                  setConfig({
+                    ...config,
+                    scan_interval_min: Number(e.target.value) || 10,
+                  })
+                }
+                className="w-32"
+              />
+              <p className="text-xs text-muted-foreground">
+                后端每隔 N 分钟自动执行一次扫描，最小 5 分钟
+              </p>
             </div>
 
-            {config.rules.map((rule, idx) => (
-              <div
-                key={idx}
-                className="rounded-lg border p-4 space-y-3 bg-muted/30"
-              >
+            {/* Rules */}
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <label className="text-sm font-medium">
+                  检测规则（最多 10 条）
+                </label>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={addRule}
+                  disabled={config.rules.length >= 10}
+                >
+                  <Plus className="h-3.5 w-3.5 mr-1" />
+                  添加规则
+                </Button>
+              </div>
+
+              {config.rules.map((rule, idx) => (
+                <div
+                  key={idx}
+                  className="rounded-lg border p-4 space-y-3 bg-muted/30"
+                >
                 <div className="flex items-center justify-between">
                   <span className="text-sm font-medium">Rule {idx + 1}</span>
                   <Button
@@ -2699,7 +2833,14 @@ function ConfigDrawer({
                 </p>
               </div>
             ))}
-          </div>
+            </div>
+          </section>
+
+          <UnifiedSettingsExtras
+            columnGroups={columnGroups}
+            onScanNow={onScanNow}
+            scanningNow={scanningNow}
+          />
         </div>
 
         <div className="border-t p-4 flex justify-end gap-2">
@@ -2708,7 +2849,7 @@ function ConfigDrawer({
           </DrawerClose>
           <Button onClick={onSave} disabled={saving}>
             <Save className="h-4 w-4 mr-1.5" />
-            {saving ? "保存中..." : "保存配置"}
+            {saving ? "保存中..." : "保存规则"}
           </Button>
         </div>
       </DrawerContent>
@@ -2723,6 +2864,9 @@ function QuickConfigDrawer({
   setConfig,
   onSave,
   saving,
+  columnGroups,
+  onScanNow,
+  scanningNow,
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
@@ -2730,6 +2874,9 @@ function QuickConfigDrawer({
   setConfig: (c: QuickOpenCloseConfig | null) => void;
   onSave: () => void;
   saving: boolean;
+  columnGroups: ColumnSettingGroup[];
+  onScanNow: () => void;
+  scanningNow: boolean;
 }) {
   const isMobile = useIsMobile();
   if (!config) return null;
@@ -2774,12 +2921,12 @@ function QuickConfigDrawer({
         )}
       >
         <DrawerHeader className="border-b px-6">
-          <DrawerTitle>快开快平规则配置</DrawerTitle>
+          <DrawerTitle>设置</DrawerTitle>
         </DrawerHeader>
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
-          <div className="space-y-1.5">
+          <section className="space-y-4">
             <div className="flex items-center justify-between">
-              <label className="text-sm font-medium">启用规则</label>
+              <h3 className="text-sm font-medium">启用规则</h3>
               <Checkbox
                 checked={config.enabled}
                 onCheckedChange={(v) =>
@@ -2787,10 +2934,9 @@ function QuickConfigDrawer({
                 }
               />
             </div>
-            <p className="text-xs text-muted-foreground">
+            <p className="text-xs text-muted-foreground -mt-2">
               关闭后仅停止新告警扫描，不影响历史告警展示。
             </p>
-          </div>
 
           <div className="space-y-3">
             <div className="flex items-center justify-between">
@@ -2881,6 +3027,13 @@ function QuickConfigDrawer({
               拉取区间内、持单不超过「最大持单时长」的平仓之合计。
             </p>
           </div>
+          </section>
+
+          <UnifiedSettingsExtras
+            columnGroups={columnGroups}
+            onScanNow={onScanNow}
+            scanningNow={scanningNow}
+          />
         </div>
 
         <div className="border-t p-4 flex justify-end gap-2">
@@ -2889,7 +3042,7 @@ function QuickConfigDrawer({
           </DrawerClose>
           <Button onClick={onSave} disabled={saving}>
             <Save className="h-4 w-4 mr-1.5" />
-            {saving ? "保存中..." : "保存配置"}
+            {saving ? "保存中..." : "保存规则"}
           </Button>
         </div>
       </DrawerContent>
@@ -3486,13 +3639,8 @@ function QuickProfitTab({ active }: { active: boolean }) {
             }}
           >
             <Settings2 className="h-4 w-4 mr-1.5" />
-            规则配置
+            设置
           </Button>
-          <ColumnVisibilityMenu
-            persist={columnPersist}
-            columnDefs={columnDefs as ColDef<unknown>[]}
-            size="sm"
-          />
           <Button
             variant="outline"
             size="sm"
@@ -3512,17 +3660,6 @@ function QuickProfitTab({ active }: { active: boolean }) {
               )}
             />
             {refreshingFloating ? "刷新中..." : "刷新浮动盈亏"}
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={handleScanNow}
-            disabled={scanningNow}
-          >
-            <RefreshCw
-              className={cn("h-4 w-4 mr-1.5", scanningNow && "animate-spin")}
-            />
-            {scanningNow ? "扫描中..." : "立即扫描"}
           </Button>
         </div>
       </div>
@@ -3568,7 +3705,7 @@ function QuickProfitTab({ active }: { active: boolean }) {
         <Card className="border-dashed">
           <CardContent className="p-4 text-sm text-muted-foreground">
             {config && config.rules.length === 0
-              ? "请先在「规则配置」中添加至少一条规则。"
+              ? "请先在「设置」中添加至少一条规则。"
               : "正在加载规则…"}
           </CardContent>
         </Card>
@@ -3784,6 +3921,14 @@ function QuickProfitTab({ active }: { active: boolean }) {
         setConfig={setEditConfig}
         onSave={handleSaveConfig}
         saving={savingConfig}
+        columnGroups={[
+          {
+            persist: columnPersist,
+            columnDefs: columnDefs as ColDef<unknown>[],
+          },
+        ]}
+        onScanNow={handleScanNow}
+        scanningNow={scanningNow}
       />
     </div>
   );
@@ -3796,6 +3941,9 @@ function QuickProfitConfigDrawer({
   setConfig,
   onSave,
   saving,
+  columnGroups,
+  onScanNow,
+  scanningNow,
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
@@ -3803,6 +3951,9 @@ function QuickProfitConfigDrawer({
   setConfig: (c: QuickProfitConfig | null) => void;
   onSave: () => void;
   saving: boolean;
+  columnGroups: ColumnSettingGroup[];
+  onScanNow: () => void;
+  scanningNow: boolean;
 }) {
   const isMobile = useIsMobile();
   if (!config) return null;
@@ -3846,12 +3997,12 @@ function QuickProfitConfigDrawer({
         )}
       >
         <DrawerHeader className="border-b px-6">
-          <DrawerTitle>快速获利规则配置</DrawerTitle>
+          <DrawerTitle>设置</DrawerTitle>
         </DrawerHeader>
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
-          <div className="space-y-1.5">
+          <section className="space-y-4">
             <div className="flex items-center justify-between">
-              <label className="text-sm font-medium">启用快速获利检测</label>
+              <h3 className="text-sm font-medium">启用规则</h3>
               <Checkbox
                 checked={config.enabled}
                 onCheckedChange={(v) =>
@@ -3859,10 +4010,9 @@ function QuickProfitConfigDrawer({
                 }
               />
             </div>
-            <p className="text-xs text-muted-foreground">
+            <p className="text-xs text-muted-foreground -mt-2">
               关闭后仅停止新告警扫描，不影响历史告警展示。
             </p>
-          </div>
 
           <div className="space-y-3">
             <div className="flex items-center justify-between">
@@ -3957,6 +4107,13 @@ function QuickProfitConfigDrawer({
               10min），否则可能漏报；浮动利润每 30s 自动刷新。
             </p>
           </div>
+          </section>
+
+          <UnifiedSettingsExtras
+            columnGroups={columnGroups}
+            onScanNow={onScanNow}
+            scanningNow={scanningNow}
+          />
         </div>
         <div className="border-t p-4 flex justify-end gap-2">
           <DrawerClose asChild>
@@ -3964,7 +4121,7 @@ function QuickProfitConfigDrawer({
           </DrawerClose>
           <Button onClick={onSave} disabled={saving}>
             <Save className="h-4 w-4 mr-1.5" />
-            {saving ? "保存中..." : "保存配置"}
+            {saving ? "保存中..." : "保存规则"}
           </Button>
         </div>
       </DrawerContent>
@@ -4595,25 +4752,7 @@ function HedgeOpenTab({ active }: { active: boolean }) {
             }}
           >
             <Settings2 className="h-4 w-4 mr-1.5" />
-            规则配置
-          </Button>
-          <ColumnVisibilityMenu
-            persist={aggregated ? aggColumnPersist : columnPersist}
-            columnDefs={
-              (aggregated ? aggregatedColumnDefs : columnDefs) as ColDef<unknown>[]
-            }
-            size="sm"
-          />
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={handleScanNow}
-            disabled={scanningNow}
-          >
-            <RefreshCw
-              className={cn("h-4 w-4 mr-1.5", scanningNow && "animate-spin")}
-            />
-            {scanningNow ? "扫描中..." : "立即扫描"}
+            设置
           </Button>
           {/* "聚合 / 已聚合" toggle.
               - Off (default): amber background + 「聚合」 — affordance, draws
@@ -4696,7 +4835,7 @@ function HedgeOpenTab({ active }: { active: boolean }) {
         <Card className="border-dashed">
           <CardContent className="p-4 text-sm text-muted-foreground">
             {config && config.rules.length === 0
-              ? "请先在「规则配置」中添加至少一条规则。"
+              ? "请先在「设置」中添加至少一条规则。"
               : "正在加载规则…"}
           </CardContent>
         </Card>
@@ -4941,6 +5080,23 @@ function HedgeOpenTab({ active }: { active: boolean }) {
         setConfig={setEditConfig}
         onSave={handleSaveConfig}
         saving={savingConfig}
+        columnGroups={[
+          {
+            // Tracks the 聚合 toggle so the column list inside the drawer
+            // always matches the table currently rendered on screen.
+            // Label is shown as a caption above the checkbox list so the
+            // analyst can see at a glance which view's columns they're
+            // editing — defensive against any future code path that
+            // could flip `aggregated` while the drawer is open.
+            label: aggregated ? "聚合视图" : "明细视图",
+            persist: aggregated ? aggColumnPersist : columnPersist,
+            columnDefs: (aggregated
+              ? aggregatedColumnDefs
+              : columnDefs) as ColDef<unknown>[],
+          },
+        ]}
+        onScanNow={handleScanNow}
+        scanningNow={scanningNow}
       />
     </div>
   );
@@ -4958,6 +5114,9 @@ function HedgeConfigDrawer({
   setConfig,
   onSave,
   saving,
+  columnGroups,
+  onScanNow,
+  scanningNow,
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
@@ -4965,6 +5124,9 @@ function HedgeConfigDrawer({
   setConfig: (c: HedgeOpenConfig | null) => void;
   onSave: () => void;
   saving: boolean;
+  columnGroups: ColumnSettingGroup[];
+  onScanNow: () => void;
+  scanningNow: boolean;
 }) {
   const isMobile = useIsMobile();
   if (!config) return null;
@@ -5012,16 +5174,13 @@ function HedgeConfigDrawer({
         )}
       >
         <DrawerHeader className="border-b px-6">
-          <DrawerTitle>对冲刷单规则配置</DrawerTitle>
+          <DrawerTitle>设置</DrawerTitle>
         </DrawerHeader>
 
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
-          {/* Master enable — matches the QOC / Quick Profit pattern:
-              label on the left, Checkbox right-aligned, small grey hint
-              underneath. See page-style-conventions §9. */}
-          <div className="space-y-1.5">
+          <section className="space-y-4">
             <div className="flex items-center justify-between">
-              <label className="text-sm font-medium">启用对冲刷单检测</label>
+              <h3 className="text-sm font-medium">启用规则</h3>
               <Checkbox
                 checked={config.enabled}
                 onCheckedChange={(v) =>
@@ -5029,10 +5188,9 @@ function HedgeConfigDrawer({
                 }
               />
             </div>
-            <p className="text-xs text-muted-foreground">
+            <p className="text-xs text-muted-foreground -mt-2">
               关闭后仅停止新告警扫描，不影响历史告警展示。
             </p>
-          </div>
 
           <div className="space-y-3">
             <div className="flex items-center justify-between">
@@ -5149,6 +5307,13 @@ function HedgeConfigDrawer({
               </div>
             ))}
           </div>
+          </section>
+
+          <UnifiedSettingsExtras
+            columnGroups={columnGroups}
+            onScanNow={onScanNow}
+            scanningNow={scanningNow}
+          />
         </div>
 
         <div className="border-t p-4 flex justify-end gap-2">
@@ -5157,7 +5322,7 @@ function HedgeConfigDrawer({
           </DrawerClose>
           <Button onClick={onSave} disabled={saving}>
             <Save className="h-4 w-4 mr-1.5" />
-            {saving ? "保存中..." : "保存配置"}
+            {saving ? "保存中..." : "保存规则"}
           </Button>
         </div>
       </DrawerContent>
@@ -6117,7 +6282,7 @@ function GapTradeTab({ active }: { active: boolean }) {
             </Button>
             <Button variant="outline" size="sm" onClick={handleOpenConfig}>
               <Settings2 className="h-4 w-4 mr-1.5" />
-              规则配置
+              设置
             </Button>
           </div>
         </div>
@@ -6261,14 +6426,6 @@ function GapTradeTab({ active }: { active: boolean }) {
           <span className="text-xs font-normal text-muted-foreground">
             · 共 {clientPairAgg.length} 对客户 · 按 L 累计亏损降序
           </span>
-          <span className="ml-auto">
-            <ColumnVisibilityMenu
-              persist={clientPairPersist}
-              columnDefs={clientPairColumns as ColDef<unknown>[]}
-              iconOnly
-              label="客户对汇总 · 列设置"
-            />
-          </span>
         </h3>
         <div
           className={cn(
@@ -6301,14 +6458,6 @@ function GapTradeTab({ active }: { active: boolean }) {
           <Badge variant="outline">爆仓 AB 仓配对 · 逐笔明细</Badge>
           <span className="text-xs font-normal text-muted-foreground">
             · 共 {soAbAlerts.length} 条 · 点击行查看完整字段
-          </span>
-          <span className="ml-auto">
-            <ColumnVisibilityMenu
-              persist={soAbPersist}
-              columnDefs={soAbColumns as ColDef<unknown>[]}
-              iconOnly
-              label="逐笔明细 · 列设置"
-            />
           </span>
         </h3>
         {/* AG-Grid — same theme + legacy mode + heights as the other 3 tabs */}
@@ -6346,14 +6495,6 @@ function GapTradeTab({ active }: { active: boolean }) {
           <Badge variant="outline">Gap Trade 超额获利客户</Badge>
           <span className="text-xs font-normal text-muted-foreground">
             · 共 {gapAlerts.length} 条 · 点击行查看完整字段
-          </span>
-          <span className="ml-auto">
-            <ColumnVisibilityMenu
-              persist={gapPersist}
-              columnDefs={gapColumns as ColDef<unknown>[]}
-              iconOnly
-              label="Gap Trade · 列设置"
-            />
           </span>
         </h3>
         <div
@@ -6435,6 +6576,23 @@ function GapTradeTab({ active }: { active: boolean }) {
         setConfig={setEditConfig}
         onSave={handleSaveConfig}
         saving={savingConfig}
+        columnGroups={[
+          {
+            label: "客户对汇总",
+            persist: clientPairPersist,
+            columnDefs: clientPairColumns as ColDef<unknown>[],
+          },
+          {
+            label: "逐笔明细",
+            persist: soAbPersist,
+            columnDefs: soAbColumns as ColDef<unknown>[],
+          },
+          {
+            label: "Gap Trade 超额获利",
+            persist: gapPersist,
+            columnDefs: gapColumns as ColDef<unknown>[],
+          },
+        ]}
       />
 
       {/* Yellow row highlight for shared-IP SO+AB rows.
@@ -6476,6 +6634,7 @@ function GapTradeConfigDrawer({
   setConfig,
   onSave,
   saving,
+  columnGroups,
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
@@ -6483,6 +6642,7 @@ function GapTradeConfigDrawer({
   setConfig: (c: GapTradeConfig | null) => void;
   onSave: () => void;
   saving: boolean;
+  columnGroups: ColumnSettingGroup[];
 }) {
   const isMobile = useIsMobile();
   if (!config) return null;
@@ -6501,10 +6661,13 @@ function GapTradeConfigDrawer({
         )}
       >
         <DrawerHeader className="border-b px-6">
-          <DrawerTitle>Gap Trade 规则配置</DrawerTitle>
+          <DrawerTitle>设置</DrawerTitle>
         </DrawerHeader>
 
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
+          <section className="space-y-4">
+            <h3 className="text-sm font-medium">启用规则</h3>
+
           {/* Scan window (MT time) — top-level field block, no card wrapper,
               matching the "扫描间隔" pattern in ConfigDrawer (Burst Open). */}
           <div className="space-y-2">
@@ -6759,6 +6922,9 @@ function GapTradeConfigDrawer({
               </p>
             </div>
           </div>
+          </section>
+
+          <UnifiedSettingsExtras columnGroups={columnGroups} />
         </div>
 
         <div className="border-t p-4 flex justify-end gap-2">
@@ -6767,7 +6933,7 @@ function GapTradeConfigDrawer({
           </DrawerClose>
           <Button onClick={onSave} disabled={saving}>
             <Save className="h-4 w-4 mr-1.5" />
-            {saving ? "保存中..." : "保存配置"}
+            {saving ? "保存中..." : "保存规则"}
           </Button>
         </div>
       </DrawerContent>

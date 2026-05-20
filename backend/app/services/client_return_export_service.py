@@ -45,6 +45,7 @@ _CSV_FIELDS = [
     "country",
     "zipcode",
     "is_akcm",
+    "has_usdt_tag",
     "net_deposit_hist",
     "net_deposit_month",
     "equity",
@@ -187,6 +188,7 @@ def _run_export_task(task_id: str) -> None:
             include_avg_equity=bool(params.get("include_avg_equity", True)),
             country_filter=params.get("country_filter"),
             akcm_filter=params.get("akcm_filter"),
+            usdt_filter=params.get("usdt_filter"),
             return_all=True,
             use_cache=False,
         )

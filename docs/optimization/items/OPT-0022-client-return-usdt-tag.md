@@ -1,11 +1,12 @@
 ---
 id: OPT-0022
 title: Client Return Rate 加 USDT 标记列（从 OPT-0020 拆出）
-status: ready
+status: done
 priority: P2
 area: mixed
 effort: S
 created: 2026-05-20
+completed: 2026-05-20
 related: [[OPT-0020]]
 ---
 
@@ -149,4 +150,52 @@ Cons ×3）分两 Drop 上线。但：
 
 ## 结果
 
-(done 时填)
+完成日期：2026-05-20。
+
+### 实际交付（vs AC）
+
+后端：
+- ✅ `client_return_service.py` Phase 2 SQL：新增 USDT LEFT JOIN（子查询模板与 AKCM 一致，`tagid IN (6148, 214, 172)`，`SELECT DISTINCT userid` 防一对多撑行）
+- ✅ SELECT 列加 `COALESCE(usdt.has_usdt_tag, 0) AS has_usdt_tag`
+- ✅ `allowed_sort_columns` 加 `has_usdt_tag` + `is_akcm`（顺手补：`is_akcm` 之前漏在白名单）
+- ✅ Cache key prefix `client_return_v4_zipcode_` → `client_return_v5_usdt_`
+- ✅ Python 后处理把 int 0/1 cast 为 bool（跟 `is_akcm` 同一处理）
+- ✅ `client_return_export_service.py` `_CSV_FIELDS` 加 `has_usdt_tag`（紧跟 `is_akcm`）
+- ✅ `ClientReturnRateRow` schema 加 `has_usdt_tag: bool = False`
+
+前端：
+- ✅ `ClientReturnRate.tsx` 列定义新增「U入金」列（用户验收后定稿）：
+  - 显式 `colId="has_usdt_tag"`（CLAUDE.md grid-column-persist 要求）
+  - 列标题 `U入金`，配 `InfoHeader` tooltip：「含 tag：U_ERC20, U_TRC20, U_电汇TT\n如有更新，请联系 Kieran 添加」（跟 ROACE / avg_daily_equity 同款 InfoHeader）
+  - 显示：是（绿）/ 否（灰），居中
+  - 底层值 0/1：`valueGetter` 输出数字，`filter: agNumberColumnFilter` 直接按 1/0 过滤；显示由 `valueFormatter` 转中文
+  - 宽 90px，位置：zipcode 之后、`net_deposit_hist` 之前（识别类信号靠前）
+- ✅ `ClientReturnRateRow` interface 加 `has_usdt_tag: boolean`
+
+验证（冒烟）：
+- ✅ Pre-flight `user_tags`：3 个 tagid 全活跃（172=203 / 214=61 / 6148=3800 distinct user），共 4042 USDT 用户；索引 `(tagId, userId)` 复合 + 单列俱在
+- ✅ 已知 USDT user 100021/100027/100038/100041（tag 214 命中）→ API `has_usdt_tag=true`
+- ✅ 已知非 USDT user → API `has_usdt_tag=false`
+- ✅ Sort by `has_usdt_tag` desc / asc 均正确
+- ✅ Redis cache：第二次同参 query `from_cache=true`，命中
+
+### 偏差
+
+- ➕ **OPT 文档假设有误**：AC §前端「复用 `is_akcm` 列的布尔图标渲染器」—— 实际 `is_akcm` 在 grid 里**不是一个可见列**，只是 filter 下拉 UI。无现成渲染器可 copy。
+- ➕ **列文案 + 渲染由用户验收后改版**：原计划列标题 `USDT` + 绿 ✓/— icon。用户要求改成「U入金」+ `InfoHeader` tooltip（列出 tag 名 + 联系 Kieran 更新提示）+ 中文「是/否」+ 过滤值 1/0。最终用 `valueGetter` 输出 0/1 + `valueFormatter` 转「是/否」+ `agNumberColumnFilter` 直接按数字过滤。
+- ➕ `allowed_sort_columns` 顺手补 `is_akcm`：原本只在前端按布尔过滤，新 USDT 列既然支持服务端排序，AKCM 没理由不支持。零额外成本。
+
+### 性能（回答用户原始疑虑）
+
+用户提问："2k 个用户每次查询都要查 3 个 tagid，会不会拖慢？"
+- 否。Phase 2 SQL 是**一条整 SQL**，所有 LEFT JOIN 共享 Phase-1 产出的 `id_list_str`。USDT JOIN 只是在已 active 的客户集合上做一次 index range scan。
+- `user_tags` 几万行小表，`(tagId, userId)` 复合索引完美匹配 `WHERE tagid IN (3 vals) AND userid IN (...)`。
+- 实测 90 天范围 4331 客户，冷查询 4.5s（与未加 USDT JOIN 前同量级），cache 命中 <50ms。
+- v4→v5 cache bump 一次性失效成本 ≈ 几百 ms ~ 2s（首次冷查询），后续 3h TTL 内全走 Redis。
+
+### Follow-up（留给未来）
+
+- ~~若 risk team 反馈想筛选 "只看 USDT 客户" / "排除 USDT 客户"：补一个 `usdt_filter` 后端参数，仿照 `akcm_filter` 模式。~~ → 提前做了。用户验收时直接要求加，参考 risk-monitor 顶部下拉风格全部重写：3 个 ToggleGroup（国家 / AKCM）→ 3 个 shadcn Select，新增「入金渠道」下拉（trigger 显示类目名，点开是 全部 / 仅U入金 / 非U入金）；外层容器加 `sm:flex-wrap` 多过滤项窄屏自动折行。端到端：schemas + service + cache key + export 全套接通。
+- USDT 入金金额聚合（现在只是布尔）：需要拉 deposit 表 + 货币识别，独立 OPT。
+- 多语言列标题（en/zh）：等系统级 i18n 框架就位再统一处理。
+- 抽公共 `<BooleanIconCell>` 组件：当第二个布尔列出现时再抽（YAGNI）。

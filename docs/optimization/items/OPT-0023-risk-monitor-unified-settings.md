@@ -1,7 +1,7 @@
 ---
 id: OPT-0023
 title: Risk-monitor header 化繁为简：合并「列设置」「立即扫描」进设置抽屉
-status: wip
+status: done
 priority: P2
 area: frontend
 effort: M
@@ -38,8 +38,9 @@ created: 2026-05-20
 ## 验收标准
 
 ### Header 简化
-- [ ] burst-open / quick-open-close / quick-profit / gap-trade：header 只剩 `导出CSV` + `设置`（2 个按钮）
-- [ ] hedge-open：header 只剩 `导出CSV` + `聚合` + `设置`（3 个按钮）
+- [ ] burst-open / quick-open-close / gap-trade：header 只剩 `导出CSV` + `设置`（2 个按钮）
+- [ ] quick-profit：header 留 `导出CSV` + `刷新浮动盈亏`（tab-specific，类似 hedge 聚合）+ `设置`（3 个按钮）
+- [ ] hedge-open：header 留 `导出CSV` + `聚合` + `设置`（3 个按钮）
 - [ ] 「规则配置」按钮文案 → 「设置」（Settings icon 保留）
 
 ### 设置抽屉（5 个 drawer 都升级）
@@ -49,6 +50,7 @@ created: 2026-05-20
   2. **列设置** — **内联 checkbox 列表**（不再用 DropdownMenu 二次弹出）。即时存 localStorage，复用 `useGridColumnPersist`。
      - gap-trade 抽屉特殊：分 3 段折叠分组（客户对汇总 / 逐笔明细 / Gap Trade 表格）
   3. **立即扫描** — 抽屉底部的 action 块，点击立即触发扫描；扫描中按钮 disabled + spinner
+     - gap-trade 抽屉**不放**该段（gap-trade 是每日刷新，没有 on-demand 扫描）
 
 ### 行为不变
 - [ ] 列可见性持久化逻辑（`useGridColumnPersist`）行为不变，localStorage key 不变 → 老用户切换后保留原选择
@@ -73,4 +75,31 @@ created: 2026-05-20
 
 ## 结果
 
-<!-- done 时填 -->
+实际交付（与 AC 一致）：
+
+- 5 个 ConfigDrawer header 统一改名「设置」；burst/quick/QP/hedge 抽屉里 3 段
+  （启用规则 + 列设置 + 立即扫描），gap-trade 不放扫描段
+- header 简化到 2-3 个按钮：导出 CSV + 设置 + tab-specific（hedge 聚合 /
+  QP 刷新浮动盈亏）
+- 新增 `ColumnVisibilityInline` 组件 + 共享 `useColumnVisibilityState` hook
+  （`ColumnVisibilityMenu` 同文件保留给 ClientReturnRate）
+- 新增 `UnifiedSettingsExtras` 共享段渲染列设置 + 手动扫描
+- gap-trade 抽屉里列设置分 3 段（客户对汇总 / 逐笔明细 / Gap Trade）
+- hedge 抽屉里列设置随聚合 toggle 动态切换 persist 源 + 显示「聚合/明细视图」
+- 4 处 empty-state 文案「规则配置」→「设置」
+
+Stage 1 outsider-review 处理记录（用户每条独立拍板）：
+
+- ✅ 当场修：列设置说明加「实时保存，不受『取消』影响」消除保存语义混淆
+- ✅ 当场修：inline 列表加 `role="group"` + `aria-labelledby` 让读屏器区分多列组
+- ✅ 当场修：hedge 抽屉加「聚合视图 / 明细视图」label caption（防御未来状态翻转）
+- ⚪ 保留：「设置」label 改成「设置/列」拒绝了——「化繁为简」是首要目标
+- ⚪ 出 OPT 候选（已在本 OPT close body 列 follow-up）：
+  - 5 个 *ConfigDrawer 合并成统一 `<DrawerShell>` 重构（reviewer 建议，超出本 OPT 范围）
+  - 抽屉滚动过长 + 移动端键盘遮挡时用 `<Tabs>` 内嵌（reviewer 建议，UX 大改）
+  - `useGridColumnPersist` 版本变更无声重置告警（pre-existing pattern）
+  - `useColumnVisibilityState` render-time grid API read 改 `useSyncExternalStore`（pre-existing pattern）
+
+合并方式：本次 merge 一并把 OPT-0022（U入金标记列）拿上 main——另一个 session
+在我的 opt branch 上提交了 OPT-0022 close commit 9ac113b。用户选项 B「一起 merge」。
+

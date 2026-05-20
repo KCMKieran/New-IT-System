@@ -7,6 +7,8 @@ Append-only 日志。最新的写在最上面。
 
 | 日期 | ID | Commit | 标题 |
 |------|----|--------|------|
+| 2026-05-20 | [OPT-0023](./items/OPT-0023-risk-monitor-unified-settings.md) | — | Risk-monitor header 化繁为简：5 个 tab 的「列设置」+「立即扫描」收进设置抽屉（rename「规则配置」→「设置」），导出 CSV + hedge 聚合 + QP 刷新浮动盈亏 留在 header；新增 ColumnVisibilityInline 组件 + UnifiedSettingsExtras 共享段；Stage 1 outsider-review 修了 3 条（save semantics 提示 / a11y group / hedge 聚合 caption）|
+| 2026-05-20 | [OPT-0022](./items/OPT-0022-client-return-usdt-tag.md) | — | Client Return Rate 加 USDT 标记列 + 入金渠道筛选（从 OPT-0020 拆出，与 OPT-0023 一起 merge）|
 | 2026-05-19 | [OPT-0021](./items/OPT-0021-risk-monitor-hedge-wash-tab.md) | — | Risk Monitor 新增「对冲刷单」Tab（rule_id 91-100，单账户 buy+sell 严格 1:1 + 0.01 lot EPS）— 抓 wash trading via lock-position；同时引入 per-rule name 字段（fund-flow 模式）+ page-style-conventions §9 多 tab 页面布局规范 |
 | 2026-05-19 | [OPT-0019](./items/OPT-0019-redis-maxmemory-policy.md) | — (merge of `61b2666`) | Redis 加 maxmemory 256mb + allkeys-lru（OPT-0018 sub-OPT；prod + dev compose 同步；需要手动 `docker compose up -d redis-prod` 才会生效）|
 | 2026-05-18 | [OPT-0017](./items/OPT-0017-risk-monitor-group-column.md) | `e5e102c` (merge of `e2b21ae`) | Risk Monitor 各 Tab 添加账户组列（Tab 2/3 后端 `get_account_info_map` extend；Tab 4 三段 grid 用现有 `l_groupsid` / `client_groupsid`）|

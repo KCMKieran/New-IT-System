@@ -2,6 +2,7 @@ import { Columns3 } from "lucide-react";
 import type { ColDef } from "ag-grid-community";
 import { useCallback, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   DropdownMenu,
   DropdownMenuCheckboxItem,
@@ -51,34 +52,16 @@ function toToggleable(defs: ColDef<unknown>[]): ToggleableColumn[] {
     .filter((x): x is ToggleableColumn => x !== null);
 }
 
-/**
- * Dropdown menu that lets users toggle column visibility on an AG-Grid that
- * uses `useGridColumnPersist`. Visibility changes are immediately reflected
- * in the grid and persisted to localStorage via the hook's throttled save.
- *
- * Two visual modes:
- * - default: full-width-ish button "Settings2 + 列设置" — use in toolbar rows
- * - iconOnly: 36×36 icon — use beside section <h3> titles (e.g. Gap Trade's
- *   3 stacked grids where horizontal real estate is tight)
- *
- * Quick actions:
- * - "全选": mark every column visible (one batched setColumnsVisible call)
- * - "重置": clear localStorage + resetColumnState() — restores the
- *   columnDefs defaults including width / order / pinned
- */
-export function ColumnVisibilityMenu({
-  persist,
-  columnDefs,
-  label = "列设置",
-  buttonClassName,
-  iconOnly = false,
-  size = "default",
-}: ColumnVisibilityMenuProps) {
+// Shared state hook used by both the dropdown menu and the inline list:
+// resolves the toggleable column list, mirrors grid state into a checked-map,
+// and exposes the show-all / reset / toggle handlers with the same
+// "bump version after each action so checkboxes re-read grid state" trick.
+function useColumnVisibilityState(
+  persist: UseGridColumnPersistResult,
+  columnDefs: ColDef<unknown>[],
+) {
   const toggleColumns = toToggleable(columnDefs);
 
-  // Bump version to force a re-read of column state after each user action,
-  // so checkbox `checked` props match grid reality. getColumnState() is
-  // cheap (in-memory) so re-reading on every render is fine.
   const [, setVersion] = useState(0);
   const bump = useCallback(() => setVersion((v) => v + 1), []);
 
@@ -115,6 +98,35 @@ export function ColumnVisibilityMenu({
     },
     [persist, bump],
   );
+
+  return { toggleColumns, stateMap, handleShowAll, handleReset, handleToggle };
+}
+
+/**
+ * Dropdown menu that lets users toggle column visibility on an AG-Grid that
+ * uses `useGridColumnPersist`. Visibility changes are immediately reflected
+ * in the grid and persisted to localStorage via the hook's throttled save.
+ *
+ * Two visual modes:
+ * - default: full-width-ish button "Settings2 + 列设置" — use in toolbar rows
+ * - iconOnly: 36×36 icon — use beside section <h3> titles (e.g. Gap Trade's
+ *   3 stacked grids where horizontal real estate is tight)
+ *
+ * Quick actions:
+ * - "全选": mark every column visible (one batched setColumnsVisible call)
+ * - "重置": clear localStorage + resetColumnState() — restores the
+ *   columnDefs defaults including width / order / pinned
+ */
+export function ColumnVisibilityMenu({
+  persist,
+  columnDefs,
+  label = "列设置",
+  buttonClassName,
+  iconOnly = false,
+  size = "default",
+}: ColumnVisibilityMenuProps) {
+  const { toggleColumns, stateMap, handleShowAll, handleReset, handleToggle } =
+    useColumnVisibilityState(persist, columnDefs);
 
   return (
     <DropdownMenu>
@@ -195,5 +207,65 @@ export function ColumnVisibilityMenu({
         })}
       </DropdownMenuContent>
     </DropdownMenu>
+  );
+}
+
+export interface ColumnVisibilityInlineProps {
+  persist: UseGridColumnPersistResult;
+  columnDefs: ColDef<unknown>[];
+}
+
+// Flat inline checkbox list — for use inside the risk-monitor settings
+// drawer where the dropdown wrapper would be a nested popup. Same state
+// semantics as ColumnVisibilityMenu: immediate localStorage save, "全选" /
+// "重置" quick actions, re-reads grid state after each toggle.
+export function ColumnVisibilityInline({
+  persist,
+  columnDefs,
+}: ColumnVisibilityInlineProps) {
+  const { toggleColumns, stateMap, handleShowAll, handleReset, handleToggle } =
+    useColumnVisibilityState(persist, columnDefs);
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-2">
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-7 px-2 text-xs"
+          onClick={handleShowAll}
+        >
+          全选
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-7 px-2 text-xs"
+          onClick={handleReset}
+        >
+          重置
+        </Button>
+      </div>
+      <div className="grid grid-cols-2 gap-x-3 gap-y-1.5">
+        {toggleColumns.map(({ colId, label: itemLabel }) => {
+          const checked = stateMap[colId] ?? true;
+          const id = `col-vis-${colId}`;
+          return (
+            <label
+              key={colId}
+              htmlFor={id}
+              className="flex items-center gap-2 text-sm cursor-pointer select-none py-0.5"
+            >
+              <Checkbox
+                id={id}
+                checked={checked}
+                onCheckedChange={(value) => handleToggle(colId, !!value)}
+              />
+              <span className="truncate">{itemLabel}</span>
+            </label>
+          );
+        })}
+      </div>
+    </div>
   );
 }
