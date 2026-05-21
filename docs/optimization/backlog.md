@@ -21,6 +21,7 @@
 | [OPT-0001](./items/OPT-0001-risk-monitor-tab-cache.md) | P2 | frontend | M | Risk-monitor 四个 tab 切换状态/缓存优化 |
 | [OPT-0002](./items/OPT-0002-browser-cache-pattern-doc.md) | P2 | docs | S | 现有浏览器缓存模式归纳成复用文档 |
 | [OPT-0003](./items/OPT-0003-risk-monitor-sqlite-perf.md) | P1 | db | L | Risk-monitor SQLite 数据增长后的性能方案 |
+| [OPT-0025](./items/OPT-0025-risk-monitor-filter-persist.md) | P2 | frontend | S | Risk-monitor 工具栏过滤器持久化（rangePreset / ruleFilter / serverFilter / onlySharedIp） |
 
 ## 💡 想法（Ideas）—— 还不能直接 claim
 
