@@ -78,6 +78,7 @@ import {
   estimateCommissionTwoLegs,
   formatCommission,
 } from "@/lib/commission";
+import { InfoHeader } from "@/components/ui/info-header";
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -665,7 +666,10 @@ function estCommissionColDef<TRow>(opts: {
     width,
     sortable: true,
     cellClass: "ag-right-aligned-cell",
-    headerTooltip: EST_COMMISSION_TOOLTIP,
+    // Use InfoHeader (with ℹ icon) so users see a visible affordance — the
+    // raw `headerTooltip` string is invisible unless they hover the text.
+    headerComponent: InfoHeader,
+    headerComponentParams: { tooltip: EST_COMMISSION_TOOLTIP },
     valueGetter: (p) => (p.data ? getCommission(p.data) : null),
     cellRenderer: (p: { value: number | null }) => formatCommission(p.value),
     comparator: (a: number | null, b: number | null) => {
