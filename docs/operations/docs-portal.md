@@ -21,9 +21,9 @@
 ```
 
 - **入口 URL**：`/docs/`（子路径，复用主站的 Cloudflare Tunnel + Nginx，零额外 DNS/证书）。
-- **后端**：`mkdocs serve --dev-addr=0.0.0.0:8000` 跑在 `mkdocs` service 里（image `squidfunk/mkdocs-material:latest`）。
+- **后端**：`mkdocs serve --dev-addr=0.0.0.0:8000` 跑在 `mkdocs` service 里（image `squidfunk/mkdocs-material:9.7.6`，**pin 到具体版本**避免 `:latest` 静默 breaking change，升级时一起改 compose + 重测）。
 - **挂载**：`./docs:/docs/docs:ro` + `./mkdocs.yml:/docs/mkdocs.yml:ro`，**只读** —— 容器永远改不到源文件。
-- **链接前缀**：mkdocs.yml `site_url: .../docs/` 让生成的 HTML 内部链接带 `/docs/` 前缀；Nginx `proxy_pass http://mkdocs:8000/`（带 trailing slash）剥掉前缀再转发给 mkdocs，所以上游收到的是它认识的根路径。
+- **链接前缀**：mkdocs.yml `site_url: .../docs/` 让 mkdocs 期望收到的请求**已经带** `/docs/` 前缀，生成的内部链接也都带这个前缀。Nginx `proxy_pass http://mkdocs:8000`（**不**带 trailing slash）保留请求 URI 转发给 mkdocs —— 上游收到 `/docs/...`，正好匹配它认识的路径。如果错写成 `http://mkdocs:8000/`（带斜杠剥前缀），mkdocs 收到 `/` 会 302 回 `/docs/`，浏览器再回到 nginx，**形成无限循环**。
 
 ## 2. 本地启动 / 重启
 
@@ -90,7 +90,9 @@ graph LR
 | `502 Bad Gateway` 访问 `/docs/` | mkdocs 容器没起 | `docker compose -f docker-compose.prod.yml up -d mkdocs` |
 | 页面 404 但文件存在 | mkdocs serve 启动时报错 | `docker logs new-it-mkdocs-prod` 看 yaml 解析错 |
 | 改 .md 后页面没刷新 | livereload ws 没穿过 nginx | 浏览器手动刷新即可；或 `docker restart new-it-mkdocs-prod` |
-| 内部链接 404 / 样式坏 | site_url 和 nginx proxy 前缀不一致 | 确认 `mkdocs.yml site_url` 末尾有 `/` 且 nginx `proxy_pass` URL 末尾也有 `/` |
+| 内部链接 404 / 样式坏 | site_url 和 nginx proxy 前缀不一致 | 确认 `mkdocs.yml site_url` 末尾有 `/`，**nginx `proxy_pass` URL 末尾不要带 `/`**（保留前缀避免 302 循环） |
+| `/docs/` 浏览器一直转圈 / 间歇 502 | proxy_pass 误改成带 trailing slash | 检查 `frontend/nginx.conf` 的 `location /docs/` 块——`proxy_pass http://mkdocs:8000;` 后面**没有** `/` |
+| `docker compose ps` 显示 mkdocs 状态 `unhealthy` | mkdocs.yml 解析错，或 docs_dir mount 缺失 | `docker logs new-it-mkdocs-prod` 看 yaml 错；healthcheck 探的是 `localhost:8000/docs/`，必须真返 200 才 healthy |
 | Mermaid 图不渲染 | 客户端没载 mermaid.js | 检查浏览器 console；CDN 被墙时改用本地 mermaid.min.js |
 | frontmatter YAML 显示成代码 | 文件第一行不是 `---` | MkDocs 自动剥 YAML 块的前提是文件**首行**就是 `---` |
 
