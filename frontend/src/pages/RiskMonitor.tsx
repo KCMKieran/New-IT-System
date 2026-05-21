@@ -1714,7 +1714,7 @@ function BurstOpenTab({ active }: { active: boolean }) {
           rowData={alerts}
           columnDefs={columnDefs}
           defaultColDef={defaultColDef}
-          gridOptions={{ theme: "legacy" }}
+          gridOptions={{ theme: "legacy", enableBrowserTooltips: true }}
           animateRows={false}
           enableCellTextSelection
           suppressCellFocus
@@ -2515,7 +2515,7 @@ function QuickOpenCloseTab({ active }: { active: boolean }) {
           rowData={alerts}
           columnDefs={columnDefs}
           defaultColDef={defaultColDef}
-          gridOptions={{ theme: "legacy" }}
+          gridOptions={{ theme: "legacy", enableBrowserTooltips: true }}
           animateRows={false}
           enableCellTextSelection
           suppressCellFocus
@@ -3944,7 +3944,7 @@ function QuickProfitTab({ active }: { active: boolean }) {
           rowData={alerts}
           columnDefs={columnDefs}
           defaultColDef={defaultColDef}
-          gridOptions={{ theme: "legacy" }}
+          gridOptions={{ theme: "legacy", enableBrowserTooltips: true }}
           animateRows={false}
           enableCellTextSelection
           suppressCellFocus
@@ -5126,7 +5126,7 @@ function HedgeOpenTab({ active }: { active: boolean }) {
             rowData={aggRows}
             columnDefs={aggregatedColumnDefs}
             defaultColDef={defaultColDef}
-            gridOptions={{ theme: "legacy" }}
+            gridOptions={{ theme: "legacy", enableBrowserTooltips: true }}
             animateRows={false}
             enableCellTextSelection
             suppressCellFocus
@@ -5158,7 +5158,7 @@ function HedgeOpenTab({ active }: { active: boolean }) {
             rowData={alerts}
             columnDefs={columnDefs}
             defaultColDef={defaultColDef}
-            gridOptions={{ theme: "legacy" }}
+            gridOptions={{ theme: "legacy", enableBrowserTooltips: true }}
             animateRows={false}
             enableCellTextSelection
             suppressCellFocus
@@ -6622,7 +6622,7 @@ function GapTradeTab({ active }: { active: boolean }) {
             rowData={clientPairAgg}
             columnDefs={clientPairColumns}
             defaultColDef={defaultColDef}
-            gridOptions={{ theme: "legacy" }}
+            gridOptions={{ theme: "legacy", enableBrowserTooltips: true }}
             animateRows={false}
             enableCellTextSelection
             suppressCellFocus
@@ -6656,7 +6656,7 @@ function GapTradeTab({ active }: { active: boolean }) {
             rowData={soAbAlerts}
             columnDefs={soAbColumns}
             defaultColDef={defaultColDef}
-            gridOptions={{ theme: "legacy" }}
+            gridOptions={{ theme: "legacy", enableBrowserTooltips: true }}
             animateRows={false}
             enableCellTextSelection
             suppressCellFocus
@@ -6692,7 +6692,7 @@ function GapTradeTab({ active }: { active: boolean }) {
             rowData={gapAlerts}
             columnDefs={gapColumns}
             defaultColDef={defaultColDef}
-            gridOptions={{ theme: "legacy" }}
+            gridOptions={{ theme: "legacy", enableBrowserTooltips: true }}
             animateRows={false}
             enableCellTextSelection
             suppressCellFocus
