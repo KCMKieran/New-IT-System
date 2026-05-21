@@ -1,6 +1,7 @@
 import * as React from "react";
 import { Link } from "react-router-dom";
 import {
+  IconBook,
   IconDashboard,
   IconDatabase,
   IconFileWord,
@@ -108,6 +109,15 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
         { title: t("common.search"), url: "/search", icon: IconSearch },
       ],
       documents: [
+        // OPT-0026: docs portal — external link to MkDocs site at /docs/.
+        // Marked `external` so NavDocuments renders an <a target="_blank">
+        // instead of a SPA <Link> (mkdocs lives outside React Router).
+        {
+          name: t("config.docs"),
+          url: "/docs/",
+          icon: IconBook,
+          external: true,
+        },
         {
           name: t("config.managers"),
           url: "/cfg/managers",

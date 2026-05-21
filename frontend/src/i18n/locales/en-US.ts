@@ -91,6 +91,7 @@ export const enUS = {
   
   // Configuration
   config: {
+    docs: "Docs",
     managers: "Managers",
     customGroups: "Custom Groups",
     reports: "Reports",
