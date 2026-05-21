@@ -7,6 +7,7 @@ Append-only 日志。最新的写在最上面。
 
 | 日期 | ID | Commit | 标题 |
 |------|----|--------|------|
+| 2026-05-21 | [OPT-0025](./items/OPT-0025-risk-monitor-filter-persist.md) | — | Risk-monitor 5 个 tab 工具栏过滤器持久化（rangePreset / ruleFilter / serverFilter / sharedIpOnly）；新增 `useFilterPersist` hook + 纯函数 helpers（envelope `{v, value}` schema 自愈 + localStorage throw 兜底）+ 18 项 vitest 测试；`customRange` 路径靠 `skipFields: ["rangePreset"]` 保留 storage 中上一次真 preset；遵守「用户偏好持久化、调查上下文（login/zipcode/customRange）不持久化」标准；用户拍板不加「重置过滤」按钮（保持 OPT-0023 化繁为简） |
 | 2026-05-21 | [OPT-0024](./items/OPT-0024-risk-monitor-est-commission.md) | — | Risk-monitor 4 个 tab 加「佣金试算」列 — **Phase 1：CN（CID=0）D03 公式**：新建 `lib/commission.ts` 复刻 D03 公式（External + Internal + Dark Points），7 处列注入，非 CN 显示 `—`；用 InfoHeader（ℹ 图标 + shadcn Tooltip）；顺手修 AG-Grid headerTooltip 即时显示（`enableBrowserTooltips: true`）；引入 vitest 测试框架 + commission.test.ts 30 项测试。**Multi-phase OPT**：Phase 2（global / CID=1）触发时 reopen 本 OPT 加新分支，**不开新 OPT** —— 详情见 item 文末「§ 后续扩展」段 + 文档顶部「⚠ Multi-phase」段 |
 | 2026-05-20 | [OPT-0023](./items/OPT-0023-risk-monitor-unified-settings.md) | — | Risk-monitor header 化繁为简：5 个 tab 的「列设置」+「立即扫描」收进设置抽屉（rename「规则配置」→「设置」），导出 CSV + hedge 聚合 + QP 刷新浮动盈亏 留在 header；新增 ColumnVisibilityInline 组件 + UnifiedSettingsExtras 共享段；Stage 1 outsider-review 修了 3 条（save semantics 提示 / a11y group / hedge 聚合 caption）|
 | 2026-05-20 | [OPT-0022](./items/OPT-0022-client-return-usdt-tag.md) | — | Client Return Rate 加 USDT 标记列 + 入金渠道筛选（从 OPT-0020 拆出，与 OPT-0023 一起 merge）|

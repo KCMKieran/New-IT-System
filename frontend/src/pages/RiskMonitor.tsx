@@ -73,6 +73,7 @@ import { useIsMobile } from "@/hooks/use-mobile";
 import { useGridColumnPersist } from "@/hooks/useGridColumnPersist";
 import { ColumnVisibilityInline } from "@/components/ColumnVisibilityMenu";
 import type { UseGridColumnPersistResult } from "@/hooks/useGridColumnPersist";
+import { useFilterPersist, readFilterState } from "@/hooks/useFilterPersist";
 import {
   estimateCommission,
   estimateCommissionTwoLegs,
@@ -750,6 +751,45 @@ const RISK_MONITOR_TAB_STORAGE_KEY = "RISK_MONITOR_ACTIVE_TAB_V1";
  */
 const HEDGE_OPEN_AGGREGATED_STORAGE_KEY = "RISK_MONITOR_HEDGE_OPEN_AGGREGATED_V1";
 
+// ── OPT-0025: per-tab toolbar filter persistence ──────────────────
+//
+// Each tab persists its toolbar filter selections as a single JSON blob.
+// Persisted: rangePreset, ruleFilter, serverFilter, sharedIpOnly (gap-trade).
+// NOT persisted: customRange (absolute dates would mislead on next visit),
+// loginInput / zipcodeInput (per-investigation context, persisting causes
+// "I closed the browser and now I'm stuck on someone's login" footguns).
+//
+// When rangePreset === "custom" the rangePreset slot in storage is masked
+// (kept at last non-custom value) so re-opening the page restores the
+// user's preferred preset rather than re-entering custom mode.
+const RISK_MONITOR_BURST_OPEN_FILTERS_KEY = "RISK_MONITOR_BURST_OPEN_FILTERS_V1";
+const RISK_MONITOR_QUICK_OPEN_CLOSE_FILTERS_KEY = "RISK_MONITOR_QUICK_OPEN_CLOSE_FILTERS_V1";
+const RISK_MONITOR_QUICK_PROFIT_FILTERS_KEY = "RISK_MONITOR_QUICK_PROFIT_FILTERS_V1";
+const RISK_MONITOR_HEDGE_OPEN_FILTERS_KEY = "RISK_MONITOR_HEDGE_OPEN_FILTERS_V1";
+const RISK_MONITOR_GAP_TRADE_FILTERS_KEY = "RISK_MONITOR_GAP_TRADE_FILTERS_V1";
+
+type StandardTabFilters = {
+  rangePreset: RangePresetKey;
+  ruleFilter: string;
+  serverFilter: string;
+};
+const DEFAULT_STANDARD_FILTERS: StandardTabFilters = {
+  rangePreset: "4h",
+  ruleFilter: "all",
+  serverFilter: "all",
+};
+
+type GapTradeFilters = {
+  rangePreset: GapTradeDayRange;
+  serverFilter: string;
+  sharedIpOnly: boolean;
+};
+const DEFAULT_GAP_TRADE_FILTERS: GapTradeFilters = {
+  rangePreset: "today",
+  serverFilter: "all",
+  sharedIpOnly: false,
+};
+
 // ── OPT-0013: realtime SSE connection indicator ──────────
 
 function RealtimeIndicator({
@@ -965,8 +1005,23 @@ function BurstOpenTab({ active }: { active: boolean }) {
     "RISK_MONITOR_BURST_OPEN_GRID_STATE_V1",
   );
 
+  // OPT-0025: hydrate toolbar filters from localStorage on first mount.
+  // Reads the entire JSON blob once; individual useState calls below pick
+  // their field from it. Subsequent persistence happens via useFilterPersist
+  // at the bottom of this state block.
+  const persistedBurstFilters = useMemo(
+    () =>
+      readFilterState(
+        RISK_MONITOR_BURST_OPEN_FILTERS_KEY,
+        DEFAULT_STANDARD_FILTERS,
+      ),
+    [],
+  );
+
   // Time range state
-  const [rangePreset, setRangePreset] = useState<RangePresetKey>("4h");
+  const [rangePreset, setRangePreset] = useState<RangePresetKey>(
+    persistedBurstFilters.rangePreset,
+  );
   const [customRange, setCustomRange] = useState<DateRange | undefined>();
   const [datePickerOpen, setDatePickerOpen] = useState(false);
 
@@ -998,10 +1053,19 @@ function BurstOpenTab({ active }: { active: boolean }) {
   const [sortBy, setSortBy] = useState<string>("scanned_at");
   const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
 
-  // Toolbar filters (all server-side now).
-  const [serverFilter, setServerFilter] = useState("all");
+  // Toolbar filters (all server-side now). OPT-0025: hydrated from localStorage.
+  const [serverFilter, setServerFilter] = useState(persistedBurstFilters.serverFilter);
   /** Table-only: "all" or burst `rule_id` string. Summary cards use stats without this filter. */
-  const [ruleFilter, setRuleFilter] = useState<string>("all");
+  const [ruleFilter, setRuleFilter] = useState<string>(persistedBurstFilters.ruleFilter);
+
+  // OPT-0025: persist filter selections. rangePreset === "custom" masks the
+  // rangePreset slot so the storage keeps the user's last real preset.
+  useFilterPersist(
+    RISK_MONITOR_BURST_OPEN_FILTERS_KEY,
+    DEFAULT_STANDARD_FILTERS,
+    { rangePreset, ruleFilter, serverFilter },
+    { skipFields: rangePreset === "custom" ? ["rangePreset"] : [] },
+  );
 
   // Login + zipcode inputs: keep the raw value locally, debounce into a
   // separate `query` state that actually hits the API. Prevents spamming
@@ -1870,7 +1934,19 @@ function QuickOpenCloseTab({ active }: { active: boolean }) {
     "RISK_MONITOR_QUICK_OPEN_CLOSE_GRID_STATE_V1",
   );
 
-  const [rangePreset, setRangePreset] = useState<RangePresetKey>("4h");
+  // OPT-0025: hydrate toolbar filters from localStorage.
+  const persistedQocFilters = useMemo(
+    () =>
+      readFilterState(
+        RISK_MONITOR_QUICK_OPEN_CLOSE_FILTERS_KEY,
+        DEFAULT_STANDARD_FILTERS,
+      ),
+    [],
+  );
+
+  const [rangePreset, setRangePreset] = useState<RangePresetKey>(
+    persistedQocFilters.rangePreset,
+  );
   const [customRange, setCustomRange] = useState<DateRange | undefined>();
   const [datePickerOpen, setDatePickerOpen] = useState(false);
 
@@ -1894,17 +1970,25 @@ function QuickOpenCloseTab({ active }: { active: boolean }) {
   const [savingConfig, setSavingConfig] = useState(false);
 
   /** Table-only filter: "all" or concrete `rule_id` string (e.g. "51"). Summary cards use stats without this filter. */
-  const [ruleFilter, setRuleFilter] = useState<string>("all");
+  const [ruleFilter, setRuleFilter] = useState<string>(persistedQocFilters.ruleFilter);
 
   const [pageIndex, setPageIndex] = useState(0);
   const pageSize = isMobile ? 20 : 50;
   const [sortBy, setSortBy] = useState<string>("scanned_at");
   const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
-  const [serverFilter, setServerFilter] = useState("all");
+  const [serverFilter, setServerFilter] = useState(persistedQocFilters.serverFilter);
   const [loginInput, setLoginInput] = useState("");
   const [loginQuery, setLoginQuery] = useState("");
   const [zipcodeInput, setZipcodeInput] = useState("");
   const [zipcodeQuery, setZipcodeQuery] = useState("");
+
+  // OPT-0025: persist filter selections.
+  useFilterPersist(
+    RISK_MONITOR_QUICK_OPEN_CLOSE_FILTERS_KEY,
+    DEFAULT_STANDARD_FILTERS,
+    { rangePreset, ruleFilter, serverFilter },
+    { skipFields: rangePreset === "custom" ? ["rangePreset"] : [] },
+  );
 
   useEffect(() => {
     const trimmed = loginInput.trim();
@@ -3232,7 +3316,19 @@ function QuickProfitTab({ active }: { active: boolean }) {
     "RISK_MONITOR_QUICK_PROFIT_GRID_STATE_V1",
   );
 
-  const [rangePreset, setRangePreset] = useState<RangePresetKey>("4h");
+  // OPT-0025: hydrate toolbar filters from localStorage.
+  const persistedQpFilters = useMemo(
+    () =>
+      readFilterState(
+        RISK_MONITOR_QUICK_PROFIT_FILTERS_KEY,
+        DEFAULT_STANDARD_FILTERS,
+      ),
+    [],
+  );
+
+  const [rangePreset, setRangePreset] = useState<RangePresetKey>(
+    persistedQpFilters.rangePreset,
+  );
   const [customRange, setCustomRange] = useState<DateRange | undefined>();
   const [datePickerOpen, setDatePickerOpen] = useState(false);
 
@@ -3255,17 +3351,25 @@ function QuickProfitTab({ active }: { active: boolean }) {
   const [savingConfig, setSavingConfig] = useState(false);
 
   /** Table-only filter: "all" or concrete `rule_id` string (e.g. "61"). */
-  const [ruleFilter, setRuleFilter] = useState<string>("all");
+  const [ruleFilter, setRuleFilter] = useState<string>(persistedQpFilters.ruleFilter);
 
   const [pageIndex, setPageIndex] = useState(0);
   const pageSize = isMobile ? 20 : 50;
   const [sortBy, setSortBy] = useState<string>("scanned_at");
   const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
-  const [serverFilter, setServerFilter] = useState("all");
+  const [serverFilter, setServerFilter] = useState(persistedQpFilters.serverFilter);
   const [loginInput, setLoginInput] = useState("");
   const [loginQuery, setLoginQuery] = useState("");
   const [zipcodeInput, setZipcodeInput] = useState("");
   const [zipcodeQuery, setZipcodeQuery] = useState("");
+
+  // OPT-0025: persist filter selections.
+  useFilterPersist(
+    RISK_MONITOR_QUICK_PROFIT_FILTERS_KEY,
+    DEFAULT_STANDARD_FILTERS,
+    { rangePreset, ruleFilter, serverFilter },
+    { skipFields: rangePreset === "custom" ? ["rangePreset"] : [] },
+  );
 
   useEffect(() => {
     const trimmed = loginInput.trim();
@@ -4309,7 +4413,19 @@ function HedgeOpenTab({ active }: { active: boolean }) {
   const [aggSortBy, setAggSortBy] = useState<string>("total_lots");
   const [aggSortOrder, setAggSortOrder] = useState<"asc" | "desc">("desc");
 
-  const [rangePreset, setRangePreset] = useState<RangePresetKey>("4h");
+  // OPT-0025: hydrate toolbar filters from localStorage.
+  const persistedHedgeFilters = useMemo(
+    () =>
+      readFilterState(
+        RISK_MONITOR_HEDGE_OPEN_FILTERS_KEY,
+        DEFAULT_STANDARD_FILTERS,
+      ),
+    [],
+  );
+
+  const [rangePreset, setRangePreset] = useState<RangePresetKey>(
+    persistedHedgeFilters.rangePreset,
+  );
   const [customRange, setCustomRange] = useState<DateRange | undefined>();
   const [datePickerOpen, setDatePickerOpen] = useState(false);
 
@@ -4332,17 +4448,25 @@ function HedgeOpenTab({ active }: { active: boolean }) {
   const [savingConfig, setSavingConfig] = useState(false);
 
   /** Table-only filter: "all" or concrete `rule_id` string (e.g. "91"). */
-  const [ruleFilter, setRuleFilter] = useState<string>("all");
+  const [ruleFilter, setRuleFilter] = useState<string>(persistedHedgeFilters.ruleFilter);
 
   const [pageIndex, setPageIndex] = useState(0);
   const pageSize = isMobile ? 20 : 50;
   const [sortBy, setSortBy] = useState<string>("scanned_at");
   const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
-  const [serverFilter, setServerFilter] = useState("all");
+  const [serverFilter, setServerFilter] = useState(persistedHedgeFilters.serverFilter);
   const [loginInput, setLoginInput] = useState("");
   const [loginQuery, setLoginQuery] = useState("");
   const [zipcodeInput, setZipcodeInput] = useState("");
   const [zipcodeQuery, setZipcodeQuery] = useState("");
+
+  // OPT-0025: persist filter selections.
+  useFilterPersist(
+    RISK_MONITOR_HEDGE_OPEN_FILTERS_KEY,
+    DEFAULT_STANDARD_FILTERS,
+    { rangePreset, ruleFilter, serverFilter },
+    { skipFields: rangePreset === "custom" ? ["rangePreset"] : [] },
+  );
 
   useEffect(() => {
     const trimmed = loginInput.trim();
@@ -5659,14 +5783,36 @@ function GapTradeTab({ active }: { active: boolean }) {
   // this preset, even though calendar-wise the gap happened yesterday MT.
   // Manual backfills run today also show under "Today" (admin path,
   // acceptable side effect).
-  const [rangePreset, setRangePreset] = useState<GapTradeDayRange>("today");
+  //
+  // OPT-0025: rangePreset / serverFilter / sharedIpOnly hydrate from localStorage.
+  const persistedGapFilters = useMemo(
+    () =>
+      readFilterState(
+        RISK_MONITOR_GAP_TRADE_FILTERS_KEY,
+        DEFAULT_GAP_TRADE_FILTERS,
+      ),
+    [],
+  );
+  const [rangePreset, setRangePreset] = useState<GapTradeDayRange>(
+    persistedGapFilters.rangePreset,
+  );
   const [customRange, setCustomRange] = useState<DateRange | undefined>();
   const [datePickerOpen, setDatePickerOpen] = useState(false);
-  const [serverFilter, setServerFilter] = useState<string>("all");
+  const [serverFilter, setServerFilter] = useState<string>(
+    persistedGapFilters.serverFilter,
+  );
   // Client-side toggle. Backend would have to scan the IP files again to
   // do this filter server-side; since `shared_ip_count` already lives on
   // every rule-71 alert, filtering in-memory is free and avoids a refetch.
-  const [sharedIpOnly, setSharedIpOnly] = useState(false);
+  const [sharedIpOnly, setSharedIpOnly] = useState(persistedGapFilters.sharedIpOnly);
+
+  // OPT-0025: persist filter selections.
+  useFilterPersist(
+    RISK_MONITOR_GAP_TRADE_FILTERS_KEY,
+    DEFAULT_GAP_TRADE_FILTERS,
+    { rangePreset, serverFilter, sharedIpOnly },
+    { skipFields: rangePreset === "custom" ? ["rangePreset"] : [] },
+  );
 
   // ── Data state ──
   const [alerts, setAlerts] = useState<AlertEvent[]>([]);

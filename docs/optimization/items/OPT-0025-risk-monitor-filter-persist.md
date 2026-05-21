@@ -1,12 +1,13 @@
 ---
 id: OPT-0025
 title: Risk-monitor 工具栏过滤器持久化（rangePreset / ruleFilter / serverFilter / onlySharedIp）
-status: wip
+status: done
 priority: P2
 area: frontend
 effort: S
 created: 2026-05-21
 claimed: 2026-05-21
+completed: 2026-05-21
 branch: opt/risk-monitor-filter-persist
 related: [[OPT-0015]]
 ---
@@ -116,3 +117,43 @@ gap-trade (GapTradeTab @ ~5662):      rangePreset(GapTradeDayRange) / customRang
 - **过度持久化 footgun**：用户 A 把 serverFilter 改成只看 MT5，用户 B 接班看同一台机器以为数据全（其实被过滤了）。**缓解**：(a) 工具栏的 ruleFilter / serverFilter 永远显式渲染当前值（不要折叠隐藏），(b) 「重置过滤」按钮 prominent 可见
 - **schema 漂移**：未来加新 filter 字段时不要破坏老 key — `_V1` 后缀 + version field 解决，不匹配回退到 default
 - **写入频率**：filter 变化频率比列拖拽低得多（每次点击 1 次），不需要 throttle / debounce
+
+## 结果
+
+实际交付（与 AC 基本一致，**1 处用户拍板修改**）：
+
+**核心**
+
+- `frontend/src/hooks/useFilterPersist.helpers.ts`（73 行）—— 纯函数 `readFilterState` / `writeFilterState` / `mergeFilterState`，envelope `{ v, value }` + schema 自愈（v 不匹配回退 default）+ localStorage throw 兜底（隐私模式不炸）。零 React 依赖
+- `frontend/src/hooks/useFilterPersist.ts`（44 行）—— 薄 React 包装，useEffect 写入，`skipFields` 选项屏蔽某些字段（专为 customRange 场景：`rangePreset === "custom"` 时不写 rangePreset 持久位，storage 保留上一次真 preset）
+- `frontend/src/hooks/useFilterPersist.test.ts` —— 18 项 vitest 测试覆盖 read/write/merge/version 不匹配/损坏 JSON/localStorage throw 全场景
+- `frontend/src/pages/RiskMonitor.tsx` —— 5 个 tab 接入，每 tab 一个 `RISK_MONITOR_<TAB>_FILTERS_V1` key + typed defaults。文件顶部添加 `StandardTabFilters` / `GapTradeFilters` 类型 + `DEFAULT_STANDARD_FILTERS` / `DEFAULT_GAP_TRADE_FILTERS` 常量
+
+**文档**
+
+- `CLAUDE.md` —— Key conventions 加「工具栏过滤器持久化」一条
+- `docs/features/grid-column-persist.md` —— 加 §13「工具栏过滤器持久化（OPT-0025，同模式不同对象）」整段（持久化 vs 不持久化判断 / 一句话总览 / customRange 特殊处理 / 已用 key 列表 / 测试模式 / 反观点）
+- `.cursor/skills/risk-monitor/SKILL.md` —— Step 5「Build the Frontend Tab」加「Filter persistence (必做 · OPT-0025)」段
+- 这 3 个 doc 文件都是 **gitignored 本地资产**（`.gitignore` line 46 / 57 / 23），不进 commit
+
+**与 AC 偏差（用户 claim 时拍板）**
+
+- ❌ **不加「重置过滤」按钮**（AC 原本要求 icon RotateCcw 贴工具栏）—— 用户决定保持 OPT-0023 化繁为简方向，footgun 缓解靠「工具栏过滤器永远显式渲染当前值（不折叠）」+ 「用户手动改回默认值」。如果未来频次高再单独 file follow-up
+
+**测试 / 验证**
+
+- `npm test` 一行验证：48/48 通过（30 commission + 18 useFilterPersist），163ms
+- `npx tsc --noEmit` 干净，无新 lint 错误（baseline 3 个 pre-existing 错误：1 个 unused var + 2 个 `any`，与本 OPT 无关）
+- **未做浏览器手动验证** —— 留给用户验收。改动是 standard React useState init + useEffect 模式，纯函数已经测试覆盖，hook 是薄包装
+
+**实施时遇到的（值得追踪）**
+
+- 并发 session 把我的 branch 移到了独立 worktree `/opt/myproject/New-IT-System-opt0025`，stash 救援 + 不同分支切换发生数次。**好用：worktree 隔离 + stash 保活** 。这次反映出**多 session 共享单仓时需要主动用 `git worktree add`** 切隔离，否则各自 `git checkout` 会互相覆盖工作树（已在 [git worktree 知识] 中记忆）
+- **gitignore 边界**：CLAUDE.md / docs/** / .cursor 都是 local-only assets，文档侧改动不进 commit。Memory feedback `feedback_lessons_and_cursor_local_only.md` 已经记录过
+
+**Stage 1 outsider-review**：用户选 No（5 个 tab 改动 standard 模式 + 18 项测试覆盖纯函数 + 不动后端 / SQL / SSE）
+
+**Follow-up（值得追踪）**
+
+- 用户浏览器实际验证后如发现某些 tab 默认持久化体感不佳（如 ruleFilter 持久化导致漏告警），可单独 file follow-up「ruleFilter 默认不持久化」或「加重置按钮」
+- 跟 [[OPT-0001]]（tab 切换缓存）零冲突，本 OPT 产出的 hook 是 OPT-0001 实施时可以读的
