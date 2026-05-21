@@ -1,11 +1,13 @@
 ---
 id: OPT-0025
 title: Risk-monitor 工具栏过滤器持久化（rangePreset / ruleFilter / serverFilter / onlySharedIp）
-status: ready
+status: wip
 priority: P2
 area: frontend
 effort: S
 created: 2026-05-21
+claimed: 2026-05-21
+branch: opt/risk-monitor-filter-persist
 related: [[OPT-0015]]
 ---
 
