@@ -91,6 +91,7 @@ export const zhCN = {
 
   // Configuration
   config: {
+    docs: "文档中心",
     managers: "Managers",
     customGroups: "自定义组别",
     reports: "Reports",

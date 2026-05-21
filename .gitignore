@@ -59,6 +59,11 @@ docs/**
 # can see each other's claims (see docs/optimization/README.md §并行 session 安全).
 !docs/optimization
 !docs/optimization/**
+# Exception: docs portal ops doc — OPT-0026 needs this checked in so new
+# deploys can read the portal's architecture/ops notes (the portal itself
+# lives outside docs/, but its runbook belongs next to other operations/).
+!docs/operations/
+!docs/operations/docs-portal.md
 # Pre-migration SQLite backups (created ad-hoc before risky schema changes)
 backend/data/risk_monitor.db.bak-*
 frontend/tsconfig.app.tsbuildinfo

@@ -79,3 +79,33 @@ services:
     # (default maxmemory=0 + noeviction would silently fail new SETs).
     # See docs/optimization/items/OPT-0019-redis-maxmemory-policy.md.
     command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+
+  # OPT-0026: internal docs portal. MkDocs Material live-serves docs/ over
+  # the shared compose network; Nginx proxies /docs/ to mkdocs:8000.
+  # Read-only mounts so the container can never mutate source files.
+  # Runtime ops: docs/operations/docs-portal.md
+  # Image tag pinned to a concrete release so `docker compose pull` can't
+  # silently break the portal on an upstream major version bump (OPT-0026
+  # outsider-review F2). Bump intentionally when ready.
+  mkdocs:
+    image: squidfunk/mkdocs-material:9.7.6
+    container_name: new-it-mkdocs-prod
+    command: ["serve", "--dev-addr=0.0.0.0:8000"]
+    volumes:
+      - ./docs:/docs/docs:ro
+      - ./mkdocs.yml:/docs/mkdocs.yml:ro
+    restart: unless-stopped
+    # Probe through the /docs/ prefix that matches the site_url; a plain /
+    # would just hit the 302 → /docs/ redirect and still pass, but exercising
+    # the real path catches broken mkdocs.yml syntax / missing docs_dir too.
+    # Use 127.0.0.1 (not "localhost") — inside this image localhost resolves
+    # to ::1 (IPv6) but mkdocs serve only binds IPv4 0.0.0.0:8000, so wget
+    # via localhost would get ECONNREFUSED forever.
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "wget -qO- --tries=1 --timeout=3 http://127.0.0.1:8000/docs/ >/dev/null || exit 1"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s

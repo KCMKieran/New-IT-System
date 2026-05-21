@@ -1,11 +1,12 @@
 ---
 id: OPT-0026
 title: 文档中心 sidebar 入口 + MkDocs Material 自托管站点
-status: wip
+status: done
 priority: P3
 area: mixed
 effort: M
 created: 2026-05-21
+closed: 2026-05-21
 ---
 
 ## 问题
@@ -77,4 +78,53 @@ created: 2026-05-21
 
 ## 结果
 
-<待 close 时填>
+### 实际交付
+
+实施 = AC 1-8 全部命中，9 (手机/iPad 实测) 留给用户。Merge commit 后会绑定 SHA — 历史用 `git log --grep="OPT-0026" --merges` 找。
+
+**核心文件**:
+- `mkdocs.yml` 仓库根，Material 9.7.6 / 中文 / superfences (Mermaid) / 中英 search
+- `docker-compose.prod.yml` 加 `mkdocs` service：image pin `9.7.6` + ro mount `./docs` + `./mkdocs.yml` + healthcheck (`127.0.0.1:8000/docs/`)
+- `frontend/nginx.conf` 加 `location /docs/` → `proxy_pass http://mkdocs:8000`（**不带** trailing slash 保留前缀；mkdocs `site_url=/docs/` 配套）
+- `frontend/src/components/app-sidebar.tsx` Configuration 组顶部插「文档中心 / Docs」external link，icon = `IconBook`
+- `frontend/src/components/nav-documents.tsx` 加 `external?: boolean` 字段 + `NavLink` (forwardRef，asChild ref 链路) + firstItems 可见数 3→4
+- `frontend/src/i18n/locales/{zh-CN,en-US}.ts` `config.docs` 中英
+- `docs/operations/docs-portal.md` 8 节运维 doc：架构图 / 启停 / 加新页 / Mermaid / 排障 / 安全
+- `.gitignore` 加单文件例外 `!docs/operations/docs-portal.md`（其他同目录文件保持本地）
+
+**端到端验证**（端口 3000，Cloudflare Tunnel 之前）:
+- `GET /docs/` → 200, 76KB HTML
+- `GET /docs/operations/docs-portal/` → 200, "文档中心" 命中 8 次
+- `GET /docs/analysis/` → 404（`exclude_docs: /analysis/` 工作）
+- `GET /docs`（无 trailing slash）→ 301 → `/docs/`（nginx 自动 redirect，不走 SPA fallback）
+- mkdocs container healthcheck → `healthy`
+- frontend `tsc -b --noEmit` → 干净
+
+### Stage 1 outsider-review 处理记录
+
+reviewer 给 11 条 findings。在转述前 sanity-check 验证：reviewer 关于「`/docs` 无 slash 落到 SPA」和「`exclude_docs: /analysis/` 不 work」均**实测不成立**（前者是 nginx 自动 301、后者实测 404）。
+
+最终 curate + 用户拍板:
+
+| # | Finding | 处理 |
+|---|---|---|
+| F1 | gitignored docs (lessons/, ai-context/PROJECT_CONTEXT.md, deployment/cloudflare-api-blocked.md ...) 被 portal 渲染给所有 CF Access SSO 用户 | **Live with** — 内部团队已经能 ssh / clone 看同样文件，portal 只是 friendlier read path；不引入新访问权限 |
+| F2 | `image: mkdocs-material:latest` 不 pin + 没 healthcheck → 升级 silent break | **当场修**：pin `9.7.6` + healthcheck `127.0.0.1:8000/docs/`（IPv4，因为 image 内 localhost=::1 但 mkdocs bind 0.0.0.0:8000） |
+| F3 | ops doc `docs-portal.md` line 26 / 93 写"trailing slash"跟实际反 | **当场修**：line 26 改写明"**不**带 / 保留前缀避免 302 循环"，line 93 troubleshooting 加新行涵盖错改 trailing slash + healthcheck 故障 |
+| F4 | `mkdocs serve` 是 dev server（livereload watchers + Tornado）不适合 prod | **新 hardening OPT** — 切到 `mkdocs build` + nginx serve 静态文件 |
+| F5 | `.gitignore` 单文件例外不可扩展 | **Live with** — 用户上一轮明确选择单文件例外 over 整目录 |
+| F6 | NavDocuments external item 多余的 dropdown (Open/Share/Delete 都无 onClick) | **新 hardening OPT** — 跟 F4 合一个 |
+| F7-F9 | aria-label / 502 branded page / SPA subpath | **Live with** — nice-to-have 优先级低 |
+
+reviewer 误判：F1 中的 `/docs` 落到 SPA 不成立 (是 301)、F10 中 `exclude_docs:/...` 前缀斜杠不 work 不成立 (实测 OK)。
+
+### Follow-up
+
+- **OPT-0027 (docs-portal-hardening)** — 包 F4 (mkdocs build mode) + F6 (NavDocuments external dropdown 隐藏 + aria-label)。Effort M
+- **Live with 累积**: F1 / F5 / F7 / F8 / F9 — 写在这里留 paper trail，未来真出事再回头修
+
+### 手机/iPad 实测
+
+留给用户用户在浏览器手动测：sidebar 文档中心可点、新窗口 docs 打开、能搜索、左侧导航能展开收起。
+
+Verified via prod nginx 链路（不是 dev 5173）后**才**算这条 AC 命中。

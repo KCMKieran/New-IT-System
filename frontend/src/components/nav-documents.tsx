@@ -27,19 +27,51 @@ import {
 } from "@/components/ui/sidebar"
 import { Link } from "react-router-dom"
 
-export function NavDocuments({
-  items,
-}: {
-  items: {
-    name: string
-    url: string
-    icon: Icon
-  }[]
-}) {
+type NavDocItem = {
+  name: string
+  url: string
+  icon: Icon
+  // External URLs (e.g. the docs portal at /docs/) need a real <a> so the
+  // browser does a full navigation instead of the SPA router catching it.
+  external?: boolean
+}
+
+// SidebarMenuButton's asChild path uses Radix Slot, which forwards a ref to
+// the child element — so this wrapper must use forwardRef instead of being
+// a plain function component, otherwise the ref handoff silently breaks.
+const NavLink = React.forwardRef<
+  HTMLAnchorElement,
+  { item: NavDocItem; children: React.ReactNode }
+>(({ item, children, ...rest }, ref) => {
+  if (item.external) {
+    return (
+      <a
+        ref={ref}
+        href={item.url}
+        target="_blank"
+        rel="noopener noreferrer"
+        {...rest}
+      >
+        {children}
+      </a>
+    )
+  }
+  return (
+    <Link ref={ref} to={item.url} {...rest}>
+      {children}
+    </Link>
+  )
+})
+NavLink.displayName = "NavLink"
+
+export function NavDocuments({ items }: { items: NavDocItem[] }) {
   const { isMobile } = useSidebar()
   const [expanded, setExpanded] = React.useState(false)
-  const firstItems = items.slice(0, 3)
-  const restItems = items.slice(3)
+  // Visible-vs-collapsed split: top 4 always shown, the rest fold under
+  // "More". Bumped from 3 to 4 (OPT-0026) so adding the docs portal entry
+  // doesn't push Reports below the fold for existing users.
+  const firstItems = items.slice(0, 4)
+  const restItems = items.slice(4)
 
   return (
     <SidebarGroup className="group-data-[collapsible=icon]:hidden">
@@ -48,10 +80,10 @@ export function NavDocuments({
         {firstItems.map((item) => (
           <SidebarMenuItem key={item.name}>
             <SidebarMenuButton asChild>
-              <Link to={item.url}>
+              <NavLink item={item}>
                 <item.icon />
                 <span>{item.name}</span>
-              </Link>
+              </NavLink>
             </SidebarMenuButton>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
@@ -95,10 +127,10 @@ export function NavDocuments({
                 {restItems.map((item) => (
                   <li key={item.name}>
                     <SidebarMenuButton asChild>
-                      <Link to={item.url}>
+                      <NavLink item={item}>
                         <item.icon />
                         <span>{item.name}</span>
-                      </Link>
+                      </NavLink>
                     </SidebarMenuButton>
                   </li>
                 ))}

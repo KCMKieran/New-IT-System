@@ -1,0 +1,88 @@
+# MkDocs Material site config for the internal docs portal (OPT-0026).
+# Serves docs/ over Nginx at /docs/ behind Cloudflare Tunnel.
+# Ops notes: docs/operations/docs-portal.md
+
+site_name: KCM IT System Docs
+site_description: 内部文档中心 — KCM Trade 风控与分析平台
+site_url: https://analysis.kohleservices.com/docs/
+docs_dir: docs
+use_directory_urls: true
+
+# Skip directories that are local-only or noisy (lessons is gitignored —
+# safe to render locally; optimization items are useful in-context).
+exclude_docs: |
+  /analysis/
+
+theme:
+  name: material
+  language: zh
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.tracking
+    - navigation.indexes
+    - navigation.instant
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+    - toc.follow
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: 切到暗色
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: 切到亮色
+  font:
+    text: Inter
+    code: JetBrains Mono
+
+plugins:
+  - search:
+      lang:
+        - en
+        - zh
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+      toc_depth: 4
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.details
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.twemoji
+
+# Mermaid rendering: mkdocs-material 9+ ships Mermaid integration; the
+# superfences custom_fence above is all that's needed — the theme injects
+# the runtime itself on pages that contain `.mermaid` blocks.

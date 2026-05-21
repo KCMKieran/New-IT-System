@@ -10,7 +10,6 @@
 
 | ID | Branch | Claim 日期 | 备注 |
 |----|--------|-----------|------|
-| [OPT-0026](./items/OPT-0026-docs-portal.md) | `opt/docs-portal` | 2026-05-21 | 文档中心 sidebar 入口 + MkDocs Material 自托管（手机/iPad 可读） |
 
 ## ✅ 待领取（Ready）
 
