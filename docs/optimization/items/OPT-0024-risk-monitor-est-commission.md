@@ -15,8 +15,29 @@ phases:
     status: done (2026-05-21)
   - phase: 2
     scope: Global 账户（CID=1，非 KCMc group）走 D04 country-aware 公式 / 其他
-    status: planned —— 见下方「§ 后续扩展 / Phase 2」段，触发后单独开 OPT-0025
+    status: planned —— 见下方「§ 后续扩展 / Phase 2」段
+multi_phase: true   # ⚠ 非标准：本 OPT 是 multi-phase，Phase 2 时 reopen 本 OPT 而非开新 OPT
 ---
+
+> **⚠ Multi-phase OPT — 与标准 workflow 的区别**
+>
+> 标准 OPT state machine 是 `idea → ready → wip → done`（单程，无回路）。
+> 本 OPT 是个例外：用户**明确**要求未来 global 扩展时**回到本 OPT-0024
+> 加 Phase 2 实现**，而不是另开新 OPT。Phase 2 触发时操作流程：
+>
+> 1. 把 frontmatter `status: done` 改回 `status: wip`，新建分支
+>    `opt/risk-monitor-est-commission-p2`
+> 2. 在「§ 后续扩展 / Phase 2」段把 AC 写完整（替换当前的"规划/讨论"
+>    内容），同时把「不在范围内（Phase 1）」里的 global 限制行删掉
+> 3. 实施 + 测试 + merge 流程跟标准动作 4 一致
+> 4. 完成后：`status: done`、Phase 2 实现细节 append 到「结果」段下面新增
+>    的 **Phase 2 结果** 子段（**不要**覆盖 Phase 1 结果，两段共存）
+> 5. `done.md` 里**编辑现有 OPT-0024 行**，把 "Phase 1 / Phase 2 path planned"
+>    改成 "Phase 1 + Phase 2 done"，**不要**新加一行
+>
+> 不开新 OPT 的理由（用户拍板）：佣金试算列在概念上是一件事，CN → global
+> 是同一功能的扩展。分两 OPT 会让"佣金试算"语义碎在 2 个 item 文件里，
+> 未来 grep 也只能搜到一半。
 
 ## 问题
 
@@ -142,14 +163,15 @@ symbol_fee 按表：
 - ❌ Client Return Rate 页面（用户先不要）
 - ❌ burst-open tab（无平仓数据）
 - ❌ **Global / CID=1 账户**（VN/TH cent + 其他非 KCMc group）—— 见下方
-  Phase 2，触发后单独 OPT-0025
+  Phase 2 段，触发后 reopen 本 OPT 实施
 - ❌ 后端字段补充（country / 客户级 lots 聚合）
 - ❌ 与 CRM 实际入账对账（D03 程序里的 Difference）
 
 ## 后续扩展 / Phase 2 — Global（CID=1）覆盖
 
-> **状态**：planned，未开 OPT。触发条件：Phase 1 上线后产品/风控团队确认
-> 试算列对决策有用、希望覆盖更多账户 → 单独开 OPT-0025。
+> **状态**：planned。触发条件：Phase 1 上线后产品/风控团队确认试算列对决策
+> 有用、希望覆盖更多账户 → reopen 本 OPT 实施 Phase 2（**不开新 OPT**，理由
+> 见文档顶部「⚠ Multi-phase OPT」段）。
 
 ### 目标
 
@@ -178,7 +200,7 @@ symbol_fee 按表：
 名单不全也只影响 ~50 个 VIP 客户的精度，列头 ℹ tooltip 标注即可）。
 如果产品反馈说"VIP 客户特别重要、试算必须准"，再升级到 A。
 
-### Phase 2 关键设计决策（开 OPT-0025 前要拍板）
+### Phase 2 关键设计决策（reopen 实施前要拍板）
 
 1. **country 字段来源**：D04 是 `Country IN ['Thailand', 'Vietnam']` 判定
    cent，但 risk-monitor 后端目前**不回 country**。两选项：
@@ -198,11 +220,11 @@ symbol_fee 按表：
 4. **公式发散风险**：D03 偶尔会改公式（如新加 symbol 类型、调整 fixed_fee）。
    现在前端 `commission.ts` + Python `D03_daily_report.py` 是**两份独立实现**，
    靠人工同步。是否要抽出共享配置（如 JSON schema）让两端 import 同一个？
-   —— 工作量大，暂不做，列在 OPT-0025 「评估项」里。
+   —— 工作量大，暂不做，列在 Phase 2「评估项」里。
 
 ### Phase 2 触发条件
 
-满足以下**任一**条件时，建议 file OPT-0025：
+满足以下**任一**条件时，建议 reopen 本 OPT 实施 Phase 2：
 
 - [ ] 产品 / 风控团队明确反馈 "Phase 1 数字有用，希望 global 也覆盖"
 - [ ] global 账户在 4 个 tab 告警里占比 >30%（即 `—` 占据多数列时，
@@ -210,12 +232,12 @@ symbol_fee 按表：
 - [ ] 某次具体决策（如某 global 客户大额盈利的 P&L 复盘）发现没有试算
   导致判断偏差
 
-### Phase 2 不在 OPT-0025 范围（保持小步快跑）
+### Phase 2 仍不在范围内的（保持小步快跑）
 
 - ❌ Client Return Rate 页面（独立 OPT）
 - ❌ burst-open tab 加列（独立 OPT，前提是 burst 也加平仓数据）
 - ❌ 与 CRM 实际入账对账（独立 OPT，跟 D03 程序的 Difference 逻辑一致）
-- ❌ 共享公式配置（前后端 import 同一份）—— 复杂度太高，列在 OPT-0025
+- ❌ 共享公式配置（前后端 import 同一份）—— 复杂度太高，列在 Phase 2
   「评估项」
 
 ## 结果
@@ -266,9 +288,9 @@ symbol_fee 按表：
   edge case（如 `KCMc60A_xxx` 同时含 A 计数）。当前测试覆盖了这一情况
   （42.5 算例），但生产数据可能有更刁钻的命名。
 - **Global / CID=1 扩展**：见文末「§ 后续扩展 / Phase 2」段，列了三种
-  实现方案（A 完整 D04 / B 简化 D04 / C 一刀切 D03）+ 4 个开 OPT-0025
-  前要拍板的设计决策（country 字段来源 / cent symbol 识别 / VIP 白名单 /
-  公式发散风险）。
+  实现方案（A 完整 D04 / B 简化 D04 / C 一刀切 D03）+ 4 个 reopen 前要拍
+  板的设计决策（country 字段来源 / cent symbol 识别 / VIP 白名单 / 公式
+  发散风险）。**不开新 OPT，回本 OPT-0024 加 Phase 2**。
 - `total_lots` 在 hedge 聚合是双边 sum，按当前公式跟「每腿付一次佣金」
   语义吻合。若分析师反馈数字对不上，可能要做 buy_lots_sum × buy_symbol_fee
   vs sell_lots_sum × sell_symbol_fee 拆开（但当前 symbol 只有一个，意义
