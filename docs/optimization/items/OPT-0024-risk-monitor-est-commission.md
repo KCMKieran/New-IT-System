@@ -1,6 +1,6 @@
 ---
 id: OPT-0024
-title: Risk-monitor 4 个 tab 加「佣金试算」列（CN 账户 D03 公式）
+title: Risk-monitor 4 个 tab 加「佣金试算」列 — Phase 1：CN（CID=0）D03 公式
 status: done
 priority: P2
 area: frontend
@@ -9,6 +9,13 @@ created: 2026-05-21
 claimed: 2026-05-21
 completed: 2026-05-21
 branch: opt/risk-monitor-est-commission
+phases:
+  - phase: 1
+    scope: CN 账户（CID=0，group.startsWith('KCMc')）走 D03 公式
+    status: done (2026-05-21)
+  - phase: 2
+    scope: Global 账户（CID=1，非 KCMc group）走 D04 country-aware 公式 / 其他
+    status: planned —— 见下方「§ 后续扩展 / Phase 2」段，触发后单独开 OPT-0025
 ---
 
 ## 问题
@@ -18,8 +25,17 @@ branch: opt/risk-monitor-est-commission
 
 KCM 是 B-book CFD 券商：「客户 profit」≠「公司净亏损」。代理佣金
 （External + Internal + Dark Points）是真实成本。完整佣金表在 CRM 里太大、
-查询困难，需要用 `KCM_Daily_Report/Azure_Function_BAU/D03_daily_report.py`
-里的公式当场粗略试算。
+查询困难，需要用 `KCM_Daily_Report/Azure_Function_BAU/` 里的公式当场粗略
+试算。
+
+> **覆盖边界 — 仅 Phase 1 = CN（CID=0）**
+>
+> | CID | 客户来源 | Group 标志 | 公式来源 | 本 OPT 处理 |
+> |---|---|---|---|---|
+> | **0** | China | `KCMc*` | `D03_daily_report.py` | ✅ 套公式 |
+> | **1** | Global（VN/TH/其他） | 非 KCMc（如 `4V_*` / `4c_*` / `4Vc_*`） | `D04_global_cent_daily_report_copy.py` + 其他 | ⛔ 显示 `—`（Phase 2 上） |
+>
+> Phase 2 扩展路径见文末「§ 后续扩展」段。
 
 burst-open tab **不加** —— burst 是开仓告警、无平仓记录，谈不上佣金。
 
@@ -119,15 +135,88 @@ symbol_fee 按表：
 - 纯前端
 - 单一新 lib + 单文件 `RiskMonitor.tsx` 修改
 - 关键风险：D03 `extract_number` 假设 group 含 `c` 和 `_`，非 KCMc 已过滤，但要测 `KCMc0_xxx`（rate=0）的 edge case
-- 后续：若决定扩展到 D04 cent 公式 → 独立 OPT-0025（带 country-aware 表 + VN VIP 白名单同步机制）
+- 后续扩展见文末「§ 后续扩展 / Phase 2 — Global（CID=1）覆盖」段
 
-## 不在范围内
+## 不在范围内（Phase 1）
 
 - ❌ Client Return Rate 页面（用户先不要）
 - ❌ burst-open tab（无平仓数据）
-- ❌ D04 cent 公式（VN/TH 账户暂用 null）
+- ❌ **Global / CID=1 账户**（VN/TH cent + 其他非 KCMc group）—— 见下方
+  Phase 2，触发后单独 OPT-0025
 - ❌ 后端字段补充（country / 客户级 lots 聚合）
 - ❌ 与 CRM 实际入账对账（D03 程序里的 Difference）
+
+## 后续扩展 / Phase 2 — Global（CID=1）覆盖
+
+> **状态**：planned，未开 OPT。触发条件：Phase 1 上线后产品/风控团队确认
+> 试算列对决策有用、希望覆盖更多账户 → 单独开 OPT-0025。
+
+### 目标
+
+把「佣金试算」列从仅 CN 拓展到全部账户：CID=1（global）单元格不再
+显示 `—`，而是基于 country / group / symbol 给出试算值。
+
+### Phase 1 vs Phase 2 边界
+
+| 维度 | Phase 1（已上线）| Phase 2（规划中）|
+|---|---|---|
+| 覆盖 CID | 0 (CN) | 0 + 1（全量）|
+| 判定方式 | `group.startsWith('KCMc')` | 同上 + country/group/symbol 路由 |
+| 公式来源 | D03 严格复刻 | D03 + D04 country-aware + 其他 |
+| `commission.ts` 函数 | `estimateCommission` 返 null | 同函数返数字（按 country 分支）|
+| 后端改动 | 0 | 可能要补 `country` 字段到 AlertEvent |
+
+### Phase 2 三种实现方案
+
+| 方案 | 行为 | 精度 | 实现成本 | 维护成本 |
+|---|---|---|---|---|
+| **A. 完整复刻 D04**（VN/TH cent 走 country-aware 表 + VN VIP 白名单 + IBID 同步）| VN/TH cent 用 D04 表，其他 global 一刀切 D03 | 高 | L（移植 50+ 行配置 + 白名单同步机制）| 高（VN VIP list 频繁加客户，IBID 环境变量动态）|
+| **B. 简化 D04**（只搬费率表，VN VIP 白名单不做）| VN/TH cent 用 D04 默认费率，其他 global 套 D03 | 中 | M | 中 |
+| **C. 一刀切 D03**（所有 group 都套 D03 公式） | cent 账户结果偏大 ~100x（D04 cent fee 在 0.0X 量级，D03 在 X-XX 量级）| 低 | S | 低 |
+
+**默认推荐 B**：移植费率表保留 country-aware 精度，跳过白名单同步（白
+名单不全也只影响 ~50 个 VIP 客户的精度，列头 ℹ tooltip 标注即可）。
+如果产品反馈说"VIP 客户特别重要、试算必须准"，再升级到 A。
+
+### Phase 2 关键设计决策（开 OPT-0025 前要拍板）
+
+1. **country 字段来源**：D04 是 `Country IN ['Thailand', 'Vietnam']` 判定
+   cent，但 risk-monitor 后端目前**不回 country**。两选项：
+   - 后端补：`alert_events` 表加 `country` 列，扫描时从 `mt4_users.country_id`
+     或 `fxbackoffice.users.country` JOIN 进来 → 改 schema + SSE payload
+   - 前端推：用 group 前缀+后缀模式倒推 country（`4V_` / `*.cent` 等）
+     → 完全前端但脆弱
+
+2. **cent symbol 识别**：D04 用 `*.cent` 后缀 + `XAUUSD` 等 exact match
+   清单。这个识别规则要不要从 D04 抄一份到前端 `commission.ts`？
+   抄了就要跟 D04 同步维护。
+
+3. **`SPECIAL_IBID_LIST` 白名单**：D04 用环境变量 + DB 查 referralId。
+   前端拿不到这两个，要么放弃白名单精度（方案 B/C），要么后端把
+   `is_special_ibid` 标志位预先塞进 AlertEvent。
+
+4. **公式发散风险**：D03 偶尔会改公式（如新加 symbol 类型、调整 fixed_fee）。
+   现在前端 `commission.ts` + Python `D03_daily_report.py` 是**两份独立实现**，
+   靠人工同步。是否要抽出共享配置（如 JSON schema）让两端 import 同一个？
+   —— 工作量大，暂不做，列在 OPT-0025 「评估项」里。
+
+### Phase 2 触发条件
+
+满足以下**任一**条件时，建议 file OPT-0025：
+
+- [ ] 产品 / 风控团队明确反馈 "Phase 1 数字有用，希望 global 也覆盖"
+- [ ] global 账户在 4 个 tab 告警里占比 >30%（即 `—` 占据多数列时，
+  视觉上反而干扰）
+- [ ] 某次具体决策（如某 global 客户大额盈利的 P&L 复盘）发现没有试算
+  导致判断偏差
+
+### Phase 2 不在 OPT-0025 范围（保持小步快跑）
+
+- ❌ Client Return Rate 页面（独立 OPT）
+- ❌ burst-open tab 加列（独立 OPT，前提是 burst 也加平仓数据）
+- ❌ 与 CRM 实际入账对账（独立 OPT，跟 D03 程序的 Difference 逻辑一致）
+- ❌ 共享公式配置（前后端 import 同一份）—— 复杂度太高，列在 OPT-0025
+  「评估项」
 
 ## 结果
 
@@ -176,8 +265,10 @@ symbol_fee 按表：
   CRM 实际佣金，需要看具体 group 字符串是否落进了 `extract_number` 的
   edge case（如 `KCMc60A_xxx` 同时含 A 计数）。当前测试覆盖了这一情况
   （42.5 算例），但生产数据可能有更刁钻的命名。
-- D04 cent 公式没实现，VN/TH cent 账户都是 `null` → 显示 `—`。如果业务
-  要扩展到这部分，独立开 OPT-0025（country-aware 表 + VN VIP 白名单同步）。
+- **Global / CID=1 扩展**：见文末「§ 后续扩展 / Phase 2」段，列了三种
+  实现方案（A 完整 D04 / B 简化 D04 / C 一刀切 D03）+ 4 个开 OPT-0025
+  前要拍板的设计决策（country 字段来源 / cent symbol 识别 / VIP 白名单 /
+  公式发散风险）。
 - `total_lots` 在 hedge 聚合是双边 sum，按当前公式跟「每腿付一次佣金」
   语义吻合。若分析师反馈数字对不上，可能要做 buy_lots_sum × buy_symbol_fee
   vs sell_lots_sum × sell_symbol_fee 拆开（但当前 symbol 只有一个，意义
