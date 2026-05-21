@@ -1,12 +1,13 @@
 ---
 id: OPT-0024
 title: Risk-monitor 4 个 tab 加「佣金试算」列（CN 账户 D03 公式）
-status: wip
+status: done
 priority: P2
 area: frontend
 effort: M
 created: 2026-05-21
 claimed: 2026-05-21
+completed: 2026-05-21
 branch: opt/risk-monitor-est-commission
 ---
 
@@ -130,4 +131,55 @@ symbol_fee 按表：
 
 ## 结果
 
-（实施后回填）
+实际交付（与 AC 一致 + 实施时多带 2 件）：
+
+**核心**
+- `frontend/src/lib/commission.ts` —— D03 公式 JS 复刻（173 行）。导出
+  `isCNGroup` / `extractExternalRate` / `getSymbolFee` / `calcInternalFee` /
+  `calcDarkPoints` / `estimateCommission` / `estimateCommissionTwoLegs` /
+  `formatCommission`。
+- `frontend/src/pages/RiskMonitor.tsx` —— 新增 `estCommissionColDef<TRow>`
+  列工厂；7 处注入「佣金试算」列：
+  - QOC 主表 / QP 主表 / hedge 明细：`AlertEvent.symbol + total_lots + group`
+  - hedge 聚合：`symbols.split(',')[0]` 取主 symbol；`total_lots` 双边 sum
+    正好匹配「每条腿都付佣金」语义
+  - gap SO+AB：`estimateCommissionTwoLegs`，L 腿 + C 腿分别算后 sum（SQL
+    约束两腿同 `l_groupsid`）
+  - gap 客户对汇总 / gap 主表：显示 `—`（OPT 范围内不做客户级聚合）
+- ℹ 图标：复用 `InfoHeader` 组件 + shadcn Tooltip，列头能看到可视化提示
+
+**实施时多带的 2 件**
+
+1. **修 AG-Grid headerTooltip 即时显示问题**（commit `30b9dad`）：
+   8 个 `<AgGridReact>` 实例统一 `gridOptions={{ theme: "legacy",
+   enableBrowserTooltips: true }}`。AG-Grid v34 自家 tooltip 默认 showDelay
+   2000ms，用户短暂悬停看不到 → 改走浏览器原生 `title=""`，所有现存
+   `headerTooltip` / `tooltipField` / `tooltipValueGetter`（hedge 聚合 2 处
+   + gap-trade 同 IP/客户名/账户ID 等）一并受益。
+
+2. **引入 vitest 测试框架**（commit `11d92cd`）：
+   - `npm install -D vitest` + `package.json` 加 `test` / `test:watch` 脚本
+   - `frontend/src/lib/commission.test.ts` —— 30 项测试覆盖：
+     - `isCNGroup`：KCMc 前缀 + null 安全
+     - `extractExternalRate`：D03 严格法 + 畸形 group → 0
+     - `getSymbolFee`：XAU / XAG / 油 / 主流外汇 / 股指 / 默认 6 类
+     - `calcDarkPoints`：A 计数 + P 解析（含 KCMc20_PRO_P02 这种 P 落在
+       'PRO' 里 → NaN → 0 的 D03 quirk）+ symbol lots 倍数表
+     - `estimateCommission`：完整算例 (KCMc60_PRO + XAUUSD + 1 lot = 82.5
+       等) + KCMc0_xxx + 非 CN 返 null + 字段缺失返 null
+     - `estimateCommissionTwoLegs`：双腿全 CN / 半 CN / 全非 CN
+     - `formatCommission`：null/NaN/千分位
+   - 30/30 通过，216ms。`npm test` 一行验证。
+
+**待澄清后续（非阻塞）**
+- 数据准确性：用户验证 4 个 tab 时如果发现某行 CN 账户的试算明显偏差
+  CRM 实际佣金，需要看具体 group 字符串是否落进了 `extract_number` 的
+  edge case（如 `KCMc60A_xxx` 同时含 A 计数）。当前测试覆盖了这一情况
+  （42.5 算例），但生产数据可能有更刁钻的命名。
+- D04 cent 公式没实现，VN/TH cent 账户都是 `null` → 显示 `—`。如果业务
+  要扩展到这部分，独立开 OPT-0025（country-aware 表 + VN VIP 白名单同步）。
+- `total_lots` 在 hedge 聚合是双边 sum，按当前公式跟「每腿付一次佣金」
+  语义吻合。若分析师反馈数字对不上，可能要做 buy_lots_sum × buy_symbol_fee
+  vs sell_lots_sum × sell_symbol_fee 拆开（但当前 symbol 只有一个，意义
+  不大）。
+
