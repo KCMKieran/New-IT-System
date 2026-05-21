@@ -604,7 +604,7 @@ function netDepositColorClass(v: number | null | undefined): string {
  * are overridable so tabs with a Chinese header or a numeric column filter
  * can customise without re-implementing the renderer.
  */
-function netDepositColDef(
+function netDepositColDef<TRow extends { net_deposit_hist?: number | null }>(
   opts: {
     headerName?: string;
     colId?: string;
@@ -612,11 +612,11 @@ function netDepositColDef(
     /** Pass "agNumberColumnFilter" when the tab has the right column filter UI wired up. */
     filter?: string | boolean;
   } = {},
-): ColDef<AlertEvent> {
+): ColDef<TRow> {
   const { headerName = "Net Deposit", colId = "net_deposit_hist", width = 130, filter } = opts;
-  const def: ColDef<AlertEvent> = {
+  const def: ColDef<TRow> = {
     headerName,
-    field: "net_deposit_hist" as keyof AlertEvent,
+    field: "net_deposit_hist" as ColDef<TRow>["field"],
     colId,
     width,
     cellClass: "ag-right-aligned-cell",
@@ -685,6 +685,20 @@ function isRiskMonitorTab(s: string | null): s is RiskMonitorTab {
   );
 }
 
+/**
+ * localStorage key for the last-active sub-tab. URL `?tab=` still wins —
+ * this only fires when the user opens /risk-monitor with no tab param,
+ * so deep-links (chat, bookmarks) keep working as before.
+ */
+const RISK_MONITOR_TAB_STORAGE_KEY = "RISK_MONITOR_ACTIVE_TAB_V1";
+
+/**
+ * localStorage key for the hedge-open "聚合 / 已聚合" toggle. Stored as
+ * "1" (aggregated) / "0" (detail). Single-tab so no separate key per
+ * (server, login) — the toggle is a global view preference.
+ */
+const HEDGE_OPEN_AGGREGATED_STORAGE_KEY = "RISK_MONITOR_HEDGE_OPEN_AGGREGATED_V1";
+
 // ── OPT-0013: realtime SSE connection indicator ──────────
 
 function RealtimeIndicator({
@@ -751,8 +765,38 @@ export default function RiskMonitor() {
     }
   }, [tabParam, setSearchParams]);
 
+  // Restore last-active tab from localStorage when user visits the page
+  // without a `?tab=` param. URL deep-links still win — we only fill in
+  // the blank case. Default tab (`burst-open`) is a no-op; anything else
+  // rewrites the URL so the rest of the page reads from the URL as usual.
+  useEffect(() => {
+    if (tabParam !== null) return;
+    let saved: string | null = null;
+    try {
+      saved = localStorage.getItem(RISK_MONITOR_TAB_STORAGE_KEY);
+    } catch {
+      // ignore (private mode / disabled storage)
+    }
+    if (!saved || !isRiskMonitorTab(saved) || saved === "burst-open") return;
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.set("tab", saved);
+        return next;
+      },
+      { replace: true },
+    );
+    // Only run on mount — afterwards setActiveTab keeps storage in sync.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const setActiveTab = (value: string) => {
     if (!isRiskMonitorTab(value)) return;
+    try {
+      localStorage.setItem(RISK_MONITOR_TAB_STORAGE_KEY, value);
+    } catch {
+      // ignore
+    }
     setSearchParams(
       (prev) => {
         const next = new URLSearchParams(prev);
@@ -4181,8 +4225,26 @@ function HedgeOpenTab({ active }: { active: boolean }) {
   );
 
   /** View mode toggle. Default = detail (raw alert_events rows); when on,
-   *  the grid renders one row per (server, login) via /alerts/aggregated. */
-  const [aggregated, setAggregated] = useState(false);
+   *  the grid renders one row per (server, login) via /alerts/aggregated.
+   *  Persisted to localStorage so analysts who prefer the aggregated view
+   *  (per-account summary) don't have to re-click every visit. */
+  const [aggregated, setAggregated] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(HEDGE_OPEN_AGGREGATED_STORAGE_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        HEDGE_OPEN_AGGREGATED_STORAGE_KEY,
+        aggregated ? "1" : "0",
+      );
+    } catch {
+      // ignore (private mode / disabled storage)
+    }
+  }, [aggregated]);
   // Aggregated view has its own sort state (sortable columns are
   // different — e.g. there is no scanned_at, just last_alert_at).
   const [aggSortBy, setAggSortBy] = useState<string>("total_lots");
