@@ -120,8 +120,15 @@ reviewer 误判：F1 中的 `/docs` 落到 SPA 不成立 (是 301)、F10 中 `ex
 
 ### Follow-up
 
-- **OPT-0027 (docs-portal-hardening)** — 包 F4 (mkdocs build mode) + F6 (NavDocuments external dropdown 隐藏 + aria-label)。Effort M
-- **Live with 累积**: F1 / F5 / F7 / F8 / F9 — 写在这里留 paper trail，未来真出事再回头修
+- ~~OPT-0027 (docs-portal-hardening)~~ — 用户后续拍板**全部 live with**，**不立 hardening OPT**。F4 (mkdocs serve → build mode) + F6 (NavDocuments external dropdown 隐藏 + aria-label) 都不修。
+  - F4 风险：随 docs/ 文件数增长（50→500+）`mkdocs serve` 的 inotify watcher 和 rebuild 抖动可能成为瓶颈；今天 50 个文件不痛
+  - F6 风险：dropdown 三个 dead control（Open / Share / Delete）是 pre-existing 问题，不只是 external item；不修不会坏，只是 cosmetic
+  - 如果未来某天 docs 站突然不稳 / 觉得 dropdown 烦人，回头开 OPT-0027 重新评估
+- **Live with 累积**: F1 / F4 / F5 / F6 / F7 / F8 / F9 — 全部留 paper trail，未来真出事再回头修
+
+### Merge commit body 矫正说明
+
+Merge commit `c309649` 的 body 写"F4 + F6 → 拆 hardening OPT 跟进 (next file+claim)"，是 close 当下的计划。事后用户决定改为 live with —— commit body 不 amend（不动 main 历史），以**本「结果」段**为最终记录。
 
 ### 手机/iPad 实测
 
