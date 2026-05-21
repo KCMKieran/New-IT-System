@@ -10,7 +10,7 @@
 
 | ID | Branch | Claim 日期 | 备注 |
 |----|--------|-----------|------|
-| [OPT-0024](./items/OPT-0024-risk-monitor-est-commission.md) | `opt/risk-monitor-est-commission` | 2026-05-21 | risk-monitor 4 tab 加「佣金试算」列（CN/D03 公式） |
+| _空_ | | | |
 
 ## ✅ 待领取（Ready）
 

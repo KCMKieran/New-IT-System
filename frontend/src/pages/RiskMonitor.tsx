@@ -73,6 +73,12 @@ import { useIsMobile } from "@/hooks/use-mobile";
 import { useGridColumnPersist } from "@/hooks/useGridColumnPersist";
 import { ColumnVisibilityInline } from "@/components/ColumnVisibilityMenu";
 import type { UseGridColumnPersistResult } from "@/hooks/useGridColumnPersist";
+import {
+  estimateCommission,
+  estimateCommissionTwoLegs,
+  formatCommission,
+} from "@/lib/commission";
+import { InfoHeader } from "@/components/ui/info-header";
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -628,6 +634,51 @@ function netDepositColDef<TRow extends { net_deposit_hist?: number | null }>(
   };
   if (filter !== undefined) def.filter = filter;
   return def;
+}
+
+/**
+ * `est_commission` AG-Grid column factory — D03 粗略试算 (External + Internal
+ * + Dark Points), CN-only. Non-CN rows render `—`. See `@/lib/commission` and
+ * `docs/optimization/items/OPT-0024-*.md`.
+ *
+ * `getCommission` lets each tab supply its own per-row resolver — most tabs
+ * just call `estimateCommission(symbol, total_lots, group)`, but hedge 聚合
+ * and gap-trade need slightly different inputs.
+ */
+const EST_COMMISSION_TOOLTIP =
+  "基于 KCM_Daily_Report D03 公式粗略试算（External + Internal + Dark Points）。仅 CN 账户（KCMc 组）计算，其他显示 —。多 symbol 行用主 symbol 近似。";
+
+function estCommissionColDef<TRow>(opts: {
+  getCommission: (row: TRow) => number | null;
+  width?: number;
+  colId?: string;
+  headerName?: string;
+}): ColDef<TRow> {
+  const {
+    getCommission,
+    width = 130,
+    colId = "est_commission",
+    headerName = "佣金试算",
+  } = opts;
+  return {
+    headerName,
+    colId,
+    width,
+    sortable: true,
+    cellClass: "ag-right-aligned-cell",
+    // Use InfoHeader (with ℹ icon) so users see a visible affordance — the
+    // raw `headerTooltip` string is invisible unless they hover the text.
+    headerComponent: InfoHeader,
+    headerComponentParams: { tooltip: EST_COMMISSION_TOOLTIP },
+    valueGetter: (p) => (p.data ? getCommission(p.data) : null),
+    cellRenderer: (p: { value: number | null }) => formatCommission(p.value),
+    comparator: (a: number | null, b: number | null) => {
+      if (a == null && b == null) return 0;
+      if (a == null) return -1;
+      if (b == null) return 1;
+      return a - b;
+    },
+  };
 }
 
 // ── AG-Grid theme ─────────────────────────────────────────
@@ -1667,7 +1718,7 @@ function BurstOpenTab({ active }: { active: boolean }) {
           rowData={alerts}
           columnDefs={columnDefs}
           defaultColDef={defaultColDef}
-          gridOptions={{ theme: "legacy" }}
+          gridOptions={{ theme: "legacy", enableBrowserTooltips: true }}
           animateRows={false}
           enableCellTextSelection
           suppressCellFocus
@@ -2208,6 +2259,10 @@ function QuickOpenCloseTab({ active }: { active: boolean }) {
         cellClass: "ag-right-aligned-cell",
         valueFormatter: (p) => p.value?.toFixed(2) ?? "",
       },
+      estCommissionColDef<AlertEvent>({
+        getCommission: (r) =>
+          estimateCommission(r.symbol, r.total_lots, r.group),
+      }),
       {
         headerName: "订单明细",
         colId: "orders",
@@ -2464,7 +2519,7 @@ function QuickOpenCloseTab({ active }: { active: boolean }) {
           rowData={alerts}
           columnDefs={columnDefs}
           defaultColDef={defaultColDef}
-          gridOptions={{ theme: "legacy" }}
+          gridOptions={{ theme: "legacy", enableBrowserTooltips: true }}
           animateRows={false}
           enableCellTextSelection
           suppressCellFocus
@@ -3648,6 +3703,10 @@ function QuickProfitTab({ active }: { active: boolean }) {
         cellClass: "ag-right-aligned-cell",
         valueFormatter: (p) => p.value?.toFixed(2) ?? "",
       },
+      estCommissionColDef<AlertEvent>({
+        getCommission: (r) =>
+          estimateCommission(r.symbol, r.total_lots, r.group),
+      }),
       { headerName: "账户组", field: "group", colId: "group", width: 150 },
     ],
     [lookbackByRuleId],
@@ -3889,7 +3948,7 @@ function QuickProfitTab({ active }: { active: boolean }) {
           rowData={alerts}
           columnDefs={columnDefs}
           defaultColDef={defaultColDef}
-          gridOptions={{ theme: "legacy" }}
+          gridOptions={{ theme: "legacy", enableBrowserTooltips: true }}
           animateRows={false}
           enableCellTextSelection
           suppressCellFocus
@@ -4659,6 +4718,10 @@ function HedgeOpenTab({ active }: { active: boolean }) {
         valueFormatter: (p) =>
           typeof p.value === "number" ? p.value.toFixed(2) : "—",
       },
+      estCommissionColDef<AlertEvent>({
+        getCommission: (r) =>
+          estimateCommission(r.symbol, r.total_lots, r.group),
+      }),
       { headerName: "账户组", field: "group", colId: "group", width: 160 },
       {
         headerName: "订单明细",
@@ -4724,6 +4787,15 @@ function HedgeOpenTab({ active }: { active: boolean }) {
           typeof p.value === "number" ? p.value.toFixed(2) : "—",
         headerTooltip: "buy_lots + sell_lots 加总（双向计数，= 2× 实际对冲量）",
       },
+      estCommissionColDef<HedgeOpenAggregatedRow>({
+        // For aggregated rows, pick the primary symbol from the comma-joined
+        // `symbols` list. total_lots is intentionally double-sided (buy+sell)
+        // — that's also the right base for commission because each leg pays.
+        getCommission: (r) => {
+          const primary = (r.symbols ?? "").split(",")[0]?.trim() || null;
+          return estimateCommission(primary, r.total_lots, r.group);
+        },
+      }),
       {
         headerName: "告警次数",
         field: "alert_count",
@@ -5058,7 +5130,7 @@ function HedgeOpenTab({ active }: { active: boolean }) {
             rowData={aggRows}
             columnDefs={aggregatedColumnDefs}
             defaultColDef={defaultColDef}
-            gridOptions={{ theme: "legacy" }}
+            gridOptions={{ theme: "legacy", enableBrowserTooltips: true }}
             animateRows={false}
             enableCellTextSelection
             suppressCellFocus
@@ -5090,7 +5162,7 @@ function HedgeOpenTab({ active }: { active: boolean }) {
             rowData={alerts}
             columnDefs={columnDefs}
             defaultColDef={defaultColDef}
-            gridOptions={{ theme: "legacy" }}
+            gridOptions={{ theme: "legacy", enableBrowserTooltips: true }}
             animateRows={false}
             enableCellTextSelection
             suppressCellFocus
@@ -6011,6 +6083,17 @@ function GapTradeTab({ active }: { active: boolean }) {
         width: 150,
         sortable: false,
       },
+      estCommissionColDef<AlertEvent>({
+        // Both legs use the same (l_groupsid) per SQL constraint; sum L + C.
+        getCommission: (r) =>
+          estimateCommissionTwoLegs(
+            r.symbol,
+            r.l_lots,
+            r.l_groupsid,
+            r.c_lots,
+            r.l_groupsid,
+          ),
+      }),
     ],
     [],
   );
@@ -6138,6 +6221,11 @@ function GapTradeTab({ active }: { active: boolean }) {
         width: 150,
         sortable: false,
       },
+      estCommissionColDef<ClientPairAggRow>({
+        // Client-pair rows aggregate across multiple SO+AB pairs; we don't
+        // carry a per-pair lots total here. Render `—` per OPT-0024 scope.
+        getCommission: () => null,
+      }),
     ],
     [],
   );
@@ -6312,6 +6400,12 @@ function GapTradeTab({ active }: { active: boolean }) {
         width: 150,
         sortable: false,
       },
+      estCommissionColDef<AlertEvent>({
+        // Client-level aggregation: no per-client total lots returned by the
+        // backend, and `symbols` is comma-joined across multiple products.
+        // Render `—` per OPT-0024 scope.
+        getCommission: () => null,
+      }),
     ],
     // Rebuild when gap_profit thresholds change so the "触发条件" badge
     // tracks the live config (e.g. user lowers min_profit_usd in the
@@ -6532,7 +6626,7 @@ function GapTradeTab({ active }: { active: boolean }) {
             rowData={clientPairAgg}
             columnDefs={clientPairColumns}
             defaultColDef={defaultColDef}
-            gridOptions={{ theme: "legacy" }}
+            gridOptions={{ theme: "legacy", enableBrowserTooltips: true }}
             animateRows={false}
             enableCellTextSelection
             suppressCellFocus
@@ -6566,7 +6660,7 @@ function GapTradeTab({ active }: { active: boolean }) {
             rowData={soAbAlerts}
             columnDefs={soAbColumns}
             defaultColDef={defaultColDef}
-            gridOptions={{ theme: "legacy" }}
+            gridOptions={{ theme: "legacy", enableBrowserTooltips: true }}
             animateRows={false}
             enableCellTextSelection
             suppressCellFocus
@@ -6602,7 +6696,7 @@ function GapTradeTab({ active }: { active: boolean }) {
             rowData={gapAlerts}
             columnDefs={gapColumns}
             defaultColDef={defaultColDef}
-            gridOptions={{ theme: "legacy" }}
+            gridOptions={{ theme: "legacy", enableBrowserTooltips: true }}
             animateRows={false}
             enableCellTextSelection
             suppressCellFocus
