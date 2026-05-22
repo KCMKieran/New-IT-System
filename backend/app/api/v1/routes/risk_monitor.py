@@ -34,6 +34,7 @@ from ....core.burst_open_scheduler import (
     trigger_scan_now,
 )
 from ....core.risk_monitor_db import (
+    aggregate_burst_open_by_login,
     aggregate_hedge_open_by_login,
     alert_events_stats,
     get_alerts_by_ids,
@@ -60,6 +61,8 @@ from ....schemas.risk_monitor import (
     AlertEvent,
     AlertsResponse,
     AlertsStats,
+    BurstOpenAggregatedResponse,
+    BurstOpenAggregatedRow,
     BurstOpenAlert,
     BurstOpenConfig,
     BurstOpenScanResult,
@@ -725,6 +728,80 @@ async def burst_open_alerts_export(
         raise
     except Exception as exc:
         logger.error("Failed to export alert events: %s", exc, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        ) from exc
+
+
+# ── GET /burst-open/alerts/aggregated — per (server, login) fold (OPT-0027) ──
+
+@router.get(
+    "/burst-open/alerts/aggregated",
+    response_model=BurstOpenAggregatedResponse,
+)
+async def burst_open_alerts_aggregated(
+    since: Optional[str] = Query(default=None),
+    until: Optional[str] = Query(default=None),
+    server: Optional[str] = Query(default=None),
+    login: Optional[int] = Query(default=None),
+    symbol: Optional[str] = Query(default=None),
+    rule_id: Optional[int] = Query(default=None),
+    zipcode: Optional[str] = Query(default=None, max_length=64),
+    page: Optional[int] = Query(default=None, ge=1),
+    page_size: int = Query(default=50, ge=1, le=_MAX_PAGE_SIZE),
+    limit: Optional[int] = Query(default=None, ge=1, le=_MAX_PAGE_SIZE),
+    offset: Optional[int] = Query(default=None, ge=0),
+    sort_by: Optional[str] = Query(default=None),
+    sort_order: Optional[str] = Query(default=None),
+):
+    """Per-(server, login) aggregation of burst-open alerts in range.
+
+    Folds same-account rows from multiple scan windows / symbols into
+    one summary row with summed order_count + total_lots. Same filter
+    contract as `/burst-open/alerts`. Mirrors `/hedge-open/alerts/aggregated`
+    but with no buy/sell split (burst-open is direction-agnostic).
+    """
+    since_iso, until_iso = _default_since_until(since, until)
+    zipcode_clean = _clean_zipcode(zipcode)
+
+    if page is not None:
+        effective_limit = page_size
+        effective_offset = (page - 1) * page_size
+        effective_page = page
+    else:
+        effective_limit = limit if limit is not None else page_size
+        effective_offset = offset or 0
+        effective_page = (effective_offset // effective_limit) + 1 if effective_limit else 1
+        page_size = effective_limit
+
+    try:
+        entries, total = aggregate_burst_open_by_login(
+            since=since_iso,
+            until=until_iso,
+            rule_id_max=BURST_RULE_MAX_ID,
+            server=server,
+            login=login,
+            symbol=symbol,
+            rule_id=rule_id,
+            zipcode=zipcode_clean,
+            limit=effective_limit,
+            offset=effective_offset,
+            sort_by=sort_by,
+            sort_order=sort_order,
+        )
+        return BurstOpenAggregatedResponse(
+            entries=[BurstOpenAggregatedRow(**e) for e in entries],
+            total=total,
+            since=since_iso,
+            until=until_iso,
+            page=effective_page,
+            page_size=page_size,
+        )
+    except Exception as exc:
+        logger.error(
+            "Failed to aggregate burst-open alerts: %s", exc, exc_info=True
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(exc),
