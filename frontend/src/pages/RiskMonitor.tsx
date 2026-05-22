@@ -230,6 +230,19 @@ const HEDGE_AGG_SORTABLE_COL_IDS = new Set<string>([
   "server",
 ]);
 
+/** Sortable columns for the burst-open aggregated view (OPT-0027). Mirrors
+ *  backend `_BURST_AGG_SORT_COLS`. No buy/sell split — burst-open is
+ *  direction-agnostic. */
+const BURST_AGG_SORTABLE_COL_IDS = new Set<string>([
+  "total_lots",
+  "total_count",
+  "alert_count",
+  "last_alert_at",
+  "first_alert_at",
+  "login",
+  "server",
+]);
+
 /** Backend `QUICK_RULE_ID_BASE` — alert `rule_id` for quick rules is 51, 52, ... */
 const QUICK_RULE_ID_BASE = 51;
 
@@ -379,6 +392,36 @@ interface HedgeOpenAggregatedRow {
 
 interface HedgeOpenAggregatedResponse {
   entries: HedgeOpenAggregatedRow[];
+  total: number;
+  since: string;
+  until: string;
+  page: number;
+  page_size: number;
+}
+
+/** One row in the per-loginsid aggregated view (burst-open tab — OPT-0027).
+ *  Mirror of HedgeOpenAggregatedRow but with no buy/sell split — burst-open
+ *  is direction-agnostic. `total_count` is `SUM(order_count)` and
+ *  `total_lots` is a plain sum (NOT the 2× hedged-volume semantic that
+ *  hedge-open carries). */
+interface BurstOpenAggregatedRow {
+  server: string;
+  login: number;
+  alert_count: number;
+  total_count: number;            // SUM(order_count)
+  total_lots: number;             // SUM(total_lots) — plain sum
+  first_alert_at: string | null;
+  last_alert_at: string | null;
+  symbols: string | null;
+  symbol_count: number;
+  group: string | null;
+  currency: string | null;
+  zipcode: string | null;
+  net_deposit_hist: number | null;
+}
+
+interface BurstOpenAggregatedResponse {
+  entries: BurstOpenAggregatedRow[];
   total: number;
   since: string;
   until: string;
@@ -751,6 +794,9 @@ const RISK_MONITOR_TAB_STORAGE_KEY = "RISK_MONITOR_ACTIVE_TAB_V1";
  */
 const HEDGE_OPEN_AGGREGATED_STORAGE_KEY = "RISK_MONITOR_HEDGE_OPEN_AGGREGATED_V1";
 
+/** localStorage key for the burst-open "聚合 / 已聚合" toggle (OPT-0027). */
+const BURST_OPEN_AGGREGATED_STORAGE_KEY = "RISK_MONITOR_BURST_OPEN_AGGREGATED_V1";
+
 // ── OPT-0025: per-tab toolbar filter persistence ──────────────────
 //
 // Each tab persists its toolbar filter selections as a single JSON blob.
@@ -1004,6 +1050,37 @@ function BurstOpenTab({ active }: { active: boolean }) {
   const columnPersist = useGridColumnPersist(
     "RISK_MONITOR_BURST_OPEN_GRID_STATE_V1",
   );
+  // OPT-0027: separate persist key for the aggregated view — columns differ
+  // from the detail grid (loginsid / 累计笔数 / 累计手数 / etc.), so sharing
+  // one key would mis-apply user pinning / hiding across views.
+  const aggColumnPersist = useGridColumnPersist(
+    "RISK_MONITOR_BURST_OPEN_AGG_GRID_STATE_V1",
+  );
+
+  /** OPT-0027: view mode toggle. Default = detail (raw alert_events rows);
+   *  when on, the grid renders one row per (server, login) via the new
+   *  /burst-open/alerts/aggregated endpoint. Persisted across visits. */
+  const [aggregated, setAggregated] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(BURST_OPEN_AGGREGATED_STORAGE_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        BURST_OPEN_AGGREGATED_STORAGE_KEY,
+        aggregated ? "1" : "0",
+      );
+    } catch {
+      // ignore (private mode / disabled storage)
+    }
+  }, [aggregated]);
+  // Aggregated view has its own sort state (sortable cols are different —
+  // there's no scanned_at, just last_alert_at; SUM-able cols only).
+  const [aggSortBy, setAggSortBy] = useState<string>("total_lots");
+  const [aggSortOrder, setAggSortOrder] = useState<"asc" | "desc">("desc");
 
   // OPT-0025: hydrate toolbar filters from localStorage on first mount.
   // Reads the entire JSON blob once; individual useState calls below pick
@@ -1027,6 +1104,7 @@ function BurstOpenTab({ active }: { active: boolean }) {
 
   // Data state
   const [alerts, setAlerts] = useState<AlertEvent[]>([]);
+  const [aggRows, setAggRows] = useState<BurstOpenAggregatedRow[]>([]);  // OPT-0027
   const [totalCount, setTotalCount] = useState(0);
   const [stats, setStats] = useState<AlertsStats>({
     suspicious_count: 0,
@@ -1159,13 +1237,21 @@ function BurstOpenTab({ active }: { active: boolean }) {
         const alertsQs = new URLSearchParams(tableQs);
         alertsQs.set("page", String(pageIndex + 1));
         alertsQs.set("page_size", String(pageSize));
-        alertsQs.set("sort_by", sortBy);
-        alertsQs.set("sort_order", sortOrder);
+        // OPT-0027: pick sort state matching the current view. The
+        // /aggregated endpoint has a different sortable column set
+        // (total_lots / total_count / last_alert_at / ...) so the
+        // detail-view sort state would be a 400 if reused.
+        alertsQs.set("sort_by", aggregated ? aggSortBy : sortBy);
+        alertsQs.set("sort_order", aggregated ? aggSortOrder : sortOrder);
+
+        const alertsPath = aggregated
+          ? "/api/v1/risk-monitor/burst-open/alerts/aggregated"
+          : "/api/v1/risk-monitor/burst-open/alerts";
 
         const [alertsRes, statsRes, latestRes] = await Promise.all([
-          apiFetch(`/api/v1/risk-monitor/burst-open/alerts?${alertsQs}`, {
-            signal,
-          }),
+          apiFetch(`${alertsPath}?${alertsQs}`, { signal }),
+          // Stats endpoint stays the same — summary cards count distinct
+          // accounts + per-rule breakdown regardless of view mode.
           apiFetch(`/api/v1/risk-monitor/burst-open/alerts/stats?${statsQs}`, {
             signal,
           }),
@@ -1177,18 +1263,31 @@ function BurstOpenTab({ active }: { active: boolean }) {
         ]);
 
         if (alertsRes.ok) {
-          const json: AlertsResponse = await alertsRes.json();
-          setAlerts(json.entries);
-          setTotalCount(json.total);
-          // If the filter/sort change shrank `total` below the current
-          // page, bring the user back to the last valid page instead of
-          // leaving them on an empty one.
-          const maxPageIndex = Math.max(
-            0,
-            Math.ceil(json.total / pageSize) - 1,
-          );
-          if (pageIndex > maxPageIndex) {
-            setPageIndex(maxPageIndex);
+          if (aggregated) {
+            const json: BurstOpenAggregatedResponse = await alertsRes.json();
+            setAggRows(json.entries);
+            setTotalCount(json.total);
+            const maxPageIndex = Math.max(
+              0,
+              Math.ceil(json.total / pageSize) - 1,
+            );
+            if (pageIndex > maxPageIndex) {
+              setPageIndex(maxPageIndex);
+            }
+          } else {
+            const json: AlertsResponse = await alertsRes.json();
+            setAlerts(json.entries);
+            setTotalCount(json.total);
+            // If the filter/sort change shrank `total` below the current
+            // page, bring the user back to the last valid page instead of
+            // leaving them on an empty one.
+            const maxPageIndex = Math.max(
+              0,
+              Math.ceil(json.total / pageSize) - 1,
+            );
+            if (pageIndex > maxPageIndex) {
+              setPageIndex(maxPageIndex);
+            }
           }
         }
         if (statsRes.ok) {
@@ -1227,6 +1326,9 @@ function BurstOpenTab({ active }: { active: boolean }) {
       pageSize,
       sortBy,
       sortOrder,
+      aggregated,
+      aggSortBy,
+      aggSortOrder,
     ],
   );
 
@@ -1245,6 +1347,9 @@ function BurstOpenTab({ active }: { active: boolean }) {
     pageSize,
     sortBy,
     sortOrder,
+    aggregated,
+    aggSortBy,
+    aggSortOrder,
   ]);
 
   /** Fetch config separately so the drawer can open before first scan finishes. */
@@ -1556,6 +1661,99 @@ function BurstOpenTab({ active }: { active: boolean }) {
     [],
   );
 
+  // OPT-0027: columns for the aggregated view (per-loginsid fold).
+  // Distinct from `columnDefs` so:
+  //  - row type is BurstOpenAggregatedRow (no scanned_at, no per-event
+  //    open-time window — those don't fold)
+  //  - sortable colIds match `_BURST_AGG_SORT_COLS` on the backend
+  //  - column-persist key is a separate slot (see aggColumnPersist)
+  // No buy/sell split — burst-open is direction-agnostic (cf. hedge-open).
+  const aggregatedColumnDefs: ColDef<BurstOpenAggregatedRow>[] = useMemo(
+    () => [
+      { headerName: "服务器", field: "server", colId: "server", width: 110, pinned: "left" },
+      {
+        headerName: "账户",
+        field: "login",
+        colId: "login",
+        width: 130,
+        pinned: "left",
+        cellRenderer: LoginCell,
+      },
+      {
+        headerName: "Zipcode",
+        field: "zipcode",
+        colId: "zipcode",
+        width: 110,
+        cellRenderer: (p: { value: string | null }) => p.value || "—",
+      },
+      { headerName: "币种", field: "currency", colId: "currency", width: 80 },
+      netDepositColDef(),
+      {
+        headerName: "累计笔数",
+        field: "total_count",
+        colId: "total_count",
+        width: 110,
+        cellClass: "ag-right-aligned-cell",
+        cellStyle: { backgroundColor: "rgba(239, 68, 68, 0.08)" },
+        headerTooltip: "窗口内 alert 的 order_count 累加",
+      },
+      {
+        headerName: "累计手数",
+        field: "total_lots",
+        colId: "total_lots",
+        width: 120,
+        sort: "desc",
+        cellClass: "ag-right-aligned-cell",
+        cellStyle: { backgroundColor: "rgba(239, 68, 68, 0.08)" },
+        valueFormatter: (p) =>
+          typeof p.value === "number" ? p.value.toFixed(2) : "—",
+        // NOTE: plain sum (no double-side multiplier). Don't copy the
+        // "= 2× 实际对冲量" caveat from hedge-open here.
+        headerTooltip: "窗口内 alert 的 total_lots 累加",
+      },
+      estCommissionColDef<BurstOpenAggregatedRow>({
+        getCommission: (r) => {
+          const primary = (r.symbols ?? "").split(",")[0]?.trim() || null;
+          return estimateCommission(primary, r.total_lots, r.group);
+        },
+      }),
+      {
+        headerName: "告警次数",
+        field: "alert_count",
+        colId: "alert_count",
+        width: 100,
+        cellClass: "ag-right-aligned-cell",
+      },
+      {
+        headerName: "涉及品种",
+        colId: "symbols",
+        width: 240,
+        sortable: false,
+        valueGetter: (p) => {
+          const s = p.data?.symbols ?? "";
+          const n = p.data?.symbol_count ?? 0;
+          return n > 1 ? `${s} (${n})` : s;
+        },
+      },
+      {
+        headerName: "首次告警 (GMT+8)",
+        field: "first_alert_at",
+        colId: "first_alert_at",
+        width: 165,
+        valueFormatter: (p) => fmtTime(p.value),
+      },
+      {
+        headerName: "最近告警 (GMT+8)",
+        field: "last_alert_at",
+        colId: "last_alert_at",
+        width: 165,
+        valueFormatter: (p) => fmtTime(p.value),
+      },
+      { headerName: "账户组", field: "group", colId: "group", width: 160 },
+    ],
+    [],
+  );
+
   const rangeLabel =
     rangePreset === "custom" && customRange?.from
       ? customRange.to
@@ -1596,6 +1794,33 @@ function BurstOpenTab({ active }: { active: boolean }) {
           <Button variant="outline" size="sm" onClick={openConfigPanel}>
             <Settings2 className="h-4 w-4 mr-1.5" />
             设置
+          </Button>
+          {/* OPT-0027: "聚合 / 已聚合" toggle. Same affordance + colors as
+              the hedge-open tab so the gesture is consistent across tabs. */}
+          <Button
+            type="button"
+            size="sm"
+            onClick={() => setAggregated((v) => !v)}
+            aria-pressed={aggregated}
+            title={
+              aggregated
+                ? "已按账户聚合 — 再点切换回明细"
+                : "按账户聚合：把同账户多条告警折叠成一行"
+            }
+            className={cn(
+              "border border-transparent",
+              aggregated
+                ? "bg-emerald-500 hover:bg-emerald-600 text-emerald-50 " +
+                    "ring-2 ring-emerald-700/40 " +
+                    "dark:bg-emerald-700 dark:hover:bg-emerald-800 " +
+                    "dark:text-emerald-50 dark:ring-emerald-300/30"
+                : "bg-amber-300 hover:bg-amber-400 text-amber-950 " +
+                    "dark:bg-amber-500 dark:hover:bg-amber-600 " +
+                    "dark:text-amber-50",
+            )}
+          >
+            <Layers className="h-4 w-4 mr-1.5" />
+            {aggregated ? "已聚合" : "聚合"}
           </Button>
         </div>
       </div>
@@ -1765,7 +1990,11 @@ function BurstOpenTab({ active }: { active: boolean }) {
         </div>
 
         <span className="text-sm text-muted-foreground sm:ml-auto sm:shrink-0 py-1.5">
-          {loading ? "加载中..." : `共 ${totalCount} 条告警`}
+          {loading
+            ? "加载中..."
+            : aggregated
+              ? `共 ${totalCount} 个账户`
+              : `共 ${totalCount} 条告警`}
         </span>
       </div>
 
@@ -1777,38 +2006,73 @@ function BurstOpenTab({ active }: { active: boolean }) {
         )}
         style={gridStyle}
       >
-        <AgGridReact<AlertEvent>
-          ref={gridRef}
-          rowData={alerts}
-          columnDefs={columnDefs}
-          defaultColDef={defaultColDef}
-          gridOptions={{ theme: "legacy", enableBrowserTooltips: true }}
-          animateRows={false}
-          enableCellTextSelection
-          suppressCellFocus
-          // Keep AG Grid's 3-state sort cycle: desc → asc → none.
-          // When sort is cleared, frontend falls back to `scanned_at DESC`
-          // so `/alerts` stays deterministic.
-          sortingOrder={["desc", "asc", null]}
-          onSortChanged={(e) => {
-            // Skip the consumer's backend-sort handler while the hook is
-            // restoring state on mount — otherwise the initial /alerts
-            // fetch fires twice (once with default sort, once with the
-            // restored sort_by). Persist save is gated separately inside
-            // the hook (isApplyingRef short-circuit).
-            if (!columnPersist.isApplying()) handleSortChanged(e);
-            columnPersist.gridEventProps.onSortChanged();
-          }}
-          onGridReady={(e) => {
-            gridApiRef.current = e.api;
-            columnPersist.gridEventProps.onGridReady(e);
-          }}
-          onColumnMoved={columnPersist.gridEventProps.onColumnMoved}
-          onColumnVisible={columnPersist.gridEventProps.onColumnVisible}
-          onColumnPinned={columnPersist.gridEventProps.onColumnPinned}
-          onColumnResized={columnPersist.gridEventProps.onColumnResized}
-          getRowId={(p) => `evt-${p.data.id}`}
-        />
+        {aggregated ? (
+          /* OPT-0027: aggregated view (per-loginsid fold). */
+          <AgGridReact<BurstOpenAggregatedRow>
+            rowData={aggRows}
+            columnDefs={aggregatedColumnDefs}
+            defaultColDef={defaultColDef}
+            gridOptions={{ theme: "legacy", enableBrowserTooltips: true }}
+            animateRows={false}
+            enableCellTextSelection
+            suppressCellFocus
+            sortingOrder={["desc", "asc", null]}
+            onSortChanged={(e) => {
+              if (!aggColumnPersist.isApplying()) {
+                const activeCol = e.api.getColumnState().find((c) => c.sort);
+                const nextSortBy =
+                  activeCol?.colId &&
+                  BURST_AGG_SORTABLE_COL_IDS.has(activeCol.colId)
+                    ? activeCol.colId
+                    : "total_lots";
+                const nextSortOrder =
+                  activeCol?.sort === "asc" ? "asc" : "desc";
+                setAggSortBy(nextSortBy);
+                setAggSortOrder(nextSortOrder);
+              }
+              aggColumnPersist.gridEventProps.onSortChanged();
+            }}
+            onGridReady={aggColumnPersist.gridEventProps.onGridReady}
+            onColumnMoved={aggColumnPersist.gridEventProps.onColumnMoved}
+            onColumnVisible={aggColumnPersist.gridEventProps.onColumnVisible}
+            onColumnPinned={aggColumnPersist.gridEventProps.onColumnPinned}
+            onColumnResized={aggColumnPersist.gridEventProps.onColumnResized}
+            getRowId={(p) => `agg-${p.data.server}-${p.data.login}`}
+          />
+        ) : (
+          <AgGridReact<AlertEvent>
+            ref={gridRef}
+            rowData={alerts}
+            columnDefs={columnDefs}
+            defaultColDef={defaultColDef}
+            gridOptions={{ theme: "legacy", enableBrowserTooltips: true }}
+            animateRows={false}
+            enableCellTextSelection
+            suppressCellFocus
+            // Keep AG Grid's 3-state sort cycle: desc → asc → none.
+            // When sort is cleared, frontend falls back to `scanned_at DESC`
+            // so `/alerts` stays deterministic.
+            sortingOrder={["desc", "asc", null]}
+            onSortChanged={(e) => {
+              // Skip the consumer's backend-sort handler while the hook is
+              // restoring state on mount — otherwise the initial /alerts
+              // fetch fires twice (once with default sort, once with the
+              // restored sort_by). Persist save is gated separately inside
+              // the hook (isApplyingRef short-circuit).
+              if (!columnPersist.isApplying()) handleSortChanged(e);
+              columnPersist.gridEventProps.onSortChanged();
+            }}
+            onGridReady={(e) => {
+              gridApiRef.current = e.api;
+              columnPersist.gridEventProps.onGridReady(e);
+            }}
+            onColumnMoved={columnPersist.gridEventProps.onColumnMoved}
+            onColumnVisible={columnPersist.gridEventProps.onColumnVisible}
+            onColumnPinned={columnPersist.gridEventProps.onColumnPinned}
+            onColumnResized={columnPersist.gridEventProps.onColumnResized}
+            getRowId={(p) => `evt-${p.data.id}`}
+          />
+        )}
       </div>
 
       {/* Pagination bar — mirrors ClientPnLMonitor for visual consistency */}
@@ -1820,7 +2084,7 @@ function BurstOpenTab({ active }: { active: boolean }) {
                 <div className="text-sm text-muted-foreground">
                   {totalCount === 0
                     ? "暂无数据"
-                    : `第 ${pageIndex * pageSize + 1}-${Math.min((pageIndex + 1) * pageSize, totalCount)} 条 / 共 ${totalCount} 条`}
+                    : `第 ${pageIndex * pageSize + 1}-${Math.min((pageIndex + 1) * pageSize, totalCount)} ${aggregated ? "个" : "条"} / 共 ${totalCount} ${aggregated ? "个账户" : "条"}`}
                 </div>
               )}
 
@@ -1906,8 +2170,13 @@ function BurstOpenTab({ active }: { active: boolean }) {
         saving={savingConfig}
         columnGroups={[
           {
-            persist: columnPersist,
-            columnDefs: columnDefs as ColDef<unknown>[],
+            // OPT-0027: follow the 聚合 toggle so the column-setting list
+            // always reflects the currently rendered grid.
+            label: aggregated ? "聚合视图" : "明细视图",
+            persist: aggregated ? aggColumnPersist : columnPersist,
+            columnDefs: (aggregated
+              ? aggregatedColumnDefs
+              : columnDefs) as ColDef<unknown>[],
           },
         ]}
         manualActions={[

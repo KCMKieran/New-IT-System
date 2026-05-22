@@ -367,6 +367,39 @@ class HedgeOpenAggregatedResponse(BaseModel):
     page_size: int = 50
 
 
+class BurstOpenAggregatedRow(BaseModel):
+    """One row of the per-loginsid aggregated view for the 批量下单 tab.
+
+    Same fold semantics as HedgeOpenAggregatedRow, but burst-open has no
+    buy/sell direction split — `total_count` sums `ae.order_count` directly
+    and there are no buy_lots_sum / sell_lots_sum columns. `total_lots`
+    here is a plain sum (not the 2× hedged-volume semantic that hedge-open
+    carries).
+    """
+    server: str
+    login: int
+    alert_count: int                       # number of folded alert_events rows
+    total_count: int                       # SUM(order_count) across alerts
+    total_lots: float                      # SUM(total_lots) — plain sum
+    first_alert_at: Optional[str] = None
+    last_alert_at: Optional[str] = None
+    symbols: Optional[str] = None
+    symbol_count: int = 0
+    group: Optional[str] = None
+    currency: Optional[str] = None
+    zipcode: Optional[str] = None
+    net_deposit_hist: Optional[float] = None
+
+
+class BurstOpenAggregatedResponse(BaseModel):
+    entries: List[BurstOpenAggregatedRow]
+    total: int
+    since: str
+    until: str
+    page: int = 1
+    page_size: int = 50
+
+
 class QuickProfitFloatingRefreshItem(BaseModel):
     """Single row in the floating-refresh response.
 
