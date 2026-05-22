@@ -10,6 +10,7 @@
 
 | ID | Branch | Claim 日期 | 备注 |
 |----|--------|-----------|------|
+| [OPT-0027](./items/OPT-0027-risk-monitor-burst-aggregated-view.md) | `opt/risk-monitor-burst-aggregated-view` | 2026-05-22 | 批量下单 tab 加聚合按钮，复用 hedge-open 模式 |
 
 ## ✅ 待领取（Ready）
 
