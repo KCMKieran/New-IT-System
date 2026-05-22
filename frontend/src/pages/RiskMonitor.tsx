@@ -1784,7 +1784,12 @@ function BurstOpenTab({ active }: { active: boolean }) {
             variant="outline"
             size="sm"
             onClick={handleExportCsv}
-            disabled={exporting || totalCount === 0}
+            disabled={exporting || totalCount === 0 || aggregated}
+            title={
+              aggregated
+                ? "聚合模式下暂不支持导出（导出仍是明细数据，恢复明细视图后再点）"
+                : undefined
+            }
           >
             <Download
               className={cn("h-4 w-4 mr-1.5", exporting && "animate-spin")}
@@ -5275,7 +5280,12 @@ function HedgeOpenTab({ active }: { active: boolean }) {
             variant="outline"
             size="sm"
             onClick={handleExportCsv}
-            disabled={exporting || totalCount === 0}
+            disabled={exporting || totalCount === 0 || aggregated}
+            title={
+              aggregated
+                ? "聚合模式下暂不支持导出（导出仍是明细数据，恢复明细视图后再点）"
+                : undefined
+            }
           >
             <Download
               className={cn("h-4 w-4 mr-1.5", exporting && "animate-spin")}

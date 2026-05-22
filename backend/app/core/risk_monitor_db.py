@@ -1792,6 +1792,15 @@ def aggregate_hedge_open_by_login(
 # fields (buy/sell split — burst-open is direction-agnostic). `total_count`
 # comes from `ae.order_count` directly instead of summing the hedge detail
 # table's buy_count + sell_count.
+#
+# NOTE: this is the 2nd copy of the (CTE: ranked → agg → JOIN latest)
+# pattern. If a 3rd tab (QOC / QP) ever wants an aggregated view, extract
+# a shared helper at that point — OPT-0015 captures the "3 copies before
+# abstracting" threshold for this codebase. See OPT-0028 hardening backlog
+# for outstanding issues that should be folded into any future abstraction:
+# unused LEFT JOINs in the from clause, double-scan for `total`,
+# non-deterministic GROUP_CONCAT order, and the dual semantic of
+# `total_lots` (hedge = 2× hedged volume, burst = plain sum).
 
 _BURST_AGG_SORT_COLS: dict[str, str] = {
     "total_lots":     "total_lots",
