@@ -155,6 +155,20 @@ def _stub_scan_funcs(monkeypatch, burst_called, qoc_called, qp_called):
             "_universe_pairs": {("MT4_Live", 3)},
         }
 
+    # Hedge Open (rule_id 91-100) joined the slow tier after this suite was
+    # first written; stub it too so the detector set is deterministic (the
+    # real scan would otherwise reach for MySQL and emit nondeterministic
+    # rule_id 91 alerts). Runs in tier 'all' and 'slow', skipped in 'fast_burst'.
+    def fake_hedge(*a, **kw):
+        return {
+            "alerts": [{"rule_id": 91, "server": "MT4_Live", "login": 4,
+                        "symbol": "XAUUSD", "first_open": "2026-05-16T00:00:00Z"}],
+            "summary": {"suspicious_count": 1, "total_accounts_scanned": 1},
+            "scan_time_ms": 8,
+            "scanned_at": "2026-05-16T00:00:00Z",
+            "_universe_pairs": {("MT4_Live", 4)},
+        }
+
     monkeypatch.setattr(
         "app.services.risk_monitor_service.scan_burst_open", fake_burst,
     )
@@ -163,6 +177,9 @@ def _stub_scan_funcs(monkeypatch, burst_called, qoc_called, qp_called):
     )
     monkeypatch.setattr(
         "app.services.rule_quick_profit_service.scan_quick_profit", fake_qp,
+    )
+    monkeypatch.setattr(
+        "app.services.rule_hedge_open_service.scan_hedge_open", fake_hedge,
     )
 
 
@@ -174,9 +191,9 @@ def test_run_scan_all_runs_all_three(monkeypatch, temp_db):
 
     assert burst_called and qoc_called and qp_called
     assert bs._latest_result is not None
-    # All 3 alerts present
+    # All 4 detectors present (burst=1, QOC=51, QP=61, hedge=91)
     rule_ids = {a["rule_id"] for a in bs._latest_result["alerts"]}
-    assert rule_ids == {1, 51, 61}
+    assert rule_ids == {1, 51, 61, 91}
 
 
 def test_run_scan_fast_burst_runs_only_burst(monkeypatch, temp_db):
@@ -208,21 +225,22 @@ def test_run_scan_fast_burst_preserves_slow_tier_alerts(monkeypatch, temp_db):
     burst_called, qoc_called, qp_called = [], [], []
     _stub_scan_funcs(monkeypatch, burst_called, qoc_called, qp_called)
 
-    # Seed: prior 'all' scan left burst + QP alerts in cache
+    # Seed: prior 'all' scan left burst + QOC + QP + hedge alerts in cache
     bs._run_scan(tier="all")
     assert bs._latest_result is not None
     initial_rule_ids = sorted(a["rule_id"] for a in bs._latest_result["alerts"])
-    assert initial_rule_ids == [1, 51, 61]
+    assert initial_rule_ids == [1, 51, 61, 91]
 
     # Reset call counters and re-stub (burst only returns slightly different)
     burst_called.clear(); qoc_called.clear(); qp_called.clear()
 
-    # Now run fast tier — burst regenerates, QP/QOC alerts MUST be retained
+    # Now run fast tier — burst regenerates, slow-tier alerts MUST be retained
     bs._run_scan(tier="fast_burst")
     rule_ids = sorted(a["rule_id"] for a in bs._latest_result["alerts"])
     assert 1 in rule_ids   # burst still there (fresh)
     assert 51 in rule_ids  # QOC retained from prior cycle
     assert 61 in rule_ids  # QP retained from prior cycle
+    assert 91 in rule_ids  # hedge (slow tier, rule_id >= 51) retained too
 
 
 def test_run_scan_slow_preserves_burst_alerts(monkeypatch, temp_db):
