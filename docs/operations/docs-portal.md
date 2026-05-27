@@ -44,6 +44,18 @@ docker compose -f docker-compose.prod.yml restart mkdocs
 docker logs -f new-it-mkdocs-prod
 ```
 
+### 自动 rebuild（git hook + deploy）
+
+因为 §3 说的「inotify 不穿 bind mount」问题，docs 站**不会**自己感知文件改动。两条自动化兜住：
+
+- **git hook**：`.githooks/post-commit` + `.githooks/post-merge` —— 任何 commit / merge / pull 改到 `docs/` 或 `mkdocs.yml`，就调 `scripts/docs-refresh.sh` 重启 mkdocs 容器（~3s 重 build）。靠 `git config core.hooksPath .githooks` 激活；hook 本身已入库，但 `core.hooksPath` 是本地配置，**新 clone 要重跑这一行**。
+- **deploy.sh**：每次 `./deploy.sh` 结尾会 `restart mkdocs`，保证部署后 docs 一定最新（`up --build` 不会重建 pin 版本的 mkdocs 镜像，所以单独 restart）。
+
+手动刷新随时可用：
+```bash
+scripts/docs-refresh.sh           # 或 §2 顶部的 compose restart 命令
+```
+
 ### Dev
 不在 `frontend/docker-compose.dev.yml` 里，要单独起：
 ```bash
@@ -60,7 +72,9 @@ mkdocs serve --dev-addr=0.0.0.0:8000
 
 ## 3. 怎么改导航 / 加新页
 
-MkDocs 默认按 **`docs/` 目录结构** 自动生成左侧导航——只要新建 `.md` 文件，刷新页面就能看到，**不用改 `mkdocs.yml`**。
+MkDocs 默认按 **`docs/` 目录结构** 自动生成左侧导航——新建 `.md` 文件**不用改 `mkdocs.yml`**，导航会自动多出一项。
+
+> ⚠ **但生产站不是实时的。** 容器里跑的 `mkdocs serve` 靠 inotify 监听文件变化，而 inotify 事件**不穿过 Docker bind mount**——所以新建 / 修改的 `.md` 在容器**重启重新 build 之前**不会出现：新文件直接 404，改过的文件显示容器启动那一刻的旧快照。已配 git hook 在 commit/merge 改到 `docs/` 时自动重启（见下方 §2「自动 rebuild」小节），手动兜底也在同节。
 
 文件名规则：
 - 顶层一级章节用目录名（`docs/operations/` → "Operations" 一栏）
@@ -89,7 +103,7 @@ graph LR
 |---|---|---|
 | `502 Bad Gateway` 访问 `/docs/` | mkdocs 容器没起 | `docker compose -f docker-compose.prod.yml up -d mkdocs` |
 | 页面 404 但文件存在 | mkdocs serve 启动时报错 | `docker logs new-it-mkdocs-prod` 看 yaml 解析错 |
-| 改 .md 后页面没刷新 | livereload ws 没穿过 nginx | 浏览器手动刷新即可；或 `docker restart new-it-mkdocs-prod` |
+| 新建 / 改了 .md，`/docs/` 看不到（新文件 404，或显示旧内容） | 容器内 `mkdocs serve` 的文件监听不穿 Docker bind mount（inotify 不跨挂载），服务端 build 停在容器启动那一刻 —— **不是浏览器缓存** | 重启容器重新 build：`docker compose -f docker-compose.prod.yml restart mkdocs`。**git hook 已自动做**（见 §2 自动 rebuild），此命令是手动兜底 |
 | 内部链接 404 / 样式坏 | site_url 和 nginx proxy 前缀不一致 | 确认 `mkdocs.yml site_url` 末尾有 `/`，**nginx `proxy_pass` URL 末尾不要带 `/`**（保留前缀避免 302 循环） |
 | `/docs/` 浏览器一直转圈 / 间歇 502 | proxy_pass 误改成带 trailing slash | 检查 `frontend/nginx.conf` 的 `location /docs/` 块——`proxy_pass http://mkdocs:8000;` 后面**没有** `/` |
 | `docker compose ps` 显示 mkdocs 状态 `unhealthy` | mkdocs.yml 解析错，或 docs_dir mount 缺失 | `docker logs new-it-mkdocs-prod` 看 yaml 错；healthcheck 探的是 `localhost:8000/docs/`，必须真返 200 才 healthy |
@@ -114,4 +128,4 @@ graph LR
 - 切到 `mkdocs build` + Nginx 直接 serve 静态文件（性能更高，但 docs 改动需要重 build）
 - 加 `mkdocs-awesome-pages-plugin` 让导航顺序自定义
 - 加全文搜索 highlight + 中文分词（jieba）
-- 用 git hook 在 `docs/**/*.md` 改动时自动 rebuild
+- ~~用 git hook 在 `docs/**/*.md` 改动时自动 rebuild~~ ✅ 已实现，见 §2「自动 rebuild」小节

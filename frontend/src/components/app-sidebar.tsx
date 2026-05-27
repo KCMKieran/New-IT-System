@@ -112,9 +112,15 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
         // OPT-0026: docs portal — external link to MkDocs site at /docs/.
         // Marked `external` so NavDocuments renders an <a target="_blank">
         // instead of a SPA <Link> (mkdocs lives outside React Router).
+        // In dev there's no local mkdocs container, so a relative /docs/ would
+        // 404 on the Vite dev server — point it at the prod docs site instead
+        // (it sits behind Cloudflare Access, so SSO/office-IP still applies).
+        // In prod the relative path is served by the same Nginx.
         {
           name: t("config.docs"),
-          url: "/docs/",
+          url: import.meta.env.DEV
+            ? "https://analysis.kohleservices.com/docs/"
+            : "/docs/",
           icon: IconBook,
           external: true,
         },

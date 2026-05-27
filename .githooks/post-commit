@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Auto-rebuild the docs portal when a commit touches docs/ or mkdocs.yml.
+# Activated via: git config core.hooksPath .githooks
+# See docs/operations/docs-portal.md §2 (自动 rebuild).
+set -euo pipefail
+root="$(git rev-parse --show-toplevel)"
+if git diff-tree --no-commit-id --name-only -r HEAD 2>/dev/null \
+     | grep -qE '^(docs/|mkdocs\.yml$)'; then
+  "$root/scripts/docs-refresh.sh" || true
+fi
