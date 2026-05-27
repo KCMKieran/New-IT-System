@@ -31,3 +31,4 @@
 | [OPT-0004](./items/OPT-0004-risk-monitor-arch.md) | mixed | Risk-monitor 架构/框架重构 | 太宽，需要先拆 3~5 个子任务（路由分层 / service 抽象 / 配置集中 / 任务调度 …） |
 | [OPT-0018](./items/OPT-0018-cache-layer-audit.md) | mixed | 全链路缓存审计与硬化（HTTP / 应用 / Redis / DB） | 已扫描出 5 条真问题（Redis 无 maxmemory、匿名 volume、PnL/IB hit rate 异常等），audit 完成后拆 3-5 个子 OPT |
 | [OPT-0020](./items/OPT-0020-client-return-rate-risk-signals.md) | mixed | Client Return Rate 加 4 个风控判断列（过夜 / ~~USDT~~ / Sharpe / Consistency） | 剩余 7 列分两 Drop 上线（USDT 已拆到 OPT-0022），复用 OPT-0006 的夜间预计算 SQLite 模式；claim 前需用户审 AC、回答 4 个开放问题 + 先跑过夜 SQL 的预飞行实测 |
+| [OPT-0029](./items/OPT-0029-risk-monitor-view-presets.md) | mixed | Risk-monitor 视图模板服务端化（团队共享 view presets + 轻量自报身份） | 老板要全队统一 risk-monitor 显示设置；localStorage 无法共享/跨机。范围刻意收窄=只做服务端模板+自报身份，不含认证/RBAC/行为日志。claim 前定 3 件事：表放 SQLite vs PG、产品形态（显式模板 vs 静默同步，倾向前者）、UI 3 key 进不进模板 |
