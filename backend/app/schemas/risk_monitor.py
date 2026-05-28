@@ -113,12 +113,14 @@ class LeverageAbuseRule(BaseModel):
     # AlertEvent.rule_label as f"Rule {idx} — {name}" at trigger time.
     name: str = Field(min_length=1, max_length=100)
     enabled: bool = True
-    # Trigger when MARGIN_LEVEL < this (percent). 105.3 ≈ used-margin 95% of
-    # equity (D1 instant); 125 ≈ 80% (D2 sustained). Lower = more dangerous.
+    # Trigger when MARGIN_LEVEL at open < this (percent). 105.3 ≈ used-margin
+    # 95% of equity; 125 ≈ 80%. Lower = more dangerous.
     max_margin_level: float = Field(default=125.0, ge=10.0, le=1000.0)
-    # Consecutive scans the account must stay below max_margin_level before an
-    # alert fires. 1 = fire immediately (D1). 3 = sustained (D2); at the slow
-    # tier's shared scan_interval_min (currently 5min) that's ~15 min sustained.
+    # DEPRECATED (OPT-0030 Phase 2): the rule is now event-gated — it evaluates
+    # margin level only at the moment of OPENING, which has no "sustained N
+    # consecutive scans" concept. Kept (tolerated, defaulted) so existing saved
+    # configs round-trip; the service IGNORES it. Will be removed in a future
+    # migration once the frontend stops sending it.
     streak_min: int = Field(default=1, ge=1, le=20)
     # Drop accounts whose equity (USD, CEN already ÷100) is below this so
     # cent-dust micro-accounts (a $5 account momentarily at 100% margin level)

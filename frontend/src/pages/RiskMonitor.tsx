@@ -393,18 +393,19 @@ interface HedgeOpenConfig {
   rules: HedgeOpenRule[];
 }
 
-/** Leverage Abuse (滥用杠杆, rule_id 101-110). Snapshot rule — thresholds on
- *  MARGIN_LEVEL %; streak_min sustains across consecutive scans for D2. */
+/** Leverage Abuse (滥用杠杆, rule_id 101-110). Event-gated (OPT-0030 Phase 2):
+ *  margin level is checked at the moment of OPENING; thresholds on MARGIN_LEVEL %. */
 interface LeverageAbuseRule {
   id?: number;
   name: string;
   enabled: boolean;
-  /** Trigger when MARGIN_LEVEL < this (percent). Lower = more dangerous. */
+  /** Trigger when MARGIN_LEVEL at open < this (percent). Lower = more dangerous. */
   max_margin_level: number;
-  /** Consecutive scans below threshold before firing (1 = instant). */
-  streak_min: number;
   /** Skip accounts whose equity (USD) is below this (cent-dust filter). */
   min_equity_usd: number;
+  /** @deprecated event-gated has no sustained-scan concept; backend ignores it.
+   *  Kept optional so existing saved configs round-trip without breaking. */
+  streak_min?: number;
 }
 
 interface LeverageAbuseConfig {
@@ -6385,16 +6386,14 @@ function LeverageAbuseTab({ active }: { active: boolean }) {
         valueFormatter: (p) => (p.value == null ? "—" : fmtCurrency(p.value)),
       },
       {
-        headerName: "持续次数",
-        field: "streak_count",
-        colId: "streak_count",
+        headerName: "开仓笔数",
+        field: "order_count",
+        colId: "order_count",
         width: 100,
         cellClass: "ag-right-aligned-cell",
-        cellRenderer: (p: { value: number | null }) => p.value ?? "—",
         headerComponent: InfoHeader,
         headerComponentParams: {
-          tooltip:
-            "连续命中该规则阈值的扫描次数。D2「持续高杠杆」需达到设定次数才触发。",
+          tooltip: "本次扫描窗口内该账户的开仓笔数（触发评估的开仓动作）。",
         },
       },
       {
@@ -6424,7 +6423,7 @@ function LeverageAbuseTab({ active }: { active: boolean }) {
       <div className={RISK_MONITOR_HEADER_ROW}>
         <div className="min-w-0">
           <p className="text-sm text-muted-foreground">
-            检测保证金占用率过高、逼近强平的大敞口账户（滥用杠杆）
+            检测开仓那一刻就用满保证金、杠杆过猛的账户（滥用杠杆）
           </p>
           <p className="text-sm text-muted-foreground">
             当前范围:{" "}
@@ -6462,17 +6461,15 @@ function LeverageAbuseTab({ active }: { active: boolean }) {
                       enabled: true,
                       rules: [
                         {
-                          name: "瞬时满杠杆",
+                          name: "高杠杆重仓",
                           enabled: true,
-                          max_margin_level: 105.3,
-                          streak_min: 1,
+                          max_margin_level: 200,
                           min_equity_usd: 100,
                         },
                         {
-                          name: "持续高杠杆",
+                          name: "瞬时满杠杆",
                           enabled: true,
-                          max_margin_level: 125,
-                          streak_min: 3,
+                          max_margin_level: 150,
                           min_equity_usd: 100,
                         },
                       ],
@@ -6503,8 +6500,7 @@ function LeverageAbuseTab({ active }: { active: boolean }) {
                 label={`Rule ${idx + 1} · 去重账户`}
                 value={nAcc}
                 description={
-                  `告警 ${nEvt} 条 · 预付款比例 < ${rule.max_margin_level}%` +
-                  (rule.streak_min > 1 ? ` · 连续 ${rule.streak_min} 次` : "") +
+                  `告警 ${nEvt} 条 · 开仓时预付款比例 < ${rule.max_margin_level}%` +
                   ` · 净值 ≥ $${rule.min_equity_usd}`
                 }
                 dotColor={st.dot}
@@ -6781,7 +6777,6 @@ function LeverageAbuseConfigDrawer({
           name: `规则 ${config.rules.length + 1}`,
           enabled: true,
           max_margin_level: 125,
-          streak_min: 1,
           min_equity_usd: 100,
         },
       ],
@@ -6876,10 +6871,10 @@ function LeverageAbuseConfigDrawer({
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-3 gap-3 text-sm">
+                  <div className="grid grid-cols-2 gap-3 text-sm">
                     <div className="space-y-1">
                       <label className="text-xs text-muted-foreground">
-                        预付款比例 &lt; (%)
+                        开仓时预付款比例 &lt; (%)
                       </label>
                       <Input
                         type="number"
@@ -6890,22 +6885,6 @@ function LeverageAbuseConfigDrawer({
                         onChange={(e) =>
                           updateRule(idx, {
                             max_margin_level: Number(e.target.value) || 125,
-                          })
-                        }
-                      />
-                    </div>
-                    <div className="space-y-1">
-                      <label className="text-xs text-muted-foreground">
-                        连续扫描次数
-                      </label>
-                      <Input
-                        type="number"
-                        min={1}
-                        max={20}
-                        value={rule.streak_min}
-                        onChange={(e) =>
-                          updateRule(idx, {
-                            streak_min: Number(e.target.value) || 1,
                           })
                         }
                       />
@@ -6930,9 +6909,8 @@ function LeverageAbuseConfigDrawer({
                 </div>
               ))}
               <p className="text-xs text-muted-foreground">
-                预付款比例 = 净值 / 已用保证金 × 100%，越低越接近强平。
-                连续扫描次数 &gt; 1 时需连续多次命中才告警（如每 5 分钟扫描，3
-                次 ≈ 持续 15 分钟）。
+                预付款比例 = 净值 / 已用保证金 × 100%，越低杠杆越猛。
+                只在账户**开仓那一刻**检查（避免把后来亏损漂移的账户误判为滥用杠杆）。
               </p>
             </div>
           </section>

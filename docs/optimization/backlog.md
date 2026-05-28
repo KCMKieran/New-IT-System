@@ -10,7 +10,6 @@
 
 | ID | Branch | Claim 日期 | 备注 |
 |----|--------|-----------|------|
-| [OPT-0030](./items/OPT-0030-risk-monitor-leverage-abuse-tab.md) | opt/leverage-abuse-event-gated | 2026-05-28 | **Phase 2**（multi-phase reopen）：检测内核 snapshot→event-gated（只看开仓那一刻，剔除亏损漂移误报）。前端 3 条 rules 不动，streak_min 废弃（选项 A）。Phase 1 已上线 |
 
 ## ✅ 待领取（Ready）
 

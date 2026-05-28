@@ -1,7 +1,7 @@
 ---
 id: OPT-0030
 title: 滥用杠杆 (Leverage Abuse) tab — risk-monitor 第 6 个检测规则
-status: wip
+status: done
 priority: P1
 area: mixed
 effort: M
@@ -277,3 +277,16 @@ Phase 1 的 snapshot-scan 有个用户不想要的误报类:账户 5h 前以 400
 
 - 开仓时阈值沿用同事配的 200/150/125(不动),确认无需新阈值。
 - MT5 `_query_mt5_recent_opens` 的 open_time 已是 UTC ISO;MT4 helper 同样 `broker_time_to_utc_iso`。两边与 margin 快照的 UTC 化 MODIFY_TIME 同框 ✓。
+
+### Phase 2 结果（done 2026-05-28）
+
+**交付**：检测内核 snapshot → event-gated（只看最近开仓账户在开仓那一刻的 margin level，剔除亏损漂移误报）。复用 burst/hedge opens 查询（`cursor_time=None` overlap）+ SETTLE 60s + `MODIFY_TIME>=开仓时间` 守卫（UTC 同框）+ dedup `(rule,server,login,open_time)`。弃用 streak 表/grace/冷却。前端同事配的 3 条 rules（200/150/125）原样保留；`streak_min` 废弃（backend 容忍忽略 + 前端去掉输入框 + 表格「持续次数」改「开仓笔数」）。实测：114ms、找到 103 最近开仓账户、命中 2 条（rule 101 <200%）、dedup 重跑 0、MT4+MT5 均通；`verify.sh` PASS。
+
+**Stage 1 outsider-review（Phase 2，8 finding）处理**：
+- #3 重启 dedup 失明 → **当场修**：`get_recent_leverage_abuse_alerts(101-110)` seed + 修过时注释。commit `3850176`。
+- #9 `save_leverage_abuse_config` 的 `int(r["streak_min"])` KeyError 隐患 → **当场修**：`.get("streak_min",1)`。commit `3850176`。
+- #4 overlap 内再开仓重报 → **保持**（用户拍板：再开仓=新滥用事件，值得重报）+ 收紧 docstring。reviewer 提的"settled 被 unsettled 盖住"后半看错（collector 先 settle 再聚合）。
+- #1/#2 跳 tick / lookback 漂移漏开仓 → **live with**（用户拍板）：所有 overlap-window 规则（burst/QOC/hedge）共有架构特性，杠杆缓冲更大（60s vs burst 30s）；slow tier 5-10min + 扫描 114ms，跳 tick 极罕见。未来"基于真实经过时间动态 lookback + 跳-tick 告警"应跨规则统一（可另立 OPT）。
+- #5 同步滞后静默丢弃无告警 / #6 无 LIMIT / #7 私有 import / #8 server 大小写 → **live with**：低概率或与 burst/hedge 一致；#8 两边都是 "MT4_Live" 标签确认一致。
+
+**Phase 2 follow-up（未来若需要）**：跨规则 HWM-based 动态 lookback + 跳-tick 告警（#1/#2）；同步滞后丢弃计数日志（#5）；opens 查询 LIMIT（#6）；移除 `streak_min` schema 列。
