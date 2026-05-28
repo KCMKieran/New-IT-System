@@ -172,6 +172,22 @@ interface AlertEvent {
   profit_ratio?: number | null;
   triggered_by?: string | null;
   window_date?: string | null;
+  // ── Hedge Open detail (rule_id 91-100). NULL on other rule rows. ──
+  buy_count?: number | null;
+  sell_count?: number | null;
+  buy_lots?: number | null;
+  sell_lots?: number | null;
+  window_start?: string | null;
+  window_end?: string | null;
+  // ── Leverage Abuse detail (rule_id 101-110). NULL on other rule rows. ──
+  /** MARGIN_LEVEL % at scan time (snapshot). The trigger metric. */
+  margin_level?: number | null;
+  /** Used margin (USD, CEN ÷100). */
+  margin_used?: number | null;
+  /** Free margin = equity − margin (USD, CEN ÷100). */
+  free_margin?: number | null;
+  /** Consecutive dangerous scans (1 for D1; ≥ streak_min for D2). */
+  streak_count?: number | null;
 }
 
 interface AlertsResponse {
@@ -214,6 +230,11 @@ const SORTABLE_COL_IDS = new Set<string>([
   "sell_lots",
   "window_start",
   "window_end",
+  // Leverage Abuse detail columns
+  "margin_level",
+  "margin_used",
+  "free_margin",
+  "streak_count",
 ]);
 
 /** Sortable columns for the hedge-open aggregated view. Mirrors backend
@@ -251,6 +272,9 @@ const QUICK_PROFIT_RULE_ID_BASE = 61;
 
 /** Backend `HEDGE_OPEN_RULE_ID_MIN` — Hedge Open rule_ids are 91, 92, ... 100. */
 const HEDGE_OPEN_RULE_ID_BASE = 91;
+
+/** Backend `LEVERAGE_ABUSE_RULE_ID_MIN` — Leverage Abuse rule_ids are 101 … 110. */
+const LEVERAGE_ABUSE_RULE_ID_BASE = 101;
 
 /** Per-rule summary cards (批量下单 / 快开快平); cycles if more rules than colors. */
 const RULE_SUMMARY_CARD_STYLES: { dot: string; value: string }[] = [
@@ -369,6 +393,25 @@ interface HedgeOpenConfig {
   rules: HedgeOpenRule[];
 }
 
+/** Leverage Abuse (滥用杠杆, rule_id 101-110). Snapshot rule — thresholds on
+ *  MARGIN_LEVEL %; streak_min sustains across consecutive scans for D2. */
+interface LeverageAbuseRule {
+  id?: number;
+  name: string;
+  enabled: boolean;
+  /** Trigger when MARGIN_LEVEL < this (percent). Lower = more dangerous. */
+  max_margin_level: number;
+  /** Consecutive scans below threshold before firing (1 = instant). */
+  streak_min: number;
+  /** Skip accounts whose equity (USD) is below this (cent-dust filter). */
+  min_equity_usd: number;
+}
+
+interface LeverageAbuseConfig {
+  enabled: boolean;
+  rules: LeverageAbuseRule[];
+}
+
 /** One row in the per-loginsid aggregated view (hedge-open tab only).
  *  Folds multiple `AlertEvent` rows sharing `(server, login)` into a
  *  single summary so multi-day filters don't repeat the same account. */
@@ -440,6 +483,23 @@ function normalizeHedgeOpenConfig(c: HedgeOpenConfig): HedgeOpenConfig {
       enabled: (r.enabled as unknown) === false || (r.enabled as unknown) === 0
         ? false
         : true,
+    })),
+  };
+}
+
+function normalizeLeverageAbuseConfig(
+  c: LeverageAbuseConfig,
+): LeverageAbuseConfig {
+  const v = c.enabled as unknown;
+  return {
+    ...c,
+    enabled: v === false || v === 0 ? false : true,
+    rules: (c.rules || []).map((r) => ({
+      ...r,
+      enabled:
+        (r.enabled as unknown) === false || (r.enabled as unknown) === 0
+          ? false
+          : true,
     })),
   };
 }
@@ -766,6 +826,7 @@ const RISK_MONITOR_TABS = [
   "quick-open-close",
   "quick-profit",
   "hedge-open",
+  "leverage-abuse",
   "gap-trade",
 ] as const;
 type RiskMonitorTab = (typeof RISK_MONITOR_TABS)[number];
@@ -776,6 +837,7 @@ function isRiskMonitorTab(s: string | null): s is RiskMonitorTab {
     s === "quick-open-close" ||
     s === "quick-profit" ||
     s === "hedge-open" ||
+    s === "leverage-abuse" ||
     s === "gap-trade"
   );
 }
@@ -812,6 +874,7 @@ const RISK_MONITOR_BURST_OPEN_FILTERS_KEY = "RISK_MONITOR_BURST_OPEN_FILTERS_V1"
 const RISK_MONITOR_QUICK_OPEN_CLOSE_FILTERS_KEY = "RISK_MONITOR_QUICK_OPEN_CLOSE_FILTERS_V1";
 const RISK_MONITOR_QUICK_PROFIT_FILTERS_KEY = "RISK_MONITOR_QUICK_PROFIT_FILTERS_V1";
 const RISK_MONITOR_HEDGE_OPEN_FILTERS_KEY = "RISK_MONITOR_HEDGE_OPEN_FILTERS_V1";
+const RISK_MONITOR_LEVERAGE_ABUSE_FILTERS_KEY = "RISK_MONITOR_LEVERAGE_ABUSE_FILTERS_V1";
 const RISK_MONITOR_GAP_TRADE_FILTERS_KEY = "RISK_MONITOR_GAP_TRADE_FILTERS_V1";
 
 type StandardTabFilters = {
@@ -962,7 +1025,7 @@ export default function RiskMonitor() {
         className="w-full min-w-0"
       >
         <div className="flex items-center justify-between gap-2 max-w-4xl">
-          <TabsList className="grid w-full grid-cols-5 sm:auto-cols-fr sm:grid-flow-col">
+          <TabsList className="grid w-full grid-cols-6 sm:auto-cols-fr sm:grid-flow-col">
           <TabsTrigger
             value="burst-open"
             className="px-2 text-xs sm:px-3 sm:text-sm whitespace-nowrap"
@@ -986,6 +1049,12 @@ export default function RiskMonitor() {
             className="px-2 text-xs sm:px-3 sm:text-sm whitespace-nowrap"
           >
             对冲刷单
+          </TabsTrigger>
+          <TabsTrigger
+            value="leverage-abuse"
+            className="px-2 text-xs sm:px-3 sm:text-sm whitespace-nowrap"
+          >
+            滥用杠杆
           </TabsTrigger>
           <TabsTrigger
             value="gap-trade"
@@ -1022,6 +1091,9 @@ export default function RiskMonitor() {
         </TabsContent>
         <TabsContent value="hedge-open" forceMount>
           <HedgeOpenTab active={activeTab === "hedge-open"} />
+        </TabsContent>
+        <TabsContent value="leverage-abuse" forceMount>
+          <LeverageAbuseTab active={activeTab === "leverage-abuse"} />
         </TabsContent>
         <TabsContent value="gap-trade" forceMount>
           <GapTradeTab active={activeTab === "gap-trade"} />
@@ -5877,6 +5949,992 @@ function HedgeConfigDrawer({
               </div>
             ))}
           </div>
+          </section>
+
+          <UnifiedSettingsExtras
+            columnGroups={columnGroups}
+            manualActions={manualActions}
+          />
+        </div>
+
+        <div className="border-t p-4 flex justify-end gap-2">
+          <DrawerClose asChild>
+            <Button variant="outline">取消</Button>
+          </DrawerClose>
+          <Button onClick={onSave} disabled={saving}>
+            <Save className="h-4 w-4 mr-1.5" />
+            {saving ? "保存中..." : "保存规则"}
+          </Button>
+        </div>
+      </DrawerContent>
+    </Drawer>
+  );
+}
+
+// ── Leverage Abuse Tab (滥用杠杆, rule 101-110) ─────────────
+// Snapshot/state rule: triggers on fxbackoffice.mt4_users MARGIN_LEVEL, not a
+// trade event stream. The page is otherwise the standard tab shape (cards +
+// rule filter + toolbar + grid + config drawer + 立即扫描). No aggregated view
+// (one account = one current state), no detail Sheet.
+
+/** Renders MARGIN_LEVEL % with danger coloring: <105.3 red, <125 amber. */
+function MarginLevelCell(p: { value?: number | null }) {
+  const v = p.value;
+  if (v === null || v === undefined) return <span>—</span>;
+  const cls =
+    v < 105.3
+      ? "text-red-600 dark:text-red-400 font-semibold"
+      : v < 125
+        ? "text-amber-600 dark:text-amber-400 font-semibold"
+        : "text-muted-foreground";
+  return <span className={cls}>{v.toFixed(2)}%</span>;
+}
+
+function LeverageAbuseTab({ active }: { active: boolean }) {
+  const { theme } = useTheme();
+  const isDarkMode = theme === "dark";
+  const isMobile = useIsMobile();
+  const gridStyle = useGridThemeStyle(isDarkMode);
+  const columnPersist = useGridColumnPersist(
+    "RISK_MONITOR_LEVERAGE_ABUSE_GRID_STATE_V1",
+  );
+
+  const persistedFilters = useMemo(
+    () =>
+      readFilterState(
+        RISK_MONITOR_LEVERAGE_ABUSE_FILTERS_KEY,
+        DEFAULT_STANDARD_FILTERS,
+      ),
+    [],
+  );
+
+  const [rangePreset, setRangePreset] = useState<RangePresetKey>(
+    persistedFilters.rangePreset,
+  );
+  const [customRange, setCustomRange] = useState<DateRange | undefined>();
+  const [datePickerOpen, setDatePickerOpen] = useState(false);
+
+  const [alerts, setAlerts] = useState<AlertEvent[]>([]);
+  const [totalCount, setTotalCount] = useState(0);
+  const [stats, setStats] = useState<AlertsStats>({
+    suspicious_count: 0,
+    event_count: 0,
+    servers: [],
+  });
+  const [latestMeta, setLatestMeta] = useState<LatestScanMeta | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [scanningNow, setScanningNow] = useState(false);
+  const [lastRefresh, setLastRefresh] = useState<string | null>(null);
+  const [config, setConfig] = useState<LeverageAbuseConfig | null>(null);
+  const [editConfig, setEditConfig] = useState<LeverageAbuseConfig | null>(null);
+  const [configOpen, setConfigOpen] = useState(false);
+  const [savingConfig, setSavingConfig] = useState(false);
+
+  const [ruleFilter, setRuleFilter] = useState<string>(persistedFilters.ruleFilter);
+
+  const [pageIndex, setPageIndex] = useState(0);
+  const pageSize = isMobile ? 20 : 50;
+  const [sortBy, setSortBy] = useState<string>("scanned_at");
+  const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
+  const [serverFilter, setServerFilter] = useState(persistedFilters.serverFilter);
+  const [loginInput, setLoginInput] = useState("");
+  const [loginQuery, setLoginQuery] = useState("");
+  const [zipcodeInput, setZipcodeInput] = useState("");
+  const [zipcodeQuery, setZipcodeQuery] = useState("");
+
+  useFilterPersist(
+    RISK_MONITOR_LEVERAGE_ABUSE_FILTERS_KEY,
+    DEFAULT_STANDARD_FILTERS,
+    { rangePreset, ruleFilter, serverFilter },
+    { skipFields: rangePreset === "custom" ? ["rangePreset"] : [] },
+  );
+
+  useEffect(() => {
+    const trimmed = loginInput.trim();
+    const t = setTimeout(
+      () => setLoginQuery(/^\d+$/.test(trimmed) ? trimmed : ""),
+      300,
+    );
+    return () => clearTimeout(t);
+  }, [loginInput]);
+
+  useEffect(() => {
+    const t = setTimeout(() => setZipcodeQuery(zipcodeInput.trim()), 300);
+    return () => clearTimeout(t);
+  }, [zipcodeInput]);
+
+  useEffect(() => {
+    if (ruleFilter === "all" || !config?.rules?.length) return;
+    const n = Number.parseInt(ruleFilter, 10);
+    const maxRid = LEVERAGE_ABUSE_RULE_ID_BASE + config.rules.length - 1;
+    if (Number.isNaN(n) || n < LEVERAGE_ABUSE_RULE_ID_BASE || n > maxRid) {
+      setRuleFilter("all");
+    }
+  }, [config?.rules, ruleFilter]);
+
+  const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
+  const effectiveRange = useMemo(
+    () => buildRangeIso(rangePreset, customRange),
+    [rangePreset, customRange],
+  );
+
+  const buildStatsFilterQs = useCallback(
+    (range: { since: string; until: string }) => {
+      const qs = new URLSearchParams({ since: range.since, until: range.until });
+      if (serverFilter !== "all") qs.set("server", serverFilter);
+      if (loginQuery) qs.set("login", loginQuery);
+      if (zipcodeQuery) qs.set("zipcode", zipcodeQuery);
+      return qs;
+    },
+    [serverFilter, loginQuery, zipcodeQuery],
+  );
+
+  const buildTableFilterQs = useCallback(
+    (range: { since: string; until: string }) => {
+      const qs = buildStatsFilterQs(range);
+      if (ruleFilter !== "all") qs.set("rule_id", ruleFilter);
+      return qs;
+    },
+    [buildStatsFilterQs, ruleFilter],
+  );
+
+  const fetchConfig = useCallback(async () => {
+    try {
+      const [laRes, burstRes] = await Promise.all([
+        apiFetch("/api/v1/risk-monitor/leverage-abuse/config"),
+        apiFetch("/api/v1/risk-monitor/burst-open/config"),
+      ]);
+      if (laRes.ok) {
+        const raw = (await laRes.json()) as LeverageAbuseConfig;
+        setConfig(normalizeLeverageAbuseConfig(raw));
+      }
+      if (burstRes.ok) {
+        const burstCfg: BurstOpenConfig = await burstRes.json();
+        setLatestMeta((prev) => ({
+          scan_time_ms: prev?.scan_time_ms ?? 0,
+          scanned_at: prev?.scanned_at ?? "",
+          total_accounts_scanned: prev?.total_accounts_scanned ?? 0,
+          config: burstCfg,
+        }));
+      }
+    } catch (err) {
+      console.error("Failed to load leverage-abuse config:", err);
+    }
+  }, []);
+
+  const fetchAlerts = useCallback(
+    async (signal?: AbortSignal) => {
+      if (!effectiveRange) return;
+      setLoading(true);
+      try {
+        const statsQs = buildStatsFilterQs(effectiveRange);
+        const tableQs = buildTableFilterQs(effectiveRange);
+        const alertsQs = new URLSearchParams(tableQs);
+        alertsQs.set("page", String(pageIndex + 1));
+        alertsQs.set("page_size", String(pageSize));
+        alertsQs.set("sort_by", sortBy);
+        alertsQs.set("sort_order", sortOrder);
+
+        const [alertsRes, statsRes, latestRes] = await Promise.all([
+          apiFetch(`/api/v1/risk-monitor/leverage-abuse/alerts?${alertsQs}`, {
+            signal,
+          }),
+          apiFetch(
+            `/api/v1/risk-monitor/leverage-abuse/alerts/stats?${statsQs}`,
+            { signal },
+          ),
+          apiFetch(`/api/v1/risk-monitor/burst-open`, { signal }).catch(
+            () => null,
+          ),
+        ]);
+        if (alertsRes.ok) {
+          const json: AlertsResponse = await alertsRes.json();
+          setAlerts(json.entries);
+          setTotalCount(json.total);
+        }
+        if (statsRes.ok) {
+          const json: AlertsStats = await statsRes.json();
+          setStats(json);
+        }
+        if (latestRes && latestRes.ok) {
+          const json = await latestRes.json();
+          setLatestMeta({
+            scan_time_ms: json.scan_time_ms,
+            scanned_at: json.scanned_at,
+            total_accounts_scanned: json.summary?.total_accounts_scanned ?? 0,
+            config: json.config,
+          });
+        }
+        setLastRefresh(
+          new Date().toLocaleTimeString("zh-CN", {
+            hour: "2-digit",
+            minute: "2-digit",
+            second: "2-digit",
+          }),
+        );
+      } catch (err) {
+        if (err instanceof DOMException && err.name === "AbortError") return;
+        console.error("Leverage-abuse alerts fetch failed:", err);
+      } finally {
+        setLoading(false);
+      }
+    },
+    [
+      effectiveRange,
+      buildStatsFilterQs,
+      buildTableFilterQs,
+      pageIndex,
+      pageSize,
+      sortBy,
+      sortOrder,
+    ],
+  );
+
+  const refreshIntervalMs =
+    (latestMeta?.config?.scan_interval_min ?? 5) * 60_000;
+
+  useEffect(() => {
+    setPageIndex(0);
+  }, [
+    effectiveRange?.since,
+    effectiveRange?.until,
+    serverFilter,
+    loginQuery,
+    zipcodeQuery,
+    ruleFilter,
+    pageSize,
+    sortBy,
+    sortOrder,
+  ]);
+
+  useEffect(() => {
+    if (!active) return;
+    const controller = new AbortController();
+    fetchAlerts(controller.signal);
+    fetchConfig();
+
+    if (rangePreset !== "custom") {
+      const timer = setInterval(() => fetchAlerts(), refreshIntervalMs);
+      return () => {
+        controller.abort();
+        clearInterval(timer);
+      };
+    }
+    return () => controller.abort();
+  }, [active, fetchAlerts, fetchConfig, rangePreset, refreshIntervalMs]);
+
+  const handleExportCsv = async () => {
+    if (!effectiveRange || exporting) return;
+    setExporting(true);
+    try {
+      const qs = buildTableFilterQs(effectiveRange);
+      qs.set("sort_by", sortBy);
+      qs.set("sort_order", sortOrder);
+      const res = await apiFetch(
+        `/api/v1/risk-monitor/leverage-abuse/alerts/export?${qs}`,
+      );
+      if (!res.ok) throw new Error(`Export failed: ${res.status}`);
+      const blob = await res.blob();
+      const stamp = `${fmtFilenameStamp(effectiveRange.since)}_to_${fmtFilenameStamp(effectiveRange.until)}`;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `risk-monitor-leverage-abuse_${stamp}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error("Leverage-abuse CSV export failed:", err);
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const handleScanNow = async () => {
+    setScanningNow(true);
+    try {
+      const res = await apiFetch("/api/v1/risk-monitor/burst-open/scan-now", {
+        method: "POST",
+      });
+      if (res.ok) {
+        setPageIndex(0);
+        await fetchAlerts();
+      }
+    } catch (err) {
+      console.error("Leverage-abuse scan-now failed:", err);
+    } finally {
+      setScanningNow(false);
+    }
+  };
+
+  const handleSortChanged = useCallback((e: SortChangedEvent) => {
+    const activeCol = e.api.getColumnState().find((c) => c.sort);
+    const nextSortBy =
+      activeCol?.colId && SORTABLE_COL_IDS.has(activeCol.colId)
+        ? activeCol.colId
+        : "scanned_at";
+    const nextSortOrder = activeCol?.sort === "asc" ? "asc" : "desc";
+    setSortBy(nextSortBy);
+    setSortOrder(nextSortOrder);
+  }, []);
+
+  const handleSaveConfig = async () => {
+    if (!editConfig) return;
+    setSavingConfig(true);
+    try {
+      const res = await apiFetch("/api/v1/risk-monitor/leverage-abuse/config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(editConfig),
+      });
+      if (res.ok) {
+        const saved = (await res.json()) as LeverageAbuseConfig;
+        setConfig(normalizeLeverageAbuseConfig(saved));
+        setEditConfig(null);
+        setConfigOpen(false);
+      }
+    } catch (err) {
+      console.error("Failed to save leverage-abuse config:", err);
+    } finally {
+      setSavingConfig(false);
+    }
+  };
+
+  const columnDefs: ColDef<AlertEvent>[] = useMemo(
+    () => [
+      {
+        headerName: "规则",
+        field: "rule_label",
+        colId: "rule_label",
+        width: 150,
+        pinned: "left",
+      },
+      {
+        headerName: "发现时间 (GMT+8)",
+        field: "scanned_at",
+        colId: "scanned_at",
+        width: 165,
+        sort: "desc",
+        valueFormatter: (p) => fmtTime(p.value),
+      },
+      { headerName: "服务器", field: "server", colId: "server", width: 120 },
+      {
+        headerName: "Zipcode",
+        field: "zipcode",
+        colId: "zipcode",
+        width: 110,
+        cellRenderer: (p: { value: string | null }) => p.value || "—",
+      },
+      {
+        headerName: "账户",
+        field: "login",
+        colId: "login",
+        width: 110,
+        cellRenderer: LoginCell,
+      },
+      { headerName: "币种", field: "currency", colId: "currency", width: 80 },
+      {
+        headerName: "预付款比例",
+        field: "margin_level",
+        colId: "margin_level",
+        width: 120,
+        cellClass: "ag-right-aligned-cell",
+        cellRenderer: MarginLevelCell,
+        headerComponent: InfoHeader,
+        headerComponentParams: {
+          tooltip:
+            "MARGIN_LEVEL = 净值 / 已用保证金 × 100%。越低越接近强平：<105% 红 / 105–125% 琥珀。",
+        },
+      },
+      {
+        headerName: "已用保证金",
+        field: "margin_used",
+        colId: "margin_used",
+        width: 120,
+        cellClass: "ag-right-aligned-cell",
+        valueFormatter: (p) => (p.value == null ? "—" : fmtCurrency(p.value)),
+      },
+      {
+        headerName: "可用保证金",
+        field: "free_margin",
+        colId: "free_margin",
+        width: 120,
+        cellClass: "ag-right-aligned-cell",
+        cellRenderer: (p: { value: number | null }) => {
+          const v = p.value;
+          if (v === null || v === undefined) return "—";
+          return (
+            <span
+              className={
+                v < 0 ? "text-red-600 dark:text-red-400 font-semibold" : ""
+              }
+            >
+              {fmtCurrency(v)}
+            </span>
+          );
+        },
+      },
+      {
+        headerName: "净值",
+        field: "equity",
+        colId: "equity",
+        width: 120,
+        cellClass: "ag-right-aligned-cell",
+        valueFormatter: (p) => (p.value == null ? "—" : fmtCurrency(p.value)),
+      },
+      {
+        headerName: "持续次数",
+        field: "streak_count",
+        colId: "streak_count",
+        width: 100,
+        cellClass: "ag-right-aligned-cell",
+        cellRenderer: (p: { value: number | null }) => p.value ?? "—",
+        headerComponent: InfoHeader,
+        headerComponentParams: {
+          tooltip:
+            "连续命中该规则阈值的扫描次数。D2「持续高杠杆」需达到设定次数才触发。",
+        },
+      },
+      {
+        headerName: "杠杆",
+        field: "leverage",
+        colId: "leverage",
+        width: 90,
+        cellClass: "ag-right-aligned-cell",
+        valueFormatter: (p) => (p.value == null ? "—" : `1:${p.value}`),
+      },
+      netDepositColDef(),
+      { headerName: "账户组", field: "group", colId: "group", width: 160 },
+    ],
+    [],
+  );
+
+  const rangeLabel =
+    rangePreset === "custom" && customRange?.from
+      ? customRange.to
+        ? `${format(customRange.from, "yyyy-MM-dd")} ~ ${format(customRange.to, "yyyy-MM-dd")}`
+        : format(customRange.from, "yyyy-MM-dd")
+      : (RANGE_PRESETS.find((p) => p.key === rangePreset)?.label ??
+        "最近 4 小时");
+
+  return (
+    <div className="flex min-w-0 flex-col gap-4">
+      <div className={RISK_MONITOR_HEADER_ROW}>
+        <div className="min-w-0">
+          <p className="text-sm text-muted-foreground">
+            检测保证金占用率过高、逼近强平的大敞口账户（滥用杠杆）
+          </p>
+          <p className="text-sm text-muted-foreground">
+            当前范围:{" "}
+            <span className="font-medium text-foreground">{rangeLabel}</span>
+            {lastRefresh && ` · 上次刷新 ${lastRefresh}`}
+            {latestMeta &&
+              latestMeta.scanned_at &&
+              ` · 最近扫描 ${fmtTime(latestMeta.scanned_at)} · 耗时 ${latestMeta.scan_time_ms}ms`}
+            {latestMeta?.config &&
+              ` · 每 ${latestMeta.config.scan_interval_min} 分钟自动扫描`}
+          </p>
+        </div>
+        <div className={RISK_MONITOR_HEADER_ACTIONS}>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleExportCsv}
+            disabled={exporting || totalCount === 0}
+          >
+            <Download
+              className={cn("h-4 w-4 mr-1.5", exporting && "animate-spin")}
+            />
+            {exporting ? "导出中..." : "导出 CSV"}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              setEditConfig(
+                config
+                  ? normalizeLeverageAbuseConfig(
+                      JSON.parse(JSON.stringify(config)) as LeverageAbuseConfig,
+                    )
+                  : {
+                      enabled: true,
+                      rules: [
+                        {
+                          name: "瞬时满杠杆",
+                          enabled: true,
+                          max_margin_level: 105.3,
+                          streak_min: 1,
+                          min_equity_usd: 100,
+                        },
+                        {
+                          name: "持续高杠杆",
+                          enabled: true,
+                          max_margin_level: 125,
+                          streak_min: 3,
+                          min_equity_usd: 100,
+                        },
+                      ],
+                    },
+              );
+              setConfigOpen(true);
+            }}
+          >
+            <Settings2 className="h-4 w-4 mr-1.5" />
+            设置
+          </Button>
+        </div>
+      </div>
+
+      {config && config.rules.length > 0 ? (
+        <div className="grid w-full gap-1.5 sm:gap-2 grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4">
+          {config.rules.map((rule, idx) => {
+            const ruleId = LEVERAGE_ABUSE_RULE_ID_BASE + idx;
+            const br = stats.by_rule?.find((b) => b.rule_id === ruleId);
+            const nAcc = br?.account_count ?? 0;
+            const nEvt = br?.event_count ?? 0;
+            const st =
+              RULE_SUMMARY_CARD_STYLES[idx % RULE_SUMMARY_CARD_STYLES.length];
+            return (
+              <SummaryCard
+                key={rule.id ?? `la-rule-${idx}`}
+                compact
+                label={`Rule ${idx + 1} · 去重账户`}
+                value={nAcc}
+                description={
+                  `告警 ${nEvt} 条 · 预付款比例 < ${rule.max_margin_level}%` +
+                  (rule.streak_min > 1 ? ` · 连续 ${rule.streak_min} 次` : "") +
+                  ` · 净值 ≥ $${rule.min_equity_usd}`
+                }
+                dotColor={st.dot}
+                textColor={st.value}
+              />
+            );
+          })}
+        </div>
+      ) : (
+        <Card className="border-dashed">
+          <CardContent className="p-4 text-sm text-muted-foreground">
+            {config && config.rules.length === 0
+              ? "请先在「设置」中添加至少一条规则。"
+              : "正在加载规则…"}
+          </CardContent>
+        </Card>
+      )}
+
+      <div className="flex flex-col gap-2 w-full sm:flex-row sm:flex-wrap sm:items-stretch sm:gap-3 max-w-full">
+        <Select value={ruleFilter} onValueChange={setRuleFilter}>
+          <SelectTrigger
+            className="w-full min-w-0 h-9 sm:w-40 sm:shrink-0"
+            aria-label="按规则筛选"
+          >
+            <SelectValue placeholder="规则" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">全部规则</SelectItem>
+            {config?.rules.map((_, idx) => (
+              <SelectItem
+                key={LEVERAGE_ABUSE_RULE_ID_BASE + idx}
+                value={String(LEVERAGE_ABUSE_RULE_ID_BASE + idx)}
+              >
+                Rule {idx + 1}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Select
+          value={rangePreset}
+          onValueChange={(v) => {
+            setRangePreset(v as RangePresetKey);
+            if (v === "custom" && !customRange?.from) setDatePickerOpen(true);
+          }}
+        >
+          <SelectTrigger className="w-full min-w-0 h-9 sm:w-40 sm:shrink-0">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {RANGE_PRESETS.map((p) => (
+              <SelectItem key={p.key} value={p.key}>
+                {p.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+
+        {rangePreset === "custom" && (
+          <Popover open={datePickerOpen} onOpenChange={setDatePickerOpen}>
+            <PopoverTrigger asChild>
+              <Button
+                variant="outline"
+                className="w-full min-w-0 sm:w-40 h-9 justify-start text-left font-normal shrink-0 overflow-hidden"
+              >
+                <CalendarIcon className="mr-2 h-4 w-4 shrink-0" />
+                <span className="truncate">
+                  {customRange?.from
+                    ? customRange.to
+                      ? `${format(customRange.from, "yyyy-MM-dd")} ~ ${format(customRange.to, "yyyy-MM-dd")}`
+                      : format(customRange.from, "yyyy-MM-dd")
+                    : "选择日期范围"}
+                </span>
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent className="w-auto p-0" align="start">
+              <Calendar
+                initialFocus
+                mode="range"
+                defaultMonth={customRange?.from}
+                selected={customRange}
+                onSelect={setCustomRange}
+                numberOfMonths={2}
+                disabled={{
+                  before: new Date(
+                    Date.now() - RETENTION_DAYS * 24 * 3600 * 1000,
+                  ),
+                }}
+              />
+            </PopoverContent>
+          </Popover>
+        )}
+
+        <Select value={serverFilter} onValueChange={setServerFilter}>
+          <SelectTrigger className="w-full min-w-0 h-9 sm:w-40 sm:shrink-0">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">全部服务器</SelectItem>
+            <SelectItem value="MT4_Live">MT4 Live</SelectItem>
+            <SelectItem value="MT4_Live2">MT4 Live2</SelectItem>
+            <SelectItem value="MT5">MT5</SelectItem>
+          </SelectContent>
+        </Select>
+
+        <div className="relative w-full min-w-0 sm:w-44 sm:shrink-0">
+          <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground pointer-events-none" />
+          <Input
+            placeholder="搜索 zipcode（模糊）"
+            value={zipcodeInput}
+            onChange={(e) => setZipcodeInput(e.target.value)}
+            className="pl-8 h-9"
+          />
+        </div>
+        <div className="relative w-full min-w-0 sm:w-44 sm:shrink-0">
+          <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground pointer-events-none" />
+          <Input
+            placeholder="搜索账户号（精确）"
+            value={loginInput}
+            onChange={(e) => setLoginInput(e.target.value)}
+            className="pl-8 h-9"
+            inputMode="numeric"
+          />
+        </div>
+        <span className="text-sm text-muted-foreground sm:ml-auto sm:shrink-0 py-1.5">
+          {loading ? "加载中..." : `共 ${totalCount} 条告警`}
+        </span>
+      </div>
+
+      <div
+        className={cn(
+          "risk-monitor-theme h-[calc(100vh-540px)] min-h-[400px] w-full",
+          isDarkMode ? "ag-theme-quartz-dark" : "ag-theme-quartz",
+        )}
+        style={gridStyle}
+      >
+        <AgGridReact<AlertEvent>
+          rowData={alerts}
+          columnDefs={columnDefs}
+          defaultColDef={defaultColDef}
+          gridOptions={{ theme: "legacy", enableBrowserTooltips: true }}
+          animateRows={false}
+          enableCellTextSelection
+          suppressCellFocus
+          sortingOrder={["desc", "asc", null]}
+          onSortChanged={(e) => {
+            if (!columnPersist.isApplying()) handleSortChanged(e);
+            columnPersist.gridEventProps.onSortChanged();
+          }}
+          onGridReady={columnPersist.gridEventProps.onGridReady}
+          onColumnMoved={columnPersist.gridEventProps.onColumnMoved}
+          onColumnVisible={columnPersist.gridEventProps.onColumnVisible}
+          onColumnPinned={columnPersist.gridEventProps.onColumnPinned}
+          onColumnResized={columnPersist.gridEventProps.onColumnResized}
+          getRowId={(p) => `evt-${p.data.id}`}
+        />
+      </div>
+
+      <Card>
+        <CardContent className="py-4">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="text-sm text-muted-foreground">
+              {totalCount === 0
+                ? "暂无数据"
+                : isMobile
+                  ? `共 ${totalCount} 条`
+                  : `第 ${pageIndex * pageSize + 1}-${Math.min((pageIndex + 1) * pageSize, totalCount)} 条 / 共 ${totalCount} 条`}
+            </div>
+            <div className="flex items-center flex-wrap gap-2">
+              {!isMobile && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setPageIndex(0)}
+                  disabled={pageIndex === 0 || loading}
+                >
+                  首页
+                </Button>
+              )}
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setPageIndex(Math.max(0, pageIndex - 1))}
+                disabled={pageIndex === 0 || loading}
+              >
+                上一页
+              </Button>
+              <span className="text-sm text-muted-foreground">
+                第 {pageIndex + 1} / {totalPages} 页
+              </span>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() =>
+                  setPageIndex(Math.min(totalPages - 1, pageIndex + 1))
+                }
+                disabled={pageIndex >= totalPages - 1 || loading}
+              >
+                下一页
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setPageIndex(totalPages - 1)}
+                disabled={pageIndex >= totalPages - 1 || loading}
+              >
+                {isMobile ? "最后" : "末页"}
+              </Button>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      <LeverageAbuseConfigDrawer
+        open={configOpen}
+        onOpenChange={setConfigOpen}
+        config={editConfig}
+        setConfig={setEditConfig}
+        onSave={handleSaveConfig}
+        saving={savingConfig}
+        columnGroups={[
+          {
+            persist: columnPersist,
+            columnDefs: columnDefs as ColDef<unknown>[],
+          },
+        ]}
+        manualActions={[
+          {
+            label: "立即扫描",
+            runningLabel: "扫描中...",
+            onClick: handleScanNow,
+            running: scanningNow,
+          },
+        ]}
+      />
+    </div>
+  );
+}
+
+function LeverageAbuseConfigDrawer({
+  open,
+  onOpenChange,
+  config,
+  setConfig,
+  onSave,
+  saving,
+  columnGroups,
+  manualActions,
+}: {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  config: LeverageAbuseConfig | null;
+  setConfig: (c: LeverageAbuseConfig | null) => void;
+  onSave: () => void;
+  saving: boolean;
+  columnGroups: ColumnSettingGroup[];
+  manualActions: ManualAction[];
+}) {
+  const isMobile = useIsMobile();
+  if (!config) return null;
+
+  const updateRule = (idx: number, patch: Partial<LeverageAbuseRule>) => {
+    const rules = [...config.rules];
+    rules[idx] = { ...rules[idx], ...patch };
+    setConfig({ ...config, rules });
+  };
+
+  const addRule = () => {
+    if (config.rules.length >= 10) return;
+    setConfig({
+      ...config,
+      rules: [
+        ...config.rules,
+        {
+          name: `规则 ${config.rules.length + 1}`,
+          enabled: true,
+          max_margin_level: 125,
+          streak_min: 1,
+          min_equity_usd: 100,
+        },
+      ],
+    });
+  };
+
+  const removeRule = (idx: number) => {
+    if (config.rules.length <= 1) return;
+    setConfig({ ...config, rules: config.rules.filter((_, i) => i !== idx) });
+  };
+
+  return (
+    <Drawer
+      open={open}
+      onOpenChange={onOpenChange}
+      direction={isMobile ? "bottom" : "right"}
+    >
+      <DrawerContent
+        className={cn(
+          isMobile
+            ? "max-h-[85vh]"
+            : "ml-auto h-full w-[520px] max-w-[90vw] rounded-l-xl rounded-r-none",
+        )}
+      >
+        <DrawerHeader className="border-b px-6">
+          <DrawerTitle>设置</DrawerTitle>
+        </DrawerHeader>
+
+        <div className="flex-1 overflow-y-auto p-6 space-y-6">
+          <section className="space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-medium">启用规则</h3>
+              <Checkbox
+                checked={config.enabled}
+                onCheckedChange={(v) =>
+                  setConfig({ ...config, enabled: v === true })
+                }
+              />
+            </div>
+            <p className="text-xs text-muted-foreground -mt-2">
+              关闭后仅停止新告警扫描，不影响历史告警展示。
+            </p>
+
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <label className="text-sm font-medium">
+                  检测规则（最多 10 条）
+                </label>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={addRule}
+                  disabled={config.rules.length >= 10}
+                >
+                  <Plus className="h-3.5 w-3.5 mr-1" />
+                  添加规则
+                </Button>
+              </div>
+
+              {config.rules.map((rule, idx) => (
+                <div
+                  key={idx}
+                  className="rounded-lg border p-4 space-y-3 bg-muted/30"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <Input
+                      className="font-medium max-w-sm"
+                      value={rule.name}
+                      onChange={(e) => updateRule(idx, { name: e.target.value })}
+                      placeholder="规则名（例：瞬时满杠杆）"
+                      maxLength={100}
+                    />
+                    <div className="flex items-center gap-3">
+                      <label className="flex items-center gap-1 text-sm whitespace-nowrap">
+                        <Checkbox
+                          checked={rule.enabled}
+                          onCheckedChange={(v) =>
+                            updateRule(idx, { enabled: !!v })
+                          }
+                        />
+                        启用
+                      </label>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => removeRule(idx)}
+                        disabled={config.rules.length <= 1}
+                        aria-label="删除"
+                      >
+                        <Trash2 className="h-4 w-4 text-destructive" />
+                      </Button>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-3 text-sm">
+                    <div className="space-y-1">
+                      <label className="text-xs text-muted-foreground">
+                        预付款比例 &lt; (%)
+                      </label>
+                      <Input
+                        type="number"
+                        min={10}
+                        max={1000}
+                        step={0.1}
+                        value={rule.max_margin_level}
+                        onChange={(e) =>
+                          updateRule(idx, {
+                            max_margin_level: Number(e.target.value) || 125,
+                          })
+                        }
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs text-muted-foreground">
+                        连续扫描次数
+                      </label>
+                      <Input
+                        type="number"
+                        min={1}
+                        max={20}
+                        value={rule.streak_min}
+                        onChange={(e) =>
+                          updateRule(idx, {
+                            streak_min: Number(e.target.value) || 1,
+                          })
+                        }
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs text-muted-foreground">
+                        最低净值 (USD)
+                      </label>
+                      <Input
+                        type="number"
+                        min={0}
+                        step={50}
+                        value={rule.min_equity_usd}
+                        onChange={(e) =>
+                          updateRule(idx, {
+                            min_equity_usd: Number(e.target.value) || 0,
+                          })
+                        }
+                      />
+                    </div>
+                  </div>
+                </div>
+              ))}
+              <p className="text-xs text-muted-foreground">
+                预付款比例 = 净值 / 已用保证金 × 100%，越低越接近强平。
+                连续扫描次数 &gt; 1 时需连续多次命中才告警（如每 5 分钟扫描，3
+                次 ≈ 持续 15 分钟）。
+              </p>
+            </div>
           </section>
 
           <UnifiedSettingsExtras
