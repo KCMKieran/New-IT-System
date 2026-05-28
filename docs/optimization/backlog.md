@@ -10,6 +10,7 @@
 
 | ID | Branch | Claim 日期 | 备注 |
 |----|--------|-----------|------|
+| [OPT-0030](./items/OPT-0030-risk-monitor-leverage-abuse-tab.md) | opt/risk-monitor-leverage-abuse-tab | 2026-05-28 | 滥用杠杆 tab — 第 6 个检测规则；risk-monitor 首条 snapshot-scan 规则 |
 
 ## ✅ 待领取（Ready）
 
@@ -21,7 +22,6 @@
 | [OPT-0002](./items/OPT-0002-browser-cache-pattern-doc.md) | P2 | docs | S | 现有浏览器缓存模式归纳成复用文档 |
 | [OPT-0003](./items/OPT-0003-risk-monitor-sqlite-perf.md) | P1 | db | L | Risk-monitor SQLite 数据增长后的性能方案 |
 | [OPT-0028](./items/OPT-0028-risk-monitor-aggregator-hardening.md) | P2 | mixed | M | Risk-monitor 聚合视图硬化（SQL 性能 + 语义确定性，同时覆盖 burst + hedge） |
-| [OPT-0030](./items/OPT-0030-risk-monitor-leverage-abuse-tab.md) | P1 | mixed | M | 滥用杠杆 (Leverage Abuse) tab — risk-monitor 第 6 个检测规则（预飞行 PASS：MARGIN_LEVEL 现成 + 危险账户近实时） |
 
 ## 💡 想法（Ideas）—— 还不能直接 claim
 

@@ -1,7 +1,7 @@
 ---
 id: OPT-0030
 title: 滥用杠杆 (Leverage Abuse) tab — risk-monitor 第 6 个检测规则
-status: ready
+status: wip
 priority: P1
 area: mixed
 effort: M
