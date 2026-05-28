@@ -404,6 +404,11 @@ CREATE TABLE IF NOT EXISTS account_leverage_streak (
     server         TEXT    NOT NULL,
     login          INTEGER NOT NULL,
     streak_count   INTEGER NOT NULL DEFAULT 0,
+    -- Consecutive scans this account was NOT in the candidate set while its
+    -- streak row still exists. A transient replica blip / freshness-window
+    -- miss shouldn't instantly reset a building D2 streak, so we tolerate up
+    -- to GRACE_MISSES misses (frozen streak) before dropping the row.
+    miss_count     INTEGER NOT NULL DEFAULT 0,
     last_margin_level REAL,
     last_alert_at  TEXT,
     updated_at     TEXT    NOT NULL,
@@ -488,6 +493,7 @@ def init_risk_monitor_db() -> None:
         # newer fields were introduced. SQLite ignores ALTER TABLE ... ADD
         # COLUMN if the column already exists via a PRAGMA check.
         _migrate_alert_events_columns(conn)
+        _migrate_leverage_streak_miss_count(conn)
         _migrate_quick_rules_columns(conn)
         _migrate_drop_profit_window_from_quick_rules(conn)
         _migrate_quick_open_close_enabled_not_null(conn)
@@ -532,6 +538,23 @@ def init_risk_monitor_db() -> None:
             logger.warning("VACUUM after migration failed: %s", exc)
 
     logger.info("Risk monitor SQLite database initialized at %s", _DB_PATH)
+
+
+def _migrate_leverage_streak_miss_count(conn: sqlite3.Connection) -> None:
+    """Add account_leverage_streak.miss_count (OPT-0030 hardening) if missing.
+
+    The table is transient state rebuilt every scan, so an ALTER with a
+    default is safe and idempotent.
+    """
+    rows = list(conn.execute("PRAGMA table_info(account_leverage_streak)"))
+    if not rows:
+        return  # table not created yet (fresh install handles it via schema)
+    cols = {row[1] for row in rows}
+    if "miss_count" not in cols:
+        conn.execute(
+            "ALTER TABLE account_leverage_streak "
+            "ADD COLUMN miss_count INTEGER NOT NULL DEFAULT 0"
+        )
 
 
 def _migrate_alert_events_columns(conn: sqlite3.Connection) -> None:
@@ -1079,6 +1102,11 @@ def save_leverage_abuse_config(enabled: bool, rules: list[dict]) -> None:
         conn.execute(
             "DELETE FROM sqlite_sequence WHERE name = 'leverage_abuse_rules'"
         )
+        # Rule ids are positional (101 + sort_order), so reordering / deleting
+        # a rule re-maps rule_id → rule. The streak table is keyed by rule_id,
+        # so stale rows would mis-attribute a streak to the wrong rule. Wipe it
+        # on every config save — streaks rebuild cleanly within streak_min scans.
+        conn.execute("DELETE FROM account_leverage_streak")
         for i, r in enumerate(rules):
             conn.execute(
                 "INSERT INTO leverage_abuse_rules "
@@ -1103,15 +1131,17 @@ def save_leverage_abuse_config(enabled: bool, rules: list[dict]) -> None:
 # holds at most a few dozen rows.
 
 def load_leverage_streak_state() -> dict[tuple[int, str, int], dict[str, Any]]:
-    """Return {(rule_id, server, login): {streak_count, last_alert_at}}."""
+    """Return {(rule_id, server, login): {streak_count, miss_count,
+    last_margin_level, last_alert_at}}."""
     with get_risk_monitor_db() as conn:
         rows = conn.execute(
-            "SELECT rule_id, server, login, streak_count, last_margin_level, "
-            "last_alert_at FROM account_leverage_streak"
+            "SELECT rule_id, server, login, streak_count, miss_count, "
+            "last_margin_level, last_alert_at FROM account_leverage_streak"
         ).fetchall()
     return {
         (int(r["rule_id"]), r["server"], int(r["login"])): {
             "streak_count": int(r["streak_count"]),
+            "miss_count": int(r["miss_count"]),
             "last_margin_level": r["last_margin_level"],
             "last_alert_at": r["last_alert_at"],
         }
@@ -1122,8 +1152,9 @@ def load_leverage_streak_state() -> dict[tuple[int, str, int], dict[str, Any]]:
 def save_leverage_streak_state(rows: list[dict[str, Any]]) -> None:
     """Replace the whole streak table with `rows` atomically.
 
-    Each row: {rule_id, server, login, streak_count, last_margin_level,
-    last_alert_at}. Accounts that recovered (not in `rows`) are dropped.
+    Each row: {rule_id, server, login, streak_count, miss_count,
+    last_margin_level, last_alert_at}. Accounts dropped from `rows` (recovered
+    or aged out past the grace window) are removed.
     """
     from datetime import datetime, timezone
     now_iso = (
@@ -1136,11 +1167,13 @@ def save_leverage_streak_state(rows: list[dict[str, Any]]) -> None:
         for r in rows:
             conn.execute(
                 "INSERT INTO account_leverage_streak "
-                "(rule_id, server, login, streak_count, last_margin_level, "
-                "last_alert_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "(rule_id, server, login, streak_count, miss_count, "
+                "last_margin_level, last_alert_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     int(r["rule_id"]), r["server"], int(r["login"]),
-                    int(r["streak_count"]), r.get("last_margin_level"),
+                    int(r["streak_count"]), int(r.get("miss_count", 0)),
+                    r.get("last_margin_level"),
                     r.get("last_alert_at"), now_iso,
                 ),
             )

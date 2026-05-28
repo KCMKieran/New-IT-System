@@ -76,6 +76,21 @@ _FRESHNESS_MIN = 15
 # drops the streak row, so the next episode re-alerts immediately.
 _REALERT_COOLDOWN_SEC = 3600
 
+# D2 streak robustness: a streak row whose account is absent from a scan's
+# candidate set (genuine recovery OR a transient replica blip / freshness-
+# window miss — indistinguishable from here) is tolerated for this many
+# consecutive misses with its streak frozen before being dropped (reset).
+# Stops a single stuttering scan from wiping a building D2 streak during exactly
+# the volatile conditions D2 is meant to catch. 2 misses ≈ 10 min of tolerance
+# at the 5-min cadence.
+_GRACE_MISSES = 2
+
+# Defensive cap on the snapshot candidate set. The dangerous set is naturally
+# tiny (<1000 in practice), so hitting this means either a market-wide event or
+# a missing/ignored MODIFY_TIME index degrading the query into a wide scan —
+# either way we want it to fail loud, not silently process tens of thousands.
+_CANDIDATE_LIMIT = 5000
+
 # Reverse of SID_MAP ({"MT4_Live": 1, "MT4_Live2": 6, "MT5": 5}) so we can
 # label each mt4_users row by server. Only these three sids are monitored.
 _SID_TO_SERVER: Dict[int, str] = {v: k for k, v in SID_MAP.items()}
@@ -127,6 +142,11 @@ def _query_leverage_candidates(
     """
     sid_placeholders = ", ".join(["%s"] * len(_MONITORED_SIDS))
     mt4_sid_placeholders = ", ".join(["%s"] * len(_MT4_SIDS))
+    # The MODIFY_TIME predicate is intended to ride `IDX_MODIFY_TIME` on
+    # mt4_users so this never degrades into a full-table scan as the account
+    # base grows. Verify with EXPLAIN if perf regresses (MySQL picks a single
+    # index; a sid/GROUP index could win). The LIMIT is a loud-failure cap, not
+    # a correctness limit — see _CANDIDATE_LIMIT.
     sql = f"""
         SELECT
             sid,
@@ -151,11 +171,21 @@ def _query_leverage_candidates(
           AND `GROUP` NOT LIKE '%%demo%%'
           AND `GROUP` NOT LIKE '%%test%%'
           AND (sid NOT IN ({mt4_sid_placeholders}) OR LOGIN NOT LIKE '7%%')
+        LIMIT %s
     """
-    params: List[Any] = [freshness_min, max_margin_level, *_MONITORED_SIDS, *_MT4_SIDS]
+    params: List[Any] = [
+        freshness_min, max_margin_level, *_MONITORED_SIDS, *_MT4_SIDS,
+        _CANDIDATE_LIMIT,
+    ]
     with conn.cursor() as cur:
         cur.execute(sql, params)
         raw = cur.fetchall()
+    if len(raw) >= _CANDIDATE_LIMIT:
+        logger.warning(
+            "Leverage abuse candidate query hit the %d-row LIMIT — results "
+            "truncated. Check the IDX_MODIFY_TIME index / a market-wide event.",
+            _CANDIDATE_LIMIT,
+        )
 
     out: List[Dict[str, Any]] = []
     for r in raw:
@@ -231,6 +261,7 @@ def rule_leverage_abuse_detect(
 
     alerts: List[Dict[str, Any]] = []
     next_state: Dict[Tuple[int, str, int], Dict[str, Any]] = {}
+    active_rule_ids: set[int] = set()
 
     for rule_idx, rule in enumerate(rules):
         if not rule.get("enabled", True):
@@ -242,6 +273,7 @@ def rule_leverage_abuse_detect(
         # OPT-0008-class guard: force a corrupted rule_id back into the band.
         if rule_id < LEVERAGE_ABUSE_RULE_ID_BASE or rule_id > LEVERAGE_ABUSE_RULE_ID_MAX:
             rule_id = LEVERAGE_ABUSE_RULE_ID_BASE + rule_idx
+        active_rule_ids.add(rule_id)
 
         for row in rows:
             ml = row.get("margin_level")
@@ -277,9 +309,33 @@ def rule_leverage_abuse_detect(
                 "server": row["server"],
                 "login": int(row["login"]),
                 "streak_count": streak,
+                "miss_count": 0,            # seen this scan → reset misses
                 "last_margin_level": ml,
                 "last_alert_at": last_alert_at,
             }
+
+    # Grace window: carry forward streak rows whose account was NOT in this
+    # scan's candidate set (recovered OR a transient blip — indistinguishable).
+    # Freeze the streak and bump miss_count; drop only once it exceeds
+    # _GRACE_MISSES. Skip keys whose rule no longer exists/enabled so disabled
+    # rules don't leave orphan streaks lingering forever.
+    for key, prev in streak_state.items():
+        if key in next_state:
+            continue  # already handled (dangerous this scan)
+        if key[0] not in active_rule_ids:
+            continue  # rule gone/disabled → let it drop
+        miss = int(prev.get("miss_count", 0)) + 1
+        if miss > _GRACE_MISSES:
+            continue  # aged out → reset (drop)
+        next_state[key] = {
+            "rule_id": key[0],
+            "server": key[1],
+            "login": key[2],
+            "streak_count": int(prev["streak_count"]),
+            "miss_count": miss,
+            "last_margin_level": prev.get("last_margin_level"),
+            "last_alert_at": prev.get("last_alert_at"),
+        }
 
     return alerts, list(next_state.values())
 
@@ -358,9 +414,16 @@ def scan_leverage_abuse(
     # Loosest threshold = widest net; per-rule thresholds re-applied in detect.
     loosest = max(r["max_margin_level"] for r in norm_rules)
 
+    # Freshness window must stay wider than one scan gap, otherwise a still-
+    # dangerous account could fall out of the window between two scans and
+    # reset its streak. Floor at _FRESHNESS_MIN; widen if the interval grows.
+    freshness_min = max(_FRESHNESS_MIN, int(scan_interval_min) + 5)
+
     conn = _get_connection(settings)
     try:
-        candidates = _query_leverage_candidates(conn, max_margin_level=loosest)
+        candidates = _query_leverage_candidates(
+            conn, max_margin_level=loosest, freshness_min=freshness_min
+        )
         unique_logins: Set[Tuple[str, int]] = {
             (c["server"], int(c["login"])) for c in candidates
         }

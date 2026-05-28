@@ -25,12 +25,17 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from unittest.mock import MagicMock
+
+import pytest
 
 from app.services.rule_leverage_abuse_service import (
     LEVERAGE_ABUSE_RULE_ID_BASE,
+    _GRACE_MISSES,
     _REALERT_COOLDOWN_SEC,
     _query_leverage_candidates,
     rule_leverage_abuse_detect,
+    scan_leverage_abuse,
 )
 
 
@@ -200,9 +205,9 @@ def test_cooldown_suppresses_reentry_but_streak_advances():
     assert len(a3) == 1
 
 
-def test_recovery_resets_streak():
-    """An account that recovers (no longer below threshold) drops its streak
-    row, so a later relapse starts the streak over."""
+def test_recovery_ages_out_after_grace():
+    """An account absent from the candidate set is tolerated for _GRACE_MISSES
+    scans (streak frozen), then dropped (reset)."""
     rule = _d2_rule()
     base = datetime(2026, 5, 28, 12, 0, tzinfo=timezone.utc)
 
@@ -216,12 +221,54 @@ def test_recovery_resets_streak():
         state = _state(rows)
     assert state[(102, "MT4_Live", 8518354)]["streak_count"] == 2
 
-    # Recovered scan: account no longer in the candidate rows → state drops it
+    # Absent scans: carried frozen (streak 2) for _GRACE_MISSES, then dropped.
+    key = (102, "MT4_Live", 8518354)
+    for miss in range(1, _GRACE_MISSES + 1):
+        alerts, rows = rule_leverage_abuse_detect(
+            [], [rule], streak_state=state, now=base + timedelta(minutes=10),
+        )
+        state = _state(rows)
+        assert alerts == []
+        assert state[key]["streak_count"] == 2          # frozen
+        assert state[key]["miss_count"] == miss
+    # One more miss past the grace window → dropped (reset)
     alerts, rows = rule_leverage_abuse_detect(
-        [], [rule], streak_state=state, now=base + timedelta(minutes=10)
+        [], [rule], streak_state=state, now=base + timedelta(minutes=10),
     )
-    assert alerts == []
-    assert rows == []  # streak reset
+    assert _state(rows) == {}
+
+
+def test_grace_tolerates_blip_then_streak_continues():
+    """A single missed scan (blip) must NOT reset a building D2 streak — the
+    streak resumes on the next dangerous scan. This is the whole point of the
+    grace window: survive the volatile conditions D2 is built to catch."""
+    rule = _d2_rule()  # streak_min = 3
+    base = datetime(2026, 5, 28, 12, 0, tzinfo=timezone.utc)
+    rows = [_row(margin_level=120.0)]
+
+    # scan 1: dangerous → streak 1
+    _, s = rule_leverage_abuse_detect(rows, [rule], streak_state={}, now=base)
+    state = _state(s)
+    # scan 2: BLIP (account absent) → carried frozen at streak 1, miss 1
+    a2, s = rule_leverage_abuse_detect(
+        [], [rule], streak_state=state, now=base + timedelta(minutes=5)
+    )
+    state = _state(s)
+    assert a2 == []
+    assert state[(102, "MT4_Live", 8518354)]["streak_count"] == 1
+    # scan 3: dangerous again → streak 2 (resumes, miss reset)
+    _, s = rule_leverage_abuse_detect(
+        rows, [rule], streak_state=state, now=base + timedelta(minutes=10)
+    )
+    state = _state(s)
+    assert state[(102, "MT4_Live", 8518354)]["streak_count"] == 2
+    assert state[(102, "MT4_Live", 8518354)]["miss_count"] == 0
+    # scan 4: dangerous → streak 3 → D2 FIRES (a blip did not derail it)
+    a4, _ = rule_leverage_abuse_detect(
+        rows, [rule], streak_state=state, now=base + timedelta(minutes=15)
+    )
+    assert len(a4) == 1
+    assert a4[0]["rule_id"] == 102
 
 
 def test_d1_and_d2_coexist_first_scan():
@@ -259,6 +306,9 @@ class _FakeConn:
 
     def cursor(self):
         return _FakeCursor(self._rows)
+
+    def close(self):
+        pass
 
 
 def test_cen_account_equity_divided_margin_level_untouched():
@@ -301,3 +351,64 @@ def test_usd_account_not_divided():
     assert out[0]["equity"] == 172.59
     assert out[0]["margin_level"] == 95.06
     assert out[0]["server"] == "MT4_Live"
+
+
+# ── DB-backed: config-clear (Fix B) + failure-mode preservation (Fix A) ──
+
+@pytest.fixture
+def temp_db(tmp_path, monkeypatch):
+    """Isolated risk_monitor.db so we never touch the shared dev/prod file."""
+    from app.core import risk_monitor_db as rm_db
+    monkeypatch.setattr(rm_db, "_DB_PATH", tmp_path / "risk_monitor.db")
+    rm_db.init_risk_monitor_db()
+    return rm_db
+
+
+def test_config_save_clears_streak_state(temp_db):
+    """Saving config wipes account_leverage_streak so a rule reorder/threshold
+    change can't mis-attribute a frozen streak to the wrong rule_id."""
+    rm_db = temp_db
+    rm_db.save_leverage_streak_state([
+        {"rule_id": 101, "server": "MT4_Live", "login": 1, "streak_count": 2,
+         "miss_count": 0, "last_margin_level": 100.0, "last_alert_at": None},
+    ])
+    assert rm_db.load_leverage_streak_state()  # non-empty
+
+    rm_db.save_leverage_abuse_config(
+        True,
+        [{"name": "r1", "enabled": True, "max_margin_level": 120.0,
+          "streak_min": 1, "min_equity_usd": 100.0}],
+    )
+    assert rm_db.load_leverage_streak_state() == {}  # cleared
+
+
+def test_scan_preserves_streak_when_query_fails(temp_db, monkeypatch):
+    """A hard query failure must NOT reach save_leverage_streak_state — the
+    prior streak survives so a transient replica error can't reset D2."""
+    import app.services.rule_leverage_abuse_service as svc
+
+    # Seed prior streak state.
+    temp_db.save_leverage_streak_state([
+        {"rule_id": 102, "server": "MT4_Live", "login": 9, "streak_count": 2,
+         "miss_count": 0, "last_margin_level": 120.0, "last_alert_at": None},
+    ])
+
+    monkeypatch.setattr(svc, "_get_connection", lambda settings: _FakeConn([]))
+
+    def boom(*a, **k):
+        raise RuntimeError("replica down")
+
+    monkeypatch.setattr(svc, "_query_leverage_candidates", boom)
+    save_spy = MagicMock()
+    monkeypatch.setattr(svc, "save_leverage_streak_state", save_spy)
+
+    with pytest.raises(RuntimeError):
+        scan_leverage_abuse(
+            object(), scan_interval_min=5,
+            rules=[{"id": 102, "name": "d2", "enabled": True,
+                    "max_margin_level": 125.0, "streak_min": 3,
+                    "min_equity_usd": 100.0}],
+        )
+
+    save_spy.assert_not_called()                       # never overwrote state
+    assert temp_db.load_leverage_streak_state()         # prior streak intact
