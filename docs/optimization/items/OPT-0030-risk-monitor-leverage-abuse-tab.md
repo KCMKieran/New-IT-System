@@ -1,7 +1,7 @@
 ---
 id: OPT-0030
 title: 滥用杠杆 (Leverage Abuse) tab — risk-monitor 第 6 个检测规则
-status: idea
+status: ready
 priority: P1
 area: mixed
 effort: M
@@ -83,6 +83,20 @@ MARGIN_LEVEL = EQUITY / MARGIN × 100  ← 健康度（越小越危险）
 ## 假设 / 待验证（claim 前必须先答完这 2 个 — 这是 idea → ready 的 gate）
 
 > 这两个 open Q **直接决定 effort 是 M 还是 L 以及 D1 档是否可行**。任何一个答案不利都要回到 Ready 重新 scope。
+
+> ✅ **2026-05-28 预飞行已跑（slave `fxbackofficeslavedb`，readonly）。两个 gate 全 PASS，effort 维持 M。**
+>
+> **Q1 结果 — Branch A（MT5 完全有数据）**：sid 1/5/6 的 `rows_with_margin == rows_with_ml` 精确相等（387/387、398/398、63/63）。MT5（sid 5）398 个有持仓账户全部有 `MARGIN_LEVEL`。→ 三 server 一条 SQL 全覆盖，不碰 mt5_live、不建 symbol_contract 表。
+>   - 备注：表里有 6 个 sid，但 `SID_MAP` 只认 1/5/6。sid 2/3/4 是未监控的其他 server（sid 4 有 1072 个有 margin 账户），本规则正确只扫 1/5/6，**不扩范围**。
+>
+> **Q2 结果 — 实质 Branch A（危险账户近实时）**：原始聚合看着吓人（sid 1 平均滞后 28.5 天 / 最坏 3.6 年），但这是**双峰分布**——93–100% 的有持仓账户在 ≤5min 内刷新，长尾的"几年"全是**休眠安全账户**。**决定性诊断**：在告警候选（`MARGIN_LEVEL < 125`）里，sid 1/5/6 共 21 个危险账户**100% 在 2min 内刷新过、零陈旧**（平均滞后 12 / 103 / 125 秒）。逼近 MC 的账户净值剧烈变动 → MT 高频推送，会陈旧的恰是高 ML 休眠账户。→ **D1「瞬时档」可行。**
+>   - **设计加固（已采纳）**：仍加一道 `MODIFY_TIME >= NOW() - INTERVAL 15 MINUTE` 新鲜度闸，作为"永不在陈旧行上误报"的安全带（实测危险行无陈旧，成本几乎为零）。
+>
+> **当前告警量（健全性）**：D1（<105.3%）三 server 共 14 个、D2（<125%）共 21 个账户在危险区。每 tick 全表扫描候选 < 900 行，极便宜。信号量健全（非空、非刷屏）。
+>
+> **新增发现 → 坐实 OQ#4**：Q3 里 ML 最低的全是 cent 小账户（净值 $2–50，部分 `MARGIN_FREE` 已负、ML 跌破止损线未平）= 噪声。真正有意义的危险账户从净值 $150+ 起。→ **`min_equity_usd` 过滤是必须的**（类比 Gap Trade rule 81 的 `min_net_deposit_hist`）。
+>
+> 预飞行 SQL 原文见下方 Q1/Q2，诊断用的桶分布 / 危险行新鲜度 / 阈值计数三条补充查询留在 session 记录。
 
 ### Q1 — MT5 sid 行的 MARGIN / MARGIN_LEVEL 是否被 CRM 同步填充？
 
