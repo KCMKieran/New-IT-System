@@ -169,6 +169,20 @@ def _stub_scan_funcs(monkeypatch, burst_called, qoc_called, qp_called):
             "_universe_pairs": {("MT4_Live", 4)},
         }
 
+    # Leverage Abuse (rule_id 101-110, OPT-0030) joined the slow tier; stub it
+    # too so the detector set is deterministic (the real scan reaches MySQL +
+    # emits nondeterministic rule_id 101 snapshot alerts). Runs in 'all' and
+    # 'slow', skipped in 'fast_burst'.
+    def fake_leverage(*a, **kw):
+        return {
+            "alerts": [{"rule_id": 101, "server": "MT4_Live", "login": 5,
+                        "symbol": "", "first_open": None}],
+            "summary": {"suspicious_count": 1, "total_accounts_scanned": 1},
+            "scan_time_ms": 6,
+            "scanned_at": "2026-05-16T00:00:00Z",
+            "_universe_pairs": {("MT4_Live", 5)},
+        }
+
     monkeypatch.setattr(
         "app.services.risk_monitor_service.scan_burst_open", fake_burst,
     )
@@ -181,6 +195,9 @@ def _stub_scan_funcs(monkeypatch, burst_called, qoc_called, qp_called):
     monkeypatch.setattr(
         "app.services.rule_hedge_open_service.scan_hedge_open", fake_hedge,
     )
+    monkeypatch.setattr(
+        "app.services.rule_leverage_abuse_service.scan_leverage_abuse", fake_leverage,
+    )
 
 
 def test_run_scan_all_runs_all_three(monkeypatch, temp_db):
@@ -191,9 +208,9 @@ def test_run_scan_all_runs_all_three(monkeypatch, temp_db):
 
     assert burst_called and qoc_called and qp_called
     assert bs._latest_result is not None
-    # All 4 detectors present (burst=1, QOC=51, QP=61, hedge=91)
+    # All 5 detectors present (burst=1, QOC=51, QP=61, hedge=91, leverage=101)
     rule_ids = {a["rule_id"] for a in bs._latest_result["alerts"]}
-    assert rule_ids == {1, 51, 61, 91}
+    assert rule_ids == {1, 51, 61, 91, 101}
 
 
 def test_run_scan_fast_burst_runs_only_burst(monkeypatch, temp_db):
@@ -229,7 +246,7 @@ def test_run_scan_fast_burst_preserves_slow_tier_alerts(monkeypatch, temp_db):
     bs._run_scan(tier="all")
     assert bs._latest_result is not None
     initial_rule_ids = sorted(a["rule_id"] for a in bs._latest_result["alerts"])
-    assert initial_rule_ids == [1, 51, 61, 91]
+    assert initial_rule_ids == [1, 51, 61, 91, 101]
 
     # Reset call counters and re-stub (burst only returns slightly different)
     burst_called.clear(); qoc_called.clear(); qp_called.clear()
@@ -241,6 +258,7 @@ def test_run_scan_fast_burst_preserves_slow_tier_alerts(monkeypatch, temp_db):
     assert 51 in rule_ids  # QOC retained from prior cycle
     assert 61 in rule_ids  # QP retained from prior cycle
     assert 91 in rule_ids  # hedge (slow tier, rule_id >= 51) retained too
+    assert 101 in rule_ids  # leverage abuse (slow tier) retained too
 
 
 def test_run_scan_slow_preserves_burst_alerts(monkeypatch, temp_db):

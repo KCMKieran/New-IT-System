@@ -92,6 +92,45 @@ class HedgeOpenConfig(BaseModel):
     rules: List[HedgeOpenRule] = []
 
 
+# Leverage Abuse detection (滥用杠杆, rule_ids 101-110).
+# Risk-monitor's FIRST snapshot/state rule: instead of scanning a trade/deal
+# event stream over a time window, it reads the MT-server-maintained
+# MARGIN_LEVEL straight off the fxbackoffice.mt4_users account snapshot. An
+# account whose margin level is low is using most of its equity as margin =
+# sitting at the Margin-Call edge with a large open exposure — the core B-book
+# pre-blowup signal.
+#
+# margin_ratio (used_margin / equity) and MARGIN_LEVEL (equity / margin × 100)
+# are reciprocals, so "保证金用满 95%" ⟺ MARGIN_LEVEL < 105.3% and "用满 80%"
+# ⟺ MARGIN_LEVEL < 125%. We threshold directly on MARGIN_LEVEL (the number the
+# MT terminal shows). MARGIN > 0 is enforced in the SQL because MT reports
+# MARGIN_LEVEL = 0 for accounts with no open positions (would false-positive
+# every flat account otherwise). No severity tier — two named rules (D1 instant
+# / D2 sustained) differentiated by threshold + streak only.
+class LeverageAbuseRule(BaseModel):
+    id: Optional[int] = None
+    # Free-text rule name (fund-flow / hedge-open style). Snapshot into
+    # AlertEvent.rule_label as f"Rule {idx} — {name}" at trigger time.
+    name: str = Field(min_length=1, max_length=100)
+    enabled: bool = True
+    # Trigger when MARGIN_LEVEL < this (percent). 105.3 ≈ used-margin 95% of
+    # equity (D1 instant); 125 ≈ 80% (D2 sustained). Lower = more dangerous.
+    max_margin_level: float = Field(default=125.0, ge=10.0, le=1000.0)
+    # Consecutive scans the account must stay below max_margin_level before an
+    # alert fires. 1 = fire immediately (D1). 3 = sustained (D2); at the slow
+    # tier's shared scan_interval_min (currently 5min) that's ~15 min sustained.
+    streak_min: int = Field(default=1, ge=1, le=20)
+    # Drop accounts whose equity (USD, CEN already ÷100) is below this so
+    # cent-dust micro-accounts (a $5 account momentarily at 100% margin level)
+    # don't flood the alert list. Mirrors Gap Trade's min_net_deposit_hist.
+    min_equity_usd: float = Field(default=100.0, ge=0.0, le=10_000_000.0)
+
+
+class LeverageAbuseConfig(BaseModel):
+    enabled: bool = True
+    rules: List[LeverageAbuseRule] = []
+
+
 # ── Gap Trade (rule_ids 71-90) ────────────────────────────
 # Two sub-detectors share one config + scheduled scan window (MT 00:00–02:00
 # Mon–Fri). Sub-detector A finds Stop-out trades and pairs them with a
@@ -300,6 +339,17 @@ class AlertEvent(BaseModel):
     sell_lots: Optional[float] = None
     window_start: Optional[str] = None                # ISO8601 UTC (first OPEN_TIME in window)
     window_end: Optional[str] = None                  # ISO8601 UTC (last OPEN_TIME in window)
+    # ── Leverage Abuse extras (rule_ids 101-110) ──
+    # Account-level snapshot frozen at scan time (NOT recomputed on read).
+    # margin_level is the trigger metric; margin_used / free_margin are
+    # context. streak_count = how many consecutive scans the account has
+    # stayed below the rule's threshold (1 for D1; ≥ streak_min for D2).
+    # margin_used / free_margin / equity are CEN-normalised (÷100) like equity;
+    # margin_level is a ratio so it needs no CEN conversion.
+    margin_level: Optional[float] = None              # MARGIN_LEVEL % at scan time
+    margin_used: Optional[float] = None               # MARGIN (USD, CEN ÷100)
+    free_margin: Optional[float] = None               # MARGIN_FREE (USD, CEN ÷100)
+    streak_count: Optional[int] = None                # consecutive dangerous scans
 
 
 class AlertsResponse(BaseModel):
