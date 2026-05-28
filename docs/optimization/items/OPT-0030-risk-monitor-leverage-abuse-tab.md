@@ -74,7 +74,23 @@ MARGIN_LEVEL = EQUITY / MARGIN × 100  ← 健康度（越小越危险）
 | OPT-0011 cursor 模式 | 适用 | **不适用**（非 append-only） |
 | Dedup key | (rule_id, server, login, symbol, first_open) | (rule_id, server, login) + 冷却 |
 | 跨扫描状态 | 无（QP elapsed-time dedup 除外） | **D2 需要 `account_leverage_streak` 表**（连续扫描计数） |
-| "立即扫描" 按钮 | burst / QOC 有 | 无（同 Hedge Open / Gap Trade —— investigative） |
+| "立即扫描" 按钮 | burst / QOC 有 | **有**（snapshot 即"当前状态"，按需刷新有意义；走共享 `/burst-open/scan-now`） |
+| 聚合视图 | hedge 有 | **无**（账户级快照天然一账户一行，dedup 已折叠，无需聚合） |
+| severity 分级 | 无 | **无**（用户决策 2026-05-28：分级标准易让人困惑，只把 `margin_level` 显示清楚即可） |
+
+### 扫描间隔（detection cadence）
+
+挂在 **slow tier**，cadence = 共享的 `burst_open_config.scan_interval_min`，**当前线上 = 5 分钟**（范围 5–60，所有 slow-tier detector 共用这一个值，不单独配）。**不进** 60s fast tier（那是 burst 专用；CRM 快照本身刷新没那么快，60s 无意义）。
+- 含义：**D2「连续 3 次扫描」≈ 持续 15 分钟**满足高杠杆才触发（3 × 5min）。这跟 Q2 采纳的 `MODIFY_TIME >= NOW()-INTERVAL 15 MINUTE` 新鲜度闸正好对齐（15min 覆盖 3 个 tick）。
+- 改 `scan_interval_min` 会同时改变 D2 的"持续时长"语义——文档要写明这层耦合。
+- 另有「立即扫描」按需触发（tier='all'，会带上本 detector）。
+
+### 🔒 Scope 决策（2026-05-28 用户拍板 — claim 时按这版落地）
+
+1. **去掉 severity** — 不要 severity 字段 / badge / 配色。两个 tier 仅靠 `rule_label`（"瞬时满杠杆" / "持续高杠杆"）+ 各自 `max_margin_level` 阈值区分。
+2. **保留「立即扫描」** — 走共享 `/burst-open/scan-now`，前提是 detector 挂进 `_run_scan` 的 `'all'` + `'slow'` tier。
+3. **砍掉聚合视图** — 前端拷 HedgeOpenTab 时删 `aggregated` toggle / `aggregatedColumnDefs` / 第二套 persist key / agg sort。
+4. **`symbol` 占位语义**（主表 `symbol`/`order_count`/`total_lots` 是 NOT NULL 且为"交易事件"设计）：账户级快照填 `symbol=""`、`order_count`=持仓笔数（或 0）、`total_lots`=总持仓手数、`first_open`/`last_open`=NULL；margin 三件套 + streak 进 detail 表。**service 注释必须写明**，否则后人困惑"为何这条 alert 没 symbol"。
 
 ### Rule ID 号段
 
@@ -147,23 +163,25 @@ GROUP BY sid;
 - [ ] 新 service `backend/app/services/rule_leverage_abuse_service.py`，包含 `detect_leverage_abuse(users_snapshot, rules, *, streak_state)`（snapshot-scan 模式，**不**走 mt4_trades）
 - [ ] 单条 SELECT 拉 `fxbackoffice.mt4_users` 候选行（按 Q1 结果决定是否仅限 MT4 sid），过滤 `GROUP NOT LIKE '%demo%'` + `sid IN (allow-list)` + `LOGIN NOT LIKE '7%'` + `MARGIN > 0` + `MARGIN_LEVEL < max(rules.threshold)`
 - [ ] D2 状态表 `account_leverage_streak`（SQLite）：`(rule_id, server, login)` PK + `consecutive_count` + `last_seen_scan_id` + `last_alert_at`
-- [ ] 注册到 `burst_open_scheduler._run_scan()` slow tier（不进 fast tier — 不需要 60s 粒度；CRM 快照本身没那么新）
+- [ ] 注册到 `burst_open_scheduler._run_scan()` 的 **`'slow'` + `'all'` 两个 tier**（slow = 常规 5min cadence；all = 让「立即扫描」`scan-now`(tier='all') 能带上本 detector）。**不进** fast tier
 - [ ] Rule ID 常量 `LEVERAGE_ABUSE_RULE_ID_BASE = 101` / `LEVERAGE_ABUSE_RULE_ID_MAX = 110`；rule_id override 测试（OPT-0008-class guard）
-- [ ] AlertEvent 新字段：`margin_level`、`margin_used`、`margin_free`、`streak_count`（D2 用）；通过 `alert_leverage_abuse_detail` 表 1:1 JOIN（同 OPT-0008 拆 detail 表模式）
-- [ ] Pydantic `LeverageAbuseConfig`：master enable + max 10 rules，每条 `name` (fund-flow 风格 OPT-0021) + `enabled` + `max_margin_level` (默认 D1=105.3 / D2=125) + `streak_min` (默认 D1=1 / D2=3) + `severity` (medium/high)
-- [ ] API：`GET/POST /api/v1/risk-monitor/leverage-abuse/config` + `GET /alerts` + `GET /alerts/stats` + `GET /alerts/export`
-- [ ] Pytest 覆盖：snapshot scan 基线 / streak 状态机连续 3 次触发 / MARGIN=0 守卫（空仓不触发）/ CEN 比例免疫 / rule_id override / D1 + D2 两条规则并存 / per-rule disabled / 阈值边界
+- [ ] 主表 `alert_events` 写入遵守 snapshot-freeze（检测时刻冻结，读取不重算）：`symbol=""` / `order_count`=持仓笔数 / `total_lots`=总持仓手数 / `first_open`=`last_open`=NULL（见 §Scope 决策 4）
+- [ ] AlertEvent 新字段：`margin_level`、`margin_used`、`margin_free`、`streak_count`（D2 用）；冻结进 `alert_leverage_abuse_detail` 表，1:1 JOIN（同 OPT-0008 拆 detail 表模式）。**无 `severity` 字段**
+- [ ] Pydantic `LeverageAbuseConfig`：master enable + max 10 rules，每条 `name` (fund-flow 风格 OPT-0021) + `enabled` + `max_margin_level` (默认 D1=105.3 / D2=125) + `streak_min` (默认 D1=1 / D2=3) + `min_equity_usd` (默认 100，滤 cent-dust 假阳)。**无 `severity`**
+- [ ] API：`GET/POST /api/v1/risk-monitor/leverage-abuse/config` + `GET /alerts` + `GET /alerts/stats` + `GET /alerts/export`（**无 aggregated**）
+- [ ] Pytest 覆盖：snapshot scan 基线 / streak 状态机连续 3 次触发 + 回升清零 / MARGIN=0 守卫（空仓不触发）/ CEN 比例免疫 / rule_id override / D1 + D2 两条规则并存 / per-rule disabled / 阈值边界 / `min_equity_usd` 过滤 / 冷却 dedup（同账户不每 tick 重报）
 
 ### Frontend (`RiskMonitor.tsx`)
 
-- [ ] 新增第 6 个 tab「滥用杠杆」（建议放「对冲刷单」与「Gap Trade」之间，按 severity 顺序）
-- [ ] 列：`rule_label` / `scanned_at` / `server` / `login` (CRM link) / `currency` / `group` / `equity` / `margin_used` / `margin_free` / `margin_level` (带颜色：<105% 红 / 105–125% 琥 / 其他 灰) / `streak_count` (D2 才有) / `leverage` / `net_deposit_hist`
-- [ ] `useGridColumnPersist` (key `RISK_MONITOR_LEVERAGE_ABUSE_GRID_STATE_V1`) + `<ColumnVisibilityMenu>`（OPT-0015）
+- [ ] 新增第 6 个 tab「滥用杠杆」（放「对冲刷单」与「Gap Trade」之间）；`TabsList` `grid-cols-5`→`grid-cols-6` + `RISK_MONITOR_TABS` 数组 + `isRiskMonitorTab` guard 同步
+- [ ] 拷 `HedgeOpenTab` 为模板，**删掉聚合视图**（`aggregated` toggle / `aggregatedColumnDefs` / 第二套 persist key / agg sort）+ 无 detail sheet
+- [ ] 列：`rule_label` / `scanned_at` / `server` / `login` (CRM link, 用 userId) / `currency` (badge) / `group` / `equity` / `margin_used` / `margin_free` / `margin_level` (**带颜色：<105% 红 / 105–125% 琥 / 其他 灰** — 这是用户唯一要求"显示清楚"的列) / `streak_count` (D2 才有) / `leverage` / `net_deposit_hist` (用 `netDepositColDef` 工厂)。**无 severity 列**
+- [ ] `useGridColumnPersist` (key `RISK_MONITOR_LEVERAGE_ABUSE_GRID_STATE_V1`，注册进 `GRID_STORAGE_KEYS`) + `<ColumnVisibilityMenu>`（OPT-0015）
 - [ ] `useFilterPersist` (key `RISK_MONITOR_LEVERAGE_ABUSE_FILTERS_V1`)（OPT-0025 — rangePreset / ruleFilter / serverFilter 持久化；`loginInput` / `zipcodeInput` **不**持久化）
-- [ ] Per-rule summary cards（D1 / D2 各一张，by `AlertsStats.by_rule`）
-- [ ] Config drawer：master enable + rule rows（name / enabled / max_margin_level / streak_min / severity）
-- [ ] CSV export
-- [ ] **没有「立即扫描」按钮**（snapshot scan 跟 Gap Trade / Hedge Open 一致）
+- [ ] Per-rule summary cards（D1 / D2 各一张，by `AlertsStats.by_rule`；单 rule 也用 `grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4` **不居中**）
+- [ ] Config drawer：master enable（label 左 + Checkbox 右 + 一句 hint）+ rule rows（name / enabled / max_margin_level / streak_min / min_equity_usd）。**无 severity**
+- [ ] CSV export（复用 `_csv_stream`）
+- [ ] **保留「立即扫描」按钮**（走共享 `/burst-open/scan-now`；snapshot=当前状态，按需刷新有意义）
 
 ### Docs / Skill
 
@@ -176,7 +194,7 @@ GROUP BY sid;
 
 1. **预飞行（idea → ready 的 gate）**：跑 Q1 + Q2 两条 SQL，回填本文件「假设」段实际结果。两条结论合格才能 claim。
 2. Backend service + schema + db migration（snapshot scan + streak state 是核心 — 参考 OPT-0021 的 service / detail 表模式 + 抄 quick-profit dedup 的 elapsed-time 思想做冷却）
-3. API + scheduler 注册（slow tier only）
+3. API + scheduler 注册（slow tier 常规 + all tier 供 scan-now）
 4. Pytest（重点：streak 状态机 + MARGIN=0 守卫 + rule_id override）
 5. Frontend tab（拷 Hedge Open tab 骨架最相近）
 6. Docs + skill 同步
@@ -188,10 +206,17 @@ GROUP BY sid;
 - [[OPT-0008]] — alert_events 拆 detail 表的模式（rule-specific 字段不进主表 23 列共有字段）
 - [[OPT-0011]] cursor scan — 本规则**不适用**（snapshot 非 append-only），需在 service 注释 + 文档明确指出
 
-## Open Questions（实施期再答）
+## Open Questions
 
+**已决（2026-05-28）**：
+- ✅ severity → **不做**（用户决策）。
+- ✅ 立即扫描 → **保留**；聚合视图 → **砍掉**。
+- ✅ 阈值字段语义 → 用 **MARGIN_LEVEL %**（105 / 125），不暴露裸 ratio（MT 终端就是这个数，分析师直觉一致）。
+- ✅ `min_equity_usd` → **做**，默认 100，进 config（预飞行 Q3 坐实 cent-dust 噪声）。
+- ✅ 扫描间隔 → slow tier 共享 `scan_interval_min`（线上 5min）；D2 连续 3 次 ≈ 持续 15min。
+
+**实施期再答**：
 1. D2 streak 状态表放 SQLite（小、与 alert_events 同库、跨重启稳）还是内存（重启重置可能误判）？**倾向 SQLite**。
-2. snapshot scan 是否共享 `_scan_lock`？snapshot scan 跟 mt4_trades scan 共写 alert_events，需要走同一把锁 —— **是**。
-3. 阈值字段语义：给用户直观的"危险线 MARGIN_LEVEL %"（105 / 125）还是裸 ratio（0.95 / 0.80）？**倾向 MARGIN_LEVEL %**（MT 终端就是这个数）。
-4. 是否需要 `min_equity_usd` 过滤掉极小账户的假阳（10 美金账户瞬时 MARGIN_LEVEL 100% 没业务意义）？类比 Gap Trade rule 81 的 `min_net_deposit_hist` 100。
-5. 同一账户跨扫描的冷却时间是固定常量还是 per-rule 可配？参考 QP elapsed-time dedup 模式。
+2. snapshot scan 共享 `_scan_lock`？跟 mt4_trades scan 共写 alert_events → **是**。
+3. 同一账户冷却时间固定常量还是 per-rule 可配？参考 QP elapsed-time dedup；**倾向先固定常量**（= 1 个 scan_interval），简单。
+4. streak 状态表的清理：账户回升到安全区后是 reset count 还是删行？删行更省空间但失去"刚刚还危险"的痕迹——倾向 reset count 保留行 + 加 `last_dangerous_at`。
