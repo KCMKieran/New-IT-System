@@ -636,7 +636,7 @@ def _csv_stream(
     header: list[str] = _EXPORT_CSV_HEADER,
     row_fn=_csv_row_from_alert,
     time_field: str = "scanned_at",
-    leverage: Optional[int] = None,
+    leverage: Optional[list[int]] = None,
 ) -> Iterator[str]:
     """Yield the CSV response one row at a time.
 
@@ -1937,7 +1937,7 @@ async def leverage_abuse_alerts(
     login: Optional[int] = Query(default=None),
     symbol: Optional[str] = Query(default=None),
     rule_id: Optional[int] = Query(default=None),
-    leverage: Optional[int] = Query(default=None),
+    leverage: Optional[list[int]] = Query(default=None),
     zipcode: Optional[str] = Query(default=None, max_length=64),
     page: Optional[int] = Query(default=None, ge=1),
     page_size: int = Query(default=50, ge=1, le=_MAX_PAGE_SIZE),
@@ -1998,7 +1998,7 @@ async def leverage_abuse_alerts_stats(
     until: Optional[str] = Query(default=None),
     server: Optional[str] = Query(default=None),
     login: Optional[int] = Query(default=None),
-    leverage: Optional[int] = Query(default=None),
+    leverage: Optional[list[int]] = Query(default=None),
     zipcode: Optional[str] = Query(default=None, max_length=64),
 ):
     since_iso, until_iso = _default_since_until(since, until)
@@ -2032,7 +2032,7 @@ async def leverage_abuse_alerts_export(
     login: Optional[int] = Query(default=None),
     symbol: Optional[str] = Query(default=None),
     rule_id: Optional[int] = Query(default=None),
-    leverage: Optional[int] = Query(default=None),
+    leverage: Optional[list[int]] = Query(default=None),
     zipcode: Optional[str] = Query(default=None, max_length=64),
     sort_by: Optional[str] = Query(default=None),
     sort_order: Optional[str] = Query(default=None),

@@ -76,17 +76,23 @@ def test_query_alert_events_filters_by_leverage(rmdb_client):
     assert all_total == 2
 
     only_1000, total_1000 = rmdb.query_alert_events(
-        since, until, rule_id_min=101, rule_id_max=110, leverage=1000,
+        since, until, rule_id_min=101, rule_id_max=110, leverage=[1000],
     )
     assert total_1000 == 1
     assert only_1000[0]["leverage"] == 1000
     assert only_1000[0]["login"] == 1002
 
     only_400, total_400 = rmdb.query_alert_events(
-        since, until, rule_id_min=101, rule_id_max=110, leverage=400,
+        since, until, rule_id_min=101, rule_id_max=110, leverage=[400],
     )
     assert total_400 == 1
     assert only_400[0]["leverage"] == 400
+
+    # multi-select: both tiers → IN (...) returns both
+    both, total_both = rmdb.query_alert_events(
+        since, until, rule_id_min=101, rule_id_max=110, leverage=[400, 1000],
+    )
+    assert total_both == 2
 
 
 def test_endpoint_filters_by_leverage(rmdb_client):
@@ -104,6 +110,11 @@ def test_endpoint_filters_by_leverage(rmdb_client):
     body = r_1000.json()
     assert body["total"] == 1
     assert body["entries"][0]["leverage"] == 1000
+
+    # multi-select via repeated query param
+    r_multi = client.get(f"{base}?{qs}&leverage=1000&leverage=400")
+    assert r_multi.status_code == 200
+    assert r_multi.json()["total"] == 2
 
 
 def test_stats_filters_by_leverage(rmdb_client):

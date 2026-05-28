@@ -54,6 +54,12 @@ import {
 } from "@/components/ui/popover";
 import { Calendar } from "@/components/ui/calendar";
 import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuCheckboxItem,
+} from "@/components/ui/dropdown-menu";
+import {
   RefreshCw,
   Search,
   Plus,
@@ -63,6 +69,7 @@ import {
   Calendar as CalendarIcon,
   Download,
   Layers,
+  ChevronDown,
 } from "lucide-react";
 import { AgGridReact } from "ag-grid-react";
 import { ColDef, GridApi, SortChangedEvent } from "ag-grid-community";
@@ -889,13 +896,23 @@ const DEFAULT_STANDARD_FILTERS: StandardTabFilters = {
   serverFilter: "all",
 };
 
-// 滥用杠杆 tab adds a leverage filter (account leverage tier). Default 1:1000
-// — the riskiest tier the desk watches most closely. Persisted per OPT-0025.
-type LeverageAbuseFilters = StandardTabFilters & { leverageFilter: string };
+// 滥用杠杆 tab adds a leverage filter (account leverage tiers, multi-select).
+// Default [1:1000] — the riskiest tier the desk watches most. Empty = all
+// tiers. Persisted per OPT-0025.
+const LEVERAGE_TIERS = ["1000", "400", "200", "100"] as const;
+type LeverageAbuseFilters = StandardTabFilters & { leverageFilter: string[] };
 const DEFAULT_LEVERAGE_ABUSE_FILTERS: LeverageAbuseFilters = {
   ...DEFAULT_STANDARD_FILTERS,
-  leverageFilter: "1000",
+  leverageFilter: ["1000"],
 };
+
+/** Coerce a persisted leverage filter to string[]; migrates the old
+ *  single-select string value ("1000") to ["1000"]. */
+function coerceLeverageFilter(v: unknown): string[] {
+  if (Array.isArray(v)) return v.map(String);
+  if (typeof v === "string" && v) return [v];
+  return [];
+}
 
 type GapTradeFilters = {
   rangePreset: GapTradeDayRange;
@@ -6041,10 +6058,22 @@ function LeverageAbuseTab({ active }: { active: boolean }) {
   const [savingConfig, setSavingConfig] = useState(false);
 
   const [ruleFilter, setRuleFilter] = useState<string>(persistedFilters.ruleFilter);
-  // Leverage tier filter ("all" | "100" | "200" | "400" | "1000"). Default 1000.
-  const [leverageFilter, setLeverageFilter] = useState<string>(
-    persistedFilters.leverageFilter,
+  // Leverage tier filter — multi-select array of tiers (e.g. ["1000","400"]).
+  // Empty = all tiers. Default ["1000"]. Coerce migrates the old single-select.
+  const [leverageFilter, setLeverageFilter] = useState<string[]>(() =>
+    coerceLeverageFilter(persistedFilters.leverageFilter),
   );
+  const toggleLeverage = useCallback((tier: string) => {
+    setLeverageFilter((prev) =>
+      prev.includes(tier) ? prev.filter((t) => t !== tier) : [...prev, tier],
+    );
+  }, []);
+  const leverageLabel =
+    leverageFilter.length === 0 || leverageFilter.length === LEVERAGE_TIERS.length
+      ? "全部杠杆"
+      : leverageFilter.length === 1
+        ? `1:${leverageFilter[0]}`
+        : `已选 ${leverageFilter.length} 档`;
 
   const [pageIndex, setPageIndex] = useState(0);
   const pageSize = isMobile ? 20 : 50;
@@ -6096,7 +6125,7 @@ function LeverageAbuseTab({ active }: { active: boolean }) {
     (range: { since: string; until: string }) => {
       const qs = new URLSearchParams({ since: range.since, until: range.until });
       if (serverFilter !== "all") qs.set("server", serverFilter);
-      if (leverageFilter !== "all") qs.set("leverage", leverageFilter);
+      leverageFilter.forEach((lev) => qs.append("leverage", lev));
       if (loginQuery) qs.set("login", loginQuery);
       if (zipcodeQuery) qs.set("zipcode", zipcodeQuery);
       return qs;
@@ -6553,21 +6582,30 @@ function LeverageAbuseTab({ active }: { active: boolean }) {
             ))}
           </SelectContent>
         </Select>
-        <Select value={leverageFilter} onValueChange={setLeverageFilter}>
-          <SelectTrigger
-            className="w-full min-w-0 h-9 sm:w-40 sm:shrink-0"
-            aria-label="按杠杆筛选"
-          >
-            <SelectValue placeholder="杠杆" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">全部杠杆</SelectItem>
-            <SelectItem value="1000">1:1000</SelectItem>
-            <SelectItem value="400">1:400</SelectItem>
-            <SelectItem value="200">1:200</SelectItem>
-            <SelectItem value="100">1:100</SelectItem>
-          </SelectContent>
-        </Select>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              variant="outline"
+              aria-label="按杠杆筛选（可多选）"
+              className="w-full min-w-0 h-9 sm:w-40 sm:shrink-0 justify-between font-normal"
+            >
+              <span className="truncate">{leverageLabel}</span>
+              <ChevronDown className="h-4 w-4 opacity-50 shrink-0" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start" className="w-40">
+            {LEVERAGE_TIERS.map((tier) => (
+              <DropdownMenuCheckboxItem
+                key={tier}
+                checked={leverageFilter.includes(tier)}
+                onCheckedChange={() => toggleLeverage(tier)}
+                onSelect={(e) => e.preventDefault()}
+              >
+                1:{tier}
+              </DropdownMenuCheckboxItem>
+            ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
         <Select
           value={rangePreset}
           onValueChange={(v) => {
