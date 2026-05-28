@@ -1,7 +1,7 @@
 ---
 id: OPT-0030
 title: 滥用杠杆 (Leverage Abuse) tab — risk-monitor 第 6 个检测规则
-status: wip
+status: done
 priority: P1
 area: mixed
 effort: M
@@ -220,3 +220,22 @@ GROUP BY sid;
 2. snapshot scan 共享 `_scan_lock`？跟 mt4_trades scan 共写 alert_events → **是**。
 3. 同一账户冷却时间固定常量还是 per-rule 可配？参考 QP elapsed-time dedup；**倾向先固定常量**（= 1 个 scan_interval），简单。
 4. streak 状态表的清理：账户回升到安全区后是 reset count 还是删行？删行更省空间但失去"刚刚还危险"的痕迹——倾向 reset count 保留行 + 加 `last_dangerous_at`。
+
+## 结果（done 2026-05-28）
+
+**交付 vs AC**：全部达成。后端 schema / DB（`alert_leverage_abuse_detail` + `account_leverage_streak` 状态表）/ service（snapshot scan + D1/D2 + streak 机）/ scheduler（slow + all tier）/ 5 endpoints；前端第 6 个 tab（拷 HedgeOpenTab 砍聚合视图）+ config drawer + 列/过滤器持久化。`verify.sh` PASS（后端 146 测试 + tsc + vitest 48）。实施期 4 个 open question 落地：(1) SQLite ✓ (2) 共享 `_scan_lock` ✓ (3) 固定 1h 冷却 ✓ (4) 保留行 + `miss_count` 宽限（比原计划的 reset 更稳）。
+
+**实现要点（与原设计差异）**：预飞行发现 `mt4_users.MARGIN_LEVEL` 现成 → 不建 `symbol_contract`、不算 `required_margin`，effort L→M。阈值直接落在 `MARGIN_LEVEL`（105.3 / 125）。15min `MODIFY_TIME` 新鲜度闸兼做 `IDX_MODIFY_TIME` 索引裁剪。`symbol=""` 等占位填充 trade-shaped 共有列。
+
+**Stage 1 outsider-review 处理记录**（8 finding）：
+- A（streak 漏扫一次被清零 + 新鲜度闸与扫描间隔解耦）→ **当场修**：新增 `miss_count` 宽限窗（缺席 ≤2 次冻结 streak 不清零）+ 新鲜度 `max(15, interval+5)`。commit `9b14ea4`。
+- B（改/删规则后 streak 错配，因 rule_id 是位置式）→ **当场修**：`save_leverage_abuse_config` 清空 streak 表。commit `9b14ea4`。
+- C（snapshot SQL 无 LIMIT + 索引未验证）→ **当场修**：防御性 `LIMIT 5000` + 命中告警 + EXPLAIN 注释。commit `9b14ea4`。
+- #4（streak save 与 alert write 跨事务，崩溃丢一条 alert）→ **live with**：毫秒级崩溃窗 × 后果是晚 1h 重发（账户仍危险），概率×影响极低。未来若做严格一致性再收。
+- #6（占位 `symbol=""` 污染共享 alert_events 读取，特别是 QP dedup）→ **live with**：reviewer 看错——QP dedup 按 rule_id 段(61-70)取，杠杆行 101-110 进不了；空 symbol 索引无害。占位契约已在 service docstring + 本文档写明。
+- #7（冷却用墙钟、无单调保护）→ **live with**：失败方向偏"立即重报"（安全），NTP 回拨极低概率。
+- #8（前端 `MarginLevelCell` 硬编码 105.3/125 阈值，与可配规则脱节）→ **live with**：那是"距强平危险带"视觉提示而非规则阈值回显；默认规则恰为 105.3/125。
+
+**Follow-up（未来若需要）**：实时 margin 值（照 QP floating-refresh 模式做只读 endpoint，v2）；跨事务一致性（#4）；前端色带跟随配置（#8）。
+
+**未做**：浏览器肉眼验收（环境无浏览器工具，仅 tsc/build/dev-200 验证）——交付给用户在 `http://10.6.20.138:5173/risk-monitor` 看第 6 个 tab。

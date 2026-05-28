@@ -43,6 +43,8 @@ SORTABLE_ALERT_COLS: frozenset[str] = frozenset({
     # Hedge Open columns (rule 91-100)
     "buy_count", "sell_count", "buy_lots", "sell_lots",
     "window_start", "window_end",
+    # Leverage Abuse columns (rule 101-110)
+    "margin_level", "margin_used", "free_margin", "streak_count",
     # Frontend alias for the `account_group` DB column. We map it in
     # `_resolve_alert_order` so the API stays consistent with the
     # field name the React component already uses.
@@ -104,6 +106,11 @@ _SORT_COL_DB_NAME: dict[str, str] = {
     "sell_lots":    "ho.sell_lots",
     "window_start": "ho.window_start",
     "window_end":   "ho.window_end",
+    # Leverage Abuse detail (rule 101-110)
+    "margin_level": "la.margin_level",
+    "margin_used":  "la.margin_used",
+    "free_margin":  "la.free_margin",
+    "streak_count": "la.streak_count",
 }
 
 _DB_PATH = Path(__file__).resolve().parents[2] / "data" / "risk_monitor.db"
@@ -355,6 +362,58 @@ CREATE TABLE IF NOT EXISTS scan_cursors (
     updated_at  TEXT NOT NULL,
     PRIMARY KEY (rule_type, server)
 );
+
+-- Leverage Abuse (滥用杠杆, rule_ids 101-110). Single-row enabled flag +
+-- rules table, same shape as hedge_open. No cursor table — this rule is a
+-- snapshot scan of fxbackoffice.mt4_users, not an append-only event stream.
+CREATE TABLE IF NOT EXISTS leverage_abuse_config (
+    id          INTEGER PRIMARY KEY CHECK (id = 1),
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    updated_at  DATETIME
+);
+INSERT OR IGNORE INTO leverage_abuse_config (id) VALUES (1);
+
+CREATE TABLE IF NOT EXISTS leverage_abuse_rules (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    name              TEXT    NOT NULL DEFAULT '',
+    enabled           INTEGER NOT NULL DEFAULT 1,
+    max_margin_level  REAL    NOT NULL DEFAULT 125.0,
+    streak_min        INTEGER NOT NULL DEFAULT 1,
+    min_equity_usd    REAL    NOT NULL DEFAULT 100.0,
+    sort_order        INTEGER NOT NULL DEFAULT 0
+);
+
+-- Detail table for Leverage Abuse (rule_id 101-110). Account-level snapshot
+-- frozen at scan time, 1:1 with alert_events by id.
+CREATE TABLE IF NOT EXISTS alert_leverage_abuse_detail (
+    id            INTEGER PRIMARY KEY,
+    margin_level  REAL,
+    margin_used   REAL,
+    free_margin   REAL,
+    streak_count  INTEGER
+);
+
+-- Cross-scan streak state for the D2 "sustained N consecutive scans" tier.
+-- One row per (rule_id, server, login) currently below that rule's
+-- max_margin_level. Rows for accounts that recover are dropped each scan
+-- (full-set replace; the table is tiny — well under ~50 rows in practice).
+-- last_alert_at drives the per-account cooldown so a still-dangerous account
+-- doesn't re-alert on every tick.
+CREATE TABLE IF NOT EXISTS account_leverage_streak (
+    rule_id        INTEGER NOT NULL,
+    server         TEXT    NOT NULL,
+    login          INTEGER NOT NULL,
+    streak_count   INTEGER NOT NULL DEFAULT 0,
+    -- Consecutive scans this account was NOT in the candidate set while its
+    -- streak row still exists. A transient replica blip / freshness-window
+    -- miss shouldn't instantly reset a building D2 streak, so we tolerate up
+    -- to GRACE_MISSES misses (frozen streak) before dropping the row.
+    miss_count     INTEGER NOT NULL DEFAULT 0,
+    last_margin_level REAL,
+    last_alert_at  TEXT,
+    updated_at     TEXT    NOT NULL,
+    PRIMARY KEY (rule_id, server, login)
+);
 """
 
 # Default rule seeded on first run (3s / 3 orders / 5 lots)
@@ -387,6 +446,18 @@ INSERT INTO hedge_open_rules
 VALUES ('默认对冲检测', 1, 3, 1, 0.01, 0);
 """
 
+# Default Leverage Abuse rules: D1 instant (MARGIN_LEVEL < 105.3 ≈ used-margin
+# 95% of equity, fires on a single scan) + D2 sustained (< 125 ≈ 80%, needs 3
+# consecutive scans ≈ 15 min at a 5-min cadence). Both filter out cent-dust
+# accounts below $100 equity.
+_SEED_LEVERAGE_ABUSE_RULE_SQL = """
+INSERT INTO leverage_abuse_rules
+    (name, enabled, max_margin_level, streak_min, min_equity_usd, sort_order)
+VALUES
+    ('瞬时满杠杆', 1, 105.3, 1, 100.0, 0),
+    ('持续高杠杆', 1, 125.0, 3, 100.0, 1);
+"""
+
 
 def init_risk_monitor_db() -> None:
     """Create tables if they don't exist. Seed default rule on first run.
@@ -412,13 +483,17 @@ def init_risk_monitor_db() -> None:
         ho_count = conn.execute("SELECT COUNT(*) FROM hedge_open_rules").fetchone()[0]
         if ho_count == 0:
             conn.execute(_SEED_HEDGE_OPEN_RULE_SQL)
-        if count == 0 or quick_count == 0 or qp_count == 0 or ho_count == 0:
+        la_count = conn.execute("SELECT COUNT(*) FROM leverage_abuse_rules").fetchone()[0]
+        if la_count == 0:
+            conn.execute(_SEED_LEVERAGE_ABUSE_RULE_SQL)
+        if count == 0 or quick_count == 0 or qp_count == 0 or ho_count == 0 or la_count == 0:
             conn.commit()
 
         # Lightweight column migrations for installations created before
         # newer fields were introduced. SQLite ignores ALTER TABLE ... ADD
         # COLUMN if the column already exists via a PRAGMA check.
         _migrate_alert_events_columns(conn)
+        _migrate_leverage_streak_miss_count(conn)
         _migrate_quick_rules_columns(conn)
         _migrate_drop_profit_window_from_quick_rules(conn)
         _migrate_quick_open_close_enabled_not_null(conn)
@@ -463,6 +538,23 @@ def init_risk_monitor_db() -> None:
             logger.warning("VACUUM after migration failed: %s", exc)
 
     logger.info("Risk monitor SQLite database initialized at %s", _DB_PATH)
+
+
+def _migrate_leverage_streak_miss_count(conn: sqlite3.Connection) -> None:
+    """Add account_leverage_streak.miss_count (OPT-0030 hardening) if missing.
+
+    The table is transient state rebuilt every scan, so an ALTER with a
+    default is safe and idempotent.
+    """
+    rows = list(conn.execute("PRAGMA table_info(account_leverage_streak)"))
+    if not rows:
+        return  # table not created yet (fresh install handles it via schema)
+    cols = {row[1] for row in rows}
+    if "miss_count" not in cols:
+        conn.execute(
+            "ALTER TABLE account_leverage_streak "
+            "ADD COLUMN miss_count INTEGER NOT NULL DEFAULT 0"
+        )
 
 
 def _migrate_alert_events_columns(conn: sqlite3.Connection) -> None:
@@ -966,6 +1058,127 @@ def save_hedge_open_config(enabled: bool, rules: list[dict]) -> None:
             )
 
 
+# ── Leverage Abuse config (滥用杠杆, rule 101-110) ──────────
+
+
+def load_leverage_abuse_config() -> dict[str, Any]:
+    """Read Leverage Abuse enabled flag + rules from SQLite.
+
+    Mirrors load_hedge_open_config: NULL enabled treated as True; per-rule
+    enabled coerced to bool so the scheduler can park a draft rule.
+    """
+    with get_risk_monitor_db() as conn:
+        cfg_row = conn.execute(
+            "SELECT enabled FROM leverage_abuse_config WHERE id = 1"
+        ).fetchone()
+        if not cfg_row:
+            enabled = True
+        else:
+            raw = cfg_row["enabled"]
+            enabled = True if raw is None else bool(raw)
+
+        rule_rows = conn.execute(
+            "SELECT id, name, enabled, max_margin_level, streak_min, min_equity_usd "
+            "FROM leverage_abuse_rules ORDER BY sort_order, id"
+        ).fetchall()
+        rules: list[dict[str, Any]] = []
+        for r in rule_rows:
+            d = dict(r)
+            d["enabled"] = True if d.get("enabled") is None else bool(d["enabled"])
+            rules.append(d)
+
+    return {"enabled": enabled, "rules": rules}
+
+
+def save_leverage_abuse_config(enabled: bool, rules: list[dict]) -> None:
+    """Overwrite Leverage Abuse enabled flag + rules atomically."""
+    with get_risk_monitor_db() as conn:
+        conn.execute(
+            "UPDATE leverage_abuse_config SET enabled = ?, "
+            "updated_at = datetime('now') WHERE id = 1",
+            (1 if enabled else 0,),
+        )
+        conn.execute("DELETE FROM leverage_abuse_rules")
+        conn.execute(
+            "DELETE FROM sqlite_sequence WHERE name = 'leverage_abuse_rules'"
+        )
+        # Rule ids are positional (101 + sort_order), so reordering / deleting
+        # a rule re-maps rule_id → rule. The streak table is keyed by rule_id,
+        # so stale rows would mis-attribute a streak to the wrong rule. Wipe it
+        # on every config save — streaks rebuild cleanly within streak_min scans.
+        conn.execute("DELETE FROM account_leverage_streak")
+        for i, r in enumerate(rules):
+            conn.execute(
+                "INSERT INTO leverage_abuse_rules "
+                "(name, enabled, max_margin_level, streak_min, min_equity_usd, sort_order) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    str(r.get("name", "")).strip(),
+                    1 if r.get("enabled", True) else 0,
+                    float(r["max_margin_level"]),
+                    int(r["streak_min"]),
+                    float(r["min_equity_usd"]),
+                    i,
+                ),
+            )
+
+
+# ── Leverage Abuse streak state (D2 sustained-N-scans tier) ────────────
+# Owned solely by rule_leverage_abuse_service. The service reads the whole
+# state at the top of a scan, computes the next state (increment streaks for
+# still-dangerous accounts, drop recovered ones, stamp last_alert_at when it
+# emits), then writes the full set back. Full-set replace is fine — the table
+# holds at most a few dozen rows.
+
+def load_leverage_streak_state() -> dict[tuple[int, str, int], dict[str, Any]]:
+    """Return {(rule_id, server, login): {streak_count, miss_count,
+    last_margin_level, last_alert_at}}."""
+    with get_risk_monitor_db() as conn:
+        rows = conn.execute(
+            "SELECT rule_id, server, login, streak_count, miss_count, "
+            "last_margin_level, last_alert_at FROM account_leverage_streak"
+        ).fetchall()
+    return {
+        (int(r["rule_id"]), r["server"], int(r["login"])): {
+            "streak_count": int(r["streak_count"]),
+            "miss_count": int(r["miss_count"]),
+            "last_margin_level": r["last_margin_level"],
+            "last_alert_at": r["last_alert_at"],
+        }
+        for r in rows
+    }
+
+
+def save_leverage_streak_state(rows: list[dict[str, Any]]) -> None:
+    """Replace the whole streak table with `rows` atomically.
+
+    Each row: {rule_id, server, login, streak_count, miss_count,
+    last_margin_level, last_alert_at}. Accounts dropped from `rows` (recovered
+    or aged out past the grace window) are removed.
+    """
+    from datetime import datetime, timezone
+    now_iso = (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z")
+    )
+    with get_risk_monitor_db() as conn:
+        conn.execute("DELETE FROM account_leverage_streak")
+        for r in rows:
+            conn.execute(
+                "INSERT INTO account_leverage_streak "
+                "(rule_id, server, login, streak_count, miss_count, "
+                "last_margin_level, last_alert_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    int(r["rule_id"]), r["server"], int(r["login"]),
+                    int(r["streak_count"]), int(r.get("miss_count", 0)),
+                    r.get("last_margin_level"),
+                    r.get("last_alert_at"), now_iso,
+                ),
+            )
+
+
 # ── Gap Trade config (JSON-blob single row) ───────────────
 
 
@@ -1161,6 +1374,11 @@ def append_scan_and_events(
                     _HEDGE_OPEN_INSERT_SQL,
                     (event_id, *(alert.get(c) for c in _HEDGE_OPEN_DETAIL_COLS)),
                 )
+            elif 101 <= rule_id <= 110:
+                conn.execute(
+                    _LEVERAGE_ABUSE_INSERT_SQL,
+                    (event_id, *(alert.get(c) for c in _LEVERAGE_ABUSE_DETAIL_COLS)),
+                )
 
         # Retention purge. Detail tables get cleaned via ON DELETE-style
         # cascade in spirit: we delete from alert_events and from each
@@ -1174,6 +1392,7 @@ def append_scan_and_events(
             "alert_gap_so_detail",
             "alert_gap_profit_detail",
             "alert_hedge_open_detail",
+            "alert_leverage_abuse_detail",
         ):
             conn.execute(
                 f"DELETE FROM {detail_table} "
@@ -1345,6 +1564,10 @@ _HEDGE_OPEN_DETAIL_COLS: tuple[str, ...] = (
     "window_start", "window_end",
 )
 
+_LEVERAGE_ABUSE_DETAIL_COLS: tuple[str, ...] = (
+    "margin_level", "margin_used", "free_margin", "streak_count",
+)
+
 
 def _build_detail_insert_sql(table: str, cols: tuple[str, ...]) -> str:
     """Compose `INSERT INTO <table> (id, <cols>) VALUES (?, ...)`."""
@@ -1359,6 +1582,7 @@ _QUICK_PROFIT_INSERT_SQL = _build_detail_insert_sql("alert_quick_profit_detail",
 _GAP_SO_INSERT_SQL = _build_detail_insert_sql("alert_gap_so_detail", _GAP_SO_DETAIL_COLS)
 _GAP_PROFIT_INSERT_SQL = _build_detail_insert_sql("alert_gap_profit_detail", _GAP_PROFIT_DETAIL_COLS)
 _HEDGE_OPEN_INSERT_SQL = _build_detail_insert_sql("alert_hedge_open_detail", _HEDGE_OPEN_DETAIL_COLS)
+_LEVERAGE_ABUSE_INSERT_SQL = _build_detail_insert_sql("alert_leverage_abuse_detail", _LEVERAGE_ABUSE_DETAIL_COLS)
 
 
 # Unified SELECT with 4 LEFT JOINs — used by every reader so the API-facing
@@ -1395,6 +1619,8 @@ _ALERT_SELECT_SQL = """
     ho.buy_count, ho.sell_count, ho.buy_lots, ho.sell_lots,
     ho.window_start, ho.window_end,
 
+    la.margin_level, la.margin_used, la.free_margin, la.streak_count,
+
     COALESCE(gso.window_date, gp.window_date) AS window_date
 """
 
@@ -1405,6 +1631,7 @@ LEFT JOIN alert_quick_profit_detail  qp  ON qp.id  = ae.id
 LEFT JOIN alert_gap_so_detail        gso ON gso.id = ae.id
 LEFT JOIN alert_gap_profit_detail    gp  ON gp.id  = ae.id
 LEFT JOIN alert_hedge_open_detail    ho  ON ho.id  = ae.id
+LEFT JOIN alert_leverage_abuse_detail la ON la.id  = ae.id
 """
 
 

@@ -10,7 +10,6 @@
 
 | ID | Branch | Claim 日期 | 备注 |
 |----|--------|-----------|------|
-| [OPT-0030](./items/OPT-0030-risk-monitor-leverage-abuse-tab.md) | opt/risk-monitor-leverage-abuse-tab | 2026-05-28 | 滥用杠杆 tab — 第 6 个检测规则；risk-monitor 首条 snapshot-scan 规则 |
 
 ## ✅ 待领取（Ready）
 
