@@ -1,56 +1,68 @@
 """
-Leverage Abuse detection (滥用杠杆): flag accounts whose margin level sits
-near the Margin-Call edge — i.e. they have committed most of their equity as
-margin to hold a large open exposure. In KCM's B-book model, such an account
-winning big = the company losing big, so this is the core pre-blowup signal.
+Leverage Abuse detection (滥用杠杆): flag accounts that OPEN a position with
+abusive leverage — committing most of their equity as margin to hold a large
+exposure right at entry. In KCM's B-book model such a client winning big =
+the company losing big, so this is the core pre-blowup signal.
 
-Rule IDs 101-110 (10-slot band, see SKILL.md "Adding a New Rule"). v1 ships
-two rules: 瞬时满杠杆 (D1, fire on a single scan) + 持续高杠杆 (D2, sustained
-across `streak_min` consecutive scans).
+Rule IDs 101-110 (10-slot band). v1 thresholds are user-configured in the
+frontend (e.g. 高杠杆重仓 <200% / 瞬时满杠杆 <150% / 持续高杠杆 <125%).
 
-WHAT MAKES THIS RULE DIFFERENT FROM EVERY OTHER risk-monitor RULE:
-This is the project's FIRST *snapshot / state* detector. The other five rules
-scan a trade/deal event stream (mt4_trades / mt5_deals) over a sliding time
-window with an OPT-0011 cursor HWM. This rule instead reads the MT-server-
-maintained MARGIN_LEVEL straight off the `fxbackoffice.mt4_users` account
-snapshot — one SELECT per tick, no window, no cursor (the data is not an
-append-only stream). Consequences:
-  * No scan_cursors entry. Re-scanning the same accounts every tick is the
-    whole point — we want the *current* state each time.
-  * The candidate rows ARE the enrichment source: currency / group / zipcode /
-    equity / margin all come from the same mt4_users row, so unlike the event
-    rules we don't need a second get_account_info_map roundtrip — only
-    net_deposit_hist (a client-level aggregate) is fetched separately.
-  * The common alert_events columns are trade-shaped (symbol / order_count /
-    first_open). An account-level snapshot has no single symbol, so we write
-    symbol="" / order_count=0 / total_lots=0 / first_open=last_open=NULL and
-    put the real metrics (margin_level / margin_used / free_margin / streak)
-    in the alert_leverage_abuse_detail table.
+═══ PHASE 2 (OPT-0030): EVENT-GATED, not snapshot-scan ═══
+Phase 1 scanned the full mt4_users snapshot for any account currently below a
+margin-level threshold. That conflated TWO causes of a low margin level:
+  ① a big position opened relative to equity  → real leverage abuse (want)
+  ② equity eroded by floating LOSSES          → just a losing account (don't want;
+                                                 in B-book it's company PROFIT)
+Phase 2 fixes this by only evaluating an account's margin level AT THE MOMENT IT
+OPENS a position. Right after an open, equity ≈ balance (no time to drift), so
+"margin level at open" ≈ "position size / capital" — invariant to later P&L. An
+account that opened conservatively and merely drifted toward MC via losses never
+re-opens, so it is never (re-)evaluated → the false positive disappears.
 
-margin_ratio (used_margin / equity) and MARGIN_LEVEL (equity / margin × 100)
-are reciprocals → "保证金用满 95%" ⟺ MARGIN_LEVEL < 105.3, "用满 80%" ⟺
-MARGIN_LEVEL < 125. We threshold on MARGIN_LEVEL directly (the number the MT
-terminal shows). `AND MARGIN > 0` is mandatory in the SQL: MT reports
-MARGIN_LEVEL = 0 for accounts with NO open positions, which would otherwise
-false-positive every flat account as "100% leveraged".
+HOW (hybrid: event-stream gate + snapshot read):
+  1. Find accounts that OPENED a market order recently — reuse burst-open's
+     `_query_mt4_recent_opens` / `_query_mt5_recent_opens` (same opens query the
+     hedge rule uses), forced into overlap-window mode (cursor_time=None) so this
+     rule is independent of the global CURSOR_SCAN_ENABLED flag.
+  2. SETTLE delay: only consider opens at least `_SETTLE_SEC` old. fxbackoffice.
+     mt4_users is synced from the MT servers within ~seconds-to-1min of an open
+     (OPT-0030 Phase 2 pre-flight: 203/203 snapshots caught up, min 17s); the
+     settle window guarantees the margin snapshot already reflects the new
+     position before we read it.
+  3. Read those accounts' CURRENT margin level from fxbackoffice.mt4_users (still
+     the server-computed MARGIN_LEVEL — no required_margin math). Guard with
+     `MODIFY_TIME >= the open's time` so we never read a pre-open snapshot.
+  4. Per rule: alert when MARGIN_LEVEL < max_margin_level (and MARGIN>0, equity ≥
+     min_equity_usd). Dedup on (rule_id, server, login, open_time) so an open is
+     reported once across the overlapping windows.
+
+`streak_min` is DEPRECATED under event-gated (an open is a one-shot event, not a
+sustained state). It is tolerated on existing configs but ignored — see
+OPT-0030 Phase 2 "Option A". The Phase-1 account_leverage_streak table / grace /
+cooldown machinery is no longer used.
+
+margin_ratio (Margin/Equity) and MARGIN_LEVEL (Equity/Margin×100) are reciprocals
+→ "用满 95%" ⟺ MARGIN_LEVEL < 105.3. `MARGIN > 0` is mandatory: MT reports
+MARGIN_LEVEL = 0 for accounts with no open positions.
 """
 
 from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import pymysql
 
 from ..core.config import Settings
-from ..core.risk_monitor_db import (
-    load_leverage_streak_state,
-    save_leverage_streak_state,
-)
-from ..core.sql_helpers import SID_MAP
+from ..core.sql_helpers import SID_MAP, broker_time_to_utc_iso
 from .account_enrichment import get_net_deposit_hist_map
+from .risk_monitor_service import (
+    _query_mt4_recent_opens,
+    _query_mt5_recent_opens,
+    _SERVERS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -59,45 +71,16 @@ LEVERAGE_ABUSE_RULE_ID_BASE = 101
 LEVERAGE_ABUSE_RULE_ID_MAX = 110
 MAX_LEVERAGE_RULES = 10
 
-# Snapshot freshness gate. fxbackoffice.mt4_users is a CRM mirror, not a tick-
-# live feed: its rows are bimodal — actively-moving accounts refresh every few
-# minutes, dormant accounts go stale for months. Empirically (OPT-0030
-# pre-flight) EVERY account near the danger zone (MARGIN_LEVEL < 125) refreshed
-# within ~2 min, because an account approaching Margin Call is by definition
-# moving. So gating on MODIFY_TIME within 15 min (a) never alerts on a stale
-# row, and (b) lets MySQL use IDX_MODIFY_TIME to shrink the scan to a few
-# hundred rows instead of the full enabled-account table.
-_FRESHNESS_MIN = 15
+# Only evaluate opens at least this old, so fxbackoffice.mt4_users has synced
+# the new position before we read its margin level (see module docstring).
+_SETTLE_SEC = 60
+# Extra look-back beyond the scan interval so the processable window
+# [now-LOOKBACK, now-SETTLE] always covers a full interval with overlap; the
+# overlap is de-duplicated on (rule, server, login, open_time).
+_LOOKBACK_BUFFER_SEC = 120
 
-# Re-alert cooldown. An account that stays dangerous shouldn't spam one alert
-# per 5-min tick. We re-surface a still-dangerous account at most once per
-# hour so a persistent offender stays visible in the time-range view without
-# flooding alert_events / SSE. Recovery (margin level back above threshold)
-# drops the streak row, so the next episode re-alerts immediately.
-_REALERT_COOLDOWN_SEC = 3600
-
-# D2 streak robustness: a streak row whose account is absent from a scan's
-# candidate set (genuine recovery OR a transient replica blip / freshness-
-# window miss — indistinguishable from here) is tolerated for this many
-# consecutive misses with its streak frozen before being dropped (reset).
-# Stops a single stuttering scan from wiping a building D2 streak during exactly
-# the volatile conditions D2 is meant to catch. 2 misses ≈ 10 min of tolerance
-# at the 5-min cadence.
-_GRACE_MISSES = 2
-
-# Defensive cap on the snapshot candidate set. The dangerous set is naturally
-# tiny (<1000 in practice), so hitting this means either a market-wide event or
-# a missing/ignored MODIFY_TIME index degrading the query into a wide scan —
-# either way we want it to fail loud, not silently process tens of thousands.
-_CANDIDATE_LIMIT = 5000
-
-# Reverse of SID_MAP ({"MT4_Live": 1, "MT4_Live2": 6, "MT5": 5}) so we can
-# label each mt4_users row by server. Only these three sids are monitored.
+# Reverse of SID_MAP ({"MT4_Live": 1, "MT4_Live2": 6, "MT5": 5}).
 _SID_TO_SERVER: Dict[int, str] = {v: k for k, v in SID_MAP.items()}
-_MONITORED_SIDS: Tuple[int, ...] = (1, 5, 6)
-# MT4 test accounts have logins starting with '7'; on MT5 a leading '7' is a
-# real account, so the exclusion must be MT4-only (sids 1 & 6).
-_MT4_SIDS: Tuple[int, ...] = (1, 6)
 
 
 def _get_connection(settings: Settings):
@@ -129,89 +112,126 @@ def _parse_iso_dt(value: Any) -> Optional[datetime]:
     return dt.astimezone(timezone.utc)
 
 
-def _query_leverage_candidates(
-    conn, *, max_margin_level: float, freshness_min: int = _FRESHNESS_MIN
-) -> List[Dict[str, Any]]:
-    """Snapshot-scan fxbackoffice.mt4_users for at-risk accounts.
+def _iso(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
-    Returns rows below `max_margin_level` (the loosest enabled threshold) on
-    monitored servers, recently synced, non-demo, with an open position. CEN
-    accounts are normalised to USD here so the per-rule min_equity_usd compare
-    and the displayed equity/margin are currency-consistent; MARGIN_LEVEL is a
-    ratio and needs no conversion.
-    """
-    sid_placeholders = ", ".join(["%s"] * len(_MONITORED_SIDS))
-    mt4_sid_placeholders = ", ".join(["%s"] * len(_MT4_SIDS))
-    # The MODIFY_TIME predicate is intended to ride `IDX_MODIFY_TIME` on
-    # mt4_users so this never degrades into a full-table scan as the account
-    # base grows. Verify with EXPLAIN if perf regresses (MySQL picks a single
-    # index; a sid/GROUP index could win). The LIMIT is a loud-failure cap, not
-    # a correctness limit — see _CANDIDATE_LIMIT.
-    sql = f"""
-        SELECT
-            sid,
-            LOGIN          AS login,
-            userId         AS user_id,
-            `GROUP`        AS account_group,
-            NAME           AS name,
-            UPPER(CURRENCY) AS currency,
-            ZIPCODE        AS zipcode,
-            LEVERAGE       AS leverage,
-            EQUITY         AS equity,
-            BALANCE        AS balance,
-            MARGIN         AS margin_used,
-            MARGIN_FREE    AS free_margin,
-            MARGIN_LEVEL   AS margin_level
-        FROM fxbackoffice.mt4_users
-        WHERE MODIFY_TIME >= DATE_SUB(NOW(), INTERVAL %s MINUTE)
-          AND MARGIN > 0
-          AND MARGIN_LEVEL > 0
-          AND MARGIN_LEVEL < %s
-          AND sid IN ({sid_placeholders})
-          AND `GROUP` NOT LIKE '%%demo%%'
-          AND `GROUP` NOT LIKE '%%test%%'
-          AND (sid NOT IN ({mt4_sid_placeholders}) OR LOGIN NOT LIKE '7%%')
-        LIMIT %s
-    """
-    params: List[Any] = [
-        freshness_min, max_margin_level, *_MONITORED_SIDS, *_MT4_SIDS,
-        _CANDIDATE_LIMIT,
-    ]
-    with conn.cursor() as cur:
-        cur.execute(sql, params)
-        raw = cur.fetchall()
-    if len(raw) >= _CANDIDATE_LIMIT:
-        logger.warning(
-            "Leverage abuse candidate query hit the %d-row LIMIT — results "
-            "truncated. Check the IDX_MODIFY_TIME index / a market-wide event.",
-            _CANDIDATE_LIMIT,
-        )
 
-    out: List[Dict[str, Any]] = []
+def _format_rule_label(rule_idx: int, rule: Dict[str, Any]) -> str:
+    name = str(rule.get("name") or "").strip()
+    base = f"Rule {rule_idx + 1}"
+    return f"{base} — {name}" if name else base
+
+
+def _query_recent_settled_opens(
+    conn, *, lookback_sec: int, settle_sec: int, now: datetime
+) -> Dict[Tuple[str, int], Dict[str, Any]]:
+    """Collect accounts that opened a market order in the settled window.
+
+    Returns {(server, login): {orders, total_lots, first_open_dt, last_open_dt}}.
+    Forces overlap-window mode (cursor_time=None) so this rule is independent of
+    CURSOR_SCAN_ENABLED. Only opens at least `settle_sec` old are kept.
+    """
+    cutoff = now - timedelta(seconds=settle_sec)
+    raw: List[Dict[str, Any]] = []
+    for srv in _SERVERS:
+        try:
+            if srv["type"] == "mt5":
+                raw.extend(_query_mt5_recent_opens(
+                    conn, check_interval_sec=lookback_sec, cursor_time=None,
+                ))
+            else:
+                raw.extend(_query_mt4_recent_opens(
+                    conn, db_name=srv["db"], server_label=srv["label"],
+                    check_interval_sec=lookback_sec, cursor_time=None,
+                ))
+        except Exception:
+            logger.error(
+                "Leverage abuse opens query failed for %s", srv["label"],
+                exc_info=True,
+            )
+
+    acc: Dict[Tuple[str, int], Dict[str, Any]] = {}
     for r in raw:
-        sid = int(r["sid"])
-        server = _SID_TO_SERVER.get(sid)
-        if server is None:
-            continue
+        odt = _parse_iso_dt(r.get("open_time"))
+        if odt is None or odt > cutoff:
+            continue  # not settled yet → leave for a later scan
+        key = (r["server"], int(r["login"]))
+        a = acc.get(key)
+        if a is None:
+            a = {"orders": [], "total_lots": 0.0,
+                 "first_open_dt": odt, "last_open_dt": odt}
+            acc[key] = a
+        a["orders"].append({
+            "direction": r.get("direction") or "",
+            "lots": round(float(r.get("lots") or 0), 2),
+            "open_time": _iso(odt),
+            "symbol": str(r.get("symbol") or ""),
+            "ticket": int(r.get("ticket") or r.get("deal_id") or 0),
+        })
+        a["total_lots"] += float(r.get("lots") or 0)
+        if odt < a["first_open_dt"]:
+            a["first_open_dt"] = odt
+        if odt > a["last_open_dt"]:
+            a["last_open_dt"] = odt
+    return acc
+
+
+def _get_margin_snapshot(
+    conn, loginsids: Set[str]
+) -> Dict[str, Dict[str, Any]]:
+    """Batch-read current margin state from fxbackoffice.mt4_users.
+
+    Returns {loginsid: {margin_level, margin_used, free_margin, equity, balance,
+    currency, group, zipcode, leverage, modify_dt}}. CEN amounts ÷100 (ratio
+    margin_level is currency-immune). Demo/test accounts excluded. MODIFY_TIME
+    is normalised to UTC so it compares apples-to-apples with the open times.
+    """
+    if not loginsids:
+        return {}
+    placeholders = ", ".join(["%s"] * len(loginsids))
+    modify_col = broker_time_to_utc_iso("MODIFY_TIME", "modify_time")
+    sql = f"""
+        SELECT loginsid,
+               UPPER(CURRENCY) AS currency,
+               `GROUP`         AS account_group,
+               NAME            AS name,
+               ZIPCODE         AS zipcode,
+               LEVERAGE        AS leverage,
+               EQUITY          AS equity,
+               BALANCE         AS balance,
+               MARGIN          AS margin_used,
+               MARGIN_FREE     AS free_margin,
+               MARGIN_LEVEL    AS margin_level,
+               {modify_col}
+        FROM fxbackoffice.mt4_users
+        WHERE loginsid IN ({placeholders})
+    """
+    with conn.cursor() as cur:
+        cur.execute(sql, tuple(loginsids))
+        rows = cur.fetchall()
+
+    out: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        group = (r.get("account_group") or "").strip() or None
+        name = (r.get("name") or "").strip() or None
+        gl = (group or "").lower()
+        nl = (name or "").lower()
+        if "demo" in gl or "test" in gl or "demo" in nl or "test" in nl:
+            continue  # exclude demo/test (MT5 opens query doesn't filter these)
         currency = (r.get("currency") or "USD").upper()
         divisor = 100.0 if currency == "CEN" else 1.0
-        equity = _div(r.get("equity"), divisor)
-        out.append({
-            "server": server,
-            "login": int(r["login"]),
-            "user_id": r.get("user_id"),
-            "group": (r.get("account_group") or "").strip() or None,
-            "name": (r.get("name") or "").strip() or None,
-            "currency": currency,
-            "zipcode": (r.get("zipcode") or "").strip() or None,
-            "leverage": int(r["leverage"]) if r.get("leverage") is not None else None,
-            "equity": equity,
-            "balance": _div(r.get("balance"), divisor),
+        out[r["loginsid"]] = {
+            "margin_level": _round2(r.get("margin_level")),
             "margin_used": _div(r.get("margin_used"), divisor),
             "free_margin": _div(r.get("free_margin"), divisor),
-            "margin_level": _round2(r.get("margin_level")),
-            "_equity_usd": equity if equity is not None else 0.0,
-        })
+            "equity": _div(r.get("equity"), divisor),
+            "balance": _div(r.get("balance"), divisor),
+            "currency": currency,
+            "group": group,
+            "zipcode": (r.get("zipcode") or "").strip() or None,
+            "leverage": int(r["leverage"]) if r.get("leverage") is not None else None,
+            "modify_dt": _parse_iso_dt(r.get("modify_time")),
+        }
     return out
 
 
@@ -233,148 +253,98 @@ def _round2(value: Any) -> Optional[float]:
         return None
 
 
-def _format_rule_label(rule_idx: int, rule: Dict[str, Any]) -> str:
-    """`Rule N — <name>`; falls back to `Rule N` if name is empty."""
-    name = str(rule.get("name") or "").strip()
-    base = f"Rule {rule_idx + 1}"
-    return f"{base} — {name}" if name else base
-
-
 def rule_leverage_abuse_detect(
-    rows: List[Dict[str, Any]],
+    open_accounts: Dict[Tuple[str, int], Dict[str, Any]],
+    margin_map: Dict[str, Dict[str, Any]],
     rules: List[Dict[str, Any]],
     *,
-    streak_state: Dict[Tuple[int, str, int], Dict[str, Any]],
-    now: Optional[datetime] = None,
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """Match candidate accounts against each rule + advance streak state.
-
-    Returns (alerts, next_streak_state_rows). For every (rule, account) that
-    is below the rule's threshold THIS scan, the streak is incremented (or
-    started at 1). An alert fires when the streak first reaches the rule's
-    streak_min, then again at most once per _REALERT_COOLDOWN_SEC while it
-    stays dangerous. Accounts that recovered (no longer below threshold) are
-    simply absent from next_streak_state_rows, which resets their streak.
-    """
-    now = now or datetime.now(timezone.utc)
-    now_iso = now.isoformat(timespec="seconds").replace("+00:00", "Z")
+    previous_alerts: Optional[List[Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
+    """For each account that just opened, alert if its margin level is below a
+    rule's threshold. Dedup on (rule_id, server, login, last_open_iso) so an
+    open is reported once across overlapping scan windows. `streak_min` is
+    ignored (event-gated — see module docstring)."""
+    prev_keys: Set[Tuple[int, str, int, str]] = set()
+    for a in previous_alerts or []:
+        rid = int(a.get("rule_id", 0) or 0)
+        if LEVERAGE_ABUSE_RULE_ID_BASE <= rid <= LEVERAGE_ABUSE_RULE_ID_MAX:
+            prev_keys.add((rid, a.get("server"), int(a.get("login", 0)),
+                           a.get("last_open") or a.get("first_open")))
 
     alerts: List[Dict[str, Any]] = []
-    next_state: Dict[Tuple[int, str, int], Dict[str, Any]] = {}
-    active_rule_ids: set[int] = set()
-
     for rule_idx, rule in enumerate(rules):
         if not rule.get("enabled", True):
             continue
         max_ml = float(rule["max_margin_level"])
-        streak_min = int(rule["streak_min"])
         min_equity = float(rule["min_equity_usd"])
         rule_id = int(rule.get("id") or (LEVERAGE_ABUSE_RULE_ID_BASE + rule_idx))
         # OPT-0008-class guard: force a corrupted rule_id back into the band.
         if rule_id < LEVERAGE_ABUSE_RULE_ID_BASE or rule_id > LEVERAGE_ABUSE_RULE_ID_MAX:
             rule_id = LEVERAGE_ABUSE_RULE_ID_BASE + rule_idx
-        active_rule_ids.add(rule_id)
 
-        for row in rows:
-            ml = row.get("margin_level")
-            # ml <= 0 = flat account (MT reports MARGIN_LEVEL 0 with no open
-            # positions). The SQL already filters MARGIN > 0, but guard here
-            # too so the detector can never false-positive a flat account if a
-            # caller ever feeds it unfiltered rows.
+        for (server, login), a in open_accounts.items():
+            sid = SID_MAP.get(server)
+            if sid is None:
+                continue
+            loginsid = f"{sid}-{login}"
+            m = margin_map.get(loginsid)
+            if m is None:
+                continue  # no margin snapshot (or demo/test filtered)
+
+            ml = m["margin_level"]
             if ml is None or ml <= 0 or ml >= max_ml:
                 continue
-            if float(row.get("_equity_usd") or 0.0) < min_equity:
+            if m["margin_used"] is None or m["margin_used"] <= 0:
+                continue  # MARGIN > 0 guard (flat account reports ML=0)
+            if float(m.get("equity") or 0.0) < min_equity:
+                continue
+            # Snapshot must have caught up to the open, else we'd read pre-open
+            # margin. If stale, skip — the overlap window re-checks next scan.
+            mdt = m.get("modify_dt")
+            if mdt is None or mdt < a["last_open_dt"]:
                 continue
 
-            key = (rule_id, row["server"], int(row["login"]))
-            prev = streak_state.get(key)
-            streak = (int(prev["streak_count"]) + 1) if prev else 1
-            last_alert_at = prev["last_alert_at"] if prev else None
+            last_open_iso = _iso(a["last_open_dt"])
+            if (rule_id, server, login, last_open_iso) in prev_keys:
+                continue  # already alerted this open
 
-            emit = False
-            if streak >= streak_min:
-                if not last_alert_at:
-                    emit = True
-                else:
-                    prev_dt = _parse_iso_dt(last_alert_at)
-                    if prev_dt is None or (now - prev_dt).total_seconds() >= _REALERT_COOLDOWN_SEC:
-                        emit = True
+            alerts.append(_build_alert(rule_id, rule_idx, rule, server, login, a, m))
 
-            if emit:
-                last_alert_at = now_iso
-                alerts.append(_build_alert(rule_id, rule_idx, rule, row, streak))
-
-            next_state[key] = {
-                "rule_id": rule_id,
-                "server": row["server"],
-                "login": int(row["login"]),
-                "streak_count": streak,
-                "miss_count": 0,            # seen this scan → reset misses
-                "last_margin_level": ml,
-                "last_alert_at": last_alert_at,
-            }
-
-    # Grace window: carry forward streak rows whose account was NOT in this
-    # scan's candidate set (recovered OR a transient blip — indistinguishable).
-    # Freeze the streak and bump miss_count; drop only once it exceeds
-    # _GRACE_MISSES. Skip keys whose rule no longer exists/enabled so disabled
-    # rules don't leave orphan streaks lingering forever.
-    for key, prev in streak_state.items():
-        if key in next_state:
-            continue  # already handled (dangerous this scan)
-        if key[0] not in active_rule_ids:
-            continue  # rule gone/disabled → let it drop
-        miss = int(prev.get("miss_count", 0)) + 1
-        if miss > _GRACE_MISSES:
-            continue  # aged out → reset (drop)
-        next_state[key] = {
-            "rule_id": key[0],
-            "server": key[1],
-            "login": key[2],
-            "streak_count": int(prev["streak_count"]),
-            "miss_count": miss,
-            "last_margin_level": prev.get("last_margin_level"),
-            "last_alert_at": prev.get("last_alert_at"),
-        }
-
-    return alerts, list(next_state.values())
+    return alerts
 
 
 def _build_alert(
-    rule_id: int, rule_idx: int, rule: Dict[str, Any], row: Dict[str, Any], streak: int
+    rule_id: int, rule_idx: int, rule: Dict[str, Any],
+    server: str, login: int, a: Dict[str, Any], m: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Assemble one alert dict. Account-level snapshot → trade-shaped common
-    columns get placeholders (symbol="", order_count=0, no open/close times);
-    real metrics live in the detail fields. net_deposit_hist filled later."""
+    """Assemble one alert. Account-level rule with no single symbol → symbol="";
+    order_count / total_lots / first_open / last_open describe the opens in this
+    window; margin_* describe account state at open."""
     return {
         "rule_id": rule_id,
         "rule_label": _format_rule_label(rule_idx, rule),
-        "server": row["server"],
-        "login": int(row["login"]),
-        # Account-level rule — no single symbol/trade. Placeholders satisfy the
-        # NOT NULL common columns; see module docstring.
+        "server": server,
+        "login": login,
         "symbol": "",
-        "order_count": 0,
-        "total_lots": 0.0,
-        "first_open": None,
-        "last_open": None,
-        "orders": [],
-        # Enrichment already in hand from the mt4_users snapshot row.
-        "equity": row.get("equity"),
-        "balance": row.get("balance"),
+        "order_count": len(a["orders"]),
+        "total_lots": round(float(a["total_lots"]), 2),
+        "first_open": _iso(a["first_open_dt"]),
+        "last_open": _iso(a["last_open_dt"]),
+        "orders": a["orders"],
+        "equity": m.get("equity"),
+        "balance": m.get("balance"),
         "equity_per_lot": None,
         "total_open_lots": None,
-        "leverage": row.get("leverage"),
-        "group": row.get("group"),
-        "currency": row.get("currency"),
-        "zipcode": row.get("zipcode"),
+        "leverage": m.get("leverage"),
+        "group": m.get("group"),
+        "currency": m.get("currency"),
+        "zipcode": m.get("zipcode"),
         "net_deposit_hist": None,   # filled by _enrich_net_deposit
         "total_profit_usd": None,
-        # Leverage-abuse detail (alert_leverage_abuse_detail).
-        "margin_level": row.get("margin_level"),
-        "margin_used": row.get("margin_used"),
-        "free_margin": row.get("free_margin"),
-        "streak_count": streak,
+        "margin_level": m.get("margin_level"),
+        "margin_used": m.get("margin_used"),
+        "free_margin": m.get("free_margin"),
+        "streak_count": None,       # deprecated under event-gated
     }
 
 
@@ -383,13 +353,9 @@ def scan_leverage_abuse(
     *,
     scan_interval_min: int = 10,
     rules: List[Dict[str, Any]],
+    previous_alerts: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    """Run one leverage-abuse snapshot scan across the 3 monitored servers.
-
-    Loads + persists the streak state itself (DB-backed, survives restart) so
-    the scheduler only needs to call this and forward the alerts. Returns the
-    standard scan-result envelope used by the other rules.
-    """
+    """Run one event-gated leverage-abuse scan across the 3 monitored servers."""
     start = time.time()
 
     norm_rules: List[Dict[str, Any]] = []
@@ -402,52 +368,38 @@ def scan_leverage_abuse(
             "name": str(r.get("name") or ""),
             "enabled": True,
             "max_margin_level": float(r.get("max_margin_level", 125.0)),
-            "streak_min": int(r.get("streak_min", 1)),
             "min_equity_usd": float(r.get("min_equity_usd", 100.0)),
         })
 
     if not norm_rules:
-        # Nothing enabled → clear streak state so a re-enable starts clean.
-        save_leverage_streak_state([])
         return _empty_result(start)
 
-    # Loosest threshold = widest net; per-rule thresholds re-applied in detect.
-    loosest = max(r["max_margin_level"] for r in norm_rules)
-
-    # Freshness window must stay wider than one scan gap, otherwise a still-
-    # dangerous account could fall out of the window between two scans and
-    # reset its streak. Floor at _FRESHNESS_MIN; widen if the interval grows.
-    freshness_min = max(_FRESHNESS_MIN, int(scan_interval_min) + 5)
+    now = datetime.now(timezone.utc)
+    lookback_sec = int(scan_interval_min) * 60 + _LOOKBACK_BUFFER_SEC
 
     conn = _get_connection(settings)
     try:
-        candidates = _query_leverage_candidates(
-            conn, max_margin_level=loosest, freshness_min=freshness_min
+        open_accounts = _query_recent_settled_opens(
+            conn, lookback_sec=lookback_sec, settle_sec=_SETTLE_SEC, now=now,
         )
-        unique_logins: Set[Tuple[str, int]] = {
-            (c["server"], int(c["login"])) for c in candidates
+        unique_logins: Set[Tuple[str, int]] = set(open_accounts.keys())
+
+        loginsids = {
+            f"{SID_MAP[server]}-{login}"
+            for (server, login) in open_accounts
+            if server in SID_MAP
         }
+        margin_map = _get_margin_snapshot(conn, loginsids)
 
-        streak_state = load_leverage_streak_state()
-        alerts, next_state_rows = rule_leverage_abuse_detect(
-            candidates, norm_rules, streak_state=streak_state
+        alerts = rule_leverage_abuse_detect(
+            open_accounts, margin_map, norm_rules, previous_alerts=previous_alerts,
         )
-
-        # Persist next streak state regardless of whether anything alerted —
-        # streaks must advance every tick for the D2 sustained tier to work.
-        save_leverage_streak_state(next_state_rows)
-
         if alerts:
             _enrich_net_deposit(conn, alerts)
     finally:
         conn.close()
 
     elapsed_ms = int((time.time() - start) * 1000)
-    scanned_at = (
-        datetime.now(timezone.utc)
-        .isoformat(timespec="seconds")
-        .replace("+00:00", "Z")
-    )
     return {
         "alerts": alerts,
         "summary": {
@@ -455,7 +407,7 @@ def scan_leverage_abuse(
             "total_accounts_scanned": len(unique_logins),
         },
         "scan_time_ms": elapsed_ms,
-        "scanned_at": scanned_at,
+        "scanned_at": _iso(now),
         "_universe_pairs": unique_logins,
     }
 
@@ -465,22 +417,14 @@ def _empty_result(start: float) -> Dict[str, Any]:
         "alerts": [],
         "summary": {"suspicious_count": 0, "total_accounts_scanned": 0},
         "scan_time_ms": int((time.time() - start) * 1000),
-        "scanned_at": (
-            datetime.now(timezone.utc)
-            .isoformat(timespec="seconds")
-            .replace("+00:00", "Z")
-        ),
+        "scanned_at": _iso(datetime.now(timezone.utc)),
         "_universe_pairs": set(),
     }
 
 
 def _enrich_net_deposit(conn, alerts: List[Dict[str, Any]]) -> None:
-    """Fill client-level net_deposit_hist only.
-
-    currency / group / zipcode / equity / margin already came from the
-    mt4_users snapshot row, so unlike the event rules we skip
-    get_account_info_map and only fetch the client-level net deposit.
-    """
+    """Fill client-level net_deposit_hist (currency/group/zipcode/equity already
+    came from the mt4_users snapshot)."""
     if not alerts:
         return
     net_deposit_map = get_net_deposit_hist_map(conn, alerts)

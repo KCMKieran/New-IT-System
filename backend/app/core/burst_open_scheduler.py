@@ -116,9 +116,9 @@ def _run_scan(*, tier: str = "all") -> None:
     # Wash-trading detection doesn't need sub-minute responsiveness; 5-10
     # min cadence matches its analyst-followup mental model.
     include_hedge = tier in ("all", "slow")
-    # Leverage Abuse (rule_id 101-110): snapshot scan of mt4_users. Slow tier
-    # (current-state polling at the shared cadence); the 'all' branch lets
-    # scan-now (tier='all') refresh it on demand.
+    # Leverage Abuse (rule_id 101-110): event-gated (OPT-0030 Phase 2) — finds
+    # recently-OPENED accounts and reads their margin level at open. Slow tier;
+    # 'all' branch lets scan-now (tier='all') refresh it on demand.
     include_leverage = tier in ("all", "slow")
 
     try:
@@ -197,6 +197,7 @@ def _run_scan(*, tier: str = "all") -> None:
                     settings,
                     scan_interval_min=config["scan_interval_min"],
                     rules=leverage_config["rules"],
+                    previous_alerts=prev_alerts,
                 )
             except Exception:
                 logger.error("Leverage abuse scan failed", exc_info=True)
