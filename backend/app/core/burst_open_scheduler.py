@@ -187,17 +187,23 @@ def _run_scan(*, tier: str = "all") -> None:
             except Exception:
                 logger.error("Hedge open scan failed", exc_info=True)
 
-        # Leverage Abuse (rule_id 101-110): snapshot scan of fxbackoffice.
-        # mt4_users. No previous_alerts — cross-scan state is the DB-backed
-        # streak table, loaded/saved inside the service itself.
+        # Leverage Abuse (rule_id 101-110, event-gated). Dedup on
+        # (rule_id, server, login, open_time). Seed previous_alerts with the
+        # in-memory last tick (via prev_alerts) PLUS recent leverage rows from
+        # SQLite, so the first scan after a restart doesn't re-emit opens that
+        # were already alerted (prev_alerts' SQLite portion only covers QP).
         leverage_result: dict[str, Any] | None = None
         if include_leverage and leverage_config.get("enabled", True) and leverage_config.get("rules"):
             try:
+                from ..core.risk_monitor_db import get_recent_leverage_abuse_alerts
+                leverage_prev = list(prev_alerts) + get_recent_leverage_abuse_alerts(
+                    int(config["scan_interval_min"]) + 5
+                )
                 leverage_result = scan_leverage_abuse(
                     settings,
                     scan_interval_min=config["scan_interval_min"],
                     rules=leverage_config["rules"],
-                    previous_alerts=prev_alerts,
+                    previous_alerts=leverage_prev,
                 )
             except Exception:
                 logger.error("Leverage abuse scan failed", exc_info=True)

@@ -1116,7 +1116,7 @@ def save_leverage_abuse_config(enabled: bool, rules: list[dict]) -> None:
                     str(r.get("name", "")).strip(),
                     1 if r.get("enabled", True) else 0,
                     float(r["max_margin_level"]),
-                    int(r["streak_min"]),
+                    int(r.get("streak_min", 1) or 1),  # deprecated (Phase 2); tolerate absence
                     float(r["min_equity_usd"]),
                     i,
                 ),
@@ -1852,6 +1852,29 @@ def get_recent_quick_profit_alerts(minutes: int) -> list[dict[str, Any]]:
             SELECT {_ALERT_SELECT_SQL}
             {_ALERT_FROM_CLAUSE}
             WHERE ae.rule_id BETWEEN 61 AND 70
+              AND ae.scanned_at >= datetime('now', ?)
+            """,
+            (f"-{int(minutes)} minutes",),
+        ).fetchall()
+    return [_row_to_alert_dict(r) for r in rows]
+
+
+def get_recent_leverage_abuse_alerts(minutes: int) -> list[dict[str, Any]]:
+    """Latest leverage-abuse alerts (rule_id 101-110) within the last N minutes.
+
+    Seeds the event-gated dedup pool after a restart so the first post-restart
+    scan doesn't re-emit opens already alerted before the restart (dedup keys on
+    (rule_id, server, login, last_open)). ``minutes`` should be >= the opens
+    look-back window so any in-window prior alert is visible.
+    """
+    if minutes <= 0:
+        return []
+    with get_risk_monitor_db() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT {_ALERT_SELECT_SQL}
+            {_ALERT_FROM_CLAUSE}
+            WHERE ae.rule_id BETWEEN 101 AND 110
               AND ae.scanned_at >= datetime('now', ?)
             """,
             (f"-{int(minutes)} minutes",),
