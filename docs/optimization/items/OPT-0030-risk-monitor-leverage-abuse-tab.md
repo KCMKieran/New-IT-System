@@ -1,13 +1,15 @@
 ---
 id: OPT-0030
 title: 滥用杠杆 (Leverage Abuse) tab — risk-monitor 第 6 个检测规则
-status: done
+status: wip
 priority: P1
 area: mixed
 effort: M
 created: 2026-05-28
 related: [[OPT-0008]], [[OPT-0011]], [[OPT-0015]], [[OPT-0021]], [[OPT-0025]]
 ---
+
+> ⚠ **Multi-phase OPT**（同 [[OPT-0024]] 模式）。Phase 1（snapshot-scan）已 merge+上线（2026-05-28，merge `bb2f36b`）。**Phase 2 reopen 本 OPT，不开新 OPT**——把检测内核从 snapshot 换成 **event-gated（只看开仓那一刻）**。下面「问题/背景/AC」是 Phase 1 的；Phase 2 设计见文末「## Phase 2」段。
 
 ## 问题
 
@@ -239,3 +241,39 @@ GROUP BY sid;
 **Follow-up（未来若需要）**：实时 margin 值（照 QP floating-refresh 模式做只读 endpoint，v2）；跨事务一致性（#4）；前端色带跟随配置（#8）。
 
 **未做**：浏览器肉眼验收（环境无浏览器工具，仅 tsc/build/dev-200 验证）——交付给用户在 `http://10.6.20.138:5173/risk-monitor` 看第 6 个 tab。
+
+---
+
+## Phase 2 — event-gated 重构（reopen 2026-05-28）
+
+### 为什么 reopen
+
+Phase 1 的 snapshot-scan 有个用户不想要的误报类:账户 5h 前以 400% margin level 开仓,随后**亏钱**导致 equity 缩水、margin level 漂到 ~105%,会被 snapshot 规则抓出来。但这不是"滥用杠杆开仓",只是个**亏损账户**(B-Book 视角它正在给公司送钱)。`MARGIN_LEVEL = Equity/Margin` 变低有两因:① 仓位大(滥用,想抓)② 亏损(equity↓,不想抓),snapshot 分不出来。
+
+**用户决策**:改后端检测框架为 **event-gated——只看"最近开仓"的账户在开仓那一刻的杠杆**。开仓瞬间 `equity≈balance`(还没浮亏),所以"开仓时 margin level"天然 ≈ 仓位/本金比,自动剔除亏损漂移。**前端同事配的 3 条 rules 不动**(高杠杆重仓<200 / 瞬时满杠杆<150 / 持续高杠杆<125),只改后端"怎么评估"。
+
+### 时序一致性预飞行（已验证 2026-05-28）
+
+`fxbackoffice.mt4_users` 是**混合同步**:逐账户准实时单行更新 + 约每 1 分钟的批量 mark-to-market。最近 60min 开仓的 203 个账户 **203/203** 的 `MODIFY_TIME >= 开仓时间`(最快 17s 追上)。→ 开仓→快照反映延迟是**秒级~1 分钟**。唯一坑:开仓后 <1min 内快照可能还没同步,用 **settle 延迟**(只看 ≥1min 前的开仓)兜住。
+
+### 决策:选项 A（streak_min 废弃）
+
+`max_margin_level` / `min_equity_usd` 在 event-gated 下继续成立;**`streak_min` 没有意义**(开仓是一次性事件,无"连续 N 次扫描")。Rule 3「持续高杠杆」(streak_min=3)退化成"开仓瞬间 <125%"(最严的一档瞬时阈值)。3 条规则变成干净的三档开仓网(200/150/125)。
+
+⚠ **需求矛盾已挑明**:同事配的"持续"规则本是状态持续型(= 漂移误报源),与 event-gated 本意冲突。用户拍板选 A:放弃"持续"语义,Rule 3 退化为瞬时档。
+
+### Phase 2 AC
+
+- [ ] **Backend 检测内核换 event-gated**:`scan_leverage_abuse` 候选 = 最近开仓账户(复用 `_query_mt4_recent_opens`/`_query_mt5_recent_opens`,**强制 `cursor_time=None` 走 overlap-window**,与全局 `CURSOR_SCAN_ENABLED` 解耦)+ settle 延迟(`open_time <= now - 60s`,窗口 `interval*60 + 120s`)
+- [ ] 批量读这些账户的 margin 快照(`fxbackoffice.mt4_users`,`MODIFY_TIME` 用 `broker_time_to_utc_iso` 归一到 UTC 与 open_time 同框比较)
+- [ ] detect:per rule `margin_level < max_margin_level` AND `MARGIN>0` AND `equity_usd >= min_equity_usd` AND **`MODIFY_TIME >= 该账户最近 settled 开仓时间`**(快照已追上才评估,没追上下一轮 overlap 再抓)
+- [ ] dedup `(rule_id, server, login, open_time)`,previous_alerts 从 SQLite seed(新 `get_recent_leverage_abuse_alerts`)+ `_latest_result`;scheduler 传入
+- [ ] **`streak_min` 废弃**:backend 容忍该字段(老配置照常 load)但忽略;删 `account_leverage_streak` 表的使用(grace/cooldown 一并移除,改用 event-stream dedup)
+- [ ] Pytest 重写:settle 窗口 / MODIFY_TIME>=open 守卫 / dedup / 开仓时阈值 / CEN;删 streak 状态机测试
+- [ ] Frontend:config drawer 去掉 `streak_min` 输入框、表格去掉「持续次数」(streak_count)列、文案改"开仓时";3 条规则配置不破
+- [ ] Docs:SKILL.md Rule 6 段改写为 event-gated;risk-monitor.md §4.2;lesson 加 Phase 2 注
+
+### Phase 2 待答
+
+- 开仓时阈值沿用同事配的 200/150/125(不动),确认无需新阈值。
+- MT5 `_query_mt5_recent_opens` 的 open_time 已是 UTC ISO;MT4 helper 同样 `broker_time_to_utc_iso`。两边与 margin 快照的 UTC 化 MODIFY_TIME 同框 ✓。
