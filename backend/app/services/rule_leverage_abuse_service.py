@@ -261,9 +261,10 @@ def rule_leverage_abuse_detect(
     previous_alerts: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     """For each account that just opened, alert if its margin level is below a
-    rule's threshold. Dedup on (rule_id, server, login, last_open_iso) so an
-    open is reported once across overlapping scan windows. `streak_min` is
-    ignored (event-gated — see module docstring)."""
+    rule's threshold. Dedup on (rule_id, server, login, last_open_iso): an open
+    EVENT (keyed by its open_time) is reported once across overlapping windows;
+    if the account opens AGAIN later (new open_time) that is a new abuse event
+    and re-fires by design. `streak_min` is ignored (event-gated)."""
     prev_keys: Set[Tuple[int, str, int, str]] = set()
     for a in previous_alerts or []:
         rid = int(a.get("rule_id", 0) or 0)
