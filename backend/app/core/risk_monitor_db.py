@@ -1456,7 +1456,7 @@ def _build_alert_filters(
     rule_id_max: int | None,
     zipcode: str | None,
     time_field: str = "scanned_at",
-    leverage: int | None = None,
+    leverage: list[int] | None = None,
 ) -> tuple[str, list[Any]]:
     """Build a shared WHERE clause + params list for alert_events queries.
 
@@ -1499,9 +1499,10 @@ def _build_alert_filters(
     if zipcode:
         where.append("ae.zipcode LIKE ? ESCAPE '\\'")
         params.append(f"%{_escape_like(zipcode)}%")
-    if leverage is not None:
-        where.append("ae.leverage = ?")
-        params.append(leverage)
+    if leverage:
+        placeholders = ", ".join(["?"] * len(leverage))
+        where.append(f"ae.leverage IN ({placeholders})")
+        params.extend(leverage)
 
     return " AND ".join(where), params
 
@@ -1654,7 +1655,7 @@ def query_alert_events(
     sort_by: str | None = None,
     sort_order: str | None = None,
     time_field: str = "scanned_at",
-    leverage: int | None = None,
+    leverage: list[int] | None = None,
 ) -> tuple[list[dict], int]:
     """Query alert events by time range + optional filters.
 
@@ -1714,7 +1715,7 @@ def stream_alert_events(
     sort_order: str | None = None,
     batch_size: int = 5000,
     time_field: str = "scanned_at",
-    leverage: int | None = None,
+    leverage: list[int] | None = None,
 ) -> Iterator[dict]:
     """Yield alert events matching the filter, without a row-count cap.
 
@@ -1766,7 +1767,7 @@ def alert_events_stats(
     *,
     include_rule_breakdown: bool = False,
     time_field: str = "scanned_at",
-    leverage: int | None = None,
+    leverage: list[int] | None = None,
 ) -> dict[str, Any]:
     """Aggregate stats over the time range for the summary cards.
 
