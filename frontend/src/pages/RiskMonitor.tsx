@@ -889,6 +889,14 @@ const DEFAULT_STANDARD_FILTERS: StandardTabFilters = {
   serverFilter: "all",
 };
 
+// 滥用杠杆 tab adds a leverage filter (account leverage tier). Default 1:1000
+// — the riskiest tier the desk watches most closely. Persisted per OPT-0025.
+type LeverageAbuseFilters = StandardTabFilters & { leverageFilter: string };
+const DEFAULT_LEVERAGE_ABUSE_FILTERS: LeverageAbuseFilters = {
+  ...DEFAULT_STANDARD_FILTERS,
+  leverageFilter: "1000",
+};
+
 type GapTradeFilters = {
   rangePreset: GapTradeDayRange;
   serverFilter: string;
@@ -6004,7 +6012,7 @@ function LeverageAbuseTab({ active }: { active: boolean }) {
     () =>
       readFilterState(
         RISK_MONITOR_LEVERAGE_ABUSE_FILTERS_KEY,
-        DEFAULT_STANDARD_FILTERS,
+        DEFAULT_LEVERAGE_ABUSE_FILTERS,
       ),
     [],
   );
@@ -6033,6 +6041,10 @@ function LeverageAbuseTab({ active }: { active: boolean }) {
   const [savingConfig, setSavingConfig] = useState(false);
 
   const [ruleFilter, setRuleFilter] = useState<string>(persistedFilters.ruleFilter);
+  // Leverage tier filter ("all" | "100" | "200" | "400" | "1000"). Default 1000.
+  const [leverageFilter, setLeverageFilter] = useState<string>(
+    persistedFilters.leverageFilter,
+  );
 
   const [pageIndex, setPageIndex] = useState(0);
   const pageSize = isMobile ? 20 : 50;
@@ -6046,8 +6058,8 @@ function LeverageAbuseTab({ active }: { active: boolean }) {
 
   useFilterPersist(
     RISK_MONITOR_LEVERAGE_ABUSE_FILTERS_KEY,
-    DEFAULT_STANDARD_FILTERS,
-    { rangePreset, ruleFilter, serverFilter },
+    DEFAULT_LEVERAGE_ABUSE_FILTERS,
+    { rangePreset, ruleFilter, serverFilter, leverageFilter },
     { skipFields: rangePreset === "custom" ? ["rangePreset"] : [] },
   );
 
@@ -6084,11 +6096,12 @@ function LeverageAbuseTab({ active }: { active: boolean }) {
     (range: { since: string; until: string }) => {
       const qs = new URLSearchParams({ since: range.since, until: range.until });
       if (serverFilter !== "all") qs.set("server", serverFilter);
+      if (leverageFilter !== "all") qs.set("leverage", leverageFilter);
       if (loginQuery) qs.set("login", loginQuery);
       if (zipcodeQuery) qs.set("zipcode", zipcodeQuery);
       return qs;
     },
-    [serverFilter, loginQuery, zipcodeQuery],
+    [serverFilter, leverageFilter, loginQuery, zipcodeQuery],
   );
 
   const buildTableFilterQs = useCallback(
@@ -6201,6 +6214,7 @@ function LeverageAbuseTab({ active }: { active: boolean }) {
     effectiveRange?.since,
     effectiveRange?.until,
     serverFilter,
+    leverageFilter,
     loginQuery,
     zipcodeQuery,
     ruleFilter,
@@ -6537,6 +6551,21 @@ function LeverageAbuseTab({ active }: { active: boolean }) {
                 Rule {idx + 1}
               </SelectItem>
             ))}
+          </SelectContent>
+        </Select>
+        <Select value={leverageFilter} onValueChange={setLeverageFilter}>
+          <SelectTrigger
+            className="w-full min-w-0 h-9 sm:w-40 sm:shrink-0"
+            aria-label="按杠杆筛选"
+          >
+            <SelectValue placeholder="杠杆" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">全部杠杆</SelectItem>
+            <SelectItem value="1000">1:1000</SelectItem>
+            <SelectItem value="400">1:400</SelectItem>
+            <SelectItem value="200">1:200</SelectItem>
+            <SelectItem value="100">1:100</SelectItem>
           </SelectContent>
         </Select>
         <Select
