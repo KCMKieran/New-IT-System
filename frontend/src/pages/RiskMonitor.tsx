@@ -6003,14 +6003,32 @@ function HedgeConfigDrawer({
 // rule filter + toolbar + grid + config drawer + 立即扫描). No aggregated view
 // (one account = one current state), no detail Sheet.
 
-/** Renders MARGIN_LEVEL % with danger coloring: <105.3 red, <125 amber. */
-function MarginLevelCell(p: { value?: number | null }) {
+/**
+ * Convert between MT's native MARGIN_LEVEL (净值/已用保证金 × 100) and the
+ * displayed 保证金使用率 (已用保证金/净值 × 100). They are reciprocals, so a
+ * single 10000/x maps either direction. The backend rule field stays in
+ * MARGIN_LEVEL units (max_margin_level); only the UI speaks 使用率.
+ */
+const levelToUsage = (ml: number) => 10000 / ml;
+const usageToLevel = (usage: number) => 10000 / usage;
+
+// Danger bands in 使用率 terms, derived from the old MARGIN_LEVEL bands so
+// coloring stays in lockstep if the level thresholds ever change.
+// 105.3 → 94.97%, 125 → 80%.
+const USAGE_RED = levelToUsage(105.3);
+const USAGE_AMBER = levelToUsage(125);
+
+/**
+ * Renders 保证金使用率 (margin usage = used margin / equity = 10000 / MARGIN_LEVEL)
+ * with danger coloring. Higher = more leveraged: >USAGE_RED red, >USAGE_AMBER amber.
+ */
+function MarginUsageCell(p: { value?: number | null }) {
   const v = p.value;
   if (v === null || v === undefined) return <span>—</span>;
   const cls =
-    v < 105.3
+    v > USAGE_RED
       ? "text-red-600 dark:text-red-400 font-semibold"
-      : v < 125
+      : v > USAGE_AMBER
         ? "text-amber-600 dark:text-amber-400 font-semibold"
         : "text-muted-foreground";
   return <span className={cls}>{v.toFixed(2)}%</span>;
@@ -6319,7 +6337,16 @@ function LeverageAbuseTab({ active }: { active: boolean }) {
       activeCol?.colId && SORTABLE_COL_IDS.has(activeCol.colId)
         ? activeCol.colId
         : "scanned_at";
-    const nextSortOrder = activeCol?.sort === "asc" ? "asc" : "desc";
+    let nextSortOrder: "asc" | "desc" =
+      activeCol?.sort === "asc" ? "asc" : "desc";
+    // margin_level is sorted server-side on the raw MARGIN_LEVEL, but the
+    // column DISPLAYS its reciprocal 保证金使用率 (usage = 10000/level). Since the
+    // two run in opposite directions, flip the order we send so the fetched
+    // page matches what the user sees: "usage desc" (most dangerous first) =
+    // "level asc". Without this the server would page in the safest accounts.
+    if (nextSortBy === "margin_level") {
+      nextSortOrder = nextSortOrder === "asc" ? "desc" : "asc";
+    }
     setSortBy(nextSortBy);
     setSortOrder(nextSortOrder);
   }, []);
@@ -6380,16 +6407,28 @@ function LeverageAbuseTab({ active }: { active: boolean }) {
       },
       { headerName: "币种", field: "currency", colId: "currency", width: 80 },
       {
-        headerName: "预付款比例",
+        headerName: "保证金使用率",
         field: "margin_level",
         colId: "margin_level",
         width: 120,
         cellClass: "ag-right-aligned-cell",
-        cellRenderer: MarginLevelCell,
+        // Derive usage = 已用保证金 / 净值 = 10000 / MARGIN_LEVEL (reciprocal of
+        // MT's native margin level). colId stays "margin_level" so column
+        // persistence keeps working on the underlying field. Server-side sort
+        // also runs on the raw level — handleSortChanged FLIPS the sort order
+        // for this colId so the paged result matches the displayed usage
+        // (see the comment there). Client-side filter uses this valueGetter
+        // (usage), so the number filter already matches what the user sees.
+        valueGetter: (p) => {
+          const ml = p.data?.margin_level;
+          if (ml === null || ml === undefined || ml <= 0) return null;
+          return 10000 / ml;
+        },
+        cellRenderer: MarginUsageCell,
         headerComponent: InfoHeader,
         headerComponentParams: {
           tooltip:
-            "MARGIN_LEVEL = 净值 / 已用保证金 × 100%。越低越接近强平：<105% 红 / 105–125% 琥珀。",
+            "保证金使用率 = 已用保证金 / 净值 × 100%。越高越接近强平：>95% 红 / 80–95% 琥珀。",
         },
       },
       {
@@ -6543,7 +6582,7 @@ function LeverageAbuseTab({ active }: { active: boolean }) {
                 label={`Rule ${idx + 1} · 去重账户`}
                 value={nAcc}
                 description={
-                  `告警 ${nEvt} 条 · 开仓时预付款比例 < ${rule.max_margin_level}%` +
+                  `告警 ${nEvt} 条 · 开仓时保证金使用率 > ${Number(levelToUsage(rule.max_margin_level).toFixed(2))}%` +
                   ` · 净值 ≥ $${rule.min_equity_usd}`
                 }
                 dotColor={st.dot}
@@ -6941,17 +6980,22 @@ function LeverageAbuseConfigDrawer({
                   <div className="grid grid-cols-2 gap-3 text-sm">
                     <div className="space-y-1">
                       <label className="text-xs text-muted-foreground">
-                        开仓时预付款比例 &lt; (%)
+                        开仓时保证金使用率 &gt; (%)
                       </label>
                       <Input
                         type="number"
                         min={10}
                         max={1000}
                         step={0.1}
-                        value={rule.max_margin_level}
+                        // Display/edit in 使用率 terms; store back as MARGIN_LEVEL
+                        // (reciprocal). Re-derived each render so the round-trip
+                        // stays stable. Empty input → 80% usage (= level 125).
+                        value={Number(levelToUsage(rule.max_margin_level).toFixed(2))}
                         onChange={(e) =>
                           updateRule(idx, {
-                            max_margin_level: Number(e.target.value) || 125,
+                            max_margin_level: usageToLevel(
+                              Number(e.target.value) || 80,
+                            ),
                           })
                         }
                       />
@@ -6976,7 +7020,7 @@ function LeverageAbuseConfigDrawer({
                 </div>
               ))}
               <p className="text-xs text-muted-foreground">
-                预付款比例 = 净值 / 已用保证金 × 100%，越低杠杆越猛。
+                保证金使用率 = 已用保证金 / 净值 × 100%，越高杠杆越猛。
                 只在账户**开仓那一刻**检查（避免把后来亏损漂移的账户误判为滥用杠杆）。
               </p>
             </div>

@@ -3,6 +3,9 @@
 Append-only 日志。最新的写在最上面。
 查看任何一条的完整背景，打开对应的 `items/OPT-NNNN-*.md`。
 
+> **行长约束**：`标题` 列 = **一句话**（一行能扫完），重型细节进 item 文件的 **结果** 段——这是可扫描索引，不是日志正文。
+> **Commit 列**：新条目 merge SHA 写盘前不可知，填 `—`，用 `git log --grep="OPT-NNNN" --merges` 找回；早期手填的真 SHA 保留。
+
 ## 已完成
 
 | 日期 | ID | Commit | 标题 |

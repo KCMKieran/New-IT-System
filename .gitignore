@@ -69,3 +69,6 @@ backend/data/risk_monitor.db.bak-*
 frontend/tsconfig.app.tsbuildinfo
 .claude/settings.local.json
 .claude/skills/
+# Local AI-dev scratch notes / sharing exports (not project source)
+Claude_CLI_Quick_Access_Summary.md
+ai-dev-techniques-sharing.html
