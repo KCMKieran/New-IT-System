@@ -1,7 +1,7 @@
 ---
 id: OPT-0031
 title: risk-monitor tab 栏响应式横滑 + 数据驱动（防加 tab 挤压）
-status: wip
+status: done
 priority: P2
 area: frontend
 effort: S
@@ -48,4 +48,20 @@ related: [[OPT-0025]], [[OPT-0030]]
 
 ## 结果
 
-<done 时填>
+**交付**（全部在 `frontend/src/pages/RiskMonitor.tsx`）：
+
+- tab 栏从写死的 `grid grid-cols-6` 改为响应式：`< sm` 用 `overflow-x-auto` + `inline-flex w-max` + trigger `shrink-0` 横向滚动取自然宽度（不再挤压/重叠）；`≥ sm` 恢复 `grid auto-cols-fr grid-flow-col` 等分铺满（桌面视觉与改动前一致）。右侧 `from-muted` 渐隐提示还能滑。
+- 6 个手写 `TabsTrigger` 收成 `RISK_MONITOR_TABS.map()` 渲染 + 新增 `RISK_MONITOR_TAB_LABELS: Record<RiskMonitorTab,string>`（TS 强制 label 完整性）。**加 tab 现在只需改 `RISK_MONITOR_TABS` + 补一个 label，不再碰任何 grid 列数 className。**
+
+**与 AC 偏差**：无。5 条 AC 全部满足，verify.sh 红绿闸门通过（tsc + vitest 48 + backend pytest 148）。
+
+**Stage 1 outsider-review 处理记录**（用户对每条单独拍板，全部"当场修"）：
+- Finding #1 当场修（commit e5cacb0）：`isRiskMonitorTab` 曾是第 3 份硬编码 tab 列表，加第 7 个 tab 会**静默拒绝**（setActiveTab/深链/localStorage 全 no-op）→ 改为 `RISK_MONITOR_TABS.includes(...)` 派生，SSOT 贯通。
+- Finding #2 当场修（commit e5cacb0）：Radix 不自动滚 tab list，移动端深链/切到屏外 tab 会留在视野外 → 加 `tabScrollRef` + `useEffect([activeTab])` 调 `scrollIntoView({ inline: "nearest" })`。
+- Finding #3 当场修：渐隐 `from-background` → `from-muted`，对齐 TabsList pill 底色。
+- Finding #4 当场修：删陈旧注释 "all 4 tabs"（实际 6 个、还在涨）。
+
+**follow-up（live with，未来某次再处理）**：
+- 渐隐遮罩在移动端常驻 —— tab 少或滚到底时仍淡化最后一个 label；要消除需加 onScroll 状态跟踪，成本 > 收益。
+- `max-w-4xl` 共享给 strip + RealtimeIndicator，tab 涨到 8-10 个时 `≥ sm` 等分列会挤；届时桌面端 `≥ sm` 也应改成 scroller，与移动端分支收敛。
+- reviewer 提的"cascade 靠 source order 运气"判断有误：Tailwind 确定性地把 responsive variant 排在 base utility 之后，`sm:grid` 稳定胜出，非运气，不修。

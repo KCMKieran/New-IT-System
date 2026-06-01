@@ -10,7 +10,6 @@
 
 | ID | Branch | Claim 日期 | 备注 |
 |----|--------|-----------|------|
-| [OPT-0031](./items/OPT-0031-risk-monitor-tab-responsive.md) | opt/risk-monitor-tab-responsive | 2026-06-01 | tab 栏响应式横滑 + 数据驱动，防加 tab 挤压 |
 
 ## ✅ 待领取（Ready）
 

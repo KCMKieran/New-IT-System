@@ -839,15 +839,24 @@ const RISK_MONITOR_TABS = [
 ] as const;
 type RiskMonitorTab = (typeof RISK_MONITOR_TABS)[number];
 
+/** Display labels for each sub-tab. Single source of truth for the tab strip —
+ * add a tab by appending to RISK_MONITOR_TABS and adding its label here; the
+ * strip renders data-driven (see TabsList below) so no grid column count in
+ * className ever needs touching. */
+const RISK_MONITOR_TAB_LABELS: Record<RiskMonitorTab, string> = {
+  "burst-open": "批量下单",
+  "quick-open-close": "快开快平",
+  "quick-profit": "快速获利",
+  "hedge-open": "对冲刷单",
+  "leverage-abuse": "滥用杠杆",
+  "gap-trade": "Gap Trade",
+};
+
 function isRiskMonitorTab(s: string | null): s is RiskMonitorTab {
-  return (
-    s === "burst-open" ||
-    s === "quick-open-close" ||
-    s === "quick-profit" ||
-    s === "hedge-open" ||
-    s === "leverage-abuse" ||
-    s === "gap-trade"
-  );
+  // Derive from RISK_MONITOR_TABS so adding a tab there is the ONLY edit needed —
+  // a hardcoded string list here would silently reject new tabs (deep-link /
+  // setActiveTab / localStorage restore would all no-op).
+  return s !== null && (RISK_MONITOR_TABS as readonly string[]).includes(s);
 }
 
 /**
@@ -1043,6 +1052,18 @@ export default function RiskMonitor() {
   // tab's existing setInterval polling stays as the source of truth.
   const stream = useRiskMonitorStream(true);
 
+  // Keep the active tab in view on narrow viewports. Radix doesn't auto-scroll
+  // its tab list, so a deep-link (?tab=) or programmatic switch to an
+  // off-screen tab would otherwise leave it scrolled out of sight. No-op on
+  // desktop where the grid lays every tab out at once. (OPT-0031)
+  const tabScrollRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const active = tabScrollRef.current?.querySelector<HTMLElement>(
+      '[data-state="active"]',
+    );
+    active?.scrollIntoView({ inline: "nearest", block: "nearest" });
+  }, [activeTab]);
+
   return (
     <div className="flex min-w-0 flex-col gap-4 p-4 lg:p-6">
       <Tabs
@@ -1051,53 +1072,42 @@ export default function RiskMonitor() {
         className="w-full min-w-0"
       >
         <div className="flex items-center justify-between gap-2 max-w-4xl">
-          <TabsList className="grid w-full grid-cols-6 sm:auto-cols-fr sm:grid-flow-col">
-          <TabsTrigger
-            value="burst-open"
-            className="px-2 text-xs sm:px-3 sm:text-sm whitespace-nowrap"
-          >
-            批量下单
-          </TabsTrigger>
-          <TabsTrigger
-            value="quick-open-close"
-            className="px-2 text-xs sm:px-3 sm:text-sm whitespace-nowrap"
-          >
-            快开快平
-          </TabsTrigger>
-          <TabsTrigger
-            value="quick-profit"
-            className="px-2 text-xs sm:px-3 sm:text-sm whitespace-nowrap"
-          >
-            快速获利
-          </TabsTrigger>
-          <TabsTrigger
-            value="hedge-open"
-            className="px-2 text-xs sm:px-3 sm:text-sm whitespace-nowrap"
-          >
-            对冲刷单
-          </TabsTrigger>
-          <TabsTrigger
-            value="leverage-abuse"
-            className="px-2 text-xs sm:px-3 sm:text-sm whitespace-nowrap"
-          >
-            滥用杠杆
-          </TabsTrigger>
-          <TabsTrigger
-            value="gap-trade"
-            className="px-2 text-xs sm:px-3 sm:text-sm whitespace-nowrap"
-          >
-            Gap Trade
-          </TabsTrigger>
-        </TabsList>
-        <RealtimeIndicator
-          status={stream.status}
-          eventCount={stream.eventCount}
-          lastEventAt={stream.lastEvent?.received_at ?? null}
-        />
+          {/*
+            Narrow viewports: scroll the strip horizontally instead of cramming
+            N tabs into N equal columns (which clipped/overlapped the labels).
+            `relative` hosts the right-edge fade hint; `min-w-0 flex-1` lets the
+            scroller shrink so RealtimeIndicator keeps its space.
+          */}
+          <div className="relative min-w-0 flex-1 sm:flex-none sm:w-full">
+            <div
+              ref={tabScrollRef}
+              className="overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+            >
+              {/* < sm: natural-width tabs in a scrollable row. ≥ sm: equal columns filling the bar. */}
+              <TabsList className="inline-flex w-max sm:grid sm:w-full sm:auto-cols-fr sm:grid-flow-col">
+                {RISK_MONITOR_TABS.map((value) => (
+                  <TabsTrigger
+                    key={value}
+                    value={value}
+                    className="shrink-0 px-3 text-sm whitespace-nowrap"
+                  >
+                    {RISK_MONITOR_TAB_LABELS[value]}
+                  </TabsTrigger>
+                ))}
+              </TabsList>
+            </div>
+            {/* Fade hint that more tabs lie off-screen; desktop fills the bar so hide it there. */}
+            <div className="pointer-events-none absolute inset-y-0 right-0 w-6 bg-gradient-to-l from-muted sm:hidden" />
+          </div>
+          <RealtimeIndicator
+            status={stream.status}
+            eventCount={stream.eventCount}
+            lastEventAt={stream.lastEvent?.received_at ?? null}
+          />
         </div>
 
         {/*
-          forceMount keeps all 4 tabs in the DOM so AG-Grid state, fetched
+          forceMount keeps every tab mounted in the DOM so AG-Grid state, fetched
           alert rows, filters, and sort positions persist across tab
           switches. The `active` prop guards inside each tab's useEffect
           (e.g. `if (!active) return;`) already handle the "don't fetch
