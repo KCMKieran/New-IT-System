@@ -545,8 +545,14 @@ function fmtCurrency(v: number | null | undefined): string {
   return `${sign}$${Math.abs(v).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
-/** IANA zone for all monitor timestamps shown in the UI (backend scan time is UTC; DB open times are treated as UTC when naive). */
-const DISPLAY_TIME_ZONE = "Asia/Hong_Kong";
+/**
+ * IANA zone for all monitor timestamps shown in the UI (backend scan time is UTC;
+ * DB open times are treated as UTC when naive). MT broker time = UTC+3 (no DST);
+ * `Etc/GMT-3` is a fixed +03:00 offset (POSIX sign is inverted). DB always stores
+ * UTC `...Z`, so switching this constant retroactively re-renders ALL rows (old and
+ * new) in MT time — no data migration needed.
+ */
+const DISPLAY_TIME_ZONE = "Etc/GMT-3";
 
 /** Parse a backend timestamp (ISO with Z, or naive `YYYY-MM-DD HH:mm:ss`) into a Date. Returns null on failure. */
 function parseBackendTime(v: string | null | undefined): Date | null {
@@ -562,7 +568,7 @@ function parseBackendTime(v: string | null | undefined): Date | null {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
-/** Full HKT timestamp "YYYY-MM-DD HH:mm:ss" */
+/** Full MT-time (UTC+3) timestamp "YYYY-MM-DD HH:mm:ss" */
 function fmtTime(v: string | null | undefined): string {
   const d = parseBackendTime(v);
   if (!d) return v ? String(v).replace("T", " ").slice(0, 19) : "—";
@@ -580,7 +586,7 @@ function fmtTime(v: string | null | undefined): string {
     .replace("T", " ");
 }
 
-/** HH:mm:ss only (HKT), for compact per-order time display */
+/** HH:mm:ss only (MT-time, UTC+3), for compact per-order time display */
 function fmtTimeShort(v: string | null | undefined): string {
   const d = parseBackendTime(v);
   if (!d) return "—";
@@ -1099,6 +1105,14 @@ export default function RiskMonitor() {
             {/* Fade hint that more tabs lie off-screen; desktop fills the bar so hide it there. */}
             <div className="pointer-events-none absolute inset-y-0 right-0 w-6 bg-gradient-to-l from-muted sm:hidden" />
           </div>
+          {/* Times across every tab render in MT broker time (UTC+3); this hint
+              avoids analysts misreading timestamps they used to see in HKT. */}
+          <span
+            className="hidden shrink-0 items-center rounded-md border border-border bg-muted/50 px-2 py-0.5 text-xs font-medium text-muted-foreground sm:inline-flex"
+            title="所有时间均为 MT 服务器时间 (UTC+3)"
+          >
+            MT 时间 · UTC+3
+          </span>
           <RealtimeIndicator
             status={stream.status}
             eventCount={stream.eventCount}
