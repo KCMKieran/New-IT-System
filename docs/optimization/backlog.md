@@ -11,6 +11,7 @@
 | ID | Branch | Claim 日期 | 备注 |
 |----|--------|-----------|------|
 | [OPT-0032](./items/OPT-0032-gap-trade-crm-risk-tag.md) | `opt/gap-trade-crm-risk-tag` | 2026-06-02 | Gap Trade 超额客户→CRM 上风控 tag + 盘中 5min 快扫；P1 dry-run 先行 |
+| [OPT-0033](./items/OPT-0033-martingale-detection.md) | `opt/martingale-detection` | 2026-06-02 | 马丁策略检测 — risk-monitor 第 7 个 tab，event-gated（持仓浮亏+同向加仓），rule band 111-120 |
 
 ## ✅ 待领取（Ready）
 
