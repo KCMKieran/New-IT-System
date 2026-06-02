@@ -415,17 +415,21 @@ CREATE TABLE IF NOT EXISTS account_leverage_streak (
     PRIMARY KEY (rule_id, server, login)
 );
 
--- Gap Trade CRM risk-tag audit log (OPT-0032). Append-only: one row per
--- tag attempt (success / skip / failure) so we can answer "who got the
--- 禁止出金 / Withdrawal Notice tag, when, why". Also the dedup source —
--- `has_successful_tag(window_date, client_userid)` reads a TERMINAL-success
--- row here so the 5-min intraday tier never re-tags the same client for the
--- same MT trading day. Failed attempts deliberately do NOT block retry.
-CREATE TABLE IF NOT EXISTS gap_trade_crm_tag_log (
+-- Generic CRM tag audit log (OPT-0032). Append-only: one row per CRM tag
+-- attempt (success / skip / failure) from ANY monitor, so we can answer
+-- "who got which tag, from which detector, when, why". Also the dedup
+-- source — `has_successful_crm_tag(source, dedup_key)` reads a TERMINAL
+-- (non-failed) row so a 5-min tier never re-tags the same subject; failed
+-- attempts deliberately do NOT block retry.
+--   `source`    : which detector (e.g. 'gap_trade', 'leverage_abuse')
+--   `dedup_key` : free-form per-source identity (e.g. '2026-06-02:123456')
+--   `context`   : JSON blob for per-monitor extras (profit_usd, window_date…)
+CREATE TABLE IF NOT EXISTS crm_tag_log (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    window_date     TEXT    NOT NULL,   -- 'YYYY-MM-DD' MT trading day
-    client_userid   INTEGER NOT NULL,   -- == CRM `user` id (confirmed mapping)
-    cid             INTEGER,            -- CRM cid at read time (0=CN,1=Global)
+    source          TEXT    NOT NULL,
+    dedup_key       TEXT    NOT NULL,
+    user_id         INTEGER NOT NULL,   -- CRM `user` id
+    cid             INTEGER,            -- CRM cid at read time
     tag             TEXT,               -- tag string applied / would-be
     -- result: 'tagged' | 'skipped_existing' | 'skipped_cid' | 'dry_run'
     --       | 'skipped_dedup' | 'failed'
@@ -433,12 +437,12 @@ CREATE TABLE IF NOT EXISTS gap_trade_crm_tag_log (
     http_status     INTEGER,            -- CRM HTTP status (NULL when no call)
     tags_before     TEXT,               -- JSON array snapshot before write
     tags_after      TEXT,               -- JSON array snapshot after write
-    profit_usd      REAL,               -- triggering window profit (audit)
+    context         TEXT,               -- JSON: per-monitor extra audit fields
     detail          TEXT,               -- free-text note (errors etc.)
     attempted_at    TEXT    NOT NULL    -- UTC ISO8601
 );
-CREATE INDEX IF NOT EXISTS idx_gap_crm_tag_window_user
-    ON gap_trade_crm_tag_log(window_date, client_userid);
+CREATE INDEX IF NOT EXISTS idx_crm_tag_source_key
+    ON crm_tag_log(source, dedup_key);
 """
 
 # Default rule seeded on first run (3s / 3 orders / 5 lots)
@@ -1241,9 +1245,9 @@ def save_gap_trade_config(config: dict[str, Any]) -> None:
         )
 
 
-# ── Gap Trade CRM risk-tag audit log (OPT-0032) ───────────────────────
+# ── Generic CRM tag audit log (OPT-0032) ──────────────────────────────
 
-# Results that count as "already handled this client today" for dedup.
+# Results that count as "already handled this subject" for dedup.
 # 'failed' is intentionally excluded so a transient CRM error retries next tick.
 _TAG_TERMINAL_RESULTS = (
     "tagged",
@@ -1253,23 +1257,23 @@ _TAG_TERMINAL_RESULTS = (
 )
 
 
-def has_successful_tag(window_date: str, client_userid: int) -> bool:
-    """True if this client already has a terminal (non-failed) tag attempt
-    for the given MT trading day — the 5-min intraday tier dedup guard."""
+def has_successful_crm_tag(source: str, dedup_key: str) -> bool:
+    """True if this (source, dedup_key) already has a terminal (non-failed)
+    tag attempt — the generic dedup guard reused by every monitor that tags."""
     placeholders = ",".join(["?"] * len(_TAG_TERMINAL_RESULTS))
     with get_risk_monitor_db() as conn:
         row = conn.execute(
-            f"SELECT 1 FROM gap_trade_crm_tag_log "
-            f"WHERE window_date = ? AND client_userid = ? "
+            f"SELECT 1 FROM crm_tag_log "
+            f"WHERE source = ? AND dedup_key = ? "
             f"  AND result IN ({placeholders}) LIMIT 1",
-            (window_date, int(client_userid), *_TAG_TERMINAL_RESULTS),
+            (source, dedup_key, *_TAG_TERMINAL_RESULTS),
         ).fetchone()
     return row is not None
 
 
 def append_crm_tag_log(record: dict[str, Any]) -> None:
-    """Append one tag-attempt audit row. `tags_before`/`tags_after` may be
-    passed as lists (JSON-encoded here) or pre-encoded strings."""
+    """Append one tag-attempt audit row. `tags_before`/`tags_after`/`context`
+    may be passed as Python objects (JSON-encoded here) or pre-encoded str."""
     def _enc(v: Any) -> Any:
         if v is None or isinstance(v, str):
             return v
@@ -1277,20 +1281,21 @@ def append_crm_tag_log(record: dict[str, Any]) -> None:
 
     with get_risk_monitor_db() as conn:
         conn.execute(
-            "INSERT INTO gap_trade_crm_tag_log "
-            "(window_date, client_userid, cid, tag, result, http_status, "
-            " tags_before, tags_after, profit_usd, detail, attempted_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO crm_tag_log "
+            "(source, dedup_key, user_id, cid, tag, result, http_status, "
+            " tags_before, tags_after, context, detail, attempted_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
-                record.get("window_date"),
-                int(record.get("client_userid") or 0),
+                record.get("source"),
+                record.get("dedup_key"),
+                int(record.get("user_id") or 0),
                 record.get("cid"),
                 record.get("tag"),
                 record.get("result"),
                 record.get("http_status"),
                 _enc(record.get("tags_before")),
                 _enc(record.get("tags_after")),
-                record.get("profit_usd"),
+                _enc(record.get("context")),
                 record.get("detail"),
                 record.get("attempted_at"),
             ),

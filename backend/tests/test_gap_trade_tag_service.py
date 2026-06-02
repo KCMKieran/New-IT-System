@@ -11,6 +11,7 @@ from __future__ import annotations
 import pytest
 
 from app.core import risk_monitor_db as rm_db
+from app.services import crm_client
 from app.services import gap_trade_tag_service as svc
 
 
@@ -50,9 +51,11 @@ class _FakeCrm:
 
 @pytest.fixture
 def fake_crm(monkeypatch):
+    # Patch the crm_client module attrs — the generic crm_tag_service calls
+    # crm_client.read_user/update_user_tags via the same module object.
     crm = _FakeCrm({})
-    monkeypatch.setattr(svc.crm_client, "read_user", crm.read_user)
-    monkeypatch.setattr(svc.crm_client, "update_user_tags", crm.update_user_tags)
+    monkeypatch.setattr(crm_client, "read_user", crm.read_user)
+    monkeypatch.setattr(crm_client, "update_user_tags", crm.update_user_tags)
     return crm
 
 
@@ -140,4 +143,4 @@ def test_email_builder_flags_failures(temp_db, fake_crm):
     subj, html = svc.build_tag_email(s)
     assert "[DRY-RUN]" in subj
     assert "failed" in subj.lower()
-    assert "client_userid" in html
+    assert "user_id" in html
