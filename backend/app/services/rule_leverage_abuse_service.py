@@ -56,7 +56,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import pymysql
 
 from ..core.config import Settings
-from ..core.sql_helpers import SID_MAP, broker_time_to_utc_iso
+from ..core.sql_helpers import SID_MAP, broker_time_to_utc_iso, is_force_included
 from .account_enrichment import get_net_deposit_hist_map
 from .risk_monitor_service import (
     _query_mt4_recent_opens,
@@ -216,8 +216,10 @@ def _get_margin_snapshot(
         name = (r.get("name") or "").strip() or None
         gl = (group or "").lower()
         nl = (name or "").lower()
-        if "demo" in gl or "test" in gl or "demo" in nl or "test" in nl:
-            continue  # exclude demo/test (MT5 opens query doesn't filter these)
+        if (
+            "demo" in gl or "test" in gl or "demo" in nl or "test" in nl
+        ) and not is_force_included(r.get("loginsid")):
+            continue  # exclude demo/test (unless force-included for validation)
         currency = (r.get("currency") or "USD").upper()
         divisor = 100.0 if currency == "CEN" else 1.0
         out[r["loginsid"]] = {

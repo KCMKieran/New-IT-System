@@ -43,6 +43,10 @@ services:
       # Do NOT enable BURST_FAST_TIER_ENABLED here — dev shares SQLite with prod.
       - CURSOR_SCAN_ENABLED=true
       - SSE_ENABLED=true
+      # Force-include allowlist (mirror prod so dev /scan-now also detects it).
+      # `{sid}-{login}` — accounts here bypass the demo/test filter in all
+      # non-Gap-Trade rules. 5-60000017 = risk team validation account.
+      - RISK_MONITOR_FORCE_INCLUDE_LOGINSIDS=5-60000017
     restart: unless-stopped
     depends_on:
       - redis

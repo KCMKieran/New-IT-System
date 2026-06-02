@@ -40,7 +40,7 @@ import pymysql
 
 from ..core.config import Settings
 from ..core.risk_monitor_db import get_scan_cursor, update_scan_cursor
-from ..core.sql_helpers import SID_MAP
+from ..core.sql_helpers import SID_MAP, is_force_included
 from .account_enrichment import (
     apply_cen_conversion,
     get_account_info_map,
@@ -441,7 +441,7 @@ def _enrich_account_info(conn, alerts: List[Dict[str, Any]]) -> None:
         if (
             "demo" in grp or "test" in grp
             or "demo" in nm or "test" in nm
-        ):
+        ) and not is_force_included(loginsid):
             alert["_skip"] = True
 
     # Remove demo/test accounts that slipped through the MT5 SQL query.

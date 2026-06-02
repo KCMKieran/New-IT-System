@@ -40,6 +40,7 @@ from ..core.sql_helpers import (
     FILETIME_TICKS_PER_SEC,
     SID_MAP,
     broker_time_to_utc_iso,
+    demo_test_filter_sql,
 )
 from .account_enrichment import get_account_info_map, get_net_deposit_hist_map
 
@@ -118,10 +119,7 @@ def _query_mt4_realized(
           AND t.CLOSE_TIME > '1970-01-01 00:00:00'
           AND t.CLOSE_TIME >= DATE_SUB(NOW(), INTERVAL %s SECOND)
           AND t.LOGIN NOT LIKE '7%%'
-          AND u.`GROUP` NOT LIKE '%%demo%%'
-          AND u.`GROUP` NOT LIKE '%%test%%'
-          AND COALESCE(u.NAME, '') NOT LIKE '%%demo%%'
-          AND COALESCE(u.NAME, '') NOT LIKE '%%test%%'
+          {demo_test_filter_sql('u.`GROUP`', 'u.NAME', login_col='t.LOGIN', server_label=server_label)}
         ORDER BY t.LOGIN, t.SYMBOL, t.CLOSE_TIME
     """
     with conn.cursor() as cur:
@@ -167,10 +165,7 @@ def _query_mt5_realized(
         WHERE c.Entry IN (1, 3)
           AND c.Action IN (0, 1)
           AND c.Timestamp >= {cutoff}
-          AND u.`Group` NOT LIKE '%%demo%%'
-          AND u.`Group` NOT LIKE '%%test%%'
-          AND COALESCE(u.Name, '') NOT LIKE '%%demo%%'
-          AND COALESCE(u.Name, '') NOT LIKE '%%test%%'
+          {demo_test_filter_sql('u.`Group`', 'u.Name', login_col='c.Login', server_label='MT5')}
         ORDER BY c.Login, c.Symbol, c.Time
     """
     with conn.cursor() as cur:
@@ -203,10 +198,7 @@ def _query_mt4_floating(
         WHERE t.CMD IN (0, 1)
           AND t.CLOSE_TIME = '1970-01-01 00:00:00'
           AND t.LOGIN IN ({placeholders})
-          AND u.`GROUP` NOT LIKE '%%demo%%'
-          AND u.`GROUP` NOT LIKE '%%test%%'
-          AND COALESCE(u.NAME, '') NOT LIKE '%%demo%%'
-          AND COALESCE(u.NAME, '') NOT LIKE '%%test%%'
+          {demo_test_filter_sql('u.`GROUP`', 'u.NAME', login_col='t.LOGIN', server_label=server_label)}
         GROUP BY t.LOGIN
     """
     out: Dict[Tuple[str, int], float] = {}
@@ -231,10 +223,7 @@ def _query_mt5_floating(
         FROM mt5_live.mt5_positions p
         INNER JOIN mt5_live.mt5_users u ON u.Login = p.Login
         WHERE p.Login IN ({placeholders})
-          AND u.`Group` NOT LIKE '%%demo%%'
-          AND u.`Group` NOT LIKE '%%test%%'
-          AND COALESCE(u.Name, '') NOT LIKE '%%demo%%'
-          AND COALESCE(u.Name, '') NOT LIKE '%%test%%'
+          {demo_test_filter_sql('u.`Group`', 'u.Name', login_col='p.Login', server_label='MT5')}
         GROUP BY p.Login
     """
     out: Dict[Tuple[str, int], float] = {}
