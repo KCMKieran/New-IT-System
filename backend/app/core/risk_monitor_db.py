@@ -111,6 +111,13 @@ _SORT_COL_DB_NAME: dict[str, str] = {
     "margin_used":  "la.margin_used",
     "free_margin":  "la.free_margin",
     "streak_count": "la.streak_count",
+    # Martingale detail (rule 111-120)
+    "direction":    "mg.direction",
+    "anchor_lots":  "mg.anchor_lots",
+    "new_lots":     "mg.new_lots",
+    "lot_ratio_mg": "mg.lot_ratio_mg",
+    "floating_pnl": "mg.floating_pnl",
+    "add_count":    "mg.add_count",
 }
 
 _DB_PATH = Path(__file__).resolve().parents[2] / "data" / "risk_monitor.db"
@@ -414,6 +421,35 @@ CREATE TABLE IF NOT EXISTS account_leverage_streak (
     updated_at     TEXT    NOT NULL,
     PRIMARY KEY (rule_id, server, login)
 );
+
+CREATE TABLE IF NOT EXISTS martingale_config (
+    id          INTEGER PRIMARY KEY CHECK (id = 1),
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    updated_at  DATETIME
+);
+INSERT OR IGNORE INTO martingale_config (id) VALUES (1);
+
+CREATE TABLE IF NOT EXISTS martingale_rules (
+    id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+    name                     TEXT    NOT NULL DEFAULT '',
+    enabled                  INTEGER NOT NULL DEFAULT 1,
+    floating_loss_floor_usd  REAL    NOT NULL DEFAULT 0.0,
+    lot_multiplier           REAL    NOT NULL DEFAULT 1.0,
+    min_add_count            INTEGER NOT NULL DEFAULT 1,
+    sort_order               INTEGER NOT NULL DEFAULT 0
+);
+
+-- Detail table for Martingale (rule_id 111-120). Same-symbol same-direction
+-- add-to-loser ladder metrics, frozen at scan time, 1:1 with alert_events.
+CREATE TABLE IF NOT EXISTS alert_martingale_detail (
+    id             INTEGER PRIMARY KEY,
+    direction      TEXT,
+    anchor_lots    REAL,
+    new_lots       REAL,
+    lot_ratio_mg   REAL,
+    floating_pnl   REAL,
+    add_count      INTEGER
+);
 """
 
 # Default rule seeded on first run (3s / 3 orders / 5 lots)
@@ -458,6 +494,16 @@ VALUES
     ('持续高杠杆', 1, 125.0, 3, 100.0, 1);
 """
 
+# Default Martingale rule: any floating loss (floor 0), 1:1 multiplier (an add
+# of equal-or-greater size vs the anchor), fire on the first add. Loosest
+# sensible default; analysts tighten the floor / multiplier after watching the
+# first week of real data.
+_SEED_MARTINGALE_RULE_SQL = """
+INSERT INTO martingale_rules
+    (name, enabled, floating_loss_floor_usd, lot_multiplier, min_add_count, sort_order)
+VALUES ('默认马丁检测', 1, 0.0, 1.0, 1, 0);
+"""
+
 
 def init_risk_monitor_db() -> None:
     """Create tables if they don't exist. Seed default rule on first run.
@@ -486,7 +532,11 @@ def init_risk_monitor_db() -> None:
         la_count = conn.execute("SELECT COUNT(*) FROM leverage_abuse_rules").fetchone()[0]
         if la_count == 0:
             conn.execute(_SEED_LEVERAGE_ABUSE_RULE_SQL)
-        if count == 0 or quick_count == 0 or qp_count == 0 or ho_count == 0 or la_count == 0:
+        mg_count = conn.execute("SELECT COUNT(*) FROM martingale_rules").fetchone()[0]
+        if mg_count == 0:
+            conn.execute(_SEED_MARTINGALE_RULE_SQL)
+        if (count == 0 or quick_count == 0 or qp_count == 0 or ho_count == 0
+                or la_count == 0 or mg_count == 0):
             conn.commit()
 
         # Lightweight column migrations for installations created before
@@ -1123,6 +1173,64 @@ def save_leverage_abuse_config(enabled: bool, rules: list[dict]) -> None:
             )
 
 
+def load_martingale_config() -> dict[str, Any]:
+    """Read Martingale enabled flag + rules from SQLite.
+
+    Mirrors load_leverage_abuse_config: NULL enabled treated as True; per-rule
+    enabled coerced to bool so the scheduler can park a draft rule.
+    """
+    with get_risk_monitor_db() as conn:
+        cfg_row = conn.execute(
+            "SELECT enabled FROM martingale_config WHERE id = 1"
+        ).fetchone()
+        if not cfg_row:
+            enabled = True
+        else:
+            raw = cfg_row["enabled"]
+            enabled = True if raw is None else bool(raw)
+
+        rule_rows = conn.execute(
+            "SELECT id, name, enabled, floating_loss_floor_usd, lot_multiplier, "
+            "min_add_count FROM martingale_rules ORDER BY sort_order, id"
+        ).fetchall()
+        rules: list[dict[str, Any]] = []
+        for r in rule_rows:
+            d = dict(r)
+            d["enabled"] = True if d.get("enabled") is None else bool(d["enabled"])
+            rules.append(d)
+
+    return {"enabled": enabled, "rules": rules}
+
+
+def save_martingale_config(enabled: bool, rules: list[dict]) -> None:
+    """Overwrite Martingale enabled flag + rules atomically. Rule ids are
+    positional (111 + sort_order)."""
+    with get_risk_monitor_db() as conn:
+        conn.execute(
+            "UPDATE martingale_config SET enabled = ?, "
+            "updated_at = datetime('now') WHERE id = 1",
+            (1 if enabled else 0,),
+        )
+        conn.execute("DELETE FROM martingale_rules")
+        conn.execute(
+            "DELETE FROM sqlite_sequence WHERE name = 'martingale_rules'"
+        )
+        for i, r in enumerate(rules):
+            conn.execute(
+                "INSERT INTO martingale_rules "
+                "(name, enabled, floating_loss_floor_usd, lot_multiplier, "
+                "min_add_count, sort_order) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    str(r.get("name", "")).strip(),
+                    1 if r.get("enabled", True) else 0,
+                    float(r.get("floating_loss_floor_usd", 0.0) or 0.0),
+                    float(r.get("lot_multiplier", 1.0) or 1.0),
+                    int(r.get("min_add_count", 1) or 1),
+                    i,
+                ),
+            )
+
+
 # ── Leverage Abuse streak state (D2 sustained-N-scans tier) ────────────
 # Owned solely by rule_leverage_abuse_service. The service reads the whole
 # state at the top of a scan, computes the next state (increment streaks for
@@ -1379,6 +1487,11 @@ def append_scan_and_events(
                     _LEVERAGE_ABUSE_INSERT_SQL,
                     (event_id, *(alert.get(c) for c in _LEVERAGE_ABUSE_DETAIL_COLS)),
                 )
+            elif 111 <= rule_id <= 120:
+                conn.execute(
+                    _MARTINGALE_INSERT_SQL,
+                    (event_id, *(alert.get(c) for c in _MARTINGALE_DETAIL_COLS)),
+                )
 
         # Retention purge. Detail tables get cleaned via ON DELETE-style
         # cascade in spirit: we delete from alert_events and from each
@@ -1393,6 +1506,7 @@ def append_scan_and_events(
             "alert_gap_profit_detail",
             "alert_hedge_open_detail",
             "alert_leverage_abuse_detail",
+            "alert_martingale_detail",
         ):
             conn.execute(
                 f"DELETE FROM {detail_table} "
@@ -1573,6 +1687,11 @@ _LEVERAGE_ABUSE_DETAIL_COLS: tuple[str, ...] = (
     "margin_level", "margin_used", "free_margin", "streak_count",
 )
 
+_MARTINGALE_DETAIL_COLS: tuple[str, ...] = (
+    "direction", "anchor_lots", "new_lots", "lot_ratio_mg",
+    "floating_pnl", "add_count",
+)
+
 
 def _build_detail_insert_sql(table: str, cols: tuple[str, ...]) -> str:
     """Compose `INSERT INTO <table> (id, <cols>) VALUES (?, ...)`."""
@@ -1588,6 +1707,7 @@ _GAP_SO_INSERT_SQL = _build_detail_insert_sql("alert_gap_so_detail", _GAP_SO_DET
 _GAP_PROFIT_INSERT_SQL = _build_detail_insert_sql("alert_gap_profit_detail", _GAP_PROFIT_DETAIL_COLS)
 _HEDGE_OPEN_INSERT_SQL = _build_detail_insert_sql("alert_hedge_open_detail", _HEDGE_OPEN_DETAIL_COLS)
 _LEVERAGE_ABUSE_INSERT_SQL = _build_detail_insert_sql("alert_leverage_abuse_detail", _LEVERAGE_ABUSE_DETAIL_COLS)
+_MARTINGALE_INSERT_SQL = _build_detail_insert_sql("alert_martingale_detail", _MARTINGALE_DETAIL_COLS)
 
 
 # Unified SELECT with 4 LEFT JOINs — used by every reader so the API-facing
@@ -1626,6 +1746,9 @@ _ALERT_SELECT_SQL = """
 
     la.margin_level, la.margin_used, la.free_margin, la.streak_count,
 
+    mg.direction, mg.anchor_lots, mg.new_lots, mg.lot_ratio_mg,
+    mg.floating_pnl, mg.add_count,
+
     COALESCE(gso.window_date, gp.window_date) AS window_date
 """
 
@@ -1637,6 +1760,7 @@ LEFT JOIN alert_gap_so_detail        gso ON gso.id = ae.id
 LEFT JOIN alert_gap_profit_detail    gp  ON gp.id  = ae.id
 LEFT JOIN alert_hedge_open_detail    ho  ON ho.id  = ae.id
 LEFT JOIN alert_leverage_abuse_detail la ON la.id  = ae.id
+LEFT JOIN alert_martingale_detail    mg  ON mg.id  = ae.id
 """
 
 
@@ -1883,6 +2007,27 @@ def get_recent_leverage_abuse_alerts(minutes: int) -> list[dict[str, Any]]:
             SELECT {_ALERT_SELECT_SQL}
             {_ALERT_FROM_CLAUSE}
             WHERE ae.rule_id BETWEEN 101 AND 110
+              AND ae.scanned_at >= datetime('now', ?)
+            """,
+            (f"-{int(minutes)} minutes",),
+        ).fetchall()
+    return [_row_to_alert_dict(r) for r in rows]
+
+
+def get_recent_martingale_alerts(minutes: int) -> list[dict[str, Any]]:
+    """Latest martingale alerts (rule_id 111-120) within the last N minutes.
+
+    Seeds the event-gated dedup pool after a restart so the first post-restart
+    scan doesn't re-emit adds already alerted before the restart (dedup keys on
+    (rule_id, server, login, symbol, direction, last_open))."""
+    if minutes <= 0:
+        return []
+    with get_risk_monitor_db() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT {_ALERT_SELECT_SQL}
+            {_ALERT_FROM_CLAUSE}
+            WHERE ae.rule_id BETWEEN 111 AND 120
               AND ae.scanned_at >= datetime('now', ?)
             """,
             (f"-{int(minutes)} minutes",),

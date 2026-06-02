@@ -100,11 +100,13 @@ def _run_scan(*, tier: str = "all") -> None:
         load_config,
         load_hedge_open_config,
         load_leverage_abuse_config,
+        load_martingale_config,
         load_quick_open_close_config,
         load_quick_profit_config,
     )
     from ..services.rule_hedge_open_service import scan_hedge_open
     from ..services.rule_leverage_abuse_service import scan_leverage_abuse
+    from ..services.rule_martingale_service import scan_martingale
     from ..services.rule_quick_open_close_service import scan_quick_open_close
     from ..services.rule_quick_profit_service import scan_quick_profit
     from ..services.risk_monitor_service import scan_burst_open
@@ -120,6 +122,10 @@ def _run_scan(*, tier: str = "all") -> None:
     # recently-OPENED accounts and reads their margin level at open. Slow tier;
     # 'all' branch lets scan-now (tier='all') refresh it on demand.
     include_leverage = tier in ("all", "slow")
+    # Martingale (rule_id 111-120): event-gated like Leverage Abuse — a recent
+    # add gates evaluation against the open-position snapshot. Slow tier; 'all'
+    # branch lets scan-now refresh it on demand.
+    include_martingale = tier in ("all", "slow")
 
     try:
         config = load_config()
@@ -127,6 +133,7 @@ def _run_scan(*, tier: str = "all") -> None:
         qp_config = load_quick_profit_config()
         hedge_config = load_hedge_open_config()
         leverage_config = load_leverage_abuse_config()
+        martingale_config = load_martingale_config()
         settings = get_settings()
 
         # Always merge SQLite-recent QP alerts into the dedup pool — see
@@ -208,6 +215,27 @@ def _run_scan(*, tier: str = "all") -> None:
             except Exception:
                 logger.error("Leverage abuse scan failed", exc_info=True)
 
+        # Martingale (rule_id 111-120, event-gated). Dedup on
+        # (rule_id, server, login, symbol, direction, last_open). Seed the
+        # previous-alert pool with the in-memory last tick PLUS recent
+        # martingale rows from SQLite so a restart doesn't re-emit adds already
+        # alerted (prev_alerts' SQLite portion only covers QP).
+        martingale_result: dict[str, Any] | None = None
+        if include_martingale and martingale_config.get("enabled", True) and martingale_config.get("rules"):
+            try:
+                from ..core.risk_monitor_db import get_recent_martingale_alerts
+                martingale_prev = list(prev_alerts) + get_recent_martingale_alerts(
+                    int(config["scan_interval_min"]) + 5
+                )
+                martingale_result = scan_martingale(
+                    settings,
+                    scan_interval_min=config["scan_interval_min"],
+                    rules=martingale_config["rules"],
+                    previous_alerts=martingale_prev,
+                )
+            except Exception:
+                logger.error("Martingale scan failed", exc_info=True)
+
         # Build this tick's alerts. For tiered modes ('fast_burst'/'slow'),
         # we MERGE with the not-touched alerts from _latest_result so the
         # cached snapshot stays consistent (frontend "立即扫描" reads it).
@@ -222,6 +250,8 @@ def _run_scan(*, tier: str = "all") -> None:
             this_tick_alerts.extend(hedge_result["alerts"])
         if leverage_result:
             this_tick_alerts.extend(leverage_result["alerts"])
+        if martingale_result:
+            this_tick_alerts.extend(martingale_result["alerts"])
 
         if tier == "fast_burst":
             # Keep slow-tier alerts (rule_id >= 51) from previous result;
@@ -246,9 +276,10 @@ def _run_scan(*, tier: str = "all") -> None:
         qp_pairs = qp_result.pop("_universe_pairs", set()) if qp_result else set()
         hedge_pairs = hedge_result.pop("_universe_pairs", set()) if hedge_result else set()
         leverage_pairs = leverage_result.pop("_universe_pairs", set()) if leverage_result else set()
+        martingale_pairs = martingale_result.pop("_universe_pairs", set()) if martingale_result else set()
 
         # For tier modes, the scan_time_ms reflects only what this tick ran.
-        ran_results = [r for r in (burst_result, quick_result, qp_result, hedge_result, leverage_result) if r]
+        ran_results = [r for r in (burst_result, quick_result, qp_result, hedge_result, leverage_result, martingale_result) if r]
         if not ran_results:
             # tier='slow' with everything disabled — nothing to persist, but
             # still safe to return without touching state.
@@ -261,6 +292,7 @@ def _run_scan(*, tier: str = "all") -> None:
                 "total_accounts_scanned": len(
                     set(burst_pairs) | set(quick_pairs) | set(qp_pairs)
                     | set(hedge_pairs) | set(leverage_pairs)
+                    | set(martingale_pairs)
                 ),
             },
             "burst_summary": (burst_result["summary"] if burst_result
