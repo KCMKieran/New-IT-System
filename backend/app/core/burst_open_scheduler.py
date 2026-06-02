@@ -29,6 +29,10 @@ JOB_ID = "burst_open_scan"
 BURST_FAST_JOB_ID = "burst_open_fast_tier"
 BURST_FAST_TIER_INTERVAL_SEC = 60
 GAP_TRADE_JOB_ID = "gap_trade_daily_scan"
+# OPT-0032: intraday gap-profit fast tier — runs every N min during the
+# market-open window so superior-profit clients get CRM-tagged in real time
+# (not just at the 07:20 daily run). rule 81 only (SO+AB stays daily).
+GAP_TRADE_INTRADAY_JOB_ID = "gap_trade_intraday_scan"
 
 _scheduler: BackgroundScheduler | None = None
 _latest_result: dict[str, Any] | None = None
@@ -37,12 +41,33 @@ _scan_lock = threading.Lock()
 # tick (or vice versa). They write to the same `alert_events` table but
 # touch different rule_id ranges, so concurrent runs are safe.
 _gap_trade_lock = threading.Lock()
+# Separate lock for the intraday tier so it can't overlap itself, and is
+# isolated from the daily 07:20 job.
+_gap_trade_intraday_lock = threading.Lock()
 
 
 def _fast_tier_enabled() -> bool:
     # Default OFF — opt-in via env. Reads each call so test fixtures and
     # rolling restarts can toggle without re-importing the module.
     return os.getenv("BURST_FAST_TIER_ENABLED", "false").lower() == "true"
+
+
+def _gap_trade_intraday_enabled() -> bool:
+    # Default OFF — opt-in via env (OPT-0032 P1 rollout).
+    return os.getenv("GAP_TRADE_INTRADAY_ENABLED", "false").lower() == "true"
+
+
+def _crm_tag_dry_run() -> bool:
+    # Default TRUE — safe default: detect + audit + email, but DON'T write to
+    # the CRM. Flip to "false" only when going live (OPT-0032 P2).
+    return os.getenv("GAP_TRADE_CRM_TAG_DRY_RUN", "true").lower() != "false"
+
+
+def _gap_trade_intraday_interval_min() -> int:
+    try:
+        return max(1, int(os.getenv("GAP_TRADE_INTRADAY_INTERVAL_MIN", "5")))
+    except ValueError:
+        return 5
 
 
 def _build_quick_profit_prev_alerts(
@@ -374,6 +399,148 @@ def trigger_gap_trade_scan_now() -> None:
         _run_gap_trade_scan()
 
 
+def _maybe_send_tag_email(summary) -> None:
+    """Email the tagging-run summary to the risk desk.
+
+    Sends when there is anything actionable (a new tag or a failure). The
+    success summary can be suppressed in steady state (P3) via
+    GAP_TRADE_TAG_MAIL_ON_SUCCESS=false — failures always notify.
+    """
+    if not summary.has_changes:
+        return
+    on_success = os.getenv("GAP_TRADE_TAG_MAIL_ON_SUCCESS", "true").lower() != "false"
+    if not on_success and not summary.failed:
+        return
+    try:
+        from ..services.gap_trade_tag_service import build_tag_email
+        from ..services.email_service import send_email
+
+        to = os.getenv("GAP_TRADE_TAG_MAIL_TO", "risk@kcmtrade.com")
+        subject, html = build_tag_email(summary)
+        send_email(subject=subject, body=html, to=to)
+        logger.info("Gap Trade tag email sent -> %s (%s)", to, summary.counts)
+    except Exception:
+        logger.error("Gap Trade tag email failed", exc_info=True)
+
+
+def _run_gap_trade_tagging(alerts: list[dict[str, Any]], window_date: str) -> None:
+    """Tag rule-81 clients in the CRM + email a summary. Shared by the daily
+    07:20 run and the intraday tier. Dry-run aware; internally idempotent."""
+    if not any(int(a.get("rule_id") or 0) == 81 for a in alerts):
+        return
+    from ..core.config import get_settings
+
+    if not get_settings().CRM_RISK_API_TOKEN:
+        # Even dry-run needs to READ the CRM (for cid + current tags), so
+        # without a token there's nothing to do. Skip quietly rather than
+        # raising on every scan in environments that don't configure CRM.
+        logger.info("Gap Trade CRM tagging skipped: CRM_RISK_API_TOKEN not set")
+        return
+    try:
+        from ..services.gap_trade_tag_service import tag_gap_profit_clients
+
+        summary = tag_gap_profit_clients(
+            alerts, window_date=window_date, dry_run=_crm_tag_dry_run()
+        )
+        _maybe_send_tag_email(summary)
+    except Exception:
+        logger.error("Gap Trade CRM tagging failed", exc_info=True)
+
+
+def _run_gap_trade_intraday_scan() -> None:
+    """Intraday gap-profit scan (rule 81 only) during the market-open window.
+
+    Same per-client realized-P&L logic as the daily run but with a GROWING
+    window (`end_mt = now_mt`), so a client who books superior gap profit at
+    06:10 is tagged within ~5 min instead of waiting for the 07:20 batch.
+    Writes each client's alert_events row at most once/day; tagging dedups
+    independently via the audit table (so a tag failure still retries).
+    """
+    from ..core.config import get_settings
+    from ..core.risk_monitor_db import (
+        append_scan_and_events,
+        has_gap_profit_alert,
+        load_gap_trade_config,
+    )
+    from ..services.rule_gap_trade_gap_service import detect_gap_trade_gap_profit
+    from ..schemas.risk_monitor import GapTradeConfig
+
+    try:
+        config = GapTradeConfig(**load_gap_trade_config())
+        if not config.gap_profit.enabled:
+            return
+        settings = get_settings()
+
+        now_mt = (datetime.now(timezone.utc) + timedelta(hours=3)).replace(
+            tzinfo=None, microsecond=0
+        )
+        window_day = now_mt.replace(hour=0, minute=0, second=0, microsecond=0)
+        if config.weekdays_only and window_day.weekday() == 6:
+            return  # Sunday MT — no trading.
+
+        start_mt = window_day.replace(hour=config.window_start_hour_mt)
+        # Cap the growing window at the configured close so a late tick (e.g.
+        # the */5 cron firing at 07:00) doesn't scan past MT 02:00.
+        window_end = window_day + timedelta(hours=config.window_end_hour_mt)
+        end_mt = min(now_mt, window_end)
+        if end_mt <= start_mt:
+            return
+
+        result = detect_gap_trade_gap_profit(
+            settings,
+            start_mt=start_mt,
+            end_mt=end_mt,
+            sid_list=list(config.sid_list),
+            profit_ratio_min=config.gap_profit.profit_ratio_min,
+            min_profit_usd=config.gap_profit.min_profit_usd,
+            min_net_deposit_hist=config.gap_profit.min_net_deposit_hist,
+        )
+        alerts = result.get("alerts") or []
+        window_date = start_mt.date().isoformat()
+
+        # Persist alert_events only for clients not already recorded today, so
+        # 12 ticks/hour don't pile up 12 rows for the same client.
+        new_alerts = [
+            a for a in alerts
+            if not has_gap_profit_alert(window_date, int(a.get("client_userid") or 0))
+        ]
+        if new_alerts:
+            scanned_at = (
+                datetime.now(timezone.utc)
+                .isoformat(timespec="seconds")
+                .replace("+00:00", "Z")
+            )
+            append_scan_and_events(
+                scanned_at=scanned_at,
+                scan_interval_min=_gap_trade_intraday_interval_min(),
+                accounts_scanned=len({(a.get("server"), a.get("login")) for a in new_alerts}),
+                suspicious_count=len(new_alerts),
+                scan_time_ms=int(result.get("scan_time_ms") or 0),
+                alerts=new_alerts,
+            )
+
+        # Tag ALL qualifying clients (the tag service dedups + retries failures).
+        _run_gap_trade_tagging(alerts, window_date)
+        logger.info(
+            "Gap Trade intraday scan: %d qualifying (%d new alert_events) window MT %s ~ %s",
+            len(alerts), len(new_alerts), start_mt, end_mt,
+        )
+    except Exception:
+        logger.error("Gap Trade intraday scan failed", exc_info=True)
+
+
+def _locked_gap_trade_intraday_scan() -> None:
+    """Run the intraday gap scan under its own non-blocking lock."""
+    acquired = _gap_trade_intraday_lock.acquire(blocking=False)
+    if not acquired:
+        logger.info("Gap Trade intraday scan already running, skipping this tick")
+        return
+    try:
+        _run_gap_trade_intraday_scan()
+    finally:
+        _gap_trade_intraday_lock.release()
+
+
 def _run_gap_trade_scan() -> None:
     """Execute one Gap Trade daily scan (rules 71 + 81).
 
@@ -492,6 +659,10 @@ def _run_gap_trade_scan() -> None:
             "window MT %s ~ %s, %dms",
             len(merged_alerts), so_count, gp_count, start_mt, end_mt, total_ms,
         )
+        # Terminal-value tagging pass: the dedup audit table means clients
+        # already tagged intraday are skipped; this catches anyone the
+        # intraday tier missed (or runs standalone when intraday is off).
+        _run_gap_trade_tagging(merged_alerts, start_mt.date().isoformat())
     except Exception:
         logger.error("Gap Trade scan failed", exc_info=True)
 
@@ -564,6 +735,28 @@ def start_burst_scheduler() -> None:
             "Gap Trade scanner started: Mon–Sat 07:20 HKT "
             "(scans current MT day 00:00–02:00 window, real-time after gap close)"
         )
+        # OPT-0032: intraday gap-profit tier — every N min during the open
+        # window (default HKT 5-7, */5) so superior-profit clients get
+        # CRM-tagged in near-real-time. Opt-in; rule 81 only.
+        if _gap_trade_intraday_enabled():
+            hours = os.getenv("GAP_TRADE_INTRADAY_HOURS", "5-7")
+            step = _gap_trade_intraday_interval_min()
+            _scheduler.add_job(
+                _locked_gap_trade_intraday_scan,
+                CronTrigger(
+                    day_of_week="mon-sat",
+                    hour=hours,
+                    minute=f"*/{step}",
+                    timezone="Asia/Hong_Kong",
+                ),
+                id=GAP_TRADE_INTRADAY_JOB_ID,
+                replace_existing=True,
+            )
+            logger.info(
+                "Gap Trade intraday tier started: HKT %s every %dmin "
+                "(rule 81 only; CRM tag dry_run=%s)",
+                hours, step, _crm_tag_dry_run(),
+            )
     _scheduler.start()
     logger.info("Burst scanner started: every %d minutes", interval_min)
 

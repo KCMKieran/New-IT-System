@@ -49,6 +49,15 @@ class Settings:
     SMTP_USERNAME: str | None
     SMTP_PASSWORD: str | None
 
+    # CRM REST API (risk-tag writer, OPT-0032)
+    CRM_RISK_API_URL: str
+    CRM_RISK_API_TOKEN: str | None
+    CRM_RISK_MAX_RETRIES: int
+    CRM_RISK_RETRY_BACKOFF_SEC: float
+    CRM_RISK_MAX_REQ_PER_SEC: float
+    CRM_RISK_CONNECT_TIMEOUT: int
+    CRM_RISK_READ_TIMEOUT: int
+
     # Logging
     LOG_LEVEL: str
 
@@ -102,6 +111,26 @@ class Settings:
         self.SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
         self.SMTP_USERNAME = os.environ.get("SMTP_USERNAME")
         self.SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD")
+
+        # CRM REST API (risk-tag writer, OPT-0032). Dedicated API account,
+        # isolated from the Swap_Free integration. Endpoint shape:
+        # POST {URL} {"user": <id>, "tags": [...]} with Bearer auth. The CRM
+        # has an IP allowlist — the calling host's egress IP must be added.
+        self.CRM_RISK_API_URL = os.environ.get(
+            "CRM_RISK_API_URL", "https://mt4.kohleglobal.com/rest/users/update"
+        )
+        self.CRM_RISK_API_TOKEN = os.environ.get("CRM_RISK_API_TOKEN")
+        self.CRM_RISK_MAX_RETRIES = int(os.environ.get("CRM_RISK_MAX_RETRIES", "2"))
+        self.CRM_RISK_RETRY_BACKOFF_SEC = float(
+            os.environ.get("CRM_RISK_RETRY_BACKOFF_SEC", "2.0")
+        )
+        self.CRM_RISK_MAX_REQ_PER_SEC = float(
+            os.environ.get("CRM_RISK_MAX_REQ_PER_SEC", "10")
+        )
+        self.CRM_RISK_CONNECT_TIMEOUT = int(
+            os.environ.get("CRM_RISK_CONNECT_TIMEOUT", "10")
+        )
+        self.CRM_RISK_READ_TIMEOUT = int(os.environ.get("CRM_RISK_READ_TIMEOUT", "30"))
 
         # Logging configuration
         # Options: DEBUG, INFO, WARNING, ERROR, CRITICAL

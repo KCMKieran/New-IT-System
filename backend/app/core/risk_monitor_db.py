@@ -414,6 +414,31 @@ CREATE TABLE IF NOT EXISTS account_leverage_streak (
     updated_at     TEXT    NOT NULL,
     PRIMARY KEY (rule_id, server, login)
 );
+
+-- Gap Trade CRM risk-tag audit log (OPT-0032). Append-only: one row per
+-- tag attempt (success / skip / failure) so we can answer "who got the
+-- 禁止出金 / Withdrawal Notice tag, when, why". Also the dedup source —
+-- `has_successful_tag(window_date, client_userid)` reads a TERMINAL-success
+-- row here so the 5-min intraday tier never re-tags the same client for the
+-- same MT trading day. Failed attempts deliberately do NOT block retry.
+CREATE TABLE IF NOT EXISTS gap_trade_crm_tag_log (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    window_date     TEXT    NOT NULL,   -- 'YYYY-MM-DD' MT trading day
+    client_userid   INTEGER NOT NULL,   -- == CRM `user` id (confirmed mapping)
+    cid             INTEGER,            -- CRM cid at read time (0=CN,1=Global)
+    tag             TEXT,               -- tag string applied / would-be
+    -- result: 'tagged' | 'skipped_existing' | 'skipped_cid' | 'dry_run'
+    --       | 'skipped_dedup' | 'failed'
+    result          TEXT    NOT NULL,
+    http_status     INTEGER,            -- CRM HTTP status (NULL when no call)
+    tags_before     TEXT,               -- JSON array snapshot before write
+    tags_after      TEXT,               -- JSON array snapshot after write
+    profit_usd      REAL,               -- triggering window profit (audit)
+    detail          TEXT,               -- free-text note (errors etc.)
+    attempted_at    TEXT    NOT NULL    -- UTC ISO8601
+);
+CREATE INDEX IF NOT EXISTS idx_gap_crm_tag_window_user
+    ON gap_trade_crm_tag_log(window_date, client_userid);
 """
 
 # Default rule seeded on first run (3s / 3 orders / 5 lots)
@@ -1214,6 +1239,77 @@ def save_gap_trade_config(config: dict[str, Any]) -> None:
             "updated_at = datetime('now') WHERE id = 1",
             (json.dumps(config),),
         )
+
+
+# ── Gap Trade CRM risk-tag audit log (OPT-0032) ───────────────────────
+
+# Results that count as "already handled this client today" for dedup.
+# 'failed' is intentionally excluded so a transient CRM error retries next tick.
+_TAG_TERMINAL_RESULTS = (
+    "tagged",
+    "skipped_existing",
+    "skipped_cid",
+    "dry_run",
+)
+
+
+def has_successful_tag(window_date: str, client_userid: int) -> bool:
+    """True if this client already has a terminal (non-failed) tag attempt
+    for the given MT trading day — the 5-min intraday tier dedup guard."""
+    placeholders = ",".join(["?"] * len(_TAG_TERMINAL_RESULTS))
+    with get_risk_monitor_db() as conn:
+        row = conn.execute(
+            f"SELECT 1 FROM gap_trade_crm_tag_log "
+            f"WHERE window_date = ? AND client_userid = ? "
+            f"  AND result IN ({placeholders}) LIMIT 1",
+            (window_date, int(client_userid), *_TAG_TERMINAL_RESULTS),
+        ).fetchone()
+    return row is not None
+
+
+def append_crm_tag_log(record: dict[str, Any]) -> None:
+    """Append one tag-attempt audit row. `tags_before`/`tags_after` may be
+    passed as lists (JSON-encoded here) or pre-encoded strings."""
+    def _enc(v: Any) -> Any:
+        if v is None or isinstance(v, str):
+            return v
+        return json.dumps(v, ensure_ascii=False)
+
+    with get_risk_monitor_db() as conn:
+        conn.execute(
+            "INSERT INTO gap_trade_crm_tag_log "
+            "(window_date, client_userid, cid, tag, result, http_status, "
+            " tags_before, tags_after, profit_usd, detail, attempted_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                record.get("window_date"),
+                int(record.get("client_userid") or 0),
+                record.get("cid"),
+                record.get("tag"),
+                record.get("result"),
+                record.get("http_status"),
+                _enc(record.get("tags_before")),
+                _enc(record.get("tags_after")),
+                record.get("profit_usd"),
+                record.get("detail"),
+                record.get("attempted_at"),
+            ),
+        )
+
+
+def has_gap_profit_alert(window_date: str, client_userid: int) -> bool:
+    """True if a rule-81 alert_events row already exists for this client on
+    this MT trading day — lets the intraday tier write each client's
+    alert_events row at most once per day (avoids 12 ticks → 12 rows)."""
+    with get_risk_monitor_db() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM alert_events ae "
+            "JOIN alert_gap_profit_detail d ON d.id = ae.id "
+            "WHERE ae.rule_id = 81 AND d.window_date = ? "
+            "  AND d.client_userid = ? LIMIT 1",
+            (window_date, int(client_userid)),
+        ).fetchone()
+    return row is not None
 
 
 # ── Scan cursors (OPT-0011 cursor-mode high-water-mark) ───────────────
