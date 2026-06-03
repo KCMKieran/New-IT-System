@@ -401,14 +401,16 @@ def _empty_result(start: float) -> Dict[str, Any]:
 
 
 def _enrich_account_info(conn, alerts: List[Dict[str, Any]]) -> None:
-    """Fill CRM-side currency / zipcode / group / net_deposit_hist.
+    """Fill CRM-side currency / zipcode / group / balance / net_deposit_hist.
 
-    Broker-side equity/balance/leverage/total_open_lots are intentionally
-    NOT populated in v1 — they aren't needed to fire the rule and aren't
+    ``balance`` is the scan-time broker balance snapshot from
+    ``get_account_info_map`` (CEN ÷100 via ``apply_cen_conversion``).
+    Broker-side equity/leverage/total_open_lots are still intentionally NOT
+    populated in v1 — they aren't needed to fire the rule and aren't
     load-bearing for analyst triage of a wash-trade alert (the buy/sell
-    breakdown + net deposit history tell the whole story). Follow-up can
-    wire `_get_mt5_account_info` / `_get_mt4_account_total_lots` (already
-    in `risk_monitor_service`) if needed.
+    breakdown + balance + net deposit history tell the whole story).
+    Follow-up can wire `_get_mt5_account_info` / `_get_mt4_account_total_lots`
+    (already in `risk_monitor_service`) if needed.
     """
     if not alerts:
         return
@@ -425,6 +427,7 @@ def _enrich_account_info(conn, alerts: List[Dict[str, Any]]) -> None:
         alert["currency"] = currency
         alert["zipcode"] = info.get("zipcode")
         alert["group"] = info.get("group")
+        alert["balance"] = info.get("balance")
         alert["net_deposit_hist"] = (
             net_deposit_map.get(loginsid) if loginsid else None
         )

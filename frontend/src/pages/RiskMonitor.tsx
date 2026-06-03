@@ -817,6 +817,34 @@ function netDepositColDef<TRow extends { net_deposit_hist?: number | null }>(
 }
 
 /**
+ * `balance` AG-Grid column factory — account balance (USD), a scan-time
+ * snapshot from `fxbackoffice.mt4_users` (CEN ÷100 in the backend enrichment).
+ * Neutral right-aligned money (balance is rarely negative, so no green/red
+ * lens like equity / net deposit). `null` → "—" (account not enriched / legacy
+ * row predating balance population). Header / colId / width / filter overridable.
+ */
+function balanceColDef<TRow extends { balance?: number | null }>(
+  opts: {
+    headerName?: string;
+    colId?: string;
+    width?: number;
+    filter?: string | boolean;
+  } = {},
+): ColDef<TRow> {
+  const { headerName = "余额 (USD)", colId = "balance", width = 130, filter } = opts;
+  const def: ColDef<TRow> = {
+    headerName,
+    field: "balance" as ColDef<TRow>["field"],
+    colId,
+    width,
+    cellClass: "ag-right-aligned-cell",
+    valueFormatter: (p) => fmtCurrency(p.value as number | null | undefined),
+  };
+  if (filter !== undefined) def.filter = filter;
+  return def;
+}
+
+/**
  * `est_commission` AG-Grid column factory — D03 粗略试算 (External + Internal
  * + Dark Points), CN-only. Non-CN rows render `—`. See `@/lib/commission` and
  * `docs/optimization/items/OPT-0024-*.md`.
@@ -1777,6 +1805,7 @@ function BurstOpenTab({ active }: { active: boolean }) {
           );
         },
       },
+      balanceColDef({ filter: "agNumberColumnFilter" }),
       netDepositColDef({ filter: "agNumberColumnFilter" }),
       { headerName: "品种", field: "symbol", colId: "symbol", width: 110 },
       {
@@ -2756,6 +2785,7 @@ function QuickOpenCloseTab({ active }: { active: boolean }) {
         cellRenderer: LoginCell,
       },
       { headerName: "币种", field: "currency", colId: "currency", width: 80 },
+      balanceColDef(),
       netDepositColDef(),
       { headerName: "品种", field: "symbol", colId: "symbol", width: 110 },
       {
@@ -4208,6 +4238,7 @@ function QuickProfitTab({ active }: { active: boolean }) {
         cellRenderer: LoginCell,
       },
       { headerName: "币种", field: "currency", colId: "currency", width: 80 },
+      balanceColDef(),
       netDepositColDef(),
       { headerName: "品种", field: "symbol", colId: "symbol", width: 110 },
       {
@@ -5305,6 +5336,7 @@ function HedgeOpenTab({ active }: { active: boolean }) {
         valueFormatter: (p) => fmtTime(p.value),
       },
       { headerName: "币种", field: "currency", colId: "currency", width: 80 },
+      balanceColDef(),
       netDepositColDef(),
       {
         headerName: "总手数",
@@ -6587,6 +6619,7 @@ function LeverageAbuseTab({ active }: { active: boolean }) {
         cellClass: "ag-right-aligned-cell",
         valueFormatter: (p) => (p.value == null ? "—" : `1:${p.value}`),
       },
+      balanceColDef(),
       netDepositColDef(),
       { headerName: "账户组", field: "group", colId: "group", width: 160 },
     ],
