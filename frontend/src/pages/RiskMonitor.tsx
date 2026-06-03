@@ -768,6 +768,60 @@ function fmtFilenameStamp(iso: string): string {
     .replace(":", "-");
 }
 
+// ── Shared CSV export (client-side, grid-parity) ───────────
+//
+// The CSV must match exactly what the user sees in the grid — same columns,
+// same order, same visibility, including frontend-only computed columns
+// (淨賺 / 佣金试算) that the backend `alert_events` has no field for. So we
+// export client-side via AG-Grid's own `exportDataAsCsv`, which honours the
+// live column model and each column's valueGetter / valueFormatter.
+//
+// Catch: the table is server-paginated, so the grid only holds the current
+// page. To avoid silently exporting just one page we first page through
+// `/alerts` (server caps page_size at 500) to gather the FULL filtered set,
+// temporarily swap it into the grid's row model, emit the CSV, then restore
+// the page. The swap → export → restore runs synchronously, so there's no
+// visible flash and React's `rowData` prop stays authoritative.
+async function exportGridAsCsv(opts: {
+  api: GridApi<AlertEvent> | null;
+  alertsPath: string;
+  /** Table filters incl. rule_id, WITHOUT pagination/sort. */
+  filterQs: URLSearchParams;
+  sortBy: string;
+  sortOrder: string;
+  total: number;
+  currentRows: AlertEvent[];
+  fileName: string;
+}): Promise<void> {
+  const { api, alertsPath, filterQs, sortBy, sortOrder, total, currentRows } =
+    opts;
+  if (!api) return;
+
+  const PAGE = 500; // = backend _MAX_PAGE_SIZE
+  const pageCount = Math.max(1, Math.ceil((total || 0) / PAGE));
+  const all: AlertEvent[] = [];
+  for (let p = 1; p <= pageCount; p++) {
+    const qs = new URLSearchParams(filterQs);
+    qs.set("page", String(p));
+    qs.set("page_size", String(PAGE));
+    qs.set("sort_by", sortBy);
+    qs.set("sort_order", sortOrder);
+    const res = await apiFetch(`${alertsPath}?${qs}`);
+    if (!res.ok) throw new Error(`Export fetch failed: ${res.status}`);
+    const json = await res.json();
+    const entries: AlertEvent[] = json.entries ?? [];
+    all.push(...entries);
+    if (entries.length < PAGE) break; // last page reached
+  }
+
+  api.setGridOption("rowData", all);
+  try {
+    api.exportDataAsCsv({ fileName: opts.fileName });
+  } finally {
+    api.setGridOption("rowData", currentRows);
+  }
+}
+
 // ── Shared net_deposit_hist helpers ───────────────────────
 // Historical net deposit (USD) is one of the most-referenced risk-control
 // signals across every tab on this page. We unify the visual semantics
@@ -781,6 +835,18 @@ function fmtFilenameStamp(iso: string): string {
 function netDepositColorClass(v: number | null | undefined): string {
   if (v === null || v === undefined) return "";
   return v >= 0
+    ? "text-emerald-600 dark:text-emerald-400"
+    : "text-red-600 dark:text-red-400";
+}
+
+/**
+ * Colour lens for 淨賺 (net profit) — INVERTED vs net deposit. From the B-book
+ * company's view a client who is net-UP (淨賺 > 0) is the risk (red); a client
+ * who is net-DOWN (淨賺 < 0) is favourable (green). Exactly 0 / null → neutral.
+ */
+function netProfitColorClass(v: number | null | undefined): string {
+  if (v === null || v === undefined || v === 0) return "";
+  return v < 0
     ? "text-emerald-600 dark:text-emerald-400"
     : "text-red-600 dark:text-red-400";
 }
@@ -846,6 +912,82 @@ function balanceColDef<TRow extends { balance?: number | null }>(
     valueFormatter: (p) => fmtCurrency(p.value as number | null | undefined),
   };
   if (filter !== undefined) def.filter = filter;
+  return def;
+}
+
+/**
+ * `net_profit` (淨賺) AG-Grid column factory — a COMPUTED column:
+ *   淨賺 = 净值 (equity) − 历史净入金 (net_deposit_hist)
+ * i.e. how much the client has net-made off the company. Positive ⇒ client is
+ * up on us (B-book risk); negative ⇒ client is net-down. valueGetter-only (no
+ * backing field), so it MUST carry a stable explicit `colId` or column
+ * persistence misaligns (see grid-column-persist.md). `null` when either input
+ * is missing (legacy / unenriched row) → "—". Tinted background (violet) like
+ * balanceColDef so it reads as a derived money column distinct from the raw
+ * 余额 / 净入金 columns; the InfoHeader ℹ icon documents the formula inline
+ * (same affordance as 保证金使用率). Value is colour-coded like net deposit but
+ * INVERTED — <0 green (client down = good for us) / >0 red (client up = risk),
+ * via netProfitColorClass.
+ */
+function netProfitColDef<
+  TRow extends { equity?: number | null; net_deposit_hist?: number | null },
+>(
+  opts: {
+    headerName?: string;
+    colId?: string;
+    width?: number;
+    filter?: string | boolean;
+  } = {},
+): ColDef<TRow> {
+  // Default to a NUMBER filter (淨賺 is numeric) so every tab gets the right
+  // filter UI — without this the column falls back to defaultColDef's generic
+  // (text) filter. The valueGetter result is what AG-Grid filters on, so the
+  // number filter works even though this is a computed (field-less) column.
+  const {
+    headerName = "淨賺 (USD)",
+    colId = "net_profit",
+    width = 130,
+    filter = "agNumberColumnFilter",
+  } = opts;
+  const def: ColDef<TRow> = {
+    headerName,
+    colId,
+    width,
+    sortable: true,
+    filter,
+    cellClass: "ag-right-aligned-cell rm-netprofit-cell",
+    headerClass: "rm-netprofit-header",
+    // InfoHeader (ℹ icon) gives a visible affordance for the formula, mirroring
+    // the 保证金使用率 column — a raw headerTooltip string would be invisible.
+    headerComponent: InfoHeader,
+    headerComponentParams: {
+      tooltip:
+        "淨賺 = 净值 (Equity) − 历史净入金 (Net Deposit)。客户从公司净赚多少：正数 = 客户盈利（对 B-book 公司不利），负数 = 客户净亏。任一项缺值显示 —。",
+    },
+    valueGetter: (p) => {
+      const eq = p.data?.equity;
+      const nd = p.data?.net_deposit_hist;
+      if (eq === null || eq === undefined || nd === null || nd === undefined)
+        return null;
+      return eq - nd;
+    },
+    cellRenderer: (p: { value?: number | null }) => {
+      const v = p.value;
+      if (v === null || v === undefined) return "—";
+      return <span className={netProfitColorClass(v)}>{fmtCurrency(v)}</span>;
+    },
+    // Display uses the colour-coded cellRenderer above; valueFormatter is what
+    // AG-Grid's CSV export reads, so define it too for export parity ("—" /
+    // formatted currency, matching the on-screen text).
+    valueFormatter: (p) =>
+      p.value == null ? "—" : fmtCurrency(p.value as number),
+    comparator: (a: number | null, b: number | null) => {
+      if (a == null && b == null) return 0;
+      if (a == null) return -1;
+      if (b == null) return 1;
+      return a - b;
+    },
+  };
   return def;
 }
 
@@ -1281,6 +1423,22 @@ export default function RiskMonitor() {
         .dark .risk-monitor-theme .rm-balance-header {
           background-color: rgba(96, 165, 250, 0.22);
         }
+        /* 淨賺 (net profit = equity − net deposit) column tint — violet, kept
+           distinct from the balance blue / net-deposit emerald-red / gap-trade
+           amber. Translucent so zebra striping shows through. Applied via
+           netProfitColDef cellClass/headerClass across every account-level tab. */
+        .risk-monitor-theme .rm-netprofit-cell {
+          background-color: rgba(147, 51, 234, 0.07);
+        }
+        .risk-monitor-theme .rm-netprofit-header {
+          background-color: rgba(147, 51, 234, 0.12);
+        }
+        .dark .risk-monitor-theme .rm-netprofit-cell {
+          background-color: rgba(192, 132, 252, 0.14);
+        }
+        .dark .risk-monitor-theme .rm-netprofit-header {
+          background-color: rgba(192, 132, 252, 0.22);
+        }
       `}</style>
     </div>
   );
@@ -1709,25 +1867,17 @@ function BurstOpenTab({ active }: { active: boolean }) {
     if (!effectiveRange || exporting) return;
     setExporting(true);
     try {
-      const qs = buildTableFilterQs(effectiveRange);
-      qs.set("sort_by", sortBy);
-      qs.set("sort_order", sortOrder);
-      const res = await apiFetch(
-        `/api/v1/risk-monitor/burst-open/alerts/export?${qs}`,
-      );
-      if (!res.ok) {
-        throw new Error(`Export failed: ${res.status}`);
-      }
-      const blob = await res.blob();
       const stamp = `${fmtFilenameStamp(effectiveRange.since)}_to_${fmtFilenameStamp(effectiveRange.until)}`;
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `risk-monitor_${stamp}.csv`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
+      await exportGridAsCsv({
+        api: columnPersist.gridApiRef.current,
+        alertsPath: "/api/v1/risk-monitor/burst-open/alerts",
+        filterQs: buildTableFilterQs(effectiveRange),
+        sortBy,
+        sortOrder,
+        total: totalCount,
+        currentRows: alerts,
+        fileName: `risk-monitor_${stamp}.csv`,
+      });
     } catch (err) {
       console.error("CSV export failed:", err);
     } finally {
@@ -1828,6 +1978,7 @@ function BurstOpenTab({ active }: { active: boolean }) {
       },
       balanceColDef({ filter: "agNumberColumnFilter" }),
       netDepositColDef({ filter: "agNumberColumnFilter" }),
+      netProfitColDef({ filter: "agNumberColumnFilter" }),
       { headerName: "品种", field: "symbol", colId: "symbol", width: 110 },
       {
         headerName: "批量笔数",
@@ -2696,23 +2847,17 @@ function QuickOpenCloseTab({ active }: { active: boolean }) {
     if (!effectiveRange || exporting) return;
     setExporting(true);
     try {
-      const qs = buildTableFilterQs(effectiveRange);
-      qs.set("sort_by", sortBy);
-      qs.set("sort_order", sortOrder);
-      const res = await apiFetch(
-        `/api/v1/risk-monitor/quick-open-close/alerts/export?${qs}`,
-      );
-      if (!res.ok) throw new Error(`Export failed: ${res.status}`);
-      const blob = await res.blob();
       const stamp = `${fmtFilenameStamp(effectiveRange.since)}_to_${fmtFilenameStamp(effectiveRange.until)}`;
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `risk-monitor-quick-open-close_${stamp}.csv`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
+      await exportGridAsCsv({
+        api: columnPersist.gridApiRef.current,
+        alertsPath: "/api/v1/risk-monitor/quick-open-close/alerts",
+        filterQs: buildTableFilterQs(effectiveRange),
+        sortBy,
+        sortOrder,
+        total: totalCount,
+        currentRows: alerts,
+        fileName: `risk-monitor-quick-open-close_${stamp}.csv`,
+      });
     } catch (err) {
       console.error("Quick-open-close CSV export failed:", err);
     } finally {
@@ -2808,6 +2953,7 @@ function QuickOpenCloseTab({ active }: { active: boolean }) {
       { headerName: "币种", field: "currency", colId: "currency", width: 80 },
       balanceColDef(),
       netDepositColDef(),
+      netProfitColDef(),
       { headerName: "品种", field: "symbol", colId: "symbol", width: 110 },
       {
         headerName: "开仓时间 (MT)",
@@ -4136,23 +4282,17 @@ function QuickProfitTab({ active }: { active: boolean }) {
     if (!effectiveRange || exporting) return;
     setExporting(true);
     try {
-      const qs = buildTableFilterQs(effectiveRange);
-      qs.set("sort_by", sortBy);
-      qs.set("sort_order", sortOrder);
-      const res = await apiFetch(
-        `/api/v1/risk-monitor/quick-profit/alerts/export?${qs}`,
-      );
-      if (!res.ok) throw new Error(`Export failed: ${res.status}`);
-      const blob = await res.blob();
       const stamp = `${fmtFilenameStamp(effectiveRange.since)}_to_${fmtFilenameStamp(effectiveRange.until)}`;
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `risk-monitor-quick-profit_${stamp}.csv`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
+      await exportGridAsCsv({
+        api: columnPersist.gridApiRef.current,
+        alertsPath: "/api/v1/risk-monitor/quick-profit/alerts",
+        filterQs: buildTableFilterQs(effectiveRange),
+        sortBy,
+        sortOrder,
+        total: totalCount,
+        currentRows: alerts,
+        fileName: `risk-monitor-quick-profit_${stamp}.csv`,
+      });
     } catch (err) {
       console.error("Quick-profit CSV export failed:", err);
     } finally {
@@ -4210,14 +4350,30 @@ function QuickProfitTab({ active }: { active: boolean }) {
     }
   };
 
-  /** Map alert.rule_id → its rule's lookback_min for the "窗口" column. */
-  const lookbackByRuleId = useMemo(() => {
+  /** Map alert.rule_id → its rule's lookback_min for the "窗口" column.
+   *  Kept in a ref (not a memo dep) so `columnDefs` below can stay a stable
+   *  reference. If it fed columnDefs' deps, every config fetch would rebuild
+   *  columnDefs → AG-Grid would re-process columns and snap the order back to
+   *  the columnDefs order, wiping the user's persisted column layout on load
+   *  (and on each auto-refresh). The "窗口分钟" valueGetter reads .current. */
+  const lookbackByRuleIdRef = useRef<Map<number, number>>(new Map());
+  lookbackByRuleIdRef.current = useMemo(() => {
     const m = new Map<number, number>();
     config?.rules.forEach((r, i) => {
       m.set(QUICK_PROFIT_RULE_ID_BASE + i, r.lookback_min);
     });
     return m;
   }, [config?.rules]);
+
+  // columnDefs no longer re-renders when the lookback map changes (it reads the
+  // ref), so nudge just the "窗口分钟" cells to recompute once config arrives /
+  // changes. Far cheaper than rebuilding the whole columnDefs.
+  useEffect(() => {
+    columnPersist.gridApiRef.current?.refreshCells({
+      columns: ["lookback_min"],
+      force: true,
+    });
+  }, [config?.rules, columnPersist.gridApiRef]);
 
   const columnDefs: ColDef<AlertEvent>[] = useMemo(
     () => [
@@ -4261,6 +4417,7 @@ function QuickProfitTab({ active }: { active: boolean }) {
       { headerName: "币种", field: "currency", colId: "currency", width: 80 },
       balanceColDef(),
       netDepositColDef(),
+      netProfitColDef(),
       { headerName: "品种", field: "symbol", colId: "symbol", width: 110 },
       {
         // Main metric — bold + green when positive so it pops in the table.
@@ -4314,7 +4471,7 @@ function QuickProfitTab({ active }: { active: boolean }) {
         cellClass: "ag-right-aligned-cell",
         valueGetter: (p) => {
           const rid = p.data?.rule_id;
-          return rid ? (lookbackByRuleId.get(rid) ?? "—") : "—";
+          return rid ? (lookbackByRuleIdRef.current.get(rid) ?? "—") : "—";
         },
       },
       {
@@ -4338,7 +4495,7 @@ function QuickProfitTab({ active }: { active: boolean }) {
       }),
       { headerName: "账户组", field: "group", colId: "group", width: 150 },
     ],
-    [lookbackByRuleId],
+    [],
   );
 
   const rangeLabel =
@@ -5195,23 +5352,17 @@ function HedgeOpenTab({ active }: { active: boolean }) {
     if (!effectiveRange || exporting) return;
     setExporting(true);
     try {
-      const qs = buildTableFilterQs(effectiveRange);
-      qs.set("sort_by", sortBy);
-      qs.set("sort_order", sortOrder);
-      const res = await apiFetch(
-        `/api/v1/risk-monitor/hedge-open/alerts/export?${qs}`,
-      );
-      if (!res.ok) throw new Error(`Export failed: ${res.status}`);
-      const blob = await res.blob();
       const stamp = `${fmtFilenameStamp(effectiveRange.since)}_to_${fmtFilenameStamp(effectiveRange.until)}`;
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `risk-monitor-hedge-open_${stamp}.csv`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
+      await exportGridAsCsv({
+        api: columnPersist.gridApiRef.current,
+        alertsPath: "/api/v1/risk-monitor/hedge-open/alerts",
+        filterQs: buildTableFilterQs(effectiveRange),
+        sortBy,
+        sortOrder,
+        total: totalCount,
+        currentRows: alerts,
+        fileName: `risk-monitor-hedge-open_${stamp}.csv`,
+      });
     } catch (err) {
       console.error("Hedge-open CSV export failed:", err);
     } finally {
@@ -5359,6 +5510,7 @@ function HedgeOpenTab({ active }: { active: boolean }) {
       { headerName: "币种", field: "currency", colId: "currency", width: 80 },
       balanceColDef(),
       netDepositColDef(),
+      netProfitColDef(),
       {
         headerName: "总手数",
         field: "total_lots",
@@ -6444,23 +6596,17 @@ function LeverageAbuseTab({ active }: { active: boolean }) {
     if (!effectiveRange || exporting) return;
     setExporting(true);
     try {
-      const qs = buildTableFilterQs(effectiveRange);
-      qs.set("sort_by", sortBy);
-      qs.set("sort_order", sortOrder);
-      const res = await apiFetch(
-        `/api/v1/risk-monitor/leverage-abuse/alerts/export?${qs}`,
-      );
-      if (!res.ok) throw new Error(`Export failed: ${res.status}`);
-      const blob = await res.blob();
       const stamp = `${fmtFilenameStamp(effectiveRange.since)}_to_${fmtFilenameStamp(effectiveRange.until)}`;
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `risk-monitor-leverage-abuse_${stamp}.csv`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
+      await exportGridAsCsv({
+        api: columnPersist.gridApiRef.current,
+        alertsPath: "/api/v1/risk-monitor/leverage-abuse/alerts",
+        filterQs: buildTableFilterQs(effectiveRange),
+        sortBy,
+        sortOrder,
+        total: totalCount,
+        currentRows: alerts,
+        fileName: `risk-monitor-leverage-abuse_${stamp}.csv`,
+      });
     } catch (err) {
       console.error("Leverage-abuse CSV export failed:", err);
     } finally {
@@ -6642,6 +6788,7 @@ function LeverageAbuseTab({ active }: { active: boolean }) {
       },
       balanceColDef(),
       netDepositColDef(),
+      netProfitColDef(),
       { headerName: "账户组", field: "group", colId: "group", width: 160 },
     ],
     [],
