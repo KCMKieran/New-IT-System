@@ -831,7 +831,7 @@ function balanceColDef<TRow extends { balance?: number | null }>(
     filter?: string | boolean;
   } = {},
 ): ColDef<TRow> {
-  const { headerName = "余额 (USD)", colId = "balance", width = 130, filter } = opts;
+  const { headerName = "balance (USD)", colId = "balance", width = 130, filter } = opts;
   const def: ColDef<TRow> = {
     headerName,
     field: "balance" as ColDef<TRow>["field"],
@@ -9921,7 +9921,7 @@ function GapTradeSoDetail({ row }: { row: AlertEvent }) {
           value={fmtCurrency(row.l_profit_usd)}
           highlightClass="text-rose-600 dark:text-rose-400"
         />
-        <DetailRow label="余额 (USD)" value={fmtCurrency(row.l_balance_usd)} />
+        <DetailRow label="balance (USD)" value={fmtCurrency(row.l_balance_usd)} />
         <DetailRow
           label="历史净入金"
           value={fmtCurrency(row.net_deposit_hist)}
