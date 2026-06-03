@@ -72,3 +72,7 @@ frontend/tsconfig.app.tsbuildinfo
 # Local AI-dev scratch notes / sharing exports (not project source)
 Claude_CLI_Quick_Access_Summary.md
 ai-dev-techniques-sharing.html
+
+# Local-only scratch / data-exploration workspace (real client CSVs, internal
+# logic notes, ad-hoc scripts) — never publish to the public repo.
+temp_folder/

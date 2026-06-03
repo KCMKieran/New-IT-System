@@ -8,6 +8,10 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile.prod
+      args:
+        # Read from the root .env file; baked into nginx.conf at build time so
+        # the API key never lives in source control. Rotate the value in .env.
+        API_KEY: ${API_KEY:?API_KEY must be set in .env for the prod build}
     container_name: new-it-frontend-prod
     ports:
       - "3000:80"
