@@ -837,7 +837,12 @@ function balanceColDef<TRow extends { balance?: number | null }>(
     field: "balance" as ColDef<TRow>["field"],
     colId,
     width,
-    cellClass: "ag-right-aligned-cell",
+    // Subtle tinted background (cell + header) so the 余额 column stands out
+    // from the neighbouring 净值 / 净入金 money columns. The tint is a
+    // translucent overlay (rgba) so AG-Grid zebra striping still shows through
+    // — see `.rm-balance-cell` / `.rm-balance-header` in the page <style> block.
+    cellClass: "ag-right-aligned-cell rm-balance-cell",
+    headerClass: "rm-balance-header",
     valueFormatter: (p) => fmtCurrency(p.value as number | null | undefined),
   };
   if (filter !== undefined) def.filter = filter;
@@ -1259,6 +1264,22 @@ export default function RiskMonitor() {
         .risk-monitor-theme .ag-header {
           border: 1px solid;
           border-bottom-width: 1px;
+        }
+        /* 余额 (balance) column tint — translucent so zebra striping shows
+           through. Applied via balanceColDef cellClass/headerClass across every
+           tab that renders the column. Cool blue to stay distinct from the
+           emerald/red money columns and the amber gap-trade shared-IP rows. */
+        .risk-monitor-theme .rm-balance-cell {
+          background-color: rgba(37, 99, 235, 0.07);
+        }
+        .risk-monitor-theme .rm-balance-header {
+          background-color: rgba(37, 99, 235, 0.12);
+        }
+        .dark .risk-monitor-theme .rm-balance-cell {
+          background-color: rgba(96, 165, 250, 0.14);
+        }
+        .dark .risk-monitor-theme .rm-balance-header {
+          background-color: rgba(96, 165, 250, 0.22);
         }
       `}</style>
     </div>
