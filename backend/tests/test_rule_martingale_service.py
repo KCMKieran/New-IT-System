@@ -6,11 +6,12 @@ earliest-OPEN_TIME position in a (server, login, symbol, direction) group.
 
 Locked behaviors (each a concrete regression guard):
 - Fires on a same-symbol same-direction add to a LOSING position
-- lot_multiplier compares the latest add against the ANCHOR (建仓笔), 1:1 / 1:2
+- lot_multiplier compares the LARGEST add against the ANCHOR (建仓笔), 1:1 / 1:2
 - floating_loss_floor_usd: 0 = any loss; a positive floor needs a deeper loss
 - a position in profit (or break-even) never fires (losing is the precondition)
 - min_add_count gates the ladder length (1 = first add fires)
-- _build_position_groups: anchor = earliest open, latest add = newest open
+- _build_position_groups: anchor = earliest open; trigger = largest add (F3);
+  anchor re-anchors on surviving legs after a partial close (F2)
 - CEN floating ÷100 (the currency authority), ratio/lots currency-immune
 - direction + symbol isolation (Buy ladder ≠ Sell single; XAUUSD ≠ EURUSD)
 - dedup on (rule, server, login, symbol, direction, last_open); new add re-fires
@@ -52,7 +53,7 @@ def _candidate(
     symbol="EURUSD",
     direction="Buy",
     anchor_lots=1.0,
-    latest_add_lots=1.0,
+    new_lots=1.0,
     floating_usd=-10.0,
     add_count=1,
     first_open=BASE,
@@ -67,17 +68,17 @@ def _candidate(
         "direction": direction,
         "currency": currency,
         "anchor_lots": anchor_lots,
-        "latest_add_lots": latest_add_lots,
+        "new_lots": new_lots,
         "first_open_dt": first_open,
         "latest_open_dt": latest_open,
         "position_count": position_count,
         "add_count": add_count,
-        "total_lots": round(anchor_lots + latest_add_lots, 2),
+        "total_lots": round(anchor_lots + new_lots, 2),
         "floating_usd": floating_usd,
         "orders": [
             {"direction": direction, "lots": anchor_lots,
              "open_time": _iso(first_open), "symbol": symbol},
-            {"direction": direction, "lots": latest_add_lots,
+            {"direction": direction, "lots": new_lots,
              "open_time": _iso(latest_open), "symbol": symbol},
         ],
         "group": "KCMc00_L4",
@@ -133,21 +134,21 @@ def test_profit_position_never_fires():
 
 def test_multiplier_1to1_equal_lots_fires():
     # 1:1 → an add of equal size qualifies.
-    c = _candidate(anchor_lots=1.0, latest_add_lots=1.0)
+    c = _candidate(anchor_lots=1.0, new_lots=1.0)
     assert len(rule_martingale_detect([c], [_rule(multiplier=1.0)])) == 1
 
 
 def test_multiplier_1to2_boundary():
     # 1:2 → add must be >= 2× the anchor. 2.0 fires (>=), 1.9 does not.
     r = _rule(multiplier=2.0)
-    assert len(rule_martingale_detect([_candidate(anchor_lots=1.0, latest_add_lots=2.0)], [r])) == 1
-    assert rule_martingale_detect([_candidate(anchor_lots=1.0, latest_add_lots=1.9)], [r]) == []
+    assert len(rule_martingale_detect([_candidate(anchor_lots=1.0, new_lots=2.0)], [r])) == 1
+    assert rule_martingale_detect([_candidate(anchor_lots=1.0, new_lots=1.9)], [r]) == []
 
 
 def test_multiplier_compares_against_anchor_not_previous():
     # anchor 2.0, add 3.0 → ratio 1.5 < 2.0 → no fire even though add > anchor.
     r = _rule(multiplier=2.0)
-    assert rule_martingale_detect([_candidate(anchor_lots=2.0, latest_add_lots=3.0)], [r]) == []
+    assert rule_martingale_detect([_candidate(anchor_lots=2.0, new_lots=3.0)], [r]) == []
 
 
 # ── floating-loss floor ─────────────────────────────────────────────────
@@ -199,7 +200,7 @@ def test_dedup_new_add_refires():
     c1 = _candidate(latest_open=BASE + timedelta(seconds=30))
     first = rule_martingale_detect([c1], [_rule()])
     # A LATER add (new latest_open_dt) is a new ladder event → re-fires.
-    c2 = _candidate(latest_open=BASE + timedelta(seconds=90), latest_add_lots=2.0, add_count=2)
+    c2 = _candidate(latest_open=BASE + timedelta(seconds=90), new_lots=2.0, add_count=2)
     second = rule_martingale_detect([c2], [_rule()], previous_alerts=first)
     assert len(second) == 1
 
@@ -223,7 +224,7 @@ def test_multi_rule_fires_only_clearing_rules():
         _rule(idx_id=111, multiplier=1.0, name="任意加仓"),
         _rule(idx_id=112, multiplier=2.0, name="翻倍加仓"),
     ]
-    alerts = rule_martingale_detect([_candidate(anchor_lots=1.0, latest_add_lots=1.0)], rules)
+    alerts = rule_martingale_detect([_candidate(anchor_lots=1.0, new_lots=1.0)], rules)
     assert {a["rule_id"] for a in alerts} == {111}
 
 
@@ -248,11 +249,49 @@ def test_build_groups_anchor_is_earliest_open():
     groups = _build_position_groups(rows, currency_map={})
     g = groups[("MT4_Live", 8518354, "EURUSD", "Buy")]
     assert g["anchor_lots"] == 0.5
-    assert g["latest_add_lots"] == 3.0
+    assert g["new_lots"] == 3.0  # largest add beyond the anchor
     assert g["add_count"] == 2
     assert g["position_count"] == 3
     assert g["total_lots"] == 5.5
     assert g["floating_usd"] == -15.0  # USD account: raw sum, no ÷100
+
+
+def test_build_groups_trigger_uses_largest_add_not_latest():
+    # OPT-0033 review F3: within one window 1.0(anchor) → 10.0 → 1.0(latest).
+    # The trigger metric must be the LARGEST add (10.0), not the newest leg
+    # (1.0); otherwise the big middle add slips through and, since the gate
+    # won't re-evaluate an untouched ladder, is missed permanently.
+    rows = [
+        _row(lots=1.0, open_time=BASE, ticket=1),                        # anchor
+        _row(lots=10.0, open_time=BASE + timedelta(seconds=30), ticket=2),  # big mid
+        _row(lots=1.0, open_time=BASE + timedelta(seconds=60), ticket=3),   # latest
+    ]
+    groups = _build_position_groups(rows, currency_map={})
+    g = groups[("MT4_Live", 8518354, "EURUSD", "Buy")]
+    assert g["new_lots"] == 10.0
+    # dedup still keys on the newest open_time (the 60s leg), not the big add's.
+    assert g["latest_open_dt"] == BASE + timedelta(seconds=60)
+    # End-to-end: a 1:2 rule fires on the 10× middle add despite the small tail.
+    g["currency"] = g.get("currency", "USD")
+    alerts = rule_martingale_detect([g], [_rule(multiplier=2.0)])
+    assert len(alerts) == 1
+    assert alerts[0]["new_lots"] == 10.0
+
+
+def test_build_groups_anchor_reanchors_on_surviving_legs():
+    # OPT-0033 review F2 (live-with, pinned): the anchor is the earliest
+    # CURRENTLY-OPEN leg. If the original entry was closed, the next-earliest
+    # surviving leg becomes the anchor — by design (持仓口径). Here the snapshot
+    # holds only the 5.0 + 8.0 legs (the original 1.0 was closed), so anchor=5.0.
+    rows = [
+        _row(lots=5.0, open_time=BASE + timedelta(seconds=30), ticket=2),
+        _row(lots=8.0, open_time=BASE + timedelta(seconds=60), ticket=3),
+    ]
+    groups = _build_position_groups(rows, currency_map={})
+    g = groups[("MT4_Live", 8518354, "EURUSD", "Buy")]
+    assert g["anchor_lots"] == 5.0
+    assert g["new_lots"] == 8.0
+    assert g["add_count"] == 1
 
 
 def test_build_groups_cen_floating_divided_by_100():
@@ -277,7 +316,7 @@ def test_db_round_trip_persists_and_reads_martingale_detail(monkeypatch):
     monkeypatch.setattr(db, "_DB_PATH", tmp)
     db.init_risk_monitor_db()
 
-    alert = rule_martingale_detect([_candidate(anchor_lots=1.0, latest_add_lots=2.0,
+    alert = rule_martingale_detect([_candidate(anchor_lots=1.0, new_lots=2.0,
                                                floating_usd=-123.45, add_count=2)], [_rule()])[0]
     alert["net_deposit_hist"] = 5000.0
     db.append_scan_and_events(
