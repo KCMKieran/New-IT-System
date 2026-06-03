@@ -1713,7 +1713,7 @@ function BurstOpenTab({ active }: { active: boolean }) {
         pinned: "left",
       },
       {
-        headerName: "发现时间 (GMT+8)",
+        headerName: "发现时间 (MT)",
         field: "scanned_at",
         colId: "scanned_at",
         width: 165,
@@ -1721,7 +1721,7 @@ function BurstOpenTab({ active }: { active: boolean }) {
         valueFormatter: (p) => fmtTime(p.value),
       },
       {
-        headerName: "开仓时间 (GMT+8)",
+        headerName: "开仓时间 (MT)",
         colId: "burst_window",
         width: 160,
         // Derived from two columns, no SQL-friendly sort expression →
@@ -1935,14 +1935,14 @@ function BurstOpenTab({ active }: { active: boolean }) {
         },
       },
       {
-        headerName: "首次告警 (GMT+8)",
+        headerName: "首次告警 (MT)",
         field: "first_alert_at",
         colId: "first_alert_at",
         width: 165,
         valueFormatter: (p) => fmtTime(p.value),
       },
       {
-        headerName: "最近告警 (GMT+8)",
+        headerName: "最近告警 (MT)",
         field: "last_alert_at",
         colId: "last_alert_at",
         width: 165,
@@ -2733,7 +2733,7 @@ function QuickOpenCloseTab({ active }: { active: boolean }) {
         pinned: "left",
       },
       {
-        headerName: "发现时间 (GMT+8)",
+        headerName: "发现时间 (MT)",
         field: "scanned_at",
         colId: "scanned_at",
         width: 165,
@@ -2759,14 +2759,14 @@ function QuickOpenCloseTab({ active }: { active: boolean }) {
       netDepositColDef(),
       { headerName: "品种", field: "symbol", colId: "symbol", width: 110 },
       {
-        headerName: "开仓时间 (GMT+8)",
+        headerName: "开仓时间 (MT)",
         field: "first_open",
         colId: "first_open",
         width: 165,
         valueFormatter: (p) => fmtTime(p.value),
       },
       {
-        headerName: "平仓时间 (GMT+8)",
+        headerName: "平仓时间 (MT)",
         field: "last_open",
         colId: "last_open",
         width: 165,
@@ -4178,7 +4178,7 @@ function QuickProfitTab({ active }: { active: boolean }) {
         pinned: "left",
       },
       {
-        headerName: "发现时间 (GMT+8)",
+        headerName: "发现时间 (MT)",
         field: "scanned_at",
         colId: "scanned_at",
         width: 165,
@@ -5235,7 +5235,7 @@ function HedgeOpenTab({ active }: { active: boolean }) {
         },
       },
       {
-        headerName: "发现时间 (GMT+8)",
+        headerName: "发现时间 (MT)",
         field: "scanned_at",
         colId: "scanned_at",
         width: 165,
@@ -5291,14 +5291,14 @@ function HedgeOpenTab({ active }: { active: boolean }) {
           typeof p.value === "number" ? p.value.toFixed(2) : "—",
       },
       {
-        headerName: "窗口开始 (GMT+8)",
+        headerName: "窗口开始 (MT)",
         field: "window_start" as keyof AlertEvent,
         colId: "window_start",
         width: 165,
         valueFormatter: (p) => fmtTime(p.value),
       },
       {
-        headerName: "窗口结束 (GMT+8)",
+        headerName: "窗口结束 (MT)",
         field: "window_end" as keyof AlertEvent,
         colId: "window_end",
         width: 165,
@@ -5430,14 +5430,14 @@ function HedgeOpenTab({ active }: { active: boolean }) {
         },
       },
       {
-        headerName: "首次告警 (GMT+8)",
+        headerName: "首次告警 (MT)",
         field: "first_alert_at",
         colId: "first_alert_at",
         width: 165,
         valueFormatter: (p) => fmtTime(p.value),
       },
       {
-        headerName: "最近告警 (GMT+8)",
+        headerName: "最近告警 (MT)",
         field: "last_alert_at",
         colId: "last_alert_at",
         width: 165,
@@ -6484,7 +6484,7 @@ function LeverageAbuseTab({ active }: { active: boolean }) {
         pinned: "left",
       },
       {
-        headerName: "发现时间 (GMT+8)",
+        headerName: "发现时间 (MT)",
         field: "scanned_at",
         colId: "scanned_at",
         width: 165,
@@ -7474,7 +7474,7 @@ function MartingaleTab({ active }: { active: boolean }) {
         pinned: "left",
       },
       {
-        headerName: "发现时间 (GMT+8)",
+        headerName: "发现时间 (MT)",
         field: "scanned_at",
         colId: "scanned_at",
         width: 165,
@@ -8714,7 +8714,7 @@ function GapTradeTab({ active }: { active: boolean }) {
         },
       },
       {
-        headerName: "强平时间 (GMT+8)",
+        headerName: "强平时间 (MT)",
         field: "l_close_time" as keyof AlertEvent,
         colId: "l_close_time",
         width: 165,
@@ -8917,14 +8917,14 @@ function GapTradeTab({ active }: { active: boolean }) {
         },
       },
       {
-        headerName: "首次强平 (GMT+8)",
+        headerName: "首次强平 (MT)",
         field: "first_close",
         colId: "first_close",
         width: 165,
         valueFormatter: (p) => fmtTime(p.value as string | null | undefined),
       },
       {
-        headerName: "末次强平 (GMT+8)",
+        headerName: "末次强平 (MT)",
         field: "last_close",
         colId: "last_close",
         width: 165,
