@@ -36,12 +36,17 @@ def get_account_info_map(
 
     Returns:
         Dict keyed by ``{sid}-{login}`` (e.g. ``"5-67035933"``):
-        ``{"currency": "CEN", "zipcode": "111 90", "group": "4sd_L1_AKCM"}``
+        ``{"currency": "CEN", "zipcode": "111 90", "group": "4sd_L1_AKCM",
+        "balance": 12345.0}``
 
     Missing loginsid → not in the returned dict.  Callers should default
     to ``"USD"`` and ``None`` zipcode so USD accounts are never accidentally
     divided by 100.  ``group`` is the MT account group name (substring
     ``AKCM`` distinguishes AKCM accounts from regular B-book groups).
+    ``balance`` is the **raw** broker-side balance (still in cents on CEN
+    accounts) — callers must run :func:`apply_cen_conversion` after assigning
+    it so CEN balances are divided by 100. It is a scan-time snapshot, not a
+    live re-query.
     """
     loginsids: set[str] = set()
     for a in alerts:
@@ -59,7 +64,8 @@ def get_account_info_map(
                UPPER(CURRENCY) AS currency,
                ZIPCODE         AS zipcode,
                `GROUP`         AS `group`,
-               NAME            AS name
+               NAME            AS name,
+               BALANCE         AS balance
         FROM fxbackoffice.mt4_users
         WHERE loginsid IN ({placeholders})
     """
@@ -77,6 +83,7 @@ def get_account_info_map(
                 "zipcode": zipcode,
                 "group": group,
                 "name": name,
+                "balance": round_or_none(r.get("balance")),
             }
         return result
     except Exception:

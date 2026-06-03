@@ -559,6 +559,7 @@ def scan_quick_profit(
                 alert["currency"] = currency
                 alert["zipcode"] = info.get("zipcode")
                 alert["group"] = info.get("group")
+                alert["balance"] = info.get("balance")
                 alert["net_deposit_hist"] = (
                     net_deposit_hist_map.get(loginsid) if loginsid else None
                 )
@@ -566,8 +567,9 @@ def scan_quick_profit(
                     # Profit fields and per-order profit are stored as
                     # cents on CEN accounts → divide before display so the
                     # threshold ($USD) stays comparable. Lots are unaffected
-                    # (contract size is the same).
-                    for k in ("realized_profit", "floating_profit_snapshot", "total_profit_usd"):
+                    # (contract size is the same). ``balance`` is a broker
+                    # cents value on CEN too → divide alongside.
+                    for k in ("realized_profit", "floating_profit_snapshot", "total_profit_usd", "balance"):
                         if alert.get(k) is not None:
                             alert[k] = round(float(alert[k]) / 100.0, 2)
                     for order in alert.get("orders", []):
