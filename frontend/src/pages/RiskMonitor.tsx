@@ -306,10 +306,6 @@ const LEVERAGE_ABUSE_RULE_ID_BASE = 101;
 /** Backend `MARTINGALE_RULE_ID_MIN` — Martingale rule_ids are 111 … 120. */
 const MARTINGALE_RULE_ID_BASE = 111;
 
-/** OPT-0033: 马丁策略 tab 前端可见性开关。后端已上线；前端先隐藏，待验证后改 true。
- *  改 true 时还要取消 RISK_MONITOR_TABS + RISK_MONITOR_TAB_LABELS 两处的注释。 */
-const MARTINGALE_TAB_VISIBLE = false;
-
 /** Per-rule summary cards (批量下单 / 快开快平); cycles if more rules than colors. */
 const RULE_SUMMARY_CARD_STYLES: { dot: string; value: string }[] = [
   { dot: "bg-violet-500", value: "text-violet-600 dark:text-violet-400" },
@@ -1078,9 +1074,7 @@ const RISK_MONITOR_TABS = [
   "quick-profit",
   "hedge-open",
   "leverage-abuse",
-  // OPT-0033: 马丁策略 tab 暂时隐藏（后端已上线，前端待验证后再放出）。
-  // 重新启用：取消下面 3 处注释（这里 + RISK_MONITOR_TAB_LABELS + TabsContent）。
-  // "martingale",
+  "martingale",
   "gap-trade",
 ] as const;
 type RiskMonitorTab = (typeof RISK_MONITOR_TABS)[number];
@@ -1095,8 +1089,7 @@ const RISK_MONITOR_TAB_LABELS: Record<RiskMonitorTab, string> = {
   "quick-profit": "快速获利",
   "hedge-open": "对冲刷单",
   "leverage-abuse": "滥用杠杆",
-  // OPT-0033: 马丁策略 tab 暂时隐藏 — 重新启用时取消注释。
-  // martingale: "马丁策略",
+  martingale: "马丁策略",
   "gap-trade": "Gap Trade",
 };
 
@@ -1388,15 +1381,9 @@ export default function RiskMonitor() {
         <TabsContent value="leverage-abuse" forceMount>
           <LeverageAbuseTab active={activeTab === "leverage-abuse"} />
         </TabsContent>
-        {/* OPT-0033: 马丁策略 tab 暂时隐藏（后端已上线，前端待验证后再放出）。
-            组件保留并以 false 守卫保持引用；重新启用：把 false 改回
-            `activeTab === "martingale"`，并取消上面 RISK_MONITOR_TABS +
-            RISK_MONITOR_TAB_LABELS 两处的注释。 */}
-        {MARTINGALE_TAB_VISIBLE && (
-          <TabsContent value="martingale" forceMount>
-            <MartingaleTab active={false} />
-          </TabsContent>
-        )}
+        <TabsContent value="martingale" forceMount>
+          <MartingaleTab active={activeTab === "martingale"} />
+        </TabsContent>
         <TabsContent value="gap-trade" forceMount>
           <GapTradeTab active={activeTab === "gap-trade"} />
         </TabsContent>
