@@ -3745,7 +3745,7 @@ function QuickConfigDrawer({
                   </div>
                   <div className="space-y-1 col-span-2 sm:col-span-1">
                     <label className="text-xs text-muted-foreground">
-                      最小合并利润（USD）
+                      最小合并利润 (USD)
                     </label>
                     <Input
                       type="number"
