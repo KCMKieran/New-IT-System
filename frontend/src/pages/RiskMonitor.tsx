@@ -195,6 +195,19 @@ interface AlertEvent {
   free_margin?: number | null;
   /** Consecutive dangerous scans (1 for D1; ≥ streak_min for D2). */
   streak_count?: number | null;
+  // ── Martingale detail (rule_id 111-120). NULL on other rule rows. ──
+  /** "Buy" | "Sell" — the side of the same-direction add ladder. */
+  direction?: string | null;
+  /** Anchor (建仓笔) leg lots = earliest open in the (symbol, direction) group. */
+  anchor_lots?: number | null;
+  /** Latest add lots (the triggering 加仓笔). */
+  new_lots?: number | null;
+  /** Realised multiplier = new_lots / anchor_lots. */
+  lot_ratio_mg?: number | null;
+  /** Held position floating P&L (USD, CEN ÷100); negative = loss (precondition). */
+  floating_pnl?: number | null;
+  /** Number of adds beyond the anchor. */
+  add_count?: number | null;
 }
 
 interface AlertsResponse {
@@ -242,6 +255,13 @@ const SORTABLE_COL_IDS = new Set<string>([
   "margin_used",
   "free_margin",
   "streak_count",
+  // Martingale detail columns
+  "direction",
+  "anchor_lots",
+  "new_lots",
+  "lot_ratio_mg",
+  "floating_pnl",
+  "add_count",
 ]);
 
 /** Sortable columns for the hedge-open aggregated view. Mirrors backend
@@ -282,6 +302,13 @@ const HEDGE_OPEN_RULE_ID_BASE = 91;
 
 /** Backend `LEVERAGE_ABUSE_RULE_ID_MIN` — Leverage Abuse rule_ids are 101 … 110. */
 const LEVERAGE_ABUSE_RULE_ID_BASE = 101;
+
+/** Backend `MARTINGALE_RULE_ID_MIN` — Martingale rule_ids are 111 … 120. */
+const MARTINGALE_RULE_ID_BASE = 111;
+
+/** OPT-0033: 马丁策略 tab 前端可见性开关。后端已上线；前端先隐藏，待验证后改 true。
+ *  改 true 时还要取消 RISK_MONITOR_TABS + RISK_MONITOR_TAB_LABELS 两处的注释。 */
+const MARTINGALE_TAB_VISIBLE = false;
 
 /** Per-rule summary cards (批量下单 / 快开快平); cycles if more rules than colors. */
 const RULE_SUMMARY_CARD_STYLES: { dot: string; value: string }[] = [
@@ -420,6 +447,26 @@ interface LeverageAbuseConfig {
   rules: LeverageAbuseRule[];
 }
 
+/** Martingale (马丁策略, rule_id 111-120). Event-gated (OPT-0033): a recent add
+ *  to a same-symbol same-direction LOSING position triggers; multiplier is vs
+ *  the anchor (建仓笔). */
+interface MartingaleRule {
+  id?: number;
+  name: string;
+  enabled: boolean;
+  /** Floating-loss floor (USD). 0 = any floating loss; positive = needs deeper loss. */
+  floating_loss_floor_usd: number;
+  /** Add multiplier vs the anchor leg. 1.0 = 1:1 (equal-or-greater); 2.0 = 1:2. */
+  lot_multiplier: number;
+  /** Adds beyond the anchor before it counts as a martingale. 1 = fire on first add. */
+  min_add_count: number;
+}
+
+interface MartingaleConfig {
+  enabled: boolean;
+  rules: MartingaleRule[];
+}
+
 /** One row in the per-loginsid aggregated view (hedge-open tab only).
  *  Folds multiple `AlertEvent` rows sharing `(server, login)` into a
  *  single summary so multi-day filters don't repeat the same account. */
@@ -498,6 +545,21 @@ function normalizeHedgeOpenConfig(c: HedgeOpenConfig): HedgeOpenConfig {
 function normalizeLeverageAbuseConfig(
   c: LeverageAbuseConfig,
 ): LeverageAbuseConfig {
+  const v = c.enabled as unknown;
+  return {
+    ...c,
+    enabled: v === false || v === 0 ? false : true,
+    rules: (c.rules || []).map((r) => ({
+      ...r,
+      enabled:
+        (r.enabled as unknown) === false || (r.enabled as unknown) === 0
+          ? false
+          : true,
+    })),
+  };
+}
+
+function normalizeMartingaleConfig(c: MartingaleConfig): MartingaleConfig {
   const v = c.enabled as unknown;
   return {
     ...c,
@@ -835,6 +897,9 @@ const RISK_MONITOR_TABS = [
   "quick-profit",
   "hedge-open",
   "leverage-abuse",
+  // OPT-0033: 马丁策略 tab 暂时隐藏（后端已上线，前端待验证后再放出）。
+  // 重新启用：取消下面 3 处注释（这里 + RISK_MONITOR_TAB_LABELS + TabsContent）。
+  // "martingale",
   "gap-trade",
 ] as const;
 type RiskMonitorTab = (typeof RISK_MONITOR_TABS)[number];
@@ -849,6 +914,8 @@ const RISK_MONITOR_TAB_LABELS: Record<RiskMonitorTab, string> = {
   "quick-profit": "快速获利",
   "hedge-open": "对冲刷单",
   "leverage-abuse": "滥用杠杆",
+  // OPT-0033: 马丁策略 tab 暂时隐藏 — 重新启用时取消注释。
+  // martingale: "马丁策略",
   "gap-trade": "Gap Trade",
 };
 
@@ -892,6 +959,7 @@ const RISK_MONITOR_QUICK_OPEN_CLOSE_FILTERS_KEY = "RISK_MONITOR_QUICK_OPEN_CLOSE
 const RISK_MONITOR_QUICK_PROFIT_FILTERS_KEY = "RISK_MONITOR_QUICK_PROFIT_FILTERS_V1";
 const RISK_MONITOR_HEDGE_OPEN_FILTERS_KEY = "RISK_MONITOR_HEDGE_OPEN_FILTERS_V1";
 const RISK_MONITOR_LEVERAGE_ABUSE_FILTERS_KEY = "RISK_MONITOR_LEVERAGE_ABUSE_FILTERS_V1";
+const RISK_MONITOR_MARTINGALE_FILTERS_KEY = "RISK_MONITOR_MARTINGALE_FILTERS_V1";
 const RISK_MONITOR_GAP_TRADE_FILTERS_KEY = "RISK_MONITOR_GAP_TRADE_FILTERS_V1";
 
 type StandardTabFilters = {
@@ -1131,6 +1199,15 @@ export default function RiskMonitor() {
         <TabsContent value="leverage-abuse" forceMount>
           <LeverageAbuseTab active={activeTab === "leverage-abuse"} />
         </TabsContent>
+        {/* OPT-0033: 马丁策略 tab 暂时隐藏（后端已上线，前端待验证后再放出）。
+            组件保留并以 false 守卫保持引用；重新启用：把 false 改回
+            `activeTab === "martingale"`，并取消上面 RISK_MONITOR_TABS +
+            RISK_MONITOR_TAB_LABELS 两处的注释。 */}
+        {MARTINGALE_TAB_VISIBLE && (
+          <TabsContent value="martingale" forceMount>
+            <MartingaleTab active={false} />
+          </TabsContent>
+        )}
         <TabsContent value="gap-trade" forceMount>
           <GapTradeTab active={activeTab === "gap-trade"} />
         </TabsContent>
@@ -7032,6 +7109,1050 @@ function LeverageAbuseConfigDrawer({
               <p className="text-xs text-muted-foreground">
                 保证金使用率 = 已用保证金 / 净值 × 100%，越高杠杆越猛。
                 只在账户**开仓那一刻**检查（避免把后来亏损漂移的账户误判为滥用杠杆）。
+              </p>
+            </div>
+          </section>
+
+          <UnifiedSettingsExtras
+            columnGroups={columnGroups}
+            manualActions={manualActions}
+          />
+        </div>
+
+        <div className="border-t p-4 flex justify-end gap-2">
+          <DrawerClose asChild>
+            <Button variant="outline">取消</Button>
+          </DrawerClose>
+          <Button onClick={onSave} disabled={saving}>
+            <Save className="h-4 w-4 mr-1.5" />
+            {saving ? "保存中..." : "保存规则"}
+          </Button>
+        </div>
+      </DrawerContent>
+    </Drawer>
+  );
+}
+
+// ── Martingale Tab (马丁策略, rule_id 111-120) ─────────────
+// Event-gated (OPT-0033): a recent add to a same-symbol same-direction LOSING
+// position triggers; the add multiplier is measured against the anchor (建仓笔).
+// Mirrors the Leverage Abuse tab shell (standard filters + 立即扫描 + per-rule
+// cards + config drawer); the column set + rule knobs are martingale-specific.
+
+function MartingaleTab({ active }: { active: boolean }) {
+  const { theme } = useTheme();
+  const isDarkMode = theme === "dark";
+  const isMobile = useIsMobile();
+  const gridStyle = useGridThemeStyle(isDarkMode);
+  const columnPersist = useGridColumnPersist(
+    "RISK_MONITOR_MARTINGALE_GRID_STATE_V1",
+  );
+
+  const persistedFilters = useMemo(
+    () =>
+      readFilterState(
+        RISK_MONITOR_MARTINGALE_FILTERS_KEY,
+        DEFAULT_STANDARD_FILTERS,
+      ),
+    [],
+  );
+
+  const [rangePreset, setRangePreset] = useState<RangePresetKey>(
+    persistedFilters.rangePreset,
+  );
+  const [customRange, setCustomRange] = useState<DateRange | undefined>();
+  const [datePickerOpen, setDatePickerOpen] = useState(false);
+
+  const [alerts, setAlerts] = useState<AlertEvent[]>([]);
+  const [totalCount, setTotalCount] = useState(0);
+  const [stats, setStats] = useState<AlertsStats>({
+    suspicious_count: 0,
+    event_count: 0,
+    servers: [],
+  });
+  const [latestMeta, setLatestMeta] = useState<LatestScanMeta | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [scanningNow, setScanningNow] = useState(false);
+  const [lastRefresh, setLastRefresh] = useState<string | null>(null);
+  const [config, setConfig] = useState<MartingaleConfig | null>(null);
+  const [editConfig, setEditConfig] = useState<MartingaleConfig | null>(null);
+  const [configOpen, setConfigOpen] = useState(false);
+  const [savingConfig, setSavingConfig] = useState(false);
+
+  const [ruleFilter, setRuleFilter] = useState<string>(persistedFilters.ruleFilter);
+  const [pageIndex, setPageIndex] = useState(0);
+  const pageSize = isMobile ? 20 : 50;
+  const [sortBy, setSortBy] = useState<string>("scanned_at");
+  const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
+  const [serverFilter, setServerFilter] = useState(persistedFilters.serverFilter);
+  const [loginInput, setLoginInput] = useState("");
+  const [loginQuery, setLoginQuery] = useState("");
+  const [zipcodeInput, setZipcodeInput] = useState("");
+  const [zipcodeQuery, setZipcodeQuery] = useState("");
+
+  useFilterPersist(
+    RISK_MONITOR_MARTINGALE_FILTERS_KEY,
+    DEFAULT_STANDARD_FILTERS,
+    { rangePreset, ruleFilter, serverFilter },
+    { skipFields: rangePreset === "custom" ? ["rangePreset"] : [] },
+  );
+
+  useEffect(() => {
+    const trimmed = loginInput.trim();
+    const t = setTimeout(
+      () => setLoginQuery(/^\d+$/.test(trimmed) ? trimmed : ""),
+      300,
+    );
+    return () => clearTimeout(t);
+  }, [loginInput]);
+
+  useEffect(() => {
+    const t = setTimeout(() => setZipcodeQuery(zipcodeInput.trim()), 300);
+    return () => clearTimeout(t);
+  }, [zipcodeInput]);
+
+  useEffect(() => {
+    if (ruleFilter === "all" || !config?.rules?.length) return;
+    const n = Number.parseInt(ruleFilter, 10);
+    const maxRid = MARTINGALE_RULE_ID_BASE + config.rules.length - 1;
+    if (Number.isNaN(n) || n < MARTINGALE_RULE_ID_BASE || n > maxRid) {
+      setRuleFilter("all");
+    }
+  }, [config?.rules, ruleFilter]);
+
+  const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
+  const effectiveRange = useMemo(
+    () => buildRangeIso(rangePreset, customRange),
+    [rangePreset, customRange],
+  );
+
+  const buildStatsFilterQs = useCallback(
+    (range: { since: string; until: string }) => {
+      const qs = new URLSearchParams({ since: range.since, until: range.until });
+      if (serverFilter !== "all") qs.set("server", serverFilter);
+      if (loginQuery) qs.set("login", loginQuery);
+      if (zipcodeQuery) qs.set("zipcode", zipcodeQuery);
+      return qs;
+    },
+    [serverFilter, loginQuery, zipcodeQuery],
+  );
+
+  const buildTableFilterQs = useCallback(
+    (range: { since: string; until: string }) => {
+      const qs = buildStatsFilterQs(range);
+      if (ruleFilter !== "all") qs.set("rule_id", ruleFilter);
+      return qs;
+    },
+    [buildStatsFilterQs, ruleFilter],
+  );
+
+  const fetchConfig = useCallback(async () => {
+    try {
+      const [mgRes, burstRes] = await Promise.all([
+        apiFetch("/api/v1/risk-monitor/martingale/config"),
+        apiFetch("/api/v1/risk-monitor/burst-open/config"),
+      ]);
+      if (mgRes.ok) {
+        const raw = (await mgRes.json()) as MartingaleConfig;
+        setConfig(normalizeMartingaleConfig(raw));
+      }
+      if (burstRes.ok) {
+        const burstCfg: BurstOpenConfig = await burstRes.json();
+        setLatestMeta((prev) => ({
+          scan_time_ms: prev?.scan_time_ms ?? 0,
+          scanned_at: prev?.scanned_at ?? "",
+          total_accounts_scanned: prev?.total_accounts_scanned ?? 0,
+          config: burstCfg,
+        }));
+      }
+    } catch (err) {
+      console.error("Failed to load martingale config:", err);
+    }
+  }, []);
+
+  const fetchAlerts = useCallback(
+    async (signal?: AbortSignal) => {
+      if (!effectiveRange) return;
+      setLoading(true);
+      try {
+        const statsQs = buildStatsFilterQs(effectiveRange);
+        const tableQs = buildTableFilterQs(effectiveRange);
+        const alertsQs = new URLSearchParams(tableQs);
+        alertsQs.set("page", String(pageIndex + 1));
+        alertsQs.set("page_size", String(pageSize));
+        alertsQs.set("sort_by", sortBy);
+        alertsQs.set("sort_order", sortOrder);
+
+        const [alertsRes, statsRes, latestRes] = await Promise.all([
+          apiFetch(`/api/v1/risk-monitor/martingale/alerts?${alertsQs}`, {
+            signal,
+          }),
+          apiFetch(`/api/v1/risk-monitor/martingale/alerts/stats?${statsQs}`, {
+            signal,
+          }),
+          apiFetch(`/api/v1/risk-monitor/burst-open`, { signal }).catch(
+            () => null,
+          ),
+        ]);
+        if (alertsRes.ok) {
+          const json: AlertsResponse = await alertsRes.json();
+          setAlerts(json.entries);
+          setTotalCount(json.total);
+        }
+        if (statsRes.ok) {
+          const json: AlertsStats = await statsRes.json();
+          setStats(json);
+        }
+        if (latestRes && latestRes.ok) {
+          const json = await latestRes.json();
+          setLatestMeta({
+            scan_time_ms: json.scan_time_ms,
+            scanned_at: json.scanned_at,
+            total_accounts_scanned: json.summary?.total_accounts_scanned ?? 0,
+            config: json.config,
+          });
+        }
+        setLastRefresh(
+          new Date().toLocaleTimeString("zh-CN", {
+            hour: "2-digit",
+            minute: "2-digit",
+            second: "2-digit",
+          }),
+        );
+      } catch (err) {
+        if (err instanceof DOMException && err.name === "AbortError") return;
+        console.error("Martingale alerts fetch failed:", err);
+      } finally {
+        setLoading(false);
+      }
+    },
+    [
+      effectiveRange,
+      buildStatsFilterQs,
+      buildTableFilterQs,
+      pageIndex,
+      pageSize,
+      sortBy,
+      sortOrder,
+    ],
+  );
+
+  const refreshIntervalMs =
+    (latestMeta?.config?.scan_interval_min ?? 5) * 60_000;
+
+  useEffect(() => {
+    setPageIndex(0);
+  }, [
+    effectiveRange?.since,
+    effectiveRange?.until,
+    serverFilter,
+    loginQuery,
+    zipcodeQuery,
+    ruleFilter,
+    pageSize,
+    sortBy,
+    sortOrder,
+  ]);
+
+  useEffect(() => {
+    if (!active) return;
+    const controller = new AbortController();
+    fetchAlerts(controller.signal);
+    fetchConfig();
+
+    if (rangePreset !== "custom") {
+      const timer = setInterval(() => fetchAlerts(), refreshIntervalMs);
+      return () => {
+        controller.abort();
+        clearInterval(timer);
+      };
+    }
+    return () => controller.abort();
+  }, [active, fetchAlerts, fetchConfig, rangePreset, refreshIntervalMs]);
+
+  const handleExportCsv = async () => {
+    if (!effectiveRange || exporting) return;
+    setExporting(true);
+    try {
+      const qs = buildTableFilterQs(effectiveRange);
+      qs.set("sort_by", sortBy);
+      qs.set("sort_order", sortOrder);
+      const res = await apiFetch(
+        `/api/v1/risk-monitor/martingale/alerts/export?${qs}`,
+      );
+      if (!res.ok) throw new Error(`Export failed: ${res.status}`);
+      const blob = await res.blob();
+      const stamp = `${fmtFilenameStamp(effectiveRange.since)}_to_${fmtFilenameStamp(effectiveRange.until)}`;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `risk-monitor-martingale_${stamp}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error("Martingale CSV export failed:", err);
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const handleScanNow = async () => {
+    setScanningNow(true);
+    try {
+      const res = await apiFetch("/api/v1/risk-monitor/burst-open/scan-now", {
+        method: "POST",
+      });
+      if (res.ok) {
+        setPageIndex(0);
+        await fetchAlerts();
+      }
+    } catch (err) {
+      console.error("Martingale scan-now failed:", err);
+    } finally {
+      setScanningNow(false);
+    }
+  };
+
+  const handleSortChanged = useCallback((e: SortChangedEvent) => {
+    const activeCol = e.api.getColumnState().find((c) => c.sort);
+    const nextSortBy =
+      activeCol?.colId && SORTABLE_COL_IDS.has(activeCol.colId)
+        ? activeCol.colId
+        : "scanned_at";
+    const nextSortOrder: "asc" | "desc" =
+      activeCol?.sort === "asc" ? "asc" : "desc";
+    setSortBy(nextSortBy);
+    setSortOrder(nextSortOrder);
+  }, []);
+
+  const handleSaveConfig = async () => {
+    if (!editConfig) return;
+    setSavingConfig(true);
+    try {
+      const res = await apiFetch("/api/v1/risk-monitor/martingale/config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(editConfig),
+      });
+      if (res.ok) {
+        const saved = (await res.json()) as MartingaleConfig;
+        setConfig(normalizeMartingaleConfig(saved));
+        setEditConfig(null);
+        setConfigOpen(false);
+      }
+    } catch (err) {
+      console.error("Failed to save martingale config:", err);
+    } finally {
+      setSavingConfig(false);
+    }
+  };
+
+  const columnDefs: ColDef<AlertEvent>[] = useMemo(
+    () => [
+      {
+        headerName: "规则",
+        field: "rule_label",
+        colId: "rule_label",
+        width: 150,
+        pinned: "left",
+      },
+      {
+        headerName: "发现时间 (GMT+8)",
+        field: "scanned_at",
+        colId: "scanned_at",
+        width: 165,
+        sort: "desc",
+        valueFormatter: (p) => fmtTime(p.value),
+      },
+      { headerName: "服务器", field: "server", colId: "server", width: 120 },
+      {
+        headerName: "Zipcode",
+        field: "zipcode",
+        colId: "zipcode",
+        width: 110,
+        cellRenderer: (p: { value: string | null }) => p.value || "—",
+      },
+      {
+        headerName: "账户",
+        field: "login",
+        colId: "login",
+        width: 110,
+        cellRenderer: LoginCell,
+      },
+      { headerName: "币种", field: "currency", colId: "currency", width: 80 },
+      { headerName: "产品", field: "symbol", colId: "symbol", width: 110 },
+      {
+        headerName: "方向",
+        field: "direction",
+        colId: "direction",
+        width: 80,
+        cellRenderer: (p: { value: string | null }) => {
+          if (!p.value) return "—";
+          const buy = p.value === "Buy";
+          return (
+            <span
+              className={
+                buy
+                  ? "text-emerald-600 dark:text-emerald-400 font-medium"
+                  : "text-red-600 dark:text-red-400 font-medium"
+              }
+            >
+              {buy ? "买" : "卖"}
+            </span>
+          );
+        },
+      },
+      {
+        headerName: "建仓手数",
+        field: "anchor_lots",
+        colId: "anchor_lots",
+        width: 100,
+        cellClass: "ag-right-aligned-cell",
+        valueFormatter: (p) => (p.value == null ? "—" : p.value.toFixed(2)),
+        headerComponent: InfoHeader,
+        headerComponentParams: {
+          tooltip: "建仓笔手数 = 当前持仓里最早开仓那一笔的手数（加仓倍数的分母）。",
+        },
+      },
+      {
+        headerName: "加仓手数",
+        field: "new_lots",
+        colId: "new_lots",
+        width: 100,
+        cellClass: "ag-right-aligned-cell",
+        valueFormatter: (p) => (p.value == null ? "—" : p.value.toFixed(2)),
+        headerComponent: InfoHeader,
+        headerComponentParams: {
+          tooltip: "最近一笔加仓的手数（触发本次告警的加仓动作）。",
+        },
+      },
+      {
+        headerName: "加仓倍数",
+        field: "lot_ratio_mg",
+        colId: "lot_ratio_mg",
+        width: 100,
+        cellClass: "ag-right-aligned-cell",
+        cellRenderer: (p: { value: number | null }) => {
+          const v = p.value;
+          if (v === null || v === undefined) return "—";
+          return (
+            <span
+              className={
+                v >= 2
+                  ? "text-red-600 dark:text-red-400 font-semibold"
+                  : "font-medium"
+              }
+            >
+              {v.toFixed(2)}×
+            </span>
+          );
+        },
+        headerComponent: InfoHeader,
+        headerComponentParams: {
+          tooltip: "加仓倍数 = 加仓手数 / 建仓手数。≥ 2× 标红（典型马丁翻倍）。",
+        },
+      },
+      {
+        headerName: "加仓次数",
+        field: "add_count",
+        colId: "add_count",
+        width: 90,
+        cellClass: "ag-right-aligned-cell",
+        headerComponent: InfoHeader,
+        headerComponentParams: {
+          tooltip: "建仓之后的同向加仓笔数（不含建仓笔）。",
+        },
+      },
+      {
+        headerName: "持仓笔数",
+        field: "order_count",
+        colId: "order_count",
+        width: 100,
+        cellClass: "ag-right-aligned-cell",
+        headerComponent: InfoHeader,
+        headerComponentParams: {
+          tooltip: "该 (产品, 方向) 当前未平仓的总笔数（含建仓笔）。",
+        },
+      },
+      {
+        headerName: "持仓手数",
+        field: "total_lots",
+        colId: "total_lots",
+        width: 100,
+        cellClass: "ag-right-aligned-cell",
+        valueFormatter: (p) => (p.value == null ? "—" : p.value.toFixed(2)),
+      },
+      {
+        headerName: "浮动盈亏",
+        field: "floating_pnl",
+        colId: "floating_pnl",
+        width: 120,
+        cellClass: "ag-right-aligned-cell",
+        cellRenderer: (p: { value: number | null }) => {
+          const v = p.value;
+          if (v === null || v === undefined) return "—";
+          return (
+            <span
+              className={
+                v < 0
+                  ? "text-red-600 dark:text-red-400 font-semibold"
+                  : "text-emerald-600 dark:text-emerald-400"
+              }
+            >
+              {fmtCurrency(v)}
+            </span>
+          );
+        },
+        headerComponent: InfoHeader,
+        headerComponentParams: {
+          tooltip: "该方向持仓当前浮动盈亏（USD，CEN 已 ÷100）。负数 = 亏损（马丁前提）。",
+        },
+      },
+      {
+        headerName: "净值",
+        field: "equity",
+        colId: "equity",
+        width: 120,
+        cellClass: "ag-right-aligned-cell",
+        valueFormatter: (p) => (p.value == null ? "—" : fmtCurrency(p.value)),
+      },
+      {
+        headerName: "杠杆",
+        field: "leverage",
+        colId: "leverage",
+        width: 90,
+        cellClass: "ag-right-aligned-cell",
+        valueFormatter: (p) => (p.value == null ? "—" : `1:${p.value}`),
+      },
+      netDepositColDef(),
+      { headerName: "账户组", field: "group", colId: "group", width: 160 },
+    ],
+    [],
+  );
+
+  const rangeLabel =
+    rangePreset === "custom" && customRange?.from
+      ? customRange.to
+        ? `${format(customRange.from, "yyyy-MM-dd")} ~ ${format(customRange.to, "yyyy-MM-dd")}`
+        : format(customRange.from, "yyyy-MM-dd")
+      : (RANGE_PRESETS.find((p) => p.key === rangePreset)?.label ??
+        "最近 4 小时");
+
+  return (
+    <div className="flex min-w-0 flex-col gap-4">
+      <div className={RISK_MONITOR_HEADER_ROW}>
+        <div className="min-w-0">
+          <p className="text-sm text-muted-foreground">
+            检测持仓浮亏下、同产品同方向加仓的马丁式越亏越加（马丁策略）
+          </p>
+          <p className="text-sm text-muted-foreground">
+            当前范围:{" "}
+            <span className="font-medium text-foreground">{rangeLabel}</span>
+            {lastRefresh && ` · 上次刷新 ${lastRefresh}`}
+            {latestMeta &&
+              latestMeta.scanned_at &&
+              ` · 最近扫描 ${fmtTime(latestMeta.scanned_at)} · 耗时 ${latestMeta.scan_time_ms}ms`}
+            {latestMeta?.config &&
+              ` · 每 ${latestMeta.config.scan_interval_min} 分钟自动扫描`}
+          </p>
+        </div>
+        <div className={RISK_MONITOR_HEADER_ACTIONS}>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleExportCsv}
+            disabled={exporting || totalCount === 0}
+          >
+            <Download
+              className={cn("h-4 w-4 mr-1.5", exporting && "animate-spin")}
+            />
+            {exporting ? "导出中..." : "导出 CSV"}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              setEditConfig(
+                config
+                  ? normalizeMartingaleConfig(
+                      JSON.parse(JSON.stringify(config)) as MartingaleConfig,
+                    )
+                  : {
+                      enabled: true,
+                      rules: [
+                        {
+                          name: "默认马丁检测",
+                          enabled: true,
+                          floating_loss_floor_usd: 0,
+                          lot_multiplier: 1,
+                          min_add_count: 1,
+                        },
+                      ],
+                    },
+              );
+              setConfigOpen(true);
+            }}
+          >
+            <Settings2 className="h-4 w-4 mr-1.5" />
+            设置
+          </Button>
+        </div>
+      </div>
+
+      {config && config.rules.length > 0 ? (
+        <div className="grid w-full gap-1.5 sm:gap-2 grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4">
+          {config.rules.map((rule, idx) => {
+            const ruleId = MARTINGALE_RULE_ID_BASE + idx;
+            const br = stats.by_rule?.find((b) => b.rule_id === ruleId);
+            const nAcc = br?.account_count ?? 0;
+            const nEvt = br?.event_count ?? 0;
+            const st =
+              RULE_SUMMARY_CARD_STYLES[idx % RULE_SUMMARY_CARD_STYLES.length];
+            const lossDesc =
+              rule.floating_loss_floor_usd > 0
+                ? `浮亏 > $${rule.floating_loss_floor_usd}`
+                : "任意浮亏";
+            return (
+              <SummaryCard
+                key={rule.id ?? `mg-rule-${idx}`}
+                compact
+                label={`Rule ${idx + 1} · 去重账户`}
+                value={nAcc}
+                description={
+                  `告警 ${nEvt} 条 · ${lossDesc}` +
+                  ` · 加仓 ≥ ${Number(rule.lot_multiplier.toFixed(2))}× 建仓` +
+                  ` · 加仓 ≥ ${rule.min_add_count} 次`
+                }
+                dotColor={st.dot}
+                textColor={st.value}
+              />
+            );
+          })}
+        </div>
+      ) : (
+        <Card className="border-dashed">
+          <CardContent className="p-4 text-sm text-muted-foreground">
+            {config && config.rules.length === 0
+              ? "请先在「设置」中添加至少一条规则。"
+              : "正在加载规则…"}
+          </CardContent>
+        </Card>
+      )}
+
+      <div className="flex flex-col gap-2 w-full sm:flex-row sm:flex-wrap sm:items-stretch sm:gap-3 max-w-full">
+        <Select value={ruleFilter} onValueChange={setRuleFilter}>
+          <SelectTrigger
+            className="w-full min-w-0 h-9 sm:w-40 sm:shrink-0"
+            aria-label="按规则筛选"
+          >
+            <SelectValue placeholder="规则" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">全部规则</SelectItem>
+            {config?.rules.map((_, idx) => (
+              <SelectItem
+                key={MARTINGALE_RULE_ID_BASE + idx}
+                value={String(MARTINGALE_RULE_ID_BASE + idx)}
+              >
+                Rule {idx + 1}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Select
+          value={rangePreset}
+          onValueChange={(v) => {
+            setRangePreset(v as RangePresetKey);
+            if (v === "custom" && !customRange?.from) setDatePickerOpen(true);
+          }}
+        >
+          <SelectTrigger className="w-full min-w-0 h-9 sm:w-40 sm:shrink-0">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {RANGE_PRESETS.map((p) => (
+              <SelectItem key={p.key} value={p.key}>
+                {p.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+
+        {rangePreset === "custom" && (
+          <Popover open={datePickerOpen} onOpenChange={setDatePickerOpen}>
+            <PopoverTrigger asChild>
+              <Button
+                variant="outline"
+                className="w-full min-w-0 sm:w-40 h-9 justify-start text-left font-normal shrink-0 overflow-hidden"
+              >
+                <CalendarIcon className="mr-2 h-4 w-4 shrink-0" />
+                <span className="truncate">
+                  {customRange?.from
+                    ? customRange.to
+                      ? `${format(customRange.from, "yyyy-MM-dd")} ~ ${format(customRange.to, "yyyy-MM-dd")}`
+                      : format(customRange.from, "yyyy-MM-dd")
+                    : "选择日期范围"}
+                </span>
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent className="w-auto p-0" align="start">
+              <Calendar
+                initialFocus
+                mode="range"
+                defaultMonth={customRange?.from}
+                selected={customRange}
+                onSelect={setCustomRange}
+                numberOfMonths={2}
+                disabled={{
+                  before: new Date(
+                    Date.now() - RETENTION_DAYS * 24 * 3600 * 1000,
+                  ),
+                }}
+              />
+            </PopoverContent>
+          </Popover>
+        )}
+
+        <Select value={serverFilter} onValueChange={setServerFilter}>
+          <SelectTrigger className="w-full min-w-0 h-9 sm:w-40 sm:shrink-0">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">全部服务器</SelectItem>
+            <SelectItem value="MT4_Live">MT4 Live</SelectItem>
+            <SelectItem value="MT4_Live2">MT4 Live2</SelectItem>
+            <SelectItem value="MT5">MT5</SelectItem>
+          </SelectContent>
+        </Select>
+
+        <div className="relative w-full min-w-0 sm:w-44 sm:shrink-0">
+          <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground pointer-events-none" />
+          <Input
+            placeholder="搜索 zipcode（模糊）"
+            value={zipcodeInput}
+            onChange={(e) => setZipcodeInput(e.target.value)}
+            className="pl-8 h-9"
+          />
+        </div>
+        <div className="relative w-full min-w-0 sm:w-44 sm:shrink-0">
+          <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground pointer-events-none" />
+          <Input
+            placeholder="搜索账户号（精确）"
+            value={loginInput}
+            onChange={(e) => setLoginInput(e.target.value)}
+            className="pl-8 h-9"
+            inputMode="numeric"
+          />
+        </div>
+        <span className="text-sm text-muted-foreground sm:ml-auto sm:shrink-0 py-1.5">
+          {loading ? "加载中..." : `共 ${totalCount} 条告警`}
+        </span>
+      </div>
+
+      <div
+        className={cn(
+          "risk-monitor-theme h-[calc(100vh-540px)] min-h-[400px] w-full",
+          isDarkMode ? "ag-theme-quartz-dark" : "ag-theme-quartz",
+        )}
+        style={gridStyle}
+      >
+        <AgGridReact<AlertEvent>
+          rowData={alerts}
+          columnDefs={columnDefs}
+          defaultColDef={defaultColDef}
+          gridOptions={{ theme: "legacy", enableBrowserTooltips: true }}
+          animateRows={false}
+          enableCellTextSelection
+          suppressCellFocus
+          sortingOrder={["desc", "asc", null]}
+          onSortChanged={(e) => {
+            if (!columnPersist.isApplying()) handleSortChanged(e);
+            columnPersist.gridEventProps.onSortChanged();
+          }}
+          onGridReady={columnPersist.gridEventProps.onGridReady}
+          onColumnMoved={columnPersist.gridEventProps.onColumnMoved}
+          onColumnVisible={columnPersist.gridEventProps.onColumnVisible}
+          onColumnPinned={columnPersist.gridEventProps.onColumnPinned}
+          onColumnResized={columnPersist.gridEventProps.onColumnResized}
+          getRowId={(p) => `evt-${p.data.id}`}
+        />
+      </div>
+
+      <Card>
+        <CardContent className="py-4">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="text-sm text-muted-foreground">
+              {totalCount === 0
+                ? "暂无数据"
+                : isMobile
+                  ? `共 ${totalCount} 条`
+                  : `第 ${pageIndex * pageSize + 1}-${Math.min((pageIndex + 1) * pageSize, totalCount)} 条 / 共 ${totalCount} 条`}
+            </div>
+            <div className="flex items-center flex-wrap gap-2">
+              {!isMobile && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setPageIndex(0)}
+                  disabled={pageIndex === 0 || loading}
+                >
+                  首页
+                </Button>
+              )}
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setPageIndex(Math.max(0, pageIndex - 1))}
+                disabled={pageIndex === 0 || loading}
+              >
+                上一页
+              </Button>
+              <span className="text-sm text-muted-foreground">
+                第 {pageIndex + 1} / {totalPages} 页
+              </span>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() =>
+                  setPageIndex(Math.min(totalPages - 1, pageIndex + 1))
+                }
+                disabled={pageIndex >= totalPages - 1 || loading}
+              >
+                下一页
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setPageIndex(totalPages - 1)}
+                disabled={pageIndex >= totalPages - 1 || loading}
+              >
+                {isMobile ? "最后" : "末页"}
+              </Button>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      <MartingaleConfigDrawer
+        open={configOpen}
+        onOpenChange={setConfigOpen}
+        config={editConfig}
+        setConfig={setEditConfig}
+        onSave={handleSaveConfig}
+        saving={savingConfig}
+        columnGroups={[
+          {
+            persist: columnPersist,
+            columnDefs: columnDefs as ColDef<unknown>[],
+          },
+        ]}
+        manualActions={[
+          {
+            label: "立即扫描",
+            runningLabel: "扫描中...",
+            onClick: handleScanNow,
+            running: scanningNow,
+          },
+        ]}
+      />
+    </div>
+  );
+}
+
+function MartingaleConfigDrawer({
+  open,
+  onOpenChange,
+  config,
+  setConfig,
+  onSave,
+  saving,
+  columnGroups,
+  manualActions,
+}: {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  config: MartingaleConfig | null;
+  setConfig: (c: MartingaleConfig | null) => void;
+  onSave: () => void;
+  saving: boolean;
+  columnGroups: ColumnSettingGroup[];
+  manualActions: ManualAction[];
+}) {
+  const isMobile = useIsMobile();
+  if (!config) return null;
+
+  const updateRule = (idx: number, patch: Partial<MartingaleRule>) => {
+    const rules = [...config.rules];
+    rules[idx] = { ...rules[idx], ...patch };
+    setConfig({ ...config, rules });
+  };
+
+  const addRule = () => {
+    if (config.rules.length >= 10) return;
+    setConfig({
+      ...config,
+      rules: [
+        ...config.rules,
+        {
+          name: `规则 ${config.rules.length + 1}`,
+          enabled: true,
+          floating_loss_floor_usd: 0,
+          lot_multiplier: 1,
+          min_add_count: 1,
+        },
+      ],
+    });
+  };
+
+  const removeRule = (idx: number) => {
+    if (config.rules.length <= 1) return;
+    setConfig({ ...config, rules: config.rules.filter((_, i) => i !== idx) });
+  };
+
+  return (
+    <Drawer
+      open={open}
+      onOpenChange={onOpenChange}
+      direction={isMobile ? "bottom" : "right"}
+    >
+      <DrawerContent
+        className={cn(
+          isMobile
+            ? "max-h-[85vh]"
+            : "ml-auto h-full w-[520px] max-w-[90vw] rounded-l-xl rounded-r-none",
+        )}
+      >
+        <DrawerHeader className="border-b px-6">
+          <DrawerTitle>设置</DrawerTitle>
+        </DrawerHeader>
+
+        <div className="flex-1 overflow-y-auto p-6 space-y-6">
+          <section className="space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-medium">启用规则</h3>
+              <Checkbox
+                checked={config.enabled}
+                onCheckedChange={(v) =>
+                  setConfig({ ...config, enabled: v === true })
+                }
+              />
+            </div>
+            <p className="text-xs text-muted-foreground -mt-2">
+              关闭后仅停止新告警扫描，不影响历史告警展示。
+            </p>
+
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <label className="text-sm font-medium">
+                  检测规则（最多 10 条）
+                </label>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={addRule}
+                  disabled={config.rules.length >= 10}
+                >
+                  <Plus className="h-3.5 w-3.5 mr-1" />
+                  添加规则
+                </Button>
+              </div>
+
+              {config.rules.map((rule, idx) => (
+                <div
+                  key={idx}
+                  className="rounded-lg border p-4 space-y-3 bg-muted/30"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <Input
+                      className="font-medium max-w-sm"
+                      value={rule.name}
+                      onChange={(e) => updateRule(idx, { name: e.target.value })}
+                      placeholder="规则名（例：翻倍加仓）"
+                      maxLength={100}
+                    />
+                    <div className="flex items-center gap-3">
+                      <label className="flex items-center gap-1 text-sm whitespace-nowrap">
+                        <Checkbox
+                          checked={rule.enabled}
+                          onCheckedChange={(v) =>
+                            updateRule(idx, { enabled: !!v })
+                          }
+                        />
+                        启用
+                      </label>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => removeRule(idx)}
+                        disabled={config.rules.length <= 1}
+                        aria-label="删除"
+                      >
+                        <Trash2 className="h-4 w-4 text-destructive" />
+                      </Button>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3 text-sm">
+                    <div className="space-y-1">
+                      <label className="text-xs text-muted-foreground">
+                        加仓倍数 ≥ (× 建仓手数)
+                      </label>
+                      <Input
+                        type="number"
+                        min={1}
+                        max={100}
+                        step={0.5}
+                        value={rule.lot_multiplier}
+                        onChange={(e) =>
+                          updateRule(idx, {
+                            lot_multiplier: Number(e.target.value) || 1,
+                          })
+                        }
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs text-muted-foreground">
+                        浮亏门槛 (USD，0=任意浮亏)
+                      </label>
+                      <Input
+                        type="number"
+                        min={0}
+                        step={100}
+                        value={rule.floating_loss_floor_usd}
+                        onChange={(e) =>
+                          updateRule(idx, {
+                            floating_loss_floor_usd: Number(e.target.value) || 0,
+                          })
+                        }
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs text-muted-foreground">
+                        最少加仓次数
+                      </label>
+                      <Input
+                        type="number"
+                        min={1}
+                        max={50}
+                        step={1}
+                        value={rule.min_add_count}
+                        onChange={(e) =>
+                          updateRule(idx, {
+                            min_add_count: Number(e.target.value) || 1,
+                          })
+                        }
+                      />
+                    </div>
+                  </div>
+                </div>
+              ))}
+              <p className="text-xs text-muted-foreground">
+                马丁 = 越亏越加仓。只在账户**新开仓那一刻**评估其同产品同方向持仓：
+                浮亏满足门槛 + 加仓手数 ≥ 建仓手数 × 倍数 + 加仓次数达标即告警。
+                加仓倍数与「建仓笔」（最早那笔）比，1× = 等手数即算，2× = 翻倍。
               </p>
             </div>
           </section>

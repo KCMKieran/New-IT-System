@@ -133,6 +133,35 @@ class LeverageAbuseConfig(BaseModel):
     rules: List[LeverageAbuseRule] = []
 
 
+# Martingale detection (马丁策略, rule_ids 111-120).
+# Catches "越亏越加倉": adding to a SAME-symbol SAME-direction position while the
+# currently-held position is in a floating LOSS, with the added leg at least N×
+# the anchor (建仓笔) size. Event-gated (OPT-0033) like Leverage Abuse — a new
+# open GATES evaluation, the open-position snapshot supplies the floating loss
+# and the lot ladder, so no cross-scan order-buffer table is needed.
+class MartingaleRule(BaseModel):
+    id: Optional[int] = None
+    # Free-text rule name (fund-flow / hedge-open style). Snapshot into
+    # AlertEvent.rule_label as f"Rule {idx} — {name}" at trigger time.
+    name: str = Field(min_length=1, max_length=100)
+    enabled: bool = True
+    # Floating-loss floor (USD, CEN already ÷100). 0 = ANY floating loss
+    # qualifies (floating < 0); 500 = the position must be down more than $500.
+    # The held position must be a loss — losing is the martingale precondition.
+    floating_loss_floor_usd: float = Field(default=0.0, ge=0.0, le=10_000_000.0)
+    # Add multiplier vs the ANCHOR (first) leg. 1.0 = 1:1 (any add of equal or
+    # greater size triggers); 2.0 = 1:2 (the add must be ≥ 2× the anchor).
+    lot_multiplier: float = Field(default=1.0, ge=1.0, le=100.0)
+    # How many adds beyond the anchor before it counts as a martingale. 1 = fire
+    # on the first add (loosest); raise to require a longer ladder.
+    min_add_count: int = Field(default=1, ge=1, le=50)
+
+
+class MartingaleConfig(BaseModel):
+    enabled: bool = True
+    rules: List[MartingaleRule] = []
+
+
 # ── Gap Trade (rule_ids 71-90) ────────────────────────────
 # Two sub-detectors share one config + scheduled scan window (MT 00:00–02:00
 # Mon–Fri). Sub-detector A finds Stop-out trades and pairs them with a
@@ -352,6 +381,18 @@ class AlertEvent(BaseModel):
     margin_used: Optional[float] = None               # MARGIN (USD, CEN ÷100)
     free_margin: Optional[float] = None               # MARGIN_FREE (USD, CEN ÷100)
     streak_count: Optional[int] = None                # consecutive dangerous scans
+    # ── Martingale extras (rule_ids 111-120) ──
+    # The ladder is same-symbol + same-direction; `direction` says which side.
+    # anchor_lots = first (建仓笔) leg size; new_lots = latest add; lot_ratio =
+    # new_lots / anchor_lots (the realised multiplier). floating_pnl is the
+    # held position's floating P&L (USD, CEN ÷100) at scan time (negative =
+    # loss, the precondition). add_count = positions beyond the anchor.
+    direction: Optional[str] = None                   # "Buy" | "Sell"
+    anchor_lots: Optional[float] = None
+    new_lots: Optional[float] = None
+    lot_ratio_mg: Optional[float] = None              # new_lots / anchor_lots
+    floating_pnl: Optional[float] = None              # USD (CEN ÷100); <0 = loss
+    add_count: Optional[int] = None
 
 
 class AlertsResponse(BaseModel):
