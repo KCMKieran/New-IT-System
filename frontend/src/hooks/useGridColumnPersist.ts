@@ -139,6 +139,58 @@ function loadValidState(
   return filtered.length > 0 ? filtered : null;
 }
 
+/**
+ * Merge live columns that are MISSING from the saved state into it, each at
+ * its columnDefs-neighbour position — right after the previous live column
+ * that also exists in the saved state (front if none precedes it).
+ *
+ * Why: when a column is added to a grid's columnDefs AFTER a user has already
+ * saved a layout, that colId isn't in their saved state. Under
+ * `applyColumnState({ applyOrder: true })` AG-Grid dumps every unknown column
+ * at the far RIGHT, ignoring the position the column was given in code. This
+ * reorders those new columns to sit where columnDefs intends, while leaving
+ * the user's existing customisation (order / width / visibility / sort of the
+ * columns they HAVE saved) untouched.
+ *
+ * New columns get a bare `{ colId }` entry so width / visibility / pinning
+ * fall back to their columnDef defaults. `liveOrder` is the grid's current
+ * column order (= columnDefs order) at onGridReady time. Saved colIds are all
+ * guaranteed live (loadValidState already filtered ghosts), so every saved
+ * entry has a home in liveOrder.
+ */
+export function mergeMissingColumns(
+  saved: ColumnState[],
+  liveOrder: string[],
+): ColumnState[] {
+  const savedSet = new Set(saved.map((s) => s.colId as string));
+  // Fast path: saved layout already covers every live column — no new column.
+  if (liveOrder.every((id) => savedSet.has(id))) return saved;
+
+  // Bucket each missing colId under the saved colId that precedes it in the
+  // live order (null = before the first saved column).
+  const trailing = new Map<string | null, string[]>();
+  let lastSaved: string | null = null;
+  for (const colId of liveOrder) {
+    if (savedSet.has(colId)) {
+      lastSaved = colId;
+    } else {
+      const arr = trailing.get(lastSaved) ?? [];
+      arr.push(colId);
+      trailing.set(lastSaved, arr);
+    }
+  }
+
+  const merged: ColumnState[] = [];
+  for (const colId of trailing.get(null) ?? []) merged.push({ colId });
+  for (const s of saved) {
+    merged.push(s);
+    for (const colId of trailing.get(s.colId as string) ?? []) {
+      merged.push({ colId });
+    }
+  }
+  return merged;
+}
+
 // ─── Hook ───────────────────────────────────────────────────────────────
 
 // Shape returned by useGridColumnPersist. Exported so component props (e.g.
@@ -231,11 +283,16 @@ export function useGridColumnPersist(
     (e: GridReadyEvent) => {
       gridApiRef.current = e.api;
 
-      const knownColIds = new Set<string>();
-      e.api.getColumns()?.forEach((c) => knownColIds.add(c.getColId()));
+      // Capture the live column order (= columnDefs order) so columns added to
+      // columnDefs after a user saved their layout land at their designed
+      // neighbour position, not dumped at the far right by applyOrder.
+      const liveOrder: string[] = [];
+      e.api.getColumns()?.forEach((c) => liveOrder.push(c.getColId()));
+      const knownColIds = new Set(liveOrder);
 
-      const state = loadValidState(storageKey, knownColIds);
-      if (!state) return;
+      const saved = loadValidState(storageKey, knownColIds);
+      if (!saved) return;
+      const state = mergeMissingColumns(saved, liveOrder);
 
       isApplyingRef.current = true;
       try {
