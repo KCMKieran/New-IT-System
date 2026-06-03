@@ -25,6 +25,7 @@ from ..core.sql_helpers import (
     FILETIME_TICKS_PER_SEC,
     SID_MAP,
     broker_time_to_utc_iso,
+    demo_test_filter_sql,
 )
 from .account_enrichment import get_account_info_map, get_net_deposit_hist_map
 
@@ -140,10 +141,7 @@ def _query_mt4_recent_closed_short(
           AND t.CLOSE_TIME > '1970-01-01 00:00:00'
           AND {where_time}
           AND t.LOGIN NOT LIKE '7%%'
-          AND u.`GROUP` NOT LIKE '%%demo%%'
-          AND u.`GROUP` NOT LIKE '%%test%%'
-          AND COALESCE(u.NAME, '') NOT LIKE '%%demo%%'
-          AND COALESCE(u.NAME, '') NOT LIKE '%%test%%'
+          {demo_test_filter_sql('u.`GROUP`', 'u.NAME', login_col='t.LOGIN', server_label=server_label)}
         ORDER BY t.CLOSE_TIME, t.TICKET
     """
     with conn.cursor() as cur:
@@ -204,10 +202,7 @@ def _query_mt5_recent_closed_short(
         WHERE c.Entry IN (1, 3)
           AND c.Action IN (0, 1)
           AND {where_time}
-          AND u.`Group` NOT LIKE '%%demo%%'
-          AND u.`Group` NOT LIKE '%%test%%'
-          AND COALESCE(u.Name, '') NOT LIKE '%%demo%%'
-          AND COALESCE(u.Name, '') NOT LIKE '%%test%%'
+          {demo_test_filter_sql('u.`Group`', 'u.Name', login_col='c.Login', server_label='MT5')}
         ORDER BY c.Timestamp, c.Deal
     """
     with conn.cursor() as cur:

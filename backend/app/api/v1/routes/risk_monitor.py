@@ -1866,7 +1866,7 @@ _LEVERAGE_ABUSE_CSV_HEADER = [
     "login",
     "currency",
     "group",
-    "margin_level",
+    "margin_usage_pct",
     "margin_used",
     "free_margin",
     "equity",
@@ -1881,6 +1881,16 @@ def _csv_row_from_leverage_abuse(entry: dict) -> list:
     def _opt(key: str) -> Any:
         v = entry.get(key)
         return "" if v is None else v
+
+    # Export 保证金使用率 (已用保证金/净值 × 100) = 10000 / MARGIN_LEVEL, matching the
+    # frontend column. The stored value is MT's native MARGIN_LEVEL (净值/已用保证金);
+    # the two are reciprocals. ml <= 0 (no open positions) → blank, like the UI.
+    ml = entry.get("margin_level")
+    margin_usage_pct = (
+        round(10000 / ml, 2)
+        if isinstance(ml, (int, float)) and ml > 0
+        else ""
+    )
     return [
         entry.get("rule_label", ""),
         entry.get("scanned_at", ""),
@@ -1889,7 +1899,7 @@ def _csv_row_from_leverage_abuse(entry: dict) -> list:
         entry.get("login", ""),
         entry.get("currency") or "",
         entry.get("group") or "",
-        _opt("margin_level"),
+        margin_usage_pct,
         _opt("margin_used"),
         _opt("free_margin"),
         _opt("equity"),

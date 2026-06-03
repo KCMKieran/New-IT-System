@@ -33,6 +33,8 @@ from ..core.sql_helpers import (
     FILETIME_TICKS_PER_SEC,
     SID_MAP,
     broker_time_to_utc_iso,
+    demo_test_filter_sql,
+    is_force_included,
 )
 from .account_enrichment import (
     apply_cen_conversion,
@@ -119,8 +121,7 @@ def _query_mt4_recent_opens(
         WHERE {where_time}
           AND t.CMD IN (0, 1)
           AND t.LOGIN NOT LIKE '7%%'
-          AND u.`GROUP` NOT LIKE '%%demo%%'
-          AND u.`GROUP` NOT LIKE '%%test%%'
+          {demo_test_filter_sql('u.`GROUP`', login_col='t.LOGIN', server_label=server_label)}
     """
     params: list = list(time_params)
     if login is not None:
@@ -598,9 +599,11 @@ def _enrich_account_info(
             alert["leverage"] = int(acct["leverage"]) if acct.get("leverage") else None
             alert["group"] = acct.get("group", "")
             alert["total_open_lots"] = round_or_none(acct.get("total_open_lots"))
-            # Skip demo/test accounts
+            # Skip demo/test accounts (unless force-included for rule validation)
             grp = (alert["group"] or "").lower()
-            if "demo" in grp or "test" in grp:
+            if ("demo" in grp or "test" in grp) and not is_force_included(
+                f"{SID_MAP.get(srv)}-{lid}"
+            ):
                 alert["_skip"] = True
         else:
             # MT4: we query mt4_users directly since burst detection only

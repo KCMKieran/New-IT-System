@@ -57,6 +57,13 @@ services:
       # the 60s polling would 10× MySQL load. Both tiers share
       # _scan_lock; collisions skip a tick (~1/10min, harmless).
       - BURST_FAST_TIER_ENABLED=true
+      # Force-include allowlist: accounts here BYPASS the demo/test filter in
+      # every non-Gap-Trade rule, so the risk team can validate rules with a
+      # real "test"-named account without renaming it. Comma-separated
+      # `{sid}-{login}` (MT4_Live=1, MT5=5, MT4_Live2=6). Restart to change.
+      # ⚠ A listed account WILL show up in real alerts/stats — that's intended.
+      # 5-60000017 (NAME='test-acc') = risk team's leverage-abuse validation acct.
+      - RISK_MONITOR_FORCE_INCLUDE_LOGINSIDS=5-60000017
     restart: unless-stopped
     depends_on:
       - redis-prod
