@@ -24,6 +24,7 @@ from .routes.risk_monitor import router as risk_monitor_router
 from .routes.login_ip import router as login_ip_router
 from .routes.client_log import router as client_log_router
 from .routes.fund_flow_monitor import router as fund_flow_monitor_router
+from .routes.view_profiles import router as view_profiles_router
 
 
 api_v1_router = APIRouter()
@@ -51,3 +52,4 @@ api_v1_router.include_router(risk_monitor_router, tags=["risk-monitor"])
 api_v1_router.include_router(login_ip_router, tags=["login-ip"])
 api_v1_router.include_router(client_log_router, tags=["client-log"])
 api_v1_router.include_router(fund_flow_monitor_router, tags=["fund-flow-monitor"])
+api_v1_router.include_router(view_profiles_router, tags=["view-profiles"])

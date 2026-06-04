@@ -9,6 +9,8 @@
  * In dev (no VITE_API_KEY), falls back to plain fetch + timeout/retry only.
  */
 
+import { getDeviceId } from "@/lib/view-profiles/device-id";
+
 const API_KEY = import.meta.env.VITE_API_KEY as string | undefined;
 
 export interface ApiFetchOpts {
@@ -82,6 +84,12 @@ export async function apiFetch(
   const headers = new Headers(init?.headers);
   if (API_KEY && url.startsWith("/api/") && !headers.has("X-API-Key")) {
     headers.set("X-API-Key", API_KEY);
+  }
+  // OPT-0035: identify the browser to the backend so it can enforce exclusive
+  // view-profile claims. Harmless on every other endpoint.
+  if (url.startsWith("/api/") && !headers.has("X-Device-ID")) {
+    const deviceId = getDeviceId();
+    if (deviceId) headers.set("X-Device-ID", deviceId);
   }
 
   const externalSignal = init?.signal ?? undefined;

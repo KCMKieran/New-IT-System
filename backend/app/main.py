@@ -48,6 +48,7 @@ from app.core.login_ip_scheduler import (
 from app.core.scheduler import start_scheduler, stop_scheduler
 from app.core.burst_open_scheduler import start_burst_scheduler, stop_burst_scheduler
 from app.core.fund_flow_monitor_db import init_fund_flow_monitor_db
+from app.core.view_profiles_db import init_view_profiles_db
 from app.core.fund_flow_scheduler import (
     start_fund_flow_scheduler,
     stop_fund_flow_scheduler,
@@ -102,6 +103,7 @@ async def lifespan(app: FastAPI):
     init_client_roace_db()
     init_login_ip_db()
     init_fund_flow_monitor_db()
+    init_view_profiles_db()
 
     owns_scheduler = _try_acquire_scheduler_lock()
     if owns_scheduler:
