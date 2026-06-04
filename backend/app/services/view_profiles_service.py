@@ -2,33 +2,49 @@
 
 The one genuinely high-risk correctness point in OPT-0035 lives here: claiming a
 profile must be *exclusive* — under concurrent claims from two devices, exactly
-one wins. The intended implementation is a single conditional UPDATE
+one wins. The implementation is a single conditional UPDATE
 (`... SET owner_device=? WHERE name=? AND (owner_device IS NULL OR owner_device=?)`)
-whose affected-row count tells you whether you won the lock. The pytest suite
-asserts this under real thread contention.
-
-── SKELETON (OPT-0035 P2) ──────────────────────────────────────────────────────
-Every function below is a stub that raises NotImplementedError so the contract
-tests in tests/test_view_profiles.py are RED. Implement against view_profiles_db.
-Do NOT weaken the tests to make them pass.
+whose affected-row count tells you whether you won the lock. SQLite serialises
+writers (one write-lock at a time; busy_timeout makes the loser wait then re-run
+its UPDATE against the now-claimed row → 0 rows → conflict), so the race resolves
+to a single winner without any application-level locking. Proven by the
+concurrent test in tests/test_view_profiles.py.
 """
 
 from __future__ import annotations
 
+import json
+import sqlite3
 from typing import Any
+
+from app.core.view_profiles_db import get_view_profiles_db
+
+# SQLite expression for a UTC ISO8601 timestamp (matches the project convention
+# of storing ...Z strings).
+_NOW = "strftime('%Y-%m-%dT%H:%M:%SZ','now')"
+
+_COLUMNS = "name, state_json, owner_device, owner_label, claimed_at, updated_at"
 
 
 class ProfileClaimConflict(Exception):
-    """Raised when a claim/release loses the exclusive lock to another device."""
+    """Raised when a claim/release/save loses (or never held) the exclusive lock."""
 
 
 class ProfileAdminError(Exception):
     """Raised when a non-whitelisted device attempts an admin-only action."""
 
 
+class ProfileNotFound(Exception):
+    """Raised when the named profile does not exist."""
+
+
+class ProfileExists(Exception):
+    """Raised when creating a profile whose name is already taken."""
+
+
 # Admin devices allowed to force-release a stuck claim (the lost-device-id escape
-# hatch). P2 TODO: back this with the IB-Financial-style admin_whitelist table;
-# the empty default keeps tests in control of who is admin.
+# hatch). P2 follow-up: back this with the IB-Financial-style admin_whitelist
+# table; the empty default keeps tests (and, until then, config) in control.
 ADMIN_DEVICE_WHITELIST: set[str] = set()
 
 
@@ -36,28 +52,65 @@ def is_admin_device(device_id: str) -> bool:
     return device_id in ADMIN_DEVICE_WHITELIST
 
 
+def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    d = dict(row)
+    # Hand back structured state, not a raw JSON string.
+    try:
+        d["state"] = json.loads(d.pop("state_json") or "{}")
+    except (json.JSONDecodeError, TypeError):
+        d["state"] = {}
+    return d
+
+
 # ── CRUD ─────────────────────────────────────────────────────────────────────
 
 def create_profile(name: str) -> dict[str, Any]:
-    """Create an unclaimed profile. Raises if `name` already exists."""
-    raise NotImplementedError("OPT-0035 P2: create_profile")
+    """Create an unclaimed profile. Raises ProfileExists if `name` is taken."""
+    with get_view_profiles_db() as conn:
+        try:
+            conn.execute(
+                f"INSERT INTO view_profiles (name, state_json, updated_at) "
+                f"VALUES (?, '{{}}', {_NOW})",
+                (name,),
+            )
+        except sqlite3.IntegrityError as e:
+            raise ProfileExists(name) from e
+        row = conn.execute(
+            f"SELECT {_COLUMNS} FROM view_profiles WHERE name = ?", (name,)
+        ).fetchone()
+        return _row_to_dict(row)
 
 
 def get_profile(name: str) -> dict[str, Any] | None:
-    raise NotImplementedError("OPT-0035 P2: get_profile")
+    with get_view_profiles_db() as conn:
+        row = conn.execute(
+            f"SELECT {_COLUMNS} FROM view_profiles WHERE name = ?", (name,)
+        ).fetchone()
+        return _row_to_dict(row) if row else None
 
 
 def list_profiles() -> list[dict[str, Any]]:
-    raise NotImplementedError("OPT-0035 P2: list_profiles")
+    with get_view_profiles_db() as conn:
+        rows = conn.execute(
+            f"SELECT {_COLUMNS} FROM view_profiles ORDER BY name"
+        ).fetchall()
+        return [_row_to_dict(r) for r in rows]
 
 
 def save_state(name: str, device_id: str, state: dict[str, Any]) -> None:
     """Persist a manifest snapshot. Only the owning device may write.
 
-    P2 TODO: reject `state` keys not in the manifest whitelist (Pydantic at the
-    route layer); reject if `device_id` is not the current owner.
+    Key-whitelist validation (state keys ∈ PROFILE_MANIFEST) is enforced at the
+    route layer via Pydantic (P3) — the backend has no manifest of its own.
     """
-    raise NotImplementedError("OPT-0035 P2: save_state")
+    with get_view_profiles_db() as conn:
+        cur = conn.execute(
+            f"UPDATE view_profiles SET state_json = ?, updated_at = {_NOW} "
+            f"WHERE name = ? AND owner_device = ?",
+            (json.dumps(state), name, device_id),
+        )
+        if cur.rowcount == 0:
+            _raise_for_failed_owner_write(conn, name)
 
 
 # ── Exclusive claim / release ────────────────────────────────────────────────
@@ -65,21 +118,76 @@ def save_state(name: str, device_id: str, state: dict[str, Any]) -> None:
 def claim_profile(name: str, device_id: str, label: str | None = None) -> dict[str, Any]:
     """Claim the exclusive lock on `name` for `device_id`.
 
-    - currently unclaimed → claim succeeds.
-    - already held by `device_id` → idempotent success.
-    - held by a different device → raise ProfileClaimConflict.
+    - unclaimed → claim succeeds.
+    - already held by `device_id` → idempotent success (re-stamps claimed_at).
+    - held by a different device → ProfileClaimConflict.
     """
-    raise NotImplementedError("OPT-0035 P2: claim_profile")
+    with get_view_profiles_db() as conn:
+        cur = conn.execute(
+            f"UPDATE view_profiles "
+            f"SET owner_device = ?, "
+            f"    owner_label = COALESCE(?, owner_label), "
+            f"    claimed_at = {_NOW}, "
+            f"    updated_at = {_NOW} "
+            f"WHERE name = ? AND (owner_device IS NULL OR owner_device = ?)",
+            (device_id, label, name, device_id),
+        )
+        if cur.rowcount == 0:
+            # Lost the race, held by another device, or no such profile.
+            if _exists(conn, name):
+                raise ProfileClaimConflict(f"{name} is claimed by another device")
+            raise ProfileNotFound(name)
+        row = conn.execute(
+            f"SELECT {_COLUMNS} FROM view_profiles WHERE name = ?", (name,)
+        ).fetchone()
+        return _row_to_dict(row)
 
 
 def release_profile(name: str, device_id: str) -> None:
     """Release the lock. Only the owning device may release (else ProfileClaimConflict)."""
-    raise NotImplementedError("OPT-0035 P2: release_profile")
+    with get_view_profiles_db() as conn:
+        cur = conn.execute(
+            f"UPDATE view_profiles "
+            f"SET owner_device = NULL, owner_label = NULL, claimed_at = NULL, "
+            f"    updated_at = {_NOW} "
+            f"WHERE name = ? AND owner_device = ?",
+            (name, device_id),
+        )
+        if cur.rowcount == 0:
+            _raise_for_failed_owner_write(conn, name)
 
 
 def force_release(name: str, admin_device: str) -> None:
     """Admin escape hatch: clear `owner_device` regardless of who holds it.
 
-    Raises ProfileAdminError if `admin_device` is not whitelisted.
+    Raises ProfileAdminError if `admin_device` is not whitelisted, ProfileNotFound
+    if the profile is absent.
     """
-    raise NotImplementedError("OPT-0035 P2: force_release")
+    if not is_admin_device(admin_device):
+        raise ProfileAdminError(f"{admin_device} is not authorised to force-release")
+    with get_view_profiles_db() as conn:
+        cur = conn.execute(
+            f"UPDATE view_profiles "
+            f"SET owner_device = NULL, owner_label = NULL, claimed_at = NULL, "
+            f"    updated_at = {_NOW} "
+            f"WHERE name = ?",
+            (name,),
+        )
+        if cur.rowcount == 0:
+            raise ProfileNotFound(name)
+
+
+# ── helpers ──────────────────────────────────────────────────────────────────
+
+def _exists(conn: sqlite3.Connection, name: str) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM view_profiles WHERE name = ?", (name,)
+    ).fetchone() is not None
+
+
+def _raise_for_failed_owner_write(conn: sqlite3.Connection, name: str) -> None:
+    """An owner-gated UPDATE matched 0 rows → distinguish 'no such profile' from
+    'held by someone else / not by this device'."""
+    if _exists(conn, name):
+        raise ProfileClaimConflict(f"{name} is not held by this device")
+    raise ProfileNotFound(name)
