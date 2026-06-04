@@ -1,7 +1,8 @@
 ---
 id: OPT-0029
 title: Risk-monitor 视图模板服务端化（团队共享 view presets + 轻量自报身份）
-status: idea
+status: dropped
+superseded_by: [[OPT-0035]]
 priority: P1
 area: mixed
 effort: M
@@ -96,4 +97,8 @@ localStorage 按「浏览器 + 机器」沙箱隔离，**数据永不出本机**
 
 ## 结果
 
-_待填（idea 阶段，未 claim）_
+**被 [[OPT-0035]] 取代（2026-06-04，未实施）。** 用户拍板走本 OPT §假设 里**倾向反对**的那条产品形态——
+「每人设置 per-身份静默自动同步 + 排他认领 + 临时观摩」，而非本 OPT 的「显式命名模板 + lead official +
+自报 email」；且范围从「只 risk-monitor」放大到全页面。产品形态根本不同 → 取代而非 reopen。
+本 OPT 沉淀的分析（要同步的 14-17 个 key 清单、localStorage 留作缓存层、不造完整 auth、official≠强制）
+已被 OPT-0035 吸收。
