@@ -76,3 +76,5 @@ ai-dev-techniques-sharing.html
 # Local-only scratch / data-exploration workspace (real client CSVs, internal
 # logic notes, ad-hoc scripts) — never publish to the public repo.
 temp_folder/
+backend/scripts/zipcode_set_by_idlist.py
+backend/scripts/logs/zipcode_set_by_idlist_20260604.jsonl
