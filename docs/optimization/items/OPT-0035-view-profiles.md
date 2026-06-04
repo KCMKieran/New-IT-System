@@ -1,11 +1,13 @@
 ---
 id: OPT-0035
 title: 视图档案服务端化（View Profiles）—— 命名档案 + 排他认领 + 观摩他人 + 管理员强制解绑
-status: ready
+status: wip
 priority: P1
 area: mixed
 effort: XL
 created: 2026-06-04
+claimed: 2026-06-04
+branch: opt/view-profiles-p1
 related: [[OPT-0015]], [[OPT-0025]], [[OPT-0027]], [[OPT-0003]]
 supersedes: [[OPT-0029]]
 ---
