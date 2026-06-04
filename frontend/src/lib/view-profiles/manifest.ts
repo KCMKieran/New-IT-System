@@ -5,50 +5,59 @@
  * user's saved viewing habit".
  *
  * Design boundary (inherited from OPT-0025): keys that encode **how** a user
- * views data (columns, filters, toggles) belong in a profile; keys that encode
- * **who/what they're currently investigating** (login / zipcode / an absolute
- * custom date range) must NEVER be synced into a profile.
- *
- * ── SKELETON (OPT-0035 P1) ──────────────────────────────────────────────────
- * This is a failing-test scaffold. `PROFILE_MANIFEST` is intentionally EMPTY so
- * the anti-drift contract test in `view-profiles.test.ts` is RED until P1 is
- * implemented. Implementing P1 means assembling it from the registries below.
+ * views data (columns, filters, view-mode toggles, which tab) belong in a
+ * profile; keys that encode **who/what they're currently investigating**
+ * (login / zipcode / an absolute custom date range) must NEVER be synced.
  */
 import { GRID_STORAGE_KEYS } from "@/hooks/useGridColumnPersist";
 
 /**
  * All grid-state keys — source of truth is the hook's `GRID_STORAGE_KEYS`
- * registry. A complete `PROFILE_MANIFEST` must be a superset of these. The
- * anti-drift test asserts exactly that, so adding a grid without adding it to
- * the profile manifest fails CI.
+ * registry. The anti-drift test asserts PROFILE_MANIFEST is a superset of these,
+ * so registering a new grid without adding it to the profile manifest fails CI.
  */
 export const GRID_STATE_KEYS: readonly string[] = Object.values(GRID_STORAGE_KEYS);
 
 /**
- * Toolbar filter keys (OPT-0025, `<PAGE>_<TAB>_FILTERS_V1`) + aggregation
- * toggles + active-tab marker.
- * P1 TODO: enumerate these the same way `GRID_STORAGE_KEYS` is registered
- * (ideally extract a shared registry rather than hand-listing).
+ * Toolbar filter keys (OPT-0025, `<PAGE>_<TAB>_FILTERS_V1`). Hand-listed here to
+ * mirror the `const …_FILTERS_KEY` definitions in `RiskMonitor.tsx`; a future
+ * refactor could extract a shared registry like GRID_STORAGE_KEYS (P4 candidate).
  */
 export const FILTER_STATE_KEYS: readonly string[] = [
-  // SKELETON — to be filled in P1
+  "RISK_MONITOR_BURST_OPEN_FILTERS_V1",
+  "RISK_MONITOR_QUICK_OPEN_CLOSE_FILTERS_V1",
+  "RISK_MONITOR_QUICK_PROFIT_FILTERS_V1",
+  "RISK_MONITOR_HEDGE_OPEN_FILTERS_V1",
+  "RISK_MONITOR_LEVERAGE_ABUSE_FILTERS_V1",
+  "RISK_MONITOR_MARTINGALE_FILTERS_V1",
+  "RISK_MONITOR_GAP_TRADE_FILTERS_V1",
 ];
 
 /**
- * Investigation context — explicitly excluded from every profile snapshot.
- * P1 TODO: list the concrete storage keys for loginInput / zipcodeInput /
- * absolute customRange once their owners are confirmed.
+ * View-mode / navigation keys that are still "how I look at data": the burst /
+ * hedge aggregation toggles and which risk-monitor tab you land on. Included so
+ * observing someone reproduces their view mode and lands on their working tab.
  */
-export const INVESTIGATION_CONTEXT_KEYS: readonly string[] = [
-  // SKELETON — to be filled in P1
+export const UI_STATE_KEYS: readonly string[] = [
+  "RISK_MONITOR_BURST_OPEN_AGGREGATED_V1",
+  "RISK_MONITOR_HEDGE_OPEN_AGGREGATED_V1",
+  "RISK_MONITOR_ACTIVE_TAB_V1",
 ];
 
 /**
- * The manifest. SKELETON: empty → anti-drift test RED.
- * P1: `[...GRID_STATE_KEYS, ...FILTER_STATE_KEYS]` (and nothing from
- * INVESTIGATION_CONTEXT_KEYS).
+ * Investigation-context keys — explicitly excluded from every profile snapshot.
+ * Empty by construction: OPT-0025 already keeps loginInput / zipcodeInput /
+ * absolute customRange out of localStorage entirely (they live only in React
+ * state), so there is no key to leak. This list exists as a guard rail — if a
+ * future change ever persists one of these, add it here and the anti-drift test
+ * asserts it never enters the manifest.
  */
-export const PROFILE_MANIFEST: readonly string[] = [];
+export const INVESTIGATION_CONTEXT_KEYS: readonly string[] = [];
+
+/** The manifest: every key that makes up one named view profile (deduped). */
+export const PROFILE_MANIFEST: readonly string[] = [
+  ...new Set<string>([...GRID_STATE_KEYS, ...FILTER_STATE_KEYS, ...UI_STATE_KEYS]),
+];
 
 /** True if `key` is part of a view profile (i.e. listed in the manifest). */
 export function isProfileKey(key: string): boolean {
