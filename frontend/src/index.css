@@ -133,6 +133,37 @@
   border-top: none !important;
 }
 
+/* Table-like border on every header title cell.
+   Light theme: header bg is dark (hsl 0 0% 8%) -> white lines.
+   Dark theme:  header bg is light (white)      -> black lines.
+   We border each .ag-header-cell (NOT the .ag-header container): a border on
+   the container sits flush under .ag-root-wrapper's own outer border and is
+   not visible; per-cell borders are inset and render reliably, boxing each
+   title like a table. !important is required because index.css is imported
+   before ag-theme-quartz.css and would otherwise lose the cascade. */
+.ag-theme-quartz .ag-header-cell,
+.ag-theme-quartz .ag-header-group-cell {
+  border: 1px solid rgba(255, 255, 255, 0.45) !important;
+}
+.ag-theme-quartz-dark .ag-header-cell,
+.ag-theme-quartz-dark .ag-header-group-cell {
+  border: 1px solid rgba(0, 0, 0, 0.45) !important;
+}
+
+/* Global table header (title) font size.
+   Quartz default is 14px (--ag-font-size). We shrink ONLY the header text via
+   .ag-header-cell-text — NOT --ag-font-size — so body-cell data keeps its size
+   and header/row heights are unchanged. The custom InfoHeader title span also
+   carries the .ag-header-cell-text class, so this one selector covers default
+   headers, InfoHeader, and group headers alike.
+   !important: index.css is imported before ag-theme-quartz.css. */
+.ag-theme-quartz .ag-header-cell-text,
+.ag-theme-quartz .ag-header-group-text,
+.ag-theme-quartz-dark .ag-header-cell-text,
+.ag-theme-quartz-dark .ag-header-group-text {
+  font-size: 12px !important;
+}
+
 /* Mobile pagination compaction for client return-rate grids:
    reduce footer density and hide less-critical row-range text. */
 @media (max-width: 767px) {
