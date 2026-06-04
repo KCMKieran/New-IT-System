@@ -848,6 +848,22 @@ function netProfitColorClass(v: number | null | undefined): string {
 }
 
 /**
+ * Conventional P&L colour lens — positive = green (profit), negative = red
+ * (loss). The OPPOSITE of {@link netProfitColorClass}'s B-book lens. Used only
+ * where a tab opts in via netProfitColDef's `colorClass` (currently the
+ * leverage-abuse tab, per user request) — every other tab keeps the inverted
+ * B-book view.
+ */
+function netProfitConventionalColorClass(
+  v: number | null | undefined,
+): string {
+  if (v === null || v === undefined || v === 0) return "";
+  return v > 0
+    ? "text-emerald-600 dark:text-emerald-400"
+    : "text-red-600 dark:text-red-400";
+}
+
+/**
  * `net_deposit_hist` AG-Grid column factory. Header / colId / width / filter
  * are overridable so tabs with a Chinese header or a numeric column filter
  * can customise without re-implementing the renderer.
@@ -953,6 +969,7 @@ function netProfitColDef<
     colId?: string;
     width?: number;
     filter?: string | boolean;
+    colorClass?: (v: number | null | undefined) => string;
   } = {},
 ): ColDef<TRow> {
   // Default to a NUMBER filter (淨賺 is numeric) so every tab gets the right
@@ -964,6 +981,9 @@ function netProfitColDef<
     colId = "net_profit",
     width = 130,
     filter = "agNumberColumnFilter",
+    // Default to the B-book inverted lens; a tab can opt into the conventional
+    // (positive=green) lens by passing colorClass.
+    colorClass = netProfitColorClass,
   } = opts;
   const def: ColDef<TRow> = {
     headerName,
@@ -990,7 +1010,7 @@ function netProfitColDef<
     cellRenderer: (p: { value?: number | null }) => {
       const v = p.value;
       if (v === null || v === undefined) return "—";
-      return <span className={netProfitColorClass(v)}>{fmtCurrency(v)}</span>;
+      return <span className={colorClass(v)}>{fmtCurrency(v)}</span>;
     },
     // Display uses the colour-coded cellRenderer above; valueFormatter is what
     // AG-Grid's CSV export reads, so define it too for export parity ("—" /
@@ -6806,7 +6826,9 @@ function LeverageAbuseTab({ active }: { active: boolean }) {
       },
       balanceColDef(),
       netDepositColDef(),
-      netProfitColDef(),
+      // Leverage-abuse tab uses the conventional P&L lens (positive=green,
+      // negative=red) per user request; other tabs keep the B-book inversion.
+      netProfitColDef({ colorClass: netProfitConventionalColorClass }),
       { headerName: "账户组", field: "group", colId: "group", width: 160 },
     ],
     [],
@@ -7733,7 +7755,7 @@ function MartingaleTab({ active }: { active: boolean }) {
                   : "text-red-600 dark:text-red-400 font-medium"
               }
             >
-              {buy ? "买" : "卖"}
+              {buy ? "Buy" : "Sell"}
             </span>
           );
         },
