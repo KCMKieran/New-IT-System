@@ -56,11 +56,27 @@ export function InfoHeader(
 
   return (
     <div
-      className="ag-cell-label-container flex w-full items-center gap-1"
+      // NOTE: do NOT add AG-Grid's `ag-cell-label-container` class here — it
+      // forces `height: 100%` (plus row-reverse/space-between we don't want),
+      // which pins the header to its current height and CLIPS the wrapped title
+      // instead of letting autoHeaderHeight grow the row. Our own flex layout
+      // below (items-center + ml-auto) fully replaces it. `py-0.5` gives the
+      // wrapped 2nd line a little breathing room.
+      className="flex w-full items-center gap-1 py-0.5"
       role="presentation"
     >
+      {/*
+        WRAP (not truncate) the title. A custom headerComponent fully replaces
+        AG-Grid's default header, so `wrapHeaderText`/`autoHeaderHeight` on
+        defaultColDef do NOT apply here — without this the title clips on narrow
+        columns (the ℹ / filter / menu icons are shrink-0 and survive; the text
+        was the casualty). `min-w-0` lets the flex item shrink below its content
+        width so it can wrap; `[overflow-wrap:anywhere]` breaks long unbroken
+        latin headers. autoHeaderHeight (defaultColDef) grows the header row to
+        fit the wrapped line(s); minWidth:80 keeps the icons from overflowing.
+      */}
       <span
-        className="ag-header-cell-text cursor-pointer truncate"
+        className="ag-header-cell-text min-w-0 cursor-pointer whitespace-normal break-words leading-tight [overflow-wrap:anywhere]"
         onClick={handleSort}
       >
         {props.displayName}

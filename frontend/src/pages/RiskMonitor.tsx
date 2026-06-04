@@ -912,20 +912,20 @@ function balanceColDef<TRow extends { balance?: number | null }>(
 }
 
 /**
- * Cell style for narrow-prone numeric/unit columns. AG-Grid's default cell is
+ * Cell style that lets a cell WRAP instead of clip. AG-Grid's default cell is
  * `white-space: nowrap; overflow: hidden; text-overflow: ellipsis`, so when a
- * column is dragged narrower than its value the text is CLIPPED. For
+ * column is dragged narrower than its content the text is CLIPPED. For
  * right-aligned numbers this is silent and dangerous: the clip drops the
  * MOST-significant (left) digits / the sign, so "$1,234.56" can read as a
  * different, plausible-looking number with no ellipsis to warn the user.
- * Pairing this with `wrapText: true` + `autoHeight: true` makes the value wrap
- * to a new line instead; `overflowWrap: anywhere` is required because a number
- * like "94.97%" / "$1,234.56" has no whitespace break opportunity. These three
- * CSS props are inherited, so they reach the colour-coded inner <span>.
- * Use on any column whose cell carries a unit/sign that must not be hidden.
+ * Paired with `wrapText: true` + `autoHeight: true` (set GLOBALLY on
+ * `defaultColDef` below, so every column on every tab is covered) the value
+ * wraps to a new line instead; `overflowWrap: anywhere` is required because a
+ * number like "94.97%" / "$1,234.56" has no whitespace break opportunity.
+ * These props are inherited, so they reach the colour-coded inner <span>.
  * See the `ag-grid-style` skill →「列内容换行（防溢出截断）」.
  */
-const WRAP_NUMERIC_CELL_STYLE = {
+const WRAP_CELL_STYLE = {
   whiteSpace: "normal",
   lineHeight: "1.35",
   overflowWrap: "anywhere",
@@ -973,11 +973,6 @@ function netProfitColDef<
     filter,
     cellClass: "ag-right-aligned-cell rm-netprofit-cell",
     headerClass: "rm-netprofit-header",
-    // Wrap to a new line instead of clipping the value when narrowed — the
-    // sign/digits of a money column must never be silently hidden.
-    wrapText: true,
-    autoHeight: true,
-    cellStyle: WRAP_NUMERIC_CELL_STYLE,
     // InfoHeader (ℹ icon) gives a visible affordance for the formula, mirroring
     // the 保证金使用率 column — a raw headerTooltip string would be invisible.
     headerComponent: InfoHeader,
@@ -1090,6 +1085,17 @@ const defaultColDef: ColDef = {
   suppressMovable: false,
   wrapHeaderText: true,
   autoHeaderHeight: true,
+  // Cells WRAP instead of clipping when a column is narrowed below its content.
+  // Without this, AG-Grid's default (white-space:nowrap + overflow:hidden)
+  // silently truncates — and for right-aligned numbers it drops the sign/most-
+  // significant digits with no ellipsis, so "$1,234.56" can read as a wrong but
+  // plausible value. Applied here on the SHARED defaultColDef so every column
+  // on every tab (incl. future ones) is covered — do NOT re-add per-column.
+  // autoHeight only grows a row when a cell actually wraps, so normal widths are
+  // unchanged. See WRAP_CELL_STYLE above + the `ag-grid-style` skill §4b.
+  wrapText: true,
+  autoHeight: true,
+  cellStyle: WRAP_CELL_STYLE,
 };
 
 /** Sub-tabs on /risk-monitor — kept in the URL as `?tab=` so refresh keeps the selection. */
@@ -6724,10 +6730,6 @@ function LeverageAbuseTab({ active }: { active: boolean }) {
         colId: "margin_level",
         width: 120,
         cellClass: "ag-right-aligned-cell",
-        // Wrap the "%" value to a new line instead of clipping it when narrowed.
-        wrapText: true,
-        autoHeight: true,
-        cellStyle: WRAP_NUMERIC_CELL_STYLE,
         // Derive usage = 已用保证金 / 净值 = 10000 / MARGIN_LEVEL (reciprocal of
         // MT's native margin level). colId stays "margin_level" so column
         // persistence keeps working on the underlying field. Server-side sort
