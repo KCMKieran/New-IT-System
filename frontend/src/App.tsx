@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom"
 import { AuthProvider, useAuth } from "@/providers/auth-provider"
 import { LazyErrorBoundary, PageLoader, lazyWithRetry } from "@/components/LazyErrorBoundary"
 import { pruneStaleGridKeys } from "@/hooks/useGridColumnPersist"
+import { ensureDeviceId } from "@/lib/view-profiles/device-id"
 
 const DashboardLayout = lazyWithRetry(() => import("@/layouts/DashboardLayout"))
 const LoginPage = lazyWithRetry(() => import("@/pages/Login"))
@@ -50,6 +51,9 @@ function App() {
   // docs/features/grid-column-persist.md and OPT-0016.
   useEffect(() => {
     pruneStaleGridKeys();
+    // OPT-0035: mint a stable device id on first load so view-profile claims
+    // have a "my computer" handle from the very first request.
+    ensureDeviceId();
   }, []);
 
   return (
