@@ -549,6 +549,7 @@ def init_risk_monitor_db() -> None:
         _migrate_quick_open_close_enabled_not_null(conn)
         _migrate_quick_profit_columns(conn)
         _migrate_gap_trade_config(conn)
+        _migrate_gap_trade_crm_tag_log(conn)
         scan_history_columns_dropped = _migrate_drop_scan_history_legacy_columns(conn)
         alert_events_split_done = _migrate_split_alert_events(conn)
         orphan_cols_dropped = _migrate_drop_orphan_alert_events_columns(conn)
@@ -654,6 +655,54 @@ def _migrate_gap_trade_config(conn: sqlite3.Connection) -> None:
             """
         )
         conn.commit()
+
+
+def _migrate_gap_trade_crm_tag_log(conn: sqlite3.Connection) -> None:
+    """Create the OPT-0032 CRM tag audit table + notified_at outbox column.
+
+    The prod DB already carries this table (pre-created during design); this
+    migration brings fresh installs up to parity and adds `notified_at`
+    everywhere. The table is BOTH the audit trail and the dedup source of
+    truth: a (window_date, client_userid) row with a terminal result means
+    "never auto-write this client again this window" — even if a human later
+    removes the tag in CRM (tag absence is not consent to re-tag).
+
+    No retention purge: this is a financial-control audit trail (each row may
+    be the only pre-write snapshot of a client's tags under full-replace
+    semantics) — rows are kept indefinitely, unlike scan_history.
+    """
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS gap_trade_crm_tag_log (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            window_date     TEXT    NOT NULL,   -- 'YYYY-MM-DD' MT trading day
+            client_userid   INTEGER NOT NULL,   -- == CRM `user` id (confirmed mapping)
+            cid             INTEGER,            -- CRM cid at read time (0=CN,1=Global)
+            tag             TEXT,               -- tag string applied / would-be
+            -- result: 'tagged' | 'skipped_existing' | 'skipped_cid' | 'dry_run'
+            --       | 'skipped_dedup' | 'failed'
+            result          TEXT    NOT NULL,
+            http_status     INTEGER,            -- CRM HTTP status (NULL when no call)
+            tags_before     TEXT,               -- JSON array snapshot before write
+            tags_after      TEXT,               -- JSON array snapshot after write
+            profit_usd      REAL,               -- triggering window profit (audit)
+            detail          TEXT,               -- free-text note (errors etc.)
+            attempted_at    TEXT    NOT NULL    -- UTC ISO8601
+        );
+        CREATE INDEX IF NOT EXISTS idx_gap_crm_tag_window_user
+            ON gap_trade_crm_tag_log(window_date, client_userid);
+        """
+    )
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(gap_trade_crm_tag_log)")}
+    if "notified_at" not in cols:
+        # Email outbox marker: NULL = this row still owes the recipients a
+        # digest line. Rows are re-included in the next round's digest until
+        # a send succeeds, converting SMTP blips into minutes of delay
+        # instead of a silent freeze nobody was told about.
+        conn.execute(
+            "ALTER TABLE gap_trade_crm_tag_log ADD COLUMN notified_at TEXT"
+        )
+    conn.commit()
 
 
 def _migrate_quick_profit_columns(conn: sqlite3.Connection) -> None:
@@ -1322,6 +1371,119 @@ def save_gap_trade_config(config: dict[str, Any]) -> None:
             "updated_at = datetime('now') WHERE id = 1",
             (json.dumps(config),),
         )
+
+
+# ── Gap Trade CRM tag audit log (OPT-0032) ─────────────────
+#
+# The audit table doubles as the dedup source of truth — see
+# `_migrate_gap_trade_crm_tag_log` for the rationale. Terminal results
+# (never auto-retry within the window): tagged, skipped_existing,
+# skipped_cid. Retryable: failed, dry_run. skipped_dedup rows are written
+# for forensics but never block anything themselves.
+
+CRM_TAG_TERMINAL_RESULTS: frozenset[str] = frozenset(
+    {"tagged", "skipped_existing", "skipped_cid"}
+)
+# Results that owe the recipients a digest line. skipped_existing /
+# skipped_dedup are no-ops (CRM state unchanged) — log-only by design.
+# dry_run IS emailed: the attended log-only morning works by humans reading
+# the would-be actions in their inbox (the service inserts at most one
+# dry_run row per (window, client), so this can't spam).
+CRM_TAG_EMAIL_RESULTS: frozenset[str] = frozenset(
+    {"tagged", "failed", "skipped_cid", "dry_run"}
+)
+
+
+def get_crm_tag_logged_userids(window_date: str) -> set[int]:
+    """Userids with ANY audit row this window (dry-run insert dedup)."""
+    with get_risk_monitor_db() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT client_userid FROM gap_trade_crm_tag_log "
+            "WHERE window_date = ?",
+            (window_date,),
+        ).fetchall()
+    return {int(r["client_userid"]) for r in rows}
+
+
+def insert_crm_tag_log(
+    *,
+    window_date: str,
+    client_userid: int,
+    cid: int | None,
+    tag: str | None,
+    result: str,
+    http_status: int | None = None,
+    tags_before: list[str] | None = None,
+    tags_after: list[str] | None = None,
+    profit_usd: float | None = None,
+    detail: str = "",
+    attempted_at: str,
+) -> int:
+    """Append one audit row; returns the row id."""
+    with get_risk_monitor_db() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO gap_trade_crm_tag_log
+                (window_date, client_userid, cid, tag, result, http_status,
+                 tags_before, tags_after, profit_usd, detail, attempted_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                window_date, int(client_userid), cid, tag, result, http_status,
+                json.dumps(tags_before) if tags_before is not None else None,
+                json.dumps(tags_after) if tags_after is not None else None,
+                profit_usd, detail, attempted_at,
+            ),
+        )
+        return int(cur.lastrowid or 0)
+
+
+def get_crm_tag_done_userids(window_date: str) -> set[int]:
+    """Userids already terminally processed for this window (dedup check)."""
+    placeholders = ",".join("?" * len(CRM_TAG_TERMINAL_RESULTS))
+    with get_risk_monitor_db() as conn:
+        rows = conn.execute(
+            f"SELECT DISTINCT client_userid FROM gap_trade_crm_tag_log "
+            f"WHERE window_date = ? AND result IN ({placeholders})",
+            (window_date, *CRM_TAG_TERMINAL_RESULTS),
+        ).fetchall()
+    return {int(r["client_userid"]) for r in rows}
+
+
+def get_unnotified_crm_tag_rows(limit: int = 200) -> list[dict[str, Any]]:
+    """Outbox: emailable rows whose digest send hasn't succeeded yet."""
+    placeholders = ",".join("?" * len(CRM_TAG_EMAIL_RESULTS))
+    with get_risk_monitor_db() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM gap_trade_crm_tag_log "
+            f"WHERE notified_at IS NULL AND result IN ({placeholders}) "
+            f"ORDER BY id LIMIT ?",
+            (*CRM_TAG_EMAIL_RESULTS, limit),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def mark_crm_tag_rows_notified(row_ids: list[int], notified_at: str) -> None:
+    """Stamp rows whose digest email went out successfully."""
+    if not row_ids:
+        return
+    placeholders = ",".join("?" * len(row_ids))
+    with get_risk_monitor_db() as conn:
+        conn.execute(
+            f"UPDATE gap_trade_crm_tag_log SET notified_at = ? "
+            f"WHERE id IN ({placeholders})",
+            (notified_at, *[int(i) for i in row_ids]),
+        )
+
+
+def get_crm_tag_rows_for_window(window_date: str) -> list[dict[str, Any]]:
+    """All audit rows for one window — 07:20 reconciliation + ops queries."""
+    with get_risk_monitor_db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM gap_trade_crm_tag_log WHERE window_date = ? ORDER BY id",
+            (window_date,),
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 # ── Scan cursors (OPT-0011 cursor-mode high-water-mark) ───────────────

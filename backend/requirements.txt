@@ -29,3 +29,6 @@ mysql-connector-python==9.0.0
 clickhouse-connect
 redis
 apscheduler
+# Explicit pin — previously only a transitive dep (via dash). Used by the
+# OPT-0032 CRM risk-tag client (crm_risk_tag_client.py).
+requests==2.31.0

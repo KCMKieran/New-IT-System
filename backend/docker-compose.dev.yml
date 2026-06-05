@@ -36,6 +36,11 @@ services:
       # work; only the periodic background tick is suppressed here.
       - BURST_SCAN_ENABLED=false
       - GAP_TRADE_SCAN_ENABLED=false
+      # OPT-0032 — dev must NEVER fire the intraday tier or live CRM tag
+      # writes (shared .env carries prod-true values; compose environment
+      # entries override env_file).
+      - GAP_TRADE_INTRADAY_ENABLED=false
+      - GAP_TRADE_CRM_WRITE_ENABLED=false
       # OPT-0011/0013 — dev preview of cursor scan + SSE push.
       # Cursor mode is no-op when BURST_SCAN_ENABLED=false (no scheduler reads cursors),
       # but harmless to enable. SSE endpoint becomes reachable so the

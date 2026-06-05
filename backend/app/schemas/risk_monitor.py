@@ -202,6 +202,28 @@ class GapTradeGapRuleConfig(BaseModel):
     min_net_deposit_hist: float = Field(default=100.0, ge=0.0, le=10_000_000.0)
 
 
+class GapTradeCrmTagConfig(BaseModel):
+    """OPT-0032: auto-write a withdrawal-blocking CRM tag on rule-81 hits.
+
+    ``write_enabled`` is the RUNTIME kill-switch: it lives in the SQLite
+    config blob (editable via the existing gap-trade config API) so an
+    operator can stop live CRM writes in seconds without a redeploy. It is
+    ANDed with the env gate ``GAP_TRADE_CRM_WRITE_ENABLED`` — both must be
+    true for a real POST; either alone shuts writes down.
+    """
+
+    enabled: bool = True
+    # Default FALSE — flipping this on is the explicit go-live act for CRM
+    # writes (after the OPT-0032 D0 checklist: ID-mapping probe, IP
+    # allowlist, token rotation, canary).
+    write_enabled: bool = False
+    # Blast-radius cap: historical peak is 8 rule-81 hits/day, so >10 new
+    # candidates in one round almost certainly means a detection/config bug,
+    # not 10 simultaneous gap traders. Above the cap the round writes
+    # NOTHING and sends a failure alert instead (human must re-enable).
+    max_tags_per_scan: int = Field(default=10, ge=1, le=200)
+
+
 class GapTradeConfig(BaseModel):
     """Top-level config persisted as a single JSON blob in SQLite.
 
@@ -219,6 +241,7 @@ class GapTradeConfig(BaseModel):
     sid_list: List[int] = Field(default_factory=lambda: [1, 5, 6])
     so_ab: GapTradeSoRuleConfig = Field(default_factory=GapTradeSoRuleConfig)
     gap_profit: GapTradeGapRuleConfig = Field(default_factory=GapTradeGapRuleConfig)
+    crm_tag: GapTradeCrmTagConfig = Field(default_factory=GapTradeCrmTagConfig)
 
 
 # ── Alert & Scan Result ───────────────────────────────────

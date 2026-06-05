@@ -101,6 +101,11 @@ def _query_closed_trades_in_window(
         L.totalProfit AS total_profit
     FROM fxbackoffice.mt4_trades L
     JOIN fxbackoffice.mt4_users U ON U.loginsid = L.loginSid
+    -- Project convention: exclude employee accounts. Without this an
+    -- internal account trading the open could receive a withdrawal-blocking
+    -- CRM tag (OPT-0032 auto-tags rule-81 hits).
+    INNER JOIN fxbackoffice.users u
+            ON u.id = U.userid AND COALESCE(u.isEmployee, 0) = 0
     WHERE L.closeDate IN {date_sql}
       AND L.CLOSE_TIME >= %s
       AND L.CLOSE_TIME <  %s
@@ -118,7 +123,7 @@ def _query_closed_trades_in_window(
 
 
 def _query_net_deposit_by_userid(
-    conn, userids: List[int]
+    conn, userids: List[int], *, raise_on_error: bool = False
 ) -> Dict[int, float]:
     """Client-level historical net deposit, keyed by ``userid``.
 
@@ -168,6 +173,13 @@ def _query_net_deposit_by_userid(
         logger.error(
             "Gap Trade gap-profit net_deposit lookup failed", exc_info=True
         )
+        # OPT-0032: the intraday CRM-tag tier passes raise_on_error=True so
+        # a DB outage surfaces as a tick failure (retried next tick) instead
+        # of silently dropping EVERY client as dropped_no_deposit — a scan
+        # that tags nobody because of a DB error must be distinguishable
+        # from a genuinely quiet open.
+        if raise_on_error:
+            raise
         return {}
 
 
@@ -180,6 +192,7 @@ def detect_gap_trade_gap_profit(
     profit_ratio_min: float,
     min_profit_usd: float,
     min_net_deposit_hist: float,
+    strict_deposit: bool = False,
 ) -> Dict[str, Any]:
     """Aggregate window P&L per client and emit threshold-clearing alerts.
 
@@ -264,7 +277,9 @@ def detect_gap_trade_gap_profit(
 
         # Net deposit lookup for clients with non-zero aggregated profit.
         userids = [uid for uid, s in per_client.items() if s["total_profit_usd"] > 0]
-        nd_map = _query_net_deposit_by_userid(conn, userids)
+        nd_map = _query_net_deposit_by_userid(
+            conn, userids, raise_on_error=strict_deposit
+        )
 
         # Threshold evaluation. Funnel counters tell ops *why* the alert
         # count is what it is — most days the SQL row count looks big but

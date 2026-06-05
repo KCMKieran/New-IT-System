@@ -141,6 +141,20 @@ class Settings:
         # API Key for protecting /api/* endpoints (None = skip validation, for dev)
         self.API_KEY = os.environ.get("API_KEY")
 
+        # Gap Trade → CRM risk tag (OPT-0032). Dedicated credentials, isolated
+        # from other CRM integrations. .strip() defends against stray
+        # whitespace in .env values (a leading space once shipped here and
+        # only worked because both dotenv and compose happen to trim it).
+        self.CRM_RISK_API_URL = (os.environ.get("CRM_RISK_API_URL") or "").strip()
+        self.CRM_RISK_API_TOKEN = (os.environ.get("CRM_RISK_API_TOKEN") or "").strip()
+        # Per-round digest recipients (comma-separated). Every tag change
+        # (tagged / failed / skipped_cid) is emailed to this list.
+        self.CRM_RISK_MAIL_TO = ",".join(
+            a.strip()
+            for a in os.environ.get("CRM_RISK_MAIL_TO", "").split(",")
+            if a.strip()
+        )
+
         # View profiles (OPT-0035): comma-separated device-ids allowed to
         # force-release a claim stuck on a lost device-id. The device-id is shown
         # (and copyable) on the Settings page. Empty = nobody can force-release.
