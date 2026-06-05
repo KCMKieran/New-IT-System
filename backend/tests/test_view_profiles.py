@@ -87,6 +87,13 @@ def test_release_only_by_owner(temp_db):
 
 # ── Admin force-release (lost device-id escape hatch) ─────────────────────────
 
+def test_admin_devices_parsed_from_env(monkeypatch):
+    """Option A: VIEW_PROFILES_ADMIN_DEVICES env → trimmed, empties dropped, set."""
+    monkeypatch.setenv("VIEW_PROFILES_ADMIN_DEVICES", "dev-1, dev-2 ,, dev-1 ")
+    from app.core.config import Settings
+    assert Settings().VIEW_PROFILES_ADMIN_DEVICES == {"dev-1", "dev-2"}
+
+
 def test_force_release_requires_admin(temp_db, monkeypatch):
     _seed_unclaimed("Kieran")
     svc.claim_profile("Kieran", "device-A")

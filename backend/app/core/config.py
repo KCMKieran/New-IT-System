@@ -64,6 +64,9 @@ class Settings:
     CLIENT_ROACE_REFRESH_HOUR: int
     CLIENT_ROACE_REFRESH_MINUTE: int
 
+    # View profiles (OPT-0035): device-ids allowed to force-release a stuck claim
+    VIEW_PROFILES_ADMIN_DEVICES: set[str]
+
     def __init__(self) -> None:
         self.DB_HOST = os.environ.get("DB_HOST")
         self.DB_USER = os.environ.get("DB_USER")
@@ -137,6 +140,15 @@ class Settings:
 
         # API Key for protecting /api/* endpoints (None = skip validation, for dev)
         self.API_KEY = os.environ.get("API_KEY")
+
+        # View profiles (OPT-0035): comma-separated device-ids allowed to
+        # force-release a claim stuck on a lost device-id. The device-id is shown
+        # (and copyable) on the Settings page. Empty = nobody can force-release.
+        self.VIEW_PROFILES_ADMIN_DEVICES = {
+            d.strip()
+            for d in os.environ.get("VIEW_PROFILES_ADMIN_DEVICES", "").split(",")
+            if d.strip()
+        }
 
     @property
     def repo_root(self) -> Path:

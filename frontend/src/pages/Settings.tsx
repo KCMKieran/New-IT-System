@@ -9,7 +9,7 @@
  * Plus an admin force-release escape hatch for a lock stuck on a lost device-id.
  */
 import { useCallback, useEffect, useState } from "react";
-import { Eye, LockKeyhole, Plus, ShieldAlert, UserCheck } from "lucide-react";
+import { Copy, Eye, LockKeyhole, Plus, ShieldAlert, UserCheck } from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -151,12 +151,25 @@ export default function SettingsPage() {
         <h1 className="text-2xl font-semibold">视图档案 / View Profiles</h1>
         <p className="text-sm text-muted-foreground">
           把「怎么看数据」（列、过滤器、视图模式）绑定到一个命名档案，跨机保存、可供他人观摩。
-          {deviceId && (
-            <span className="ml-1">
-              本机 device-id：<code className="rounded bg-muted px-1">{deviceId.slice(0, 8)}…</code>
-            </span>
-          )}
         </p>
+        {deviceId && (
+          <div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
+            <span>本机 device-id：</span>
+            <code className="rounded bg-muted px-1.5 py-0.5">{deviceId}</code>
+            <Button
+              size="icon"
+              variant="ghost"
+              className="size-6"
+              title="复制完整 device-id（管理员把它加进 VIEW_PROFILES_ADMIN_DEVICES 即可获得强制解绑权限）"
+              onClick={() => {
+                void navigator.clipboard?.writeText(deviceId);
+                toast.success("已复制 device-id");
+              }}
+            >
+              <Copy className="size-3.5" />
+            </Button>
+          </div>
+        )}
       </div>
 
       {/* Zone 1 — identity / claim */}

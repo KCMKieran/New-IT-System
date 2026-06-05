@@ -17,6 +17,7 @@ import json
 import sqlite3
 from typing import Any
 
+from app.core.config import get_settings
 from app.core.view_profiles_db import get_view_profiles_db
 
 # SQLite expression for a UTC ISO8601 timestamp (matches the project convention
@@ -42,10 +43,10 @@ class ProfileExists(Exception):
     """Raised when creating a profile whose name is already taken."""
 
 
-# Admin devices allowed to force-release a stuck claim (the lost-device-id escape
-# hatch). P2 follow-up: back this with the IB-Financial-style admin_whitelist
-# table; the empty default keeps tests (and, until then, config) in control.
-ADMIN_DEVICE_WHITELIST: set[str] = set()
+# Device-ids allowed to force-release a stuck claim (the lost-device-id escape
+# hatch), sourced from the VIEW_PROFILES_ADMIN_DEVICES env var (OPT-0035, option A).
+# Read once at import; tests monkeypatch this attribute directly.
+ADMIN_DEVICE_WHITELIST: set[str] = set(get_settings().VIEW_PROFILES_ADMIN_DEVICES)
 
 
 def is_admin_device(device_id: str) -> bool:
