@@ -37,16 +37,17 @@ def get_account_info_map(
     Returns:
         Dict keyed by ``{sid}-{login}`` (e.g. ``"5-67035933"``):
         ``{"currency": "CEN", "zipcode": "111 90", "group": "4sd_L1_AKCM",
-        "balance": 12345.0}``
+        "balance": 12345.0, "equity": 12345.0}``
 
     Missing loginsid → not in the returned dict.  Callers should default
     to ``"USD"`` and ``None`` zipcode so USD accounts are never accidentally
     divided by 100.  ``group`` is the MT account group name (substring
     ``AKCM`` distinguishes AKCM accounts from regular B-book groups).
-    ``balance`` is the **raw** broker-side balance (still in cents on CEN
-    accounts) — callers must run :func:`apply_cen_conversion` after assigning
-    it so CEN balances are divided by 100. It is a scan-time snapshot, not a
-    live re-query.
+    ``balance`` / ``equity`` are the **raw** broker-side values (still in
+    cents on CEN accounts) — callers must run :func:`apply_cen_conversion`
+    after assigning them so CEN amounts are divided by 100. Both are
+    scan-time snapshots, not live re-queries. ``equity`` feeds the computed
+    淨賺 column (equity − net_deposit_hist) on the frontend.
     """
     loginsids: set[str] = set()
     for a in alerts:
@@ -65,7 +66,8 @@ def get_account_info_map(
                ZIPCODE         AS zipcode,
                `GROUP`         AS `group`,
                NAME            AS name,
-               BALANCE         AS balance
+               BALANCE         AS balance,
+               EQUITY          AS equity
         FROM fxbackoffice.mt4_users
         WHERE loginsid IN ({placeholders})
     """
@@ -84,6 +86,7 @@ def get_account_info_map(
                 "group": group,
                 "name": name,
                 "balance": round_or_none(r.get("balance")),
+                "equity": round_or_none(r.get("equity")),
             }
         return result
     except Exception:

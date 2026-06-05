@@ -413,6 +413,7 @@ def scan_quick_open_close(
                 alert["zipcode"] = info.get("zipcode")
                 alert["group"] = info.get("group")
                 alert["balance"] = info.get("balance")
+                alert["equity"] = info.get("equity")
                 alert["net_deposit_hist"] = (
                     net_deposit_hist_map.get(loginsid) if loginsid else None
                 )
@@ -421,6 +422,8 @@ def scan_quick_open_close(
                     alert["total_profit_usd"] = round(float(alert.get("total_profit_usd") or 0) / 100.0, 2)
                     if alert.get("balance") is not None:
                         alert["balance"] = round(float(alert["balance"]) / 100.0, 2)
+                    if alert.get("equity") is not None:
+                        alert["equity"] = round(float(alert["equity"]) / 100.0, 2)
                     for order in alert.get("orders", []):
                         if order.get("profit") is not None:
                             order["profit"] = round(float(order["profit"]) / 100.0, 2)

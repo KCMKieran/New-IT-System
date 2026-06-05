@@ -1,9 +1,11 @@
-"""Tests for balance enrichment added to account_enrichment.
+"""Tests for balance + equity enrichment added to account_enrichment.
 
-Covers the scan-time balance snapshot wired into get_account_info_map and the
-CEN ÷100 normalisation in apply_cen_conversion. balance is displayed as a new
-column across the risk-monitor tabs (burst / quick-open-close / quick-profit /
-hedge-open / leverage-abuse).
+Covers the scan-time balance/equity snapshots wired into get_account_info_map
+and the CEN ÷100 normalisation in apply_cen_conversion. balance is displayed
+as a column across the risk-monitor tabs (burst / quick-open-close /
+quick-profit / hedge-open / leverage-abuse); equity feeds the computed 淨賺
+column (equity − net_deposit_hist) on the quick-open-close / quick-profit /
+hedge-open tabs (burst + leverage-abuse fill equity via their own queries).
 """
 
 from app.services.account_enrichment import (
@@ -40,7 +42,7 @@ class _FakeConn:
         pass
 
 
-def test_get_account_info_map_returns_balance():
+def test_get_account_info_map_returns_balance_and_equity():
     # MT5 → sid 5, so get_account_info_map computes loginsid "5-123".
     rows = [{
         "loginsid": "5-123",
@@ -49,15 +51,17 @@ def test_get_account_info_map_returns_balance():
         "group": "KCM\\5Vc_L10",
         "name": "T",
         "balance": 12345.678,
+        "equity": 11111.116,
     }]
     out = get_account_info_map(_FakeConn(rows), [{"server": "MT5", "login": 123}])
     assert "5-123" in out
-    # Raw balance, rounded to 2dp — NOT yet CEN-divided (caller does that).
+    # Raw values, rounded to 2dp — NOT yet CEN-divided (caller does that).
     assert out["5-123"]["balance"] == 12345.68
+    assert out["5-123"]["equity"] == 11111.12
     assert out["5-123"]["currency"] == "USD"
 
 
-def test_get_account_info_map_balance_none_when_null():
+def test_get_account_info_map_balance_equity_none_when_null():
     rows = [{
         "loginsid": "1-9",
         "currency": "USD",
@@ -65,9 +69,11 @@ def test_get_account_info_map_balance_none_when_null():
         "group": None,
         "name": None,
         "balance": None,
+        "equity": None,
     }]
     out = get_account_info_map(_FakeConn(rows), [{"server": "MT4_Live", "login": 9}])
     assert out["1-9"]["balance"] is None
+    assert out["1-9"]["equity"] is None
 
 
 def test_apply_cen_conversion_divides_balance_for_cen():
