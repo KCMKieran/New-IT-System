@@ -19,6 +19,7 @@ from typing import Any
 
 from app.core.config import get_settings
 from app.core.view_profiles_db import get_view_profiles_db
+from app.schemas.view_profiles import validate_state_blob
 
 # SQLite expression for a UTC ISO8601 timestamp (matches the project convention
 # of storing ...Z strings).
@@ -41,6 +42,15 @@ class ProfileNotFound(Exception):
 
 class ProfileExists(Exception):
     """Raised when creating a profile whose name is already taken."""
+
+
+class ProfileStateInvalid(Exception):
+    """Raised when a saved state blob violates the shape/size bounds.
+
+    The HTTP route gets a 422 for free via the SaveStateRequest Pydantic
+    validator; this exception is the defensive equivalent for callers that
+    invoke save_state() directly (bypassing the schema).
+    """
 
 
 # Device-ids allowed to force-release a stuck claim (the lost-device-id escape
@@ -101,9 +111,19 @@ def list_profiles() -> list[dict[str, Any]]:
 def save_state(name: str, device_id: str, state: dict[str, Any]) -> None:
     """Persist a manifest snapshot. Only the owning device may write.
 
-    Key-whitelist validation (state keys ∈ PROFILE_MANIFEST) is enforced at the
-    route layer via Pydantic (P3) — the backend has no manifest of its own.
+    Defense-in-depth on the untrusted blob:
+    - Over HTTP, shape + size bounds are enforced by SaveStateRequest's Pydantic
+      `field_validator` in app/schemas/view_profiles.py (a violation returns 422
+      before this function is ever called).
+    - This guard re-runs the SAME bounds here so the service is safe even when
+      called directly (bypassing the schema); on violation it raises
+      ProfileStateInvalid. The backend has no manifest of its own — it enforces
+      a key *shape* allowlist + size caps, not the exact frontend key set.
     """
+    try:
+        validate_state_blob(state)
+    except ValueError as e:
+        raise ProfileStateInvalid(str(e)) from e
     with get_view_profiles_db() as conn:
         cur = conn.execute(
             f"UPDATE view_profiles SET state_json = ?, updated_at = {_NOW} "

@@ -84,12 +84,32 @@ export async function forceReleaseProfile(name: string, signal?: AbortSignal): P
   await unwrap(await postJson(`${BASE}/${enc(name)}/force-release`, {}, signal));
 }
 
-export async function saveProfileState(name: string, state: ViewSnapshot): Promise<void> {
+async function putState(name: string, state: ViewSnapshot, keepalive: boolean): Promise<void> {
   await unwrap(
     await apiFetch(`${BASE}/${enc(name)}/state`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ state }),
+      // keepalive lets the request outlive page unload. apiFetch spreads `init`
+      // into fetch(), so this passes straight through. Note: sendBeacon is NOT a
+      // substitute here — it can't set the X-Device-ID / X-API-Key headers this
+      // endpoint requires; keepalive fetch can.
+      keepalive,
     }),
   );
+}
+
+export async function saveProfileState(name: string, state: ViewSnapshot): Promise<void> {
+  await putState(name, state, false);
+}
+
+/**
+ * Same PUT as saveProfileState but with `keepalive: true`, so the request is not
+ * abandoned when the page is unloading. Wire this to the beforeunload flush.
+ */
+export async function saveProfileStateKeepalive(
+  name: string,
+  state: ViewSnapshot,
+): Promise<void> {
+  await putState(name, state, true);
 }

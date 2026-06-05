@@ -105,7 +105,11 @@ supersedes: [[OPT-0029]]
 - [ ] **★并发认领排他性**：两个线程同时 claim 同一 name，**断言恰好一个拿到 owner、另一个被拒**
       （条件 UPDATE `WHERE owner_device IS NULL OR owner_device=?` 的正面证明）。← 本 OPT 唯一高危正确性点。
 - [ ] **管理员强制解绑**：白名单设备可清任意 `owner_device`；非白名单调用被拒（复用 `admin_whitelist`）。
-- [ ] Pydantic 校验 `state_json` 的 key 在 manifest 白名单内（拒绝任意写入）。
+- [x] 后端对 `state_json` 做**有界校验**（防任意写入）：总大小 ≤ 128 KB、key 数 ≤ 100、单 value ≤ 64 KB，
+      且 key 形状走 allowlist 正则 `^[A-Z0-9_]+_(GRID_STATE|FILTERS|AGGREGATED|ACTIVE_TAB)_V\d+$`。
+      **刻意不**镜像前端那份精确的 22-key manifest（会随前端漂移而误拒），改用 key-shape 约束 + 容量上限。
+      并强制**仅 owner 可写**。
+      ⚠ 本条之前被**静默漏掉**（计划写的是「key 在 manifest 白名单内」但实现里没做），此次重写让计划诚实对账。
 
 **人验 AC**
 - [ ] `X-Device-ID` 经 `apiFetch` 正确注入并被后端读到（一次端到端手测）。
@@ -147,6 +151,17 @@ supersedes: [[OPT-0029]]
 - [ ] **观摩重挂载粒度**：整页 `key` bump vs 仅相关 grid 容器。倾向先**整页**（最稳），P3 性能不行再细化。
 - [ ] **device-id 友好名**：认领时让用户填一次 `owner_label`（如「Kieran 工位机」）便于强制解绑时辨认。
 
+## 已知限制（审计记录，收口前正视）
+
+- **(a) 认领是先到先得、无任何校验**：任何人都能认领任意一个未被认领的名字（可被恶意抢占 / 锁住别人想用的名字），
+  仅靠管理员强制解绑兜底。
+- **(b) admin 强制解绑的 bootstrap 需要改 `backend/.env` + 重建容器**：第一次锁死救火是**一次部署、不是一次点击**
+  （白名单为空时强制解绑根本不可用）。
+- **(c) P1–P3 的人验 AC 至今未在浏览器里跑过**：收口时**要么**真跑一遍 browser pass，**要么**明确标注为 deferred，
+  不能默认它们已通过。
+- **(d) verify.sh 里 lint 仅 advisory**：无人值守循环可能**悄悄引入新 lint error 而不被闸门拦下**。建议的硬化是
+  **delta-lint 闸门**（只在「相对 base 新增」的 lint error 上 fail），作为 follow-up。
+
 ## 笔记
 
 - 边界**刻意收窄**：只做「per-身份命名档案 + 排他认领 + 观摩」，**不含**真实认证（密码/SSO）、RBAC、行为审计日志——
@@ -161,6 +176,9 @@ supersedes: [[OPT-0029]]
 - **「观摩为什么不直接抄成我的？」**：用户明确要「临时观摩、退出还原」，不污染我的档案。「一键采用」可作 P3 之后的
   follow-up，不进本 OPT 主线。
 - **「永久锁会不会锁死？」**：会——所以 P2 强制带管理员强制解绑（逃生口），这是 AC 而非可选项。
+- **「全队统一一个标准视图」哪去了？**：[[OPT-0029]] 原始的老板诉求是**全队统一/官方默认视图**（由 lead 钉一份），
+  本 OPT 的 **per-身份模型并不服务这条**，且现在**没有任何单子在追它** → **明确 out of scope**。
+  老板若仍要「全队统一一个标准视图」，那是**另开一个未来 OPT**，不在 OPT-0035 范围内。
 
 ## § 无人值守执行框架
 
@@ -170,6 +188,13 @@ supersedes: [[OPT-0029]]
 - **测试 DB 隔离**：P2 pytest 用 `tmp_path` 临时 SQLite，绝不碰真库。
 - **回滚 = 删未 merge 的 branch**，main 永远干净。
 - 人工 checkpoint：①写/审 AC-as-test 骨架（尤其 P2 并发认领）②merge 每个 phase PR ③P2 建表 SQL 重审 ④P3 观摩 UX 人验。
+
+> **⚠ 实际执行偏离了计划拓扑（诚实记录）。** 计划是「每 phase 一个 PR → main，串行」，但实践中
+> P1 + P2（service + HTTP）+ P3 + admin 白名单**全部落在单一 branch `opt/view-profiles-p1`**，phase 之间
+> **没有 merge**。后果：framework 本想在各自 PR 边界单独评审的 **schema/migration 切片**与
+> **auth-adjacent 切片**（命中文末「永不自动 merge 清单」两条），现在被**和 UI diff 捆在一起**——
+> schema/auth 审查被埋在 Settings UI 的大 diff 之下。
+> **收口建议**：把 CLOSE 拆成**至少两个 PR**（先 backend/schema，后 frontend/UI），让 schema/auth 评审不被 UI 淹没。
 
 ## 结果
 

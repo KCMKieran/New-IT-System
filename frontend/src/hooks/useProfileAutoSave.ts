@@ -9,27 +9,41 @@
  */
 import { useEffect } from "react";
 
-import { saveProfileState } from "@/lib/view-profiles/api";
-import { getClaimedName } from "@/lib/view-profiles/identity";
+import { saveProfileState, saveProfileStateKeepalive } from "@/lib/view-profiles/api";
+import { clearClaimedName, getClaimedName } from "@/lib/view-profiles/identity";
 import { isObserving } from "@/lib/view-profiles/observe";
 import { captureSnapshot } from "@/lib/view-profiles/snapshot";
 import { ProfileSync } from "@/lib/view-profiles/sync";
 
-export function useProfileAutoSave(pollMs = 4000): void {
+// pollMs MUST be shorter than ProfileSync's debounce window (default 4000), else
+// a view that changes every tick keeps resetting the debounce timer forever and
+// the timer-driven flush never fires. 2000 < 4000 guarantees a settled change is
+// flushed within ~one debounce window.
+export function useProfileAutoSave(pollMs = 2000): void {
   useEffect(() => {
     const sync = new ProfileSync({
       getOwnerName: getClaimedName,
       isObserving,
       capture: captureSnapshot,
       save: saveProfileState,
+      saveKeepalive: saveProfileStateKeepalive,
+      onOwnershipLost: () => {
+        // Server reassigned our profile. Drop the local claim (back to local-mode)
+        // and stop the poll so we no longer fire doomed saves.
+        clearClaimedName();
+        window.clearInterval(tick);
+      },
     });
 
     const tick = window.setInterval(() => sync.notifyChange(), pollMs);
     const onVisibility = () => {
+      // Hidden ≠ unloading, so a normal save is fine here.
       if (document.visibilityState === "hidden") void sync.flush();
     };
     const onBeforeUnload = () => {
-      void sync.flush();
+      // The page is going away — use the keepalive transport so the last edit
+      // isn't abandoned mid-flight.
+      void sync.flush({ keepalive: true });
     };
 
     document.addEventListener("visibilitychange", onVisibility);

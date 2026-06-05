@@ -3,6 +3,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { ProfileConflictError } from "./api";
 import { ProfileSync } from "./sync";
 import type { ViewSnapshot } from "./snapshot";
 
@@ -83,5 +84,93 @@ describe("ProfileSync", () => {
     await sync.flush();
     expect(saves).toHaveLength(1);
     expect(saves[0].snap).toEqual({ K: "now" });
+  });
+
+  it("on a conflict: fires onOwnershipLost once and goes quiet", async () => {
+    const state = { owner: "Kieran" as string | null, observing: false, snap: { K: "1" } };
+    const onOwnershipLost = vi.fn();
+    let saveCalls = 0;
+    const sync = new ProfileSync({
+      getOwnerName: () => state.owner,
+      isObserving: () => state.observing,
+      capture: () => ({ ...state.snap }),
+      save: async () => {
+        saveCalls += 1;
+        throw new ProfileConflictError("claimed by another device");
+      },
+      onOwnershipLost,
+    });
+
+    state.snap = { K: "a" };
+    await sync.flush();
+    expect(saveCalls).toBe(1);
+    expect(onOwnershipLost).toHaveBeenCalledTimes(1);
+
+    // Subsequent activity must not call save or fire the callback again.
+    state.snap = { K: "b" };
+    sync.notifyChange();
+    await vi.advanceTimersByTimeAsync(8000);
+    await sync.flush();
+    expect(saveCalls).toBe(1);
+    expect(onOwnershipLost).toHaveBeenCalledTimes(1);
+
+    // rearm() re-enables scheduling: a fresh change schedules and runs save again
+    // (save still throws here, which is enough to prove the sync is no longer quiet).
+    sync.rearm();
+    state.snap = { K: "c" };
+    sync.notifyChange();
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(saveCalls).toBe(2);
+  });
+
+  it("a transient (non-conflict) error does NOT trip onOwnershipLost", async () => {
+    const state = { owner: "Kieran" as string | null, observing: false, snap: { K: "1" } };
+    const onOwnershipLost = vi.fn();
+    let saveCalls = 0;
+    const sync = new ProfileSync({
+      getOwnerName: () => state.owner,
+      isObserving: () => state.observing,
+      capture: () => ({ ...state.snap }),
+      save: async () => {
+        saveCalls += 1;
+        throw new Error("network blip");
+      },
+      onOwnershipLost,
+    });
+
+    state.snap = { K: "a" };
+    await sync.flush();
+    expect(saveCalls).toBe(1);
+    expect(onOwnershipLost).not.toHaveBeenCalled();
+
+    // Not stopped: the next change still schedules and retries the save.
+    state.snap = { K: "b" };
+    sync.notifyChange();
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(saveCalls).toBe(2);
+    expect(onOwnershipLost).not.toHaveBeenCalled();
+  });
+
+  it("flush({ keepalive: true }) uses saveKeepalive when provided", async () => {
+    const state = { owner: "Kieran" as string | null, observing: false, snap: { K: "1" } };
+    const normal: ViewSnapshot[] = [];
+    const keep: ViewSnapshot[] = [];
+    const sync = new ProfileSync({
+      getOwnerName: () => state.owner,
+      isObserving: () => state.observing,
+      capture: () => ({ ...state.snap }),
+      save: async (_n, s) => {
+        normal.push(s);
+      },
+      saveKeepalive: async (_n, s) => {
+        keep.push(s);
+      },
+    });
+
+    state.snap = { K: "bye" };
+    await sync.flush({ keepalive: true });
+    expect(keep).toHaveLength(1);
+    expect(keep[0]).toEqual({ K: "bye" });
+    expect(normal).toHaveLength(0);
   });
 });

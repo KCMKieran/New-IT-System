@@ -119,3 +119,59 @@ def test_save_state_owner_only_and_persists(client):
     assert client.put("/api/v1/view-profiles/Kieran/state", json=snap, headers=DEV_A).status_code == 200
     got = client.get("/api/v1/view-profiles/Kieran").json()["data"]["state"]
     assert got == snap["state"]
+
+
+# ── save-state input validation (OPT-0035 Fix 1: bound the untrusted blob) ───
+
+def _claim(client: TestClient, name: str = "Kieran"):
+    _create(client, name)
+    assert client.post(f"/api/v1/view-profiles/{name}/claim", json={}, headers=DEV_A).status_code == 200
+
+
+def test_save_state_valid_snapshot_persists(client):
+    """A realistic multi-key snapshot (grid state + filters + toggles) saves."""
+    _claim(client)
+    snap = {"state": {
+        "RISK_MONITOR_BURST_OPEN_GRID_STATE_V1": "[{\"colId\":\"login\"}]",
+        "RISK_MONITOR_BURST_OPEN_FILTERS_V1": "{\"rule\":\"x\"}",
+        "RISK_MONITOR_BURST_OPEN_AGGREGATED_V1": "true",
+        "RISK_MONITOR_ACTIVE_TAB_V1": "burst-open",
+    }}
+    assert client.put("/api/v1/view-profiles/Kieran/state", json=snap, headers=DEV_A).status_code == 200
+    assert client.get("/api/v1/view-profiles/Kieran").json()["data"]["state"] == snap["state"]
+
+
+def test_save_state_rejects_bad_shaped_key(client):
+    """A key not matching the view-state pattern → 422 (Pydantic validator)."""
+    _claim(client)
+    snap = {"state": {"EVIL_ARBITRARY_KEY": "x"}}
+    assert client.put("/api/v1/view-profiles/Kieran/state", json=snap, headers=DEV_A).status_code == 422
+
+
+def test_save_state_rejects_oversized_total(client):
+    """A blob over the 128 KB total cap → 422, even with a legit key shape."""
+    _claim(client)
+    # ~200 KB single value, legitimate key shape — trips both per-value and total caps.
+    snap = {"state": {"RISK_MONITOR_BURST_OPEN_GRID_STATE_V1": "x" * (200 * 1024)}}
+    assert client.put("/api/v1/view-profiles/Kieran/state", json=snap, headers=DEV_A).status_code == 422
+
+
+def test_save_state_rejects_oversized_total_many_keys(client):
+    """Total cap trips even when each individual value is under the per-value cap."""
+    _claim(client)
+    # 4 keys × ~40 KB = ~160 KB > 128 KB total, each value < 64 KB.
+    big = "y" * (40 * 1024)
+    snap = {"state": {
+        "RISK_MONITOR_BURST_OPEN_GRID_STATE_V1": big,
+        "RISK_MONITOR_HEDGE_OPEN_GRID_STATE_V1": big,
+        "RISK_MONITOR_QUICK_PROFIT_GRID_STATE_V1": big,
+        "RISK_MONITOR_MARTINGALE_GRID_STATE_V1": big,
+    }}
+    assert client.put("/api/v1/view-profiles/Kieran/state", json=snap, headers=DEV_A).status_code == 422
+
+
+def test_save_state_rejects_too_many_keys(client):
+    """Over the 100-key cap → 422, even though each key matches the pattern."""
+    _claim(client)
+    state = {f"RISK_MONITOR_GRID_STATE_V{i}": "[]" for i in range(101)}
+    assert client.put("/api/v1/view-profiles/Kieran/state", json={"state": state}, headers=DEV_A).status_code == 422

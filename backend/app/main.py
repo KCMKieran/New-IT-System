@@ -105,6 +105,18 @@ async def lifespan(app: FastAPI):
     init_fund_flow_monitor_db()
     init_view_profiles_db()
 
+    # OPT-0035: an empty admin whitelist silently disables force-release — the
+    # only escape hatch for a profile lock stuck on a lost/changed device-id.
+    # Don't crash (internal tool), but warn loudly so it doesn't ship unnoticed.
+    from app.services.view_profiles_service import ADMIN_DEVICE_WHITELIST
+    if not ADMIN_DEVICE_WHITELIST:
+        logger.warning(
+            "VIEW_PROFILES_ADMIN_DEVICES is empty — force-release is DISABLED. "
+            "A view-profile lock stuck on a lost device-id cannot be cleared. "
+            "Set VIEW_PROFILES_ADMIN_DEVICES (comma-separated device-ids) to "
+            "enable the admin escape hatch."
+        )
+
     owns_scheduler = _try_acquire_scheduler_lock()
     if owns_scheduler:
         logger.info(

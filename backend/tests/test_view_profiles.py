@@ -115,6 +115,44 @@ def test_save_state_rejects_non_owner(temp_db):
         svc.save_state("Kieran", "device-B", {"RISK_MONITOR_BURST_OPEN_GRID_STATE_V1": "[]"})
 
 
+# ── save_state input guard (OPT-0035 Fix 1: defensive, for direct callers) ────
+
+def test_save_state_guards_blob_on_direct_call(temp_db):
+    """save_state() re-validates the blob even when called directly (bypassing
+    the Pydantic schema), raising ProfileStateInvalid. The guard fires BEFORE
+    the ownership check, so it trips even on an owned profile."""
+    _seed_unclaimed("Kieran")
+    svc.claim_profile("Kieran", "device-A")
+
+    # Bad-shaped key.
+    with pytest.raises(svc.ProfileStateInvalid):
+        svc.save_state("Kieran", "device-A", {"EVIL_KEY": "x"})
+
+    # Oversized value (> 64 KB).
+    with pytest.raises(svc.ProfileStateInvalid):
+        svc.save_state(
+            "Kieran", "device-A",
+            {"RISK_MONITOR_BURST_OPEN_GRID_STATE_V1": "x" * (65 * 1024)},
+        )
+
+    # Too many keys (> 100).
+    with pytest.raises(svc.ProfileStateInvalid):
+        svc.save_state(
+            "Kieran", "device-A",
+            {f"RISK_MONITOR_GRID_STATE_V{i}": "[]" for i in range(101)},
+        )
+
+
+def test_save_state_accepts_valid_blob_on_direct_call(temp_db):
+    """A well-shaped, in-bounds blob saves fine via the direct service call."""
+    _seed_unclaimed("Kieran")
+    svc.claim_profile("Kieran", "device-A")
+    svc.save_state(
+        "Kieran", "device-A",
+        {"RISK_MONITOR_BURST_OPEN_GRID_STATE_V1": "[{\"colId\":\"login\"}]"},
+    )
+
+
 # ── ★ Concurrent claim is exclusive ──────────────────────────────────────────
 
 def test_concurrent_claim_is_exclusive(temp_db):
