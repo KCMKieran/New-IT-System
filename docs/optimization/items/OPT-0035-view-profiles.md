@@ -1,12 +1,13 @@
 ---
 id: OPT-0035
 title: 视图档案服务端化（View Profiles）—— 命名档案 + 排他认领 + 观摩他人 + 管理员强制解绑
-status: wip
+status: done
 priority: P1
 area: mixed
 effort: XL
 created: 2026-06-04
 claimed: 2026-06-04
+completed: 2026-06-05
 branch: opt/view-profiles-p1
 related: [[OPT-0015]], [[OPT-0025]], [[OPT-0027]], [[OPT-0003]]
 supersedes: [[OPT-0029]]
@@ -198,4 +199,31 @@ supersedes: [[OPT-0029]]
 
 ## 结果
 
-_待填（ready 阶段，未 claim）_
+**P1–P3 + admin 白名单全部交付，2026-06-05 直接落 main（用户授权跳过 PR 评审 + outsider-review）。**
+
+### 实际交付 vs AC
+- **P1**：`PROFILE_MANIFEST`(22 key) + capture/apply（全替换）+ anti-drift 守卫。机器 AC 全绿。
+- **P2**：`view_profiles` 表（`owner_device` 持久锁列）+ 条件 UPDATE 排他认领（**并发 20/20 + 压测 10/10**）
+  + release/force-release/save + 7 端点 + device-id（X-Device-ID 注入）。机器 AC 全绿。
+  - 「key ∈ manifest 白名单」AC **原实现是空的（假绿）**，审计后**重写**为有界校验（128KB/100key/64KB +
+    key-shape 正则 + 仅 owner 可写），不镜像前端精确清单（避免漂移）。
+- **P3**：Settings 双区 UI + 观摩（备份-还原，整页 reload 重挂载）+ 主人态防抖自动保存。
+  机器 AC（observe/sync）全绿；**人验 AC 由用户 2026-06-05 在 dev(5173) 浏览器验证通过**。
+
+### 审计（两轮独立 reviewer + 修复）
+两个无 context reviewer 并行审（代码 / 方案），**独立撞车**两条：state_json 无界+假绿 AC、丢 device-id 永久锁。
+3 个并行 agent 按 disjoint 文件修复：state 有界校验 + admin 空白名单 fail-loud warning + 失配停存(409→清认领) +
+flush catch + 卸载 keepalive + pollMs<debounce。全程 verify 绿。
+- **live with**（minor，reviewer 判 acceptable）：F5 force-release 403-before-404、F6 claimed_at 双 strftime、
+  F8 confirm 中文硬编码。
+
+### 流程偏离（记录）
+计划的「每 phase 一 PR、phase 间 merge」**未执行**——P1–P3+admin+fixes 全在一条 `opt/view-profiles-p1`。
+收口时曾拆成 backend/ui 两条 PR 分支（已 push），但用户最终**授权直接 push main**，故 2 条 PR 分支废弃。
+
+### Follow-up
+- **P4**（未做）：老页面 ClientPnL*/IBReport 内联 localStorage key 迁进 manifest + 更新 grid-column-persist.md。
+- **delta-lint 闸门**：verify.sh lint 仅 advisory = 无人值守假绿向量，建议硬化（只拦相对 base 新增的 lint error）。
+- **「全队统一官方视图」**（OPT-0029 原始老板诉求）本 OPT 不覆盖，如仍需要另开 OPT。
+- 观摩无刷新重挂载（现整页 reload）、observe-of-force-released、双 tab 同档案并发保存 —— 均 live with，已记录。
+- 课件：`docs/lessons/lesson-opt-0035-*.md`（本地资产，learn-from-opt 生成）。

@@ -11,7 +11,6 @@
 | ID | Branch | Claim 日期 | 备注 |
 |----|--------|-----------|------|
 | [OPT-0032](./items/OPT-0032-gap-trade-crm-risk-tag.md) | `opt/gap-trade-crm-risk-tag` | 2026-06-02 | Gap Trade 超额客户→CRM 上风控 tag + 盘中 5min 快扫；P1 dry-run 先行 |
-| [OPT-0035](./items/OPT-0035-view-profiles.md) | `opt/view-profiles-p1` | 2026-06-04 | 视图档案服务端化（无人值守试点）。本 branch = P1 前端地基 + harness scaffold（P1 vitest / P2 pytest 失败骨架先行）|
 
 ## ✅ 待领取（Ready）
 
