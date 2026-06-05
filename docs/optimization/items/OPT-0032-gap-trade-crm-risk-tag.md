@@ -57,24 +57,33 @@ related: [[OPT-0024]], [[OPT-0030]]
 - [x] **审计表**：`gap_trade_crm_tag_log`（schema 迁移进 `risk_monitor_db.py`），含 `tags_before/after` JSON 快照（full-replace 语义下唯一恢复依据）、`notified_at` outbox 列；无保留期清理（金融审计轨迹永久保留）。
 - [x] **邮件通知**：按上方拍板执行；连续 3 次失败中止本轮并告警；超 cap 整轮不写 + `[GAP-TAG FAILED]` 告警。
 - [~] **分阶段上线**：dry-run 豁免（见拍板）；log-only 模式保留为 `write_enabled=false` 的行为（检测 + 审计 dry_run 行 + 邮件，不碰 CRM），可随时回退。
-- [ ] verify.sh 红绿闸门通过（tsc + vitest + pytest）。
+- [x] verify.sh 红绿闸门通过（tsc + vitest 77 + pytest 241，2026-06-05）。
 
-## D0 人工闸门（翻 live 前全部完成，工具：`backend/scripts/crm_tag_probe.py`）
+## D0 人工闸门（工具：`backend/scripts/crm_tag_probe.py`）
 
-- [ ] **生产出口 IP 加白**：prod 容器内 `python scripts/crm_tag_probe.py --egress-ip` → CRM 管理员加白。
-- [ ] **Token 轮换**：旧 token 已在对话明文泄露，翻 live 前作废换新（顺带验证新 token + 白名单：从 prod 跑一次 probe）。
-- [ ] **ID 映射实测**：`--probe-historical --verify-db`（23 个历史命中 + 100017），任一 mismatch = 硬停。
-- [ ] **阈值复盘会**：与 risk + CS 走查 23 个历史命中客户「冻他对不对」；如有明显 FP，先调 `gap_profit` 阈值或要求 `triggered_by='both'`。
-- [ ] **Canary**：cid 0/1 各选一个带 ≥2 已有 tag 的内部账户，`--canary-add` → CRM UI 验证 tag 逐字节一致 + 原 tag 保留 + **CS 确认出金转人工** → `--canary-remove` 演练回滚。
-- [ ] **测试邮件**：向三个收件人发一封测试 digest，三方确认收到。
-- [ ] 以上全绿 → `.env` 置 `GAP_TRADE_INTRADAY_ENABLED=true` + `GAP_TRADE_CRM_WRITE_ENABLED=true`，DB config `crm_tag.write_enabled=true`，`./deploy.sh`；第一个开盘窗口（HKT 05:55–07:20）有人全程盯邮件，kill-switch 随手可按（DB flag 秒级生效，无需重启）。
+> **状态（2026-06-05 上线时）**：用户决策在 D0 未全绿的情况下先行上线（见上方拍板）。已完成 4/7；**未完成的 3 项列为残留风险**，按风险排序在下。
+
+- [x] **生产出口 IP**：实测出口 `218.253.255.122` 可通 CRM（prod/dev 同主机同出口，probe 成功即证明）。2026-06-05 ✓
+- [x] **ID 映射实测**：`--probe-historical --verify-db` 跑通 **23 个历史命中 + 136805 全部一致**（CRM email == fxbackoffice.users email）。2026-06-05 ✓
+- [x] **tags 形态 + cid=1 字符串**：真实读响应确认 tags = 字符串数组；`Withdrawal Notice` 与线上逐字节一致（客户 164175 已带此 tag）。2026-06-05 ✓
+- [x] **测试邮件**：log-only 模拟（client 136805）digest 已送达用户邮箱。2026-06-05 ✓
+- [ ] ⚠ **Token 轮换 — 未完成（最高优先）**：2026-06-05 实测**旧（泄露过的）token 仍然有效**。若在 CRM 后台生成过新 token，注意旧 token 可能需要**单独吊销**。完成动作 = ① CRM 侧吊销旧 token ② 新 token 更新进 `backend/.env`（**不要贴进任何对话**）③ `./deploy.sh` ④ `--probe 136805` 验证。
+- [ ] ⚠ **cid=0 tag 字符串未字节级确认**：23 个历史户中无人携带 `禁止出金(風控)`，无法从真实数据比对；cid=0 canary（带 ≥2 已有 tag 的 CN 内部户 `--canary-add` → CRM UI 验证 → `--canary-remove`）待补。在此之前第一个 CN 客户命中时需人工核对 CRM 里 tag 是否正确（而非建出新 tag）。
+- [ ] ⚠ **阈值复盘会未开**：risk + CS 走查 23 个历史命中「冻他对不对」；写上限 10/轮 + digest 邮件是当前兜底。
+
+## 上线记录
+
+- **2026-06-05 17:47 HKT** commit `6562d54`（分支 `feat/opt-0032-crm-risk-tag`）`./deploy.sh` 上线，双 tier 同时 live（用户拍板）。prod 日志确认两个 job 注册成功。
+- 三开关状态：`GAP_TRADE_INTRADAY_ENABLED=true` + `GAP_TRADE_CRM_WRITE_ENABLED=true`（env）+ `crm_tag.write_enabled=true`（DB runtime，急停用它，秒级生效无需重启）。
+- 首个真实窗口：2026-06-06（周六）HKT 05:55–07:20，需有人盯 digest 邮件。
+- ⚠ 分支未 merge `main` —— **在 main 上跑 `./deploy.sh` 会把本功能卸载**；merge 前部署务必在本分支。
 
 ## 笔记
 
 - **高危写操作**：`禁止出金` 直接 hold 客户出金，误报 = 误封正常客户 → 必须 dry-run 先行 + ID 映射实测。
 - **覆盖语义竞态**：read→write 间隙若他人（CS/Swap_Free）改了同一客户 tags 会被冲掉；窗口极小，读完立刻写缓解，记录此风险。
 - **字符串精确匹配**：tag 名繁/简、全半角必须与 CRM 逐字节一致（从 CRM 原样复制，不手敲），否则建出 CS 没在筛的新 tag → 风控形同虚设。
-- **安全**：dev token 已在对话明文出现，上线后建议轮换。
+- **安全**：dev token 已在对话明文出现。⚠ 2026-06-05 实测旧 token 仍有效 —— 轮换未完成，见 D0 清单第一条残留项。
 - 触发口径用户已定：**只看已实现利润**（沿用 rule 81，不引入浮盈）。
 - 复用 `email-notification` skill 基建。
 
