@@ -1,0 +1,1 @@
+- ruleType: 'per_lot'/'spread'…；level=IB 树深度层级

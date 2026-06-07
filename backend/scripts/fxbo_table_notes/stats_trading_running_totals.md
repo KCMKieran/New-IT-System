@@ -1,0 +1,2 @@
+- 一行/loginSid，原币种累计；查历史总交易盈亏首选（免扫 stats_trading 全日表）
+- 用法：SUM(IF(currency='CEN', plClosedHavingActivityRunningTotal/100, plClosedHavingActivityRunningTotal)) GROUP BY userId

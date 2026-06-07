@@ -1,7 +1,8 @@
 ---
 id: OPT-0036
 title: database-context skill 分层 schema 库 —— fxbackoffice 390 表三级加载 + 生成器脚本
-status: wip
+status: done
+completed: 2026-06-07
 priority: P2
 area: mixed
 effort: M
@@ -61,4 +62,25 @@ backend/scripts/dump_fxbackoffice_schema.py   ← 生成器（唯一进 git 的�
 
 ## 结果
 
-（完成后填写）
+**全部 AC 达成**（2026-06-07），实测数据：
+
+- fxbackoffice 实为 **387 张** BASE TABLE（390 含视图）。分层：Tier A 22 / Tier B 42 / Tier C 232 / 忽略 91。
+- Token 实测：`_index.md` ~1.5k（Tier C/忽略全名拆去 `_longtail.md` ~2.3k，极少加载）；
+  单表文件 ~200-500 token（users 120+ 列是上界）。典型单表任务：已知表名直读 ~500 token，
+  需定位 ~2k token，对比旧 707 行（~6k）省 ~70-90%。
+- 与 AC 偏差：单表文件"≤20 行"对 60+ 列大表（users/transactions/mt4_users）放宽到 ~40 行——列数摆在那。
+- 旧 mysql-schemas.md 707→95 行（仅剩 mt5_live + 指针）；transactions/psps 原错挂 mt5_live 标题下，已迁正。
+
+**Stage 1 outsider-review**（用户选 Yes）10 条 finding，用户拍板全部当场修：
+
+- F1 manual 注释 seed 进 git `backend/scripts/fxbo_table_notes/`（render 优先级：本地 manual 区 > seed > placeholder，分歧时 stderr 提醒回填）— 修，commit 0d9c83c
+- F2 解析容错（CRLF/空白）+ 标记损坏时拒绝覆盖（防静默丢注释）— 修
+- F3 孤儿 tables/*.md prune — 修
+- F4 漂移检测：verify.sh 加 30 天新鲜度 advisory（不入硬闸）— 修
+- F5 TIER_A 白名单 drift：render 自动 grep backend SQL 引用并告警 — 修
+- F6 rows==0 噪音误判（加 bytes<64KB 条件）/ F7 GEN 截断标记 / F8 降级快照防护（<300 表拒绝渲染）/ F9 SKILL.md token 数纠正+回退路径+记录真实 host — 修
+- F10 /tmp 快照暴露 — live with（仅 schema 无数据，单用户 dev 机）
+
+**follow-up**（未立单）：
+- APScheduler 周检 Tier-A schema hash + digest 邮件（重型漂移检测）——目前靠 verify.sh advisory + 人工重跑
+- TIER_A 增长到 ~40 张时考虑把 PURPOSE 并进 seed 文件（单一 curation 面）

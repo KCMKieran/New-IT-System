@@ -1,0 +1,1 @@
+- refTradedLots*=全部下线手数；directRefTradedLots*=仅直推；Usd/Cen 按账户币种分列（手数不÷100）

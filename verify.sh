@@ -71,6 +71,18 @@ else
   printf '\033[32m✓ lint clean\033[0m\n'
 fi
 
+# ── Advisory: fxbackoffice schema-context freshness (OPT-0036, never gates) ──
+FXBO_INDEX="$ROOT/.cursor/skills/database-context/fxbackoffice/_index.md"
+if [[ -f "$FXBO_INDEX" ]]; then
+  gen_date="$(grep -oE '生成 [0-9]{4}-[0-9]{2}-[0-9]{2}' "$FXBO_INDEX" | grep -oE '[0-9-]+' || true)"
+  if [[ -n "$gen_date" ]]; then
+    age_days=$(( ( $(date +%s) - $(date -d "$gen_date" +%s) ) / 86400 ))
+    if (( age_days > 30 )); then
+      printf '\033[33m⚠ fxbackoffice schema context is %d days old (gen %s) — re-run backend/scripts/dump_fxbackoffice_schema.py\033[0m (advisory)\n' "$age_days" "$gen_date"
+    fi
+  fi
+fi
+
 # ── Verdict ──────────────────────────────────────────────────────────────────
 printf '\n────────────────────────────────────────\n'
 if [[ ${#FAILED_GATES[@]} -eq 0 ]]; then

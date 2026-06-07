@@ -11,7 +11,6 @@
 | ID | Branch | Claim 日期 | 备注 |
 |----|--------|-----------|------|
 | [OPT-0032](./items/OPT-0032-gap-trade-crm-risk-tag.md) | `opt/gap-trade-crm-risk-tag` | 2026-06-02 | Gap Trade 超额客户→CRM 上风控 tag + 盘中 5min 快扫；P1 dry-run 先行 |
-| [OPT-0036](./items/OPT-0036-database-context-tiered-schema.md) | `opt/database-context-tiered-schema` | 2026-06-07 | database-context skill 分层 schema 库（fxbackoffice 390 表三级加载）+ 生成器脚本 |
 
 ## ✅ 待领取（Ready）
 

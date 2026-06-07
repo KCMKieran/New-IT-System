@@ -1,0 +1,2 @@
+- endingBalance=已实现（无浮动盈亏）；endingEquity=balance+浮动盈亏；currency='CEN' ÷100
+- 用途：历史趋势 + 盈亏计算交叉校验

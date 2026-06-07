@@ -1,0 +1,4 @@
+- demo 过滤：GROUP NOT LIKE '%demo%'；员工过滤 JOIN users u ON u.id=userId AND COALESCE(u.isEmployee,0)=0
+- CURRENCY='CEN' → 金额 cents ÷100；AGENT_ACCOUNT=IB 上级账户号；excludeFromReports=1 报表排除
+- loginSid={SID}-{LOGIN}（UQ）；groupSid 生成列={sid}-{GROUP}；userId → users.id
+- BALANCE/EQUITY 是 slave 同步值，非严格实时

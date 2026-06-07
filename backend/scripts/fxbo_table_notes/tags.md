@@ -1,0 +1,1 @@
+- 标签定义全局唯一（UQ tag）；风控 tag 也在这（如 OPT-0032 gap-trade 命中自动上的 CRM tag）

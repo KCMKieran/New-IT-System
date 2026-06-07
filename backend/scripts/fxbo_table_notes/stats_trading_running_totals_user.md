@@ -1,0 +1,1 @@
+- ⚠ EUR 计价！要 USD 口径时不要用——改用 stats_trading_running_totals（原币种）自行汇总

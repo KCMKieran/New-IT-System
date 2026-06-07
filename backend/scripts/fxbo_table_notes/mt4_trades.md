@@ -1,0 +1,7 @@
+- CMD: 0=Buy 1=Sell 2/3=Limit 4/5=Stop 6=Balance（出入金调整，不是交易）
+- VOLUME÷100=手数（或直接用生成列 lots）；totalProfit 生成列=PROFIT+SWAPS+COMMISSION（仅 CMD 0/1/6）
+- sid: 1=mt4_live 5=mt5 6=mt4_live2；loginSid={SID}-{LOGIN}（索引）、ticketSid={SID}-{TICKET}（PK）
+- 未平仓：CLOSE_TIME='1970-01-01'（closeDate 同）
+- ⚠ OPEN_TIME/CLOSE_TIME 是 MT 时区 UTC+3 无 DST，且 OPEN_TIME 无直接索引——范围查询走 openDate/closeDate（STORED+索引），时分粒度内存再过滤
+- ⚠ 性能：日期条件不要 OR（破索引）改 UNION ALL；避免自连接（用临时表/应用层窗口检测）
+- CEN 组金额是 cents ÷100（币种看 mt4_users.CURRENCY）

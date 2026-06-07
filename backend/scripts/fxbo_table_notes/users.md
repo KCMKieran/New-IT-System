@@ -1,0 +1,3 @@
+- 员工过滤：COALESCE(isEmployee,0)=0（报表必加）；isIb=1 是 IB
+- riskLevel/riskComment=风控字段；cid=公司/区域维度（email 在 cid 内唯一 UQ emailcid）
+- 关联：mt4_users.userId → users.id；transactions.fromUserId → users.id

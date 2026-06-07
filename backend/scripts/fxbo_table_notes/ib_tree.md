@@ -1,0 +1,1 @@
+- 闭包表：ibId=祖先 IB，referralId=后代客户，level=深度；不含自身行（要含用 ib_tree_with_self）

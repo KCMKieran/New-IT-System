@@ -1,0 +1,1 @@
+- KV 扩展字段：k=字段名，v=JSON 值；(k,userId) UQ
