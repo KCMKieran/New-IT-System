@@ -1,0 +1,3 @@
+- 一行=(date, loginSid)；totalPlClosed=当日 SUM(PROFIT+SWAPS+COMMISSION)（净已实现），totalProfit 仅 PROFIT
+- currency='CEN' ÷100；per-user 日期范围最优索引 (userId,date)
+- Client Return Rate Phase 1 快路径数据源

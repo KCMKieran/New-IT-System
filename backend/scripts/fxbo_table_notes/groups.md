@@ -1,0 +1,1 @@
+- demo 过滤源：groupName LIKE '%demo%' 排除；currency 决定该组是否 CEN（÷100）

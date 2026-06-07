@@ -1,0 +1,1 @@
+- cid=0 即 CN 通道（CN渠道支付成功率页的筛选条件）；id ← transactions.pspId

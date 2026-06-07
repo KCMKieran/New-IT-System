@@ -1,0 +1,1 @@
+- commission=实付佣金，calculatedCommission=系统应计；ibId/refId 都 → users.id；CEN ÷100

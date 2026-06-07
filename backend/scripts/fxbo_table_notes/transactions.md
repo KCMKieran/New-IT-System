@@ -1,0 +1,4 @@
+- status: 'approved'/'declined'/'fresh'…；type: 'deposit'/'withdrawal'/'ib withdrawal'
+- vendor=PSP 名（chippay/Exlink…），handler 更细一层；pspId→psps.id（psps.cid=0 即 CN 通道）
+- isFtd=首次入金标记；isFee=手续费行；requested*=客户请求，processed*=实际处理
+- 索引提示：时间范围走 createdAt；handler+status 分组走 handlerStatus；type+status+processedAt 走 IDX_TYPE_STATUS_PROCESSED_AT

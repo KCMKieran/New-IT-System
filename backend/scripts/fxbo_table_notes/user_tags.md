@@ -1,0 +1,1 @@
+- (tagId,userId) UQ；⚠ 本库是 readonly slave——打 tag 走 CRM API，不能直写

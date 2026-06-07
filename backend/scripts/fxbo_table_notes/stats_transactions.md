@@ -1,0 +1,1 @@
+- type: 'deposit'/'withdrawal'/'ib withdrawal'；currency='CEN' 金额 ÷100

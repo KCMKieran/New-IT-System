@@ -1,0 +1,2 @@
+- 内部转账：fromLoginSid→toLoginSid，配对 transactionInId/transactionOutId → transactions.id
+- ⚠ 出入金净额统计时别把内转误算成入金/出金

@@ -122,9 +122,20 @@ PURPOSE = {
 }
 
 TIER_B_MIN_BYTES = 10 * 1024 * 1024  # 10 MB
+NOISE_BYTES_MAX = 64 * 1024  # rows==0 is an InnoDB estimate — only trust it for tiny tables
+MIN_TABLES = 300  # refuse to render a degraded snapshot (grant revoked, wrong host, ...)
 NOISE_RE = re.compile(r"(^tmp_|_old$|_bak$|_backup$|_copy$)", re.I)
-MANUAL_RE = re.compile(r"<!-- manual -->\n(.*?)<!-- /manual -->", re.S)
+# Tolerant: CRLF, stray whitespace around the markers.
+MANUAL_RE = re.compile(r"<!--\s*manual\s*-->[ \t]*\r?\n?(.*?)<!--\s*/manual\s*-->", re.S)
 MANUAL_PLACEHOLDER = "（业务注释：暂无 — 沉淀后写在这区，重跑生成器不会丢）\n"
+SQL_TABLE_REF_RE = re.compile(
+    r"\b(?:FROM|JOIN|INTO|UPDATE)\s+(?:fxbackoffice\.)?`?([A-Za-z_][A-Za-z0-9_]*)`?", re.I
+)
+
+# Committed seed for the manual notes (git is the durable copy; the rendered
+# skill files under .cursor/ are gitignored local assets).
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SEED_DIR = Path(__file__).resolve().parent / "fxbo_table_notes"
 
 
 # --------------------------------------------------------------------------
@@ -146,7 +157,16 @@ def fetch() -> dict:
         connect_timeout=10,
         read_timeout=120,
     )
-    out: dict = {"schema": SCHEMA, "tables": {}, "columns": {}, "indexes": {}, "fks": {}}
+    if not TIER_A:
+        sys.exit("ERROR: TIER_A is empty — IN () would be a syntax error")
+    out: dict = {
+        "schema": SCHEMA,
+        "host": os.environ["MYSQL_HOST"],
+        "tables": {},
+        "columns": {},
+        "indexes": {},
+        "fks": {},
+    }
     with conn:
         with conn.cursor() as cur:
             cur.execute("SELECT CURDATE() AS d")
@@ -240,10 +260,41 @@ def human_size(b: int) -> str:
 
 
 def existing_manual(path: Path) -> str | None:
+    """Manual-block content of an existing output file.
+
+    Returns None only when the file does not exist. A file that exists but has
+    no parseable manual block is an ERROR — overwriting it could silently drop
+    hand-written notes (e.g. someone broke a marker while editing).
+    """
     if not path.exists():
         return None
     m = MANUAL_RE.search(path.read_text(encoding="utf-8"))
-    return m.group(1) if m else None
+    if m is None:
+        sys.exit(
+            f"ERROR: {path} exists but has no <!-- manual --> ... <!-- /manual --> block. "
+            "Refusing to overwrite (notes could be lost). Fix the markers or delete the file."
+        )
+    return m.group(1)
+
+
+def seed_manual(name: str) -> str | None:
+    p = SEED_DIR / f"{name}.md"
+    return p.read_text(encoding="utf-8") if p.exists() else None
+
+
+def referenced_tables(snap: dict) -> set[str]:
+    """Table names that appear in FROM/JOIN/INTO/UPDATE context in backend code."""
+    app_dir = REPO_ROOT / "backend" / "app"
+    found: set[str] = set()
+    if not app_dir.is_dir():
+        return found
+    for py in app_dir.rglob("*.py"):
+        try:
+            for m in SQL_TABLE_REF_RE.finditer(py.read_text(encoding="utf-8")):
+                found.add(m.group(1))
+        except OSError:
+            continue
+    return found & set(snap["tables"])
 
 
 def render_table(name: str, snap: dict) -> str:
@@ -268,7 +319,9 @@ def render_table(name: str, snap: dict) -> str:
         if "auto_increment" in c["extra"]:
             tok += " AI"
         if c["gen"]:
-            gen = re.sub(r"\s+", " ", c["gen"])[:40]
+            gen = re.sub(r"\s+", " ", c["gen"])
+            if len(gen) > 40:
+                gen = gen[:40] + "…"  # visibly truncated, not silently broken
             tok += f" GEN({gen})"
         if c["comment"]:
             tok += f"（{c['comment'][:30]}）"
@@ -298,6 +351,11 @@ def render_table(name: str, snap: dict) -> str:
 
 def render(snap: dict, out_dir: Path) -> None:
     tables = snap["tables"]
+    if len(tables) < MIN_TABLES:
+        sys.exit(
+            f"ERROR: snapshot has only {len(tables)} tables (< {MIN_TABLES}) — degraded "
+            "snapshot (revoked grant? wrong host?). Refusing to overwrite good output."
+        )
     out_dir.mkdir(parents=True, exist_ok=True)
     tdir = out_dir / "tables"
     tdir.mkdir(exist_ok=True)
@@ -306,16 +364,40 @@ def render(snap: dict, out_dir: Path) -> None:
     if missing_a:
         print(f"WARN: Tier A tables not found in DB: {missing_a}", file=sys.stderr)
 
+    # Whitelist drift check: tables referenced by backend SQL but absent from
+    # TIER_A. Warn-only — curate, then add to TIER_A (+ a purpose/seed note).
+    drift = sorted(referenced_tables(snap) - set(TIER_A))
+    if drift:
+        print(f"WARN: referenced in backend SQL but NOT in TIER_A: {drift}", file=sys.stderr)
+
     # ---- per-table files (Tier A) ----
+    # Manual notes precedence: existing local block > committed seed > placeholder.
+    # When local differs from seed, nag to backfill the seed (git is the durable copy).
     for name in TIER_A:
         if name not in tables:
             continue
         path = tdir / f"{name}.md"
-        manual = existing_manual(path) or MANUAL_PLACEHOLDER
+        local = existing_manual(path)
+        seed = seed_manual(name)
+        manual = local if local is not None else (seed if seed is not None else MANUAL_PLACEHOLDER)
+        if local is not None and seed is not None and local.strip() != seed.strip():
+            print(
+                f"WARN: manual notes for `{name}` differ from seed — backfill "
+                f"{SEED_DIR / (name + '.md')}",
+                file=sys.stderr,
+            )
         body = render_table(name, snap)
         path.write_text(
             f"{body}\n<!-- manual -->\n{manual}<!-- /manual -->\n", encoding="utf-8"
         )
+
+    # Prune orphans: tables that left TIER_A (or were dropped/renamed) must not
+    # linger as stale-but-authoritative detail files.
+    keep = {f"{n}.md" for n in TIER_A if n in tables}
+    for f in tdir.glob("*.md"):
+        if f.name not in keep:
+            f.unlink()
+            print(f"PRUNED stale table file: {f}", file=sys.stderr)
 
     # ---- tiering for the index ----
     tier_a = [n for n in TIER_A if n in tables]
@@ -323,15 +405,17 @@ def render(snap: dict, out_dir: Path) -> None:
     for name, t in sorted(tables.items(), key=lambda kv: -kv[1]["bytes"]):
         if name in TIER_A:
             continue
-        if NOISE_RE.search(name) or t["rows"] == 0:
+        # rows is an InnoDB estimate — only call a table "empty" if it's tiny too.
+        if NOISE_RE.search(name) or (t["rows"] == 0 and t["bytes"] < NOISE_BYTES_MAX):
             noise.append(name)
         elif t["bytes"] > TIER_B_MIN_BYTES:
             tier_b.append(name)
         else:
             tier_c.append(name)
 
+    src_host = snap.get("host", "?")
     lines = [
-        f"# fxbackoffice 表目录（{len(tables)} 张 · 生成 {snap['generated']} · 源 slave information_schema）",
+        f"# fxbackoffice 表目录（{len(tables)} 张 · 生成 {snap['generated']} · 源 {src_host}）",
         "",
         "> 行数是 InnoDB 估算值。用法：在这里定位表 → Tier A 再读 `tables/<table>.md` 拿列/索引/业务注释。",
         "> 通用约定（CEN÷100、UTC+3、demo/员工过滤、loginSid）见 SKILL.md。",
