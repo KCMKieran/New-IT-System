@@ -46,21 +46,43 @@ related: [[OPT-0024]], [[OPT-0030]]
 
 ## 验收标准
 
-- [ ] **盘中快扫 tier**：新增一个 gap-trade 盘中检测 job（~5min），只在配置的 HKT 开盘窗口（默认约 05:55–07:05）内执行；复用 `detect_gap_trade_gap_profit`，`end_mt=now_mt`（增长窗口）。env flag 控制开关（对齐 `BURST_FAST_TIER_ENABLED` 模式）。保留 07:20 终值扫。
-- [ ] **跨扫去重**：盘中多次扫到同一客户不重复 POST CRM（本地去重 + 「tag 已存在则跳过」双保险）。
-- [ ] **新建 `crm_client`**（New-IT-System 后端）：read-modify-write 上 tag，按 cid 选 tag，保留原有 tag，限流 + 重试（照搬 Swap_Free 模式）。专用凭证进 env（`CRM_RISK_API_URL`/`CRM_RISK_API_TOKEN`），与现有配置隔离。
-- [ ] **cid 兜底**：cid ∉ {0,1} → 跳过 + 记 log，不报错。
-- [ ] **审计表**：每次上 tag（成功/跳过/失败）落本地审计记录（谁/何时/哪个客户/cid/tag/结果），可追溯。
-- [ ] **邮件通知**：每轮扫描一封汇总邮件（本轮新打了谁 + 失败哪些）发 `risk@kcmtrade.com`；上 tag 失败必须告警（即使成功 0 条）。env flag 控制成功汇总开关（稳态可只留失败告警）。
-- [ ] **分阶段上线**：P1 dry-run（检测 + 邮件，不真写 CRM）→ P2 live（真打 + 每轮汇总 + 失败告警）→ P3 稳态（只留失败告警）。dry-run 用 env flag 控制。
-- [ ] verify.sh 红绿闸门通过（tsc + vitest + pytest）。
+> **2026-06-05 用户拍板（覆盖下列原标准中的两条）**：
+> 1. **P1 dry-run 阶段豁免**，日扫 + 盘中两个 tier 同时上线。补偿控制（不可省）：写上限 `max_tags_per_scan`、双 kill-switch（env `GAP_TRADE_CRM_WRITE_ENABLED` × DB `crm_tag.write_enabled`，后者运行时可改）、上线后第一个开盘窗口必须有人全程盯邮件、下方 D0 人工闸门全部完成后才许翻 live。
+> 2. **邮件改为「每次改 tag 必须通知」**：每轮 conditional digest（result ∈ {tagged, failed, skipped_cid, dry_run} 才发，每个变更恰好出现在一封邮件里），07:20 终扫无条件发心跳。收件人 = `it.th@kcmtrade.com` + `tobe.wong@kohleservices.com` + `cs@kcmtrade.com`（env `CRM_RISK_MAIL_TO`），替代原 `risk@kcmtrade.com` 每轮汇总。SMTP 失败不阻塞/不回滚写，`notified_at` outbox 下轮重发。
+
+- [x] **盘中快扫 tier**：`gap_trade_intraday_scan` job（5min，CronTrigger 限定 HKT 5-7 点 + 函数内 05:55–07:05 双层窗口闸），复用 `detect_gap_trade_gap_profit`，`end_mt = min(now_mt, window_end)`（增长窗口、不越过 MT 02:00）。env `GAP_TRADE_INTRADAY_ENABLED`（默认 off，dev 容器安全）。保留 07:20 终值扫（改为阻塞抢锁 300s，不再静默跳过；带当日 reconciliation diff：盘中已 tag 但终扫未确认的客户在邮件里高亮）。
+- [x] **跨扫去重**：审计表 `(window_date, client_userid)` 终态记录为唯一事实源（人工摘 tag ≠ 同意重打）+「tag 已存在则跳过」兜底；盘中与 07:20 共用同一去重。
+- [x] **新建 crm_client**（`services/crm_risk_tag_client.py`）：read-modify-write、写后 read-back 校验（旧 tags ⊆ 新 tags）、429/5xx 退避重试、非 200 响应体全留痕、解析不出可回写形态→跳过该客户（绝不写回半解析的 tags 列表）、`remove_tag()` 回滚路径 day one 就有。凭证 `CRM_RISK_API_URL`/`CRM_RISK_API_TOKEN` 进 env + Settings（带 `.strip()`）。
+- [x] **cid 兜底**：cid ∉ {0,1} → 跳过 + 审计 + **进 digest 邮件**（新区域出现要人眼看到，不是埋在 log 里）。
+- [x] **审计表**：`gap_trade_crm_tag_log`（schema 迁移进 `risk_monitor_db.py`），含 `tags_before/after` JSON 快照（full-replace 语义下唯一恢复依据）、`notified_at` outbox 列；无保留期清理（金融审计轨迹永久保留）。
+- [x] **邮件通知**：按上方拍板执行；连续 3 次失败中止本轮并告警；超 cap 整轮不写 + `[GAP-TAG FAILED]` 告警。
+- [~] **分阶段上线**：dry-run 豁免（见拍板）；log-only 模式保留为 `write_enabled=false` 的行为（检测 + 审计 dry_run 行 + 邮件，不碰 CRM），可随时回退。
+- [x] verify.sh 红绿闸门通过（tsc + vitest 77 + pytest 241，2026-06-05）。
+
+## D0 人工闸门（工具：`backend/scripts/crm_tag_probe.py`）
+
+> **状态（2026-06-05 上线时）**：用户决策在 D0 未全绿的情况下先行上线（见上方拍板）。已完成 4/6；**未完成的 2 项列为残留风险**，按风险排序在下。
+
+- [x] **生产出口 IP**：实测出口 `218.253.255.122` 可通 CRM（prod/dev 同主机同出口，probe 成功即证明）。2026-06-05 ✓
+- [x] **ID 映射实测**：`--probe-historical --verify-db` 跑通 **23 个历史命中 + 136805 全部一致**（CRM email == fxbackoffice.users email）。2026-06-05 ✓
+- [x] **tags 形态 + cid=1 字符串**：真实读响应确认 tags = 字符串数组；`Withdrawal Notice` 与线上逐字节一致（客户 164175 已带此 tag）。2026-06-05 ✓
+- [x] **测试邮件**：log-only 模拟（client 136805）digest 已送达用户邮箱。2026-06-05 ✓
+- [ ] ⚠ **cid=0 tag 字符串未字节级确认**：23 个历史户中无人携带 `禁止出金(風控)`，无法从真实数据比对；cid=0 canary（带 ≥2 已有 tag 的 CN 内部户 `--canary-add` → CRM UI 验证 → `--canary-remove`）待补。在此之前第一个 CN 客户命中时需人工核对 CRM 里 tag 是否正确（而非建出新 tag）。
+- [ ] ⚠ **阈值复盘会未开**：risk + CS 走查 23 个历史命中「冻他对不对」；写上限 10/轮 + digest 邮件是当前兜底。
+
+## 上线记录
+
+- **2026-06-05 17:47 HKT** commit `6562d54`（分支 `feat/opt-0032-crm-risk-tag`）`./deploy.sh` 上线，双 tier 同时 live（用户拍板）。prod 日志确认两个 job 注册成功。
+- 三开关状态：`GAP_TRADE_INTRADAY_ENABLED=true` + `GAP_TRADE_CRM_WRITE_ENABLED=true`（env）+ `crm_tag.write_enabled=true`（DB runtime，急停用它，秒级生效无需重启）。
+- 首个真实窗口：2026-06-06（周六）HKT 05:55–07:20，需有人盯 digest 邮件。
+- ⚠ 分支未 merge `main` —— **在 main 上跑 `./deploy.sh` 会把本功能卸载**；merge 前部署务必在本分支。
 
 ## 笔记
 
 - **高危写操作**：`禁止出金` 直接 hold 客户出金，误报 = 误封正常客户 → 必须 dry-run 先行 + ID 映射实测。
 - **覆盖语义竞态**：read→write 间隙若他人（CS/Swap_Free）改了同一客户 tags 会被冲掉；窗口极小，读完立刻写缓解，记录此风险。
 - **字符串精确匹配**：tag 名繁/简、全半角必须与 CRM 逐字节一致（从 CRM 原样复制，不手敲），否则建出 CS 没在筛的新 tag → 风控形同虚设。
-- **安全**：dev token 已在对话明文出现，上线后建议轮换。
+- **安全**：CRM 凭证（`CRM_RISK_API_TOKEN`）仅在 **IP 白名单**内可用（生产后端出口 IP），白名单为主访问控制；凭证存 `backend/.env`（gitignored，不进 git、不贴对话）。
 - 触发口径用户已定：**只看已实现利润**（沿用 rule 81，不引入浮盈）。
 - 复用 `email-notification` skill 基建。
 
