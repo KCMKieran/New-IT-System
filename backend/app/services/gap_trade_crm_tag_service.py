@@ -335,12 +335,22 @@ def build_digest_html(rows: List[Dict[str, Any]], scan_label: str,
 
     color = {"tagged": "#16a34a", "failed": "#dc2626",
              "skipped_cid": "#d97706", "dry_run": "#2563eb"}
+
+    def userid_cell(uid: Any) -> str:
+        # Deep-link the CRM user id to the cabinet client page (same pattern the
+        # frontend uses, frontend/src/lib/crm-links.ts) so CS can jump straight
+        # to the client to review / reverse the tag.
+        u = esc(uid)
+        return (f"<td style='padding:4px 8px'>"
+                f"<a href='https://mt4.kohleglobal.com/crm/users/{u}' "
+                f"style='color:#2563eb'>{u}</a></td>")
+
     trs = []
     for r in rows:
         c = color.get(r["result"], "#374151")
         trs.append(
             f"<tr>"
-            f"<td style='padding:4px 8px'>{esc(r['client_userid'])}</td>"
+            f"{userid_cell(r['client_userid'])}"
             f"<td style='padding:4px 8px'>{esc(r.get('cid'))}</td>"
             f"<td style='padding:4px 8px;color:{c};font-weight:600'>{esc(r['result'])}</td>"
             f"<td style='padding:4px 8px'>{esc(r.get('tag'))}</td>"
