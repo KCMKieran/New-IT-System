@@ -1,7 +1,7 @@
 ---
 id: OPT-0032
 title: Gap Trade 超额获利客户 → 自动给 CRM 上风控 tag（+ 盘中实时快扫）
-status: wip
+status: done
 priority: P1
 area: mixed
 effort: L
@@ -61,13 +61,13 @@ related: [[OPT-0024]], [[OPT-0030]]
 
 ## D0 人工闸门（工具：`backend/scripts/crm_tag_probe.py`）
 
-> **状态（2026-06-05 上线时）**：用户决策在 D0 未全绿的情况下先行上线（见上方拍板）。已完成 4/6；**未完成的 2 项列为残留风险**，按风险排序在下。
+> **状态（2026-06-09 更新）**：用户决策在 D0 未全绿的情况下先行上线（见上方拍板）。已完成 5/6；**未完成的 1 项列为残留风险**，在下。
 
 - [x] **生产出口 IP**：实测出口 `218.253.255.122` 可通 CRM（prod/dev 同主机同出口，probe 成功即证明）。2026-06-05 ✓
 - [x] **ID 映射实测**：`--probe-historical --verify-db` 跑通 **23 个历史命中 + 136805 全部一致**（CRM email == fxbackoffice.users email）。2026-06-05 ✓
 - [x] **tags 形态 + cid=1 字符串**：真实读响应确认 tags = 字符串数组；`Withdrawal Notice` 与线上逐字节一致（客户 164175 已带此 tag）。2026-06-05 ✓
 - [x] **测试邮件**：log-only 模拟（client 136805）digest 已送达用户邮箱。2026-06-05 ✓
-- [ ] ⚠ **cid=0 tag 字符串未字节级确认**：23 个历史户中无人携带 `禁止出金(風控)`，无法从真实数据比对；cid=0 canary（带 ≥2 已有 tag 的 CN 内部户 `--canary-add` → CRM UI 验证 → `--canary-remove`）待补。在此之前第一个 CN 客户命中时需人工核对 CRM 里 tag 是否正确（而非建出新 tag）。
+- [x] **cid=0 tag 字符串已字节确认**：2026-06-09 对真实命中户 164813（cid=0）`--live` 写入 `禁止出金(風控)`，http 200、RMW 保留原 6 个 tag、新 tag 字节正确追加。cid=0 路径打通。
 - [ ] ⚠ **阈值复盘会未开**：risk + CS 走查 23 个历史命中「冻他对不对」；写上限 10/轮 + digest 邮件是当前兜底。
 
 ## 上线记录
@@ -75,7 +75,11 @@ related: [[OPT-0024]], [[OPT-0030]]
 - **2026-06-05 17:47 HKT** commit `6562d54`（分支 `feat/opt-0032-crm-risk-tag`）`./deploy.sh` 上线，双 tier 同时 live（用户拍板）。prod 日志确认两个 job 注册成功。
 - 三开关状态：`GAP_TRADE_INTRADAY_ENABLED=true` + `GAP_TRADE_CRM_WRITE_ENABLED=true`（env）+ `crm_tag.write_enabled=true`（DB runtime，急停用它，秒级生效无需重启）。
 - 首个真实窗口：2026-06-06（周六）HKT 05:55–07:20，需有人盯 digest 邮件。
-- ⚠ 分支未 merge `main` —— **在 main 上跑 `./deploy.sh` 会把本功能卸载**；merge 前部署务必在本分支。
+- **2026-06-09 排查 + 恢复**：发现 06-05 18:01 有人在 `main` 上 `./deploy.sh` 把功能卸载了（彼时 main 无 OPT-0032）→ 06-08（8 户）/06-09（1 户）检测到却 0 上 tag。**已 merge PR #1 进 main（merge `f1ca650`）+ deploy**，根治"main deploy 卸载"。
+- **2026-06-09 两个 hotfix（已进 main）**：
+  - `c2b309a` 致命 bug —— isEmployee 排除 join 别名 `users u` 与 `mt4_users U` 在本 MySQL 撞车（`1066 Not unique table/alias 'u'`），gap-profit 检测每次崩；改 `u→eu`。pytest mock SQL 未抓到，真实窗口跑才暴露。
+  - `52161ae` digest 邮件 CRM user id → `https://mt4.kohleglobal.com/crm/users/{id}` 超链接（复用 `frontend/src/lib/crm-links.ts`）。
+- **2026-06-09 真实全流程验证**：`backend/scripts/crm_tag_manual_test.py`（默认 DRY，`--live` 才写；`CRM_RISK_MAIL_TO` env 可临时覆盖收件人）对今日窗口客户 164813 真实上 tag + 发邮件成功（见 D0 cid=0 项）。
 
 ## 笔记
 
@@ -88,4 +92,6 @@ related: [[OPT-0024]], [[OPT-0030]]
 
 ## 结果
 
-（完成后填）
+**已完成并在线（2026-06-09 验证）。** 双 tier：盘中 5min 快扫（HKT 05:55–07:05，增长窗口）+ 07:20 终扫对账，命中 rule-81 即按 cid 上 CRM tag（cid=0→`禁止出金(風控)`、cid=1→`Withdrawal Notice`、其它跳过）hold 出金，每轮发 conditional digest（带 CRM 跳转链接）给 it.th+tobe+cs，07:20 终扫发心跳。补偿控制：写上限 10/轮、env×DB 双 kill-switch、审计表去重、写后 read-back 校验、outbox 邮件重试。新增工具 `backend/scripts/crm_tag_manual_test.py`（按需手动测试，DRY/`--live`）。
+
+**残留（非 dev）**：阈值复盘会未开——risk+CS 走查命中户「冻得对不对」；当前以写上限 + digest 邮件兜底。
