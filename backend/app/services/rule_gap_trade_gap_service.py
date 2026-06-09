@@ -104,8 +104,8 @@ def _query_closed_trades_in_window(
     -- Project convention: exclude employee accounts. Without this an
     -- internal account trading the open could receive a withdrawal-blocking
     -- CRM tag (OPT-0032 auto-tags rule-81 hits).
-    INNER JOIN fxbackoffice.users u
-            ON u.id = U.userid AND COALESCE(u.isEmployee, 0) = 0
+    INNER JOIN fxbackoffice.users eu
+            ON eu.id = U.userid AND COALESCE(eu.isEmployee, 0) = 0
     WHERE L.closeDate IN {date_sql}
       AND L.CLOSE_TIME >= %s
       AND L.CLOSE_TIME <  %s
