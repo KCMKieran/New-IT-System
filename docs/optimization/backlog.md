@@ -10,7 +10,6 @@
 
 | ID | Branch | Claim 日期 | 备注 |
 |----|--------|-----------|------|
-| [OPT-0037](./items/OPT-0037-settle-window-blind-spot.md) | opt/settle-window-blind-spot | 2026-06-15 | event-gated 规则 settle-window 快进快出漏检（滥用杠杆+马丁）；方案选型待定 |
 
 ## ✅ 待领取（Ready）
 
@@ -22,6 +21,7 @@
 | [OPT-0002](./items/OPT-0002-browser-cache-pattern-doc.md) | P2 | docs | S | 现有浏览器缓存模式归纳成复用文档 |
 | [OPT-0003](./items/OPT-0003-risk-monitor-sqlite-perf.md) | P1 | db | L | Risk-monitor SQLite 数据增长后的性能方案 |
 | [OPT-0028](./items/OPT-0028-risk-monitor-aggregator-hardening.md) | P2 | mixed | M | Risk-monitor 聚合视图硬化（SQL 性能 + 语义确定性，同时覆盖 burst + hedge） |
+| [OPT-0038](./items/OPT-0038-event-gated-tier-hardening.md) | P2 | backend | M | event-gated fast-tier 硬化（马丁快照新鲜度守卫 + 自适应 lookback）— OPT-0037 review 衍生 |
 
 ## 💡 想法（Ideas）—— 还不能直接 claim
 
