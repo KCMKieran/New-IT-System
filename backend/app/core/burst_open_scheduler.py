@@ -43,6 +43,11 @@ GAP_TRADE_INTRADAY_END_HKT = (7, 5)
 _scheduler: BackgroundScheduler | None = None
 _latest_result: dict[str, Any] | None = None
 _scan_lock = threading.Lock()
+# OPT-0037 observability: a fast tick that finds the shared lock held (slow tier
+# mid-flight) skips itself. At scale, frequent skips mean the fast tier is
+# silently running below its 60s cadence — exactly when the settle-window blind
+# spot reopens — so we count + log them at INFO instead of swallowing at DEBUG.
+_fast_tier_skip_count = 0
 # Independent lock so the Gap Trade daily job never blocks the 5-min burst
 # tick (or vice versa). They write to the same `alert_events` table but
 # touch different rule_id ranges, so concurrent runs are safe.
@@ -63,6 +68,23 @@ def _fast_tier_enabled() -> bool:
     return os.getenv("BURST_FAST_TIER_ENABLED", "false").lower() == "true"
 
 
+# ─── Tier ownership: SINGLE SOURCE OF TRUTH (OPT-0037) ────────────────────
+# Which scheduler tier owns each allocated rule_id band. The cache-merge in
+# _run_scan partitions `_latest_result.alerts` by this map, so it MUST stay in
+# lockstep with the `include_*` flags in _run_scan (a band whose include_* runs
+# on one tier but is classified to the other here will be dropped/duplicated in
+# the cache on each tick).
+#
+# ⚠ ADDING A NEW RULE BAND (121+): add its (lo, hi) to exactly ONE tuple below
+# AND wire its include_* flag in _run_scan to the matching tier. The total
+# allocated range is [1, _MAX_ALLOCATED_RULE_ID]; bump that too. The invariant
+# test `test_tier_ownership_partitions_all_bands` fails until all three agree.
+_FAST_TIER_RULE_BANDS: tuple[tuple[int, int], ...] = ((1, 50), (101, 120))
+_SLOW_TIER_RULE_BANDS: tuple[tuple[int, int], ...] = ((51, 100),)
+# Highest rule_id any band currently reaches (martingale tops out at 120).
+_MAX_ALLOCATED_RULE_ID = 120
+
+
 def _is_fast_tier_rule_id(rule_id: Any) -> bool:
     """Which tier owns a rule_id's alerts for the in-memory cache merge.
 
@@ -72,10 +94,11 @@ def _is_fast_tier_rule_id(rule_id: Any) -> bool:
     abuse (101-110) + martingale (111-120). Slow tier owns quick-open-close
     (51-60) + quick-profit (61-70) + hedge-open (91-100). Gap Trade (71-90)
     never enters this cache (its cron path writes straight to alert_events),
-    so it is irrelevant here and falls on the slow side by default.
+    so it falls on the slow side and is a no-op here. Derived from
+    `_FAST_TIER_RULE_BANDS` so the boundary has one source of truth.
     """
     rid = int(rule_id or 0)
-    return 1 <= rid <= 50 or 101 <= rid <= 120
+    return any(lo <= rid <= hi for lo, hi in _FAST_TIER_RULE_BANDS)
 
 
 def _gap_trade_intraday_enabled() -> bool:
@@ -439,11 +462,17 @@ def _locked_fast_burst_scan() -> None:
     query + margin/position snapshot every 60s) — the accepted cost of
     closing the settle-window blind spot.
     """
+    global _fast_tier_skip_count
     if not _fast_tier_enabled():
         return
     acquired = _scan_lock.acquire(blocking=False)
     if not acquired:
-        logger.debug("Fast tier: scan_lock held by slow tier, skipping")
+        _fast_tier_skip_count += 1
+        logger.info(
+            "Fast tier: scan_lock held by slow tier, skipping this tick "
+            "(cumulative skips=%d)",
+            _fast_tier_skip_count,
+        )
         return
     try:
         _run_scan(tier="fast_burst")
@@ -774,6 +803,13 @@ def start_burst_scheduler() -> None:
             IntervalTrigger(seconds=BURST_FAST_TIER_INTERVAL_SEC),
             id=BURST_FAST_JOB_ID,
             replace_existing=True,
+            # OPT-0037: be explicit now that the fast tick is heavier (burst +
+            # leverage + martingale). max_instances=1 = never overlap a tick
+            # with itself; coalesce=True = if the scheduler thread stalls and
+            # several runs come due, collapse them to one (don't replay a backlog
+            # of identical overlap-window scans).
+            max_instances=1,
+            coalesce=True,
         )
         logger.info(
             "Fast tier started: every %ds (burst + leverage + martingale; "

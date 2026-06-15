@@ -337,6 +337,32 @@ def test_is_fast_tier_rule_id_boundary():
     assert bs._is_fast_tier_rule_id(0) is False
 
 
+def test_tier_ownership_partitions_all_bands():
+    """OPT-0037 invariant: every allocated rule_id in [1, _MAX_ALLOCATED_RULE_ID]
+    is owned by EXACTLY ONE tier. This is the guard the outsider-review asked for
+    — when a future band (121+) is added, bumping _MAX_ALLOCATED_RULE_ID without
+    also extending _FAST/_SLOW_TIER_RULE_BANDS makes this fail loudly, instead of
+    silently dropping/duplicating that band's alerts in the cache merge."""
+    def _in_bands(rid, bands):
+        return any(lo <= rid <= hi for lo, hi in bands)
+
+    for rid in range(1, bs._MAX_ALLOCATED_RULE_ID + 1):
+        in_fast = _in_bands(rid, bs._FAST_TIER_RULE_BANDS)
+        in_slow = _in_bands(rid, bs._SLOW_TIER_RULE_BANDS)
+        assert in_fast != in_slow, (
+            f"rule_id {rid} must belong to exactly one tier "
+            f"(fast={in_fast}, slow={in_slow}) — update the band tuples"
+        )
+        # The fast-band membership must match the live predicate used by merge.
+        assert in_fast == bs._is_fast_tier_rule_id(rid)
+
+    # Known bands map to the expected tier (self-documenting + anti-drift).
+    assert bs._is_fast_tier_rule_id(1) and bs._is_fast_tier_rule_id(101) and bs._is_fast_tier_rule_id(111)
+    assert not bs._is_fast_tier_rule_id(51)   # quick-oc → slow
+    assert not bs._is_fast_tier_rule_id(61)   # quick-profit → slow
+    assert not bs._is_fast_tier_rule_id(91)   # hedge → slow
+
+
 # ── lock + flag check on fast scan ────────────────────────────────────────
 
 def test_locked_fast_burst_noop_when_flag_off(monkeypatch, temp_db):

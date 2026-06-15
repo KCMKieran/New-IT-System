@@ -58,7 +58,27 @@ related: [[OPT-0030]], [[OPT-0033]], [[OPT-0011]], [[OPT-0012]]
 
 ## 结果
 
-（close 时填 —— 含 Stage 1 review 处理记录）
+**实现**：方案 A 完成（见上 AC 全勾）。`verify.sh` 绿（backend 242→244 / tsc / vitest 77）。
+
+**Stage 1 outsider-review 处理记录**（cold-brief reviewer，6 findings → curate 后 4 真问题）：
+- **R3 tier 归属无单一真相源（121+ 未来 band 静默错并）** → **当场修**：`_FAST/_SLOW_TIER_RULE_BANDS`
+  常量 + `_MAX_ALLOCATED_RULE_ID` + 派生 `_is_fast_tier_rule_id` + 不变量测试
+  `test_tier_ownership_partitions_all_bands`（加新 band 漏分类即 fail）。
+- **R4 提速后跳 tick 静默（DEBUG）+ fast job 无 max_instances** → **当场修**：跳过日志
+  DEBUG→INFO + 累计 `_fast_tier_skip_count`；fast job 显式 `max_instances=1, coalesce=True`。
+- **R1 马丁缺快照新鲜度守卫（settle 30s 放大）** → **拆 [[OPT-0038]]**（马丁 tab 仍隐藏，未面向用户）。
+- **R2 catch 窗口在副本延迟尖峰下变窄（360s→150s）** → **拆 [[OPT-0038]]**（自适应 lookback）。
+- **R5 dedup seed 用 slow interval** → **live with**：reviewer 自评是安全方向（seed 窗 15min ≫ 180s
+  窗口），仅 load-bearing；未来若把 `append_scan_and_events` 改成条件/异步写会破 dedup——靠注释提醒。
+- **R6 per-rule「静默 N 小时」无告警** → **live with**：现有 `except Exception` 模式；可观测性增强已记进
+  [[OPT-0038]] 可选 AC。
+- reviewer 建议「给 event-gated 规则单独锁」**不采纳**——leverage/martingale/burst 共改全局
+  `_latest_result` 且走同一 merge，共享 `_scan_lock` 是有意的（拆锁会 race 缓存 merge）。
+
+**未采纳方案**：B（MT5 重算，MT4 无 symbol 表补不齐）/ C（纯文档）。
+
+**部署注意**：prod fast tier 每 60s 会多跑 leverage + martingale（已接受的负载代价）；dev
+`BURST_SCAN_ENABLED=false` 不受影响。需 `./deploy.sh` 上线后新扫描才生效。
 
 ## 结果
 
