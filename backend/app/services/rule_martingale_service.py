@@ -247,6 +247,45 @@ def _query_mt5_open_positions(
         return list(cur.fetchall())
 
 
+def _query_modify_time_map(
+    conn, loginsids: Iterable[str]
+) -> Dict[str, datetime]:
+    """Batch-read each candidate's fxbackoffice.mt4_users.MODIFY_TIME (UTC).
+
+    OPT-0038 R1: the open-position snapshot (mt4_trades / mt5_positions) lags an
+    open by replication delay. fxbackoffice.mt4_users is the unified back-office
+    mirror (covers MT4 *and* MT5 via loginsid) and bumps MODIFY_TIME whenever an
+    account's margin is recomputed — i.e. on every open — so it is the best
+    available freshness proxy, mirroring the leverage-abuse `modify_dt` guard.
+    Returns {loginsid: modify_dt}; loginsids with no row are simply absent
+    (→ caller treats as stale and skips). MODIFY_TIME is normalised to UTC so it
+    compares apples-to-apples with the gated open times.
+    """
+    ids = [str(s) for s in loginsids if s]
+    if not ids:
+        return {}
+    placeholders = ",".join(["%s"] * len(ids))
+    modify_col = broker_time_to_utc_iso("MODIFY_TIME", "modify_time")
+    sql = f"""
+        SELECT loginsid, {modify_col}
+        FROM fxbackoffice.mt4_users
+        WHERE loginsid IN ({placeholders})
+    """
+    out: Dict[str, datetime] = {}
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, tuple(ids))
+            for r in cur.fetchall():
+                mdt = _parse_iso_dt(r.get("modify_time"))
+                if mdt is not None:
+                    out[str(r["loginsid"])] = mdt
+    except Exception:
+        logger.error(
+            "Martingale modify-time snapshot query failed", exc_info=True,
+        )
+    return out
+
+
 def _build_position_groups(
     rows: Iterable[Dict[str, Any]], currency_map: Dict[str, str]
 ) -> Dict[Tuple[str, int, str, str], Dict[str, Any]]:
@@ -352,6 +391,33 @@ def rule_martingale_detect(
                 a.get("last_open") or "",
             ))
 
+    # OPT-0038 R1 — snapshot-freshness guard (rule-independent, so filter once).
+    # The open-position snapshot lags the open; if it has not caught up, the
+    # ladder we read may be missing the newest leg → add_count / floating /
+    # anchor are all computed off a partial ladder → silent misjudge. Mirror the
+    # leverage-abuse `modify_dt >= last_open_dt` guard: require the account's
+    # mt4_users snapshot (`snapshot_modify_dt`) to have advanced to at least the
+    # event-gated open (`gate_latest_open_dt`). If stale, skip — the overlap
+    # window retries next tick. Candidates without gate metadata (pure-engine
+    # threshold tests) bypass the guard. OPT-0037 dropped settle 60→30s which
+    # raised the odds of reading a not-yet-synced snapshot, so this backstop
+    # matters more now.
+    fresh_candidates: List[Dict[str, Any]] = []
+    for g in candidates:
+        gate_open = g.get("gate_latest_open_dt")
+        if gate_open is not None:
+            mdt = g.get("snapshot_modify_dt")
+            if mdt is None or mdt < gate_open:
+                logger.info(
+                    "Martingale: snapshot stale for %s-%s %s/%s "
+                    "(modify_dt=%s < open=%s) — skip, retry next tick",
+                    g.get("server"), g.get("login"), g.get("symbol"),
+                    g.get("direction"), _iso(mdt) if mdt else None,
+                    _iso(gate_open),
+                )
+                continue
+        fresh_candidates.append(g)
+
     alerts: List[Dict[str, Any]] = []
     for rule_idx, rule in enumerate(rules):
         if not rule.get("enabled", True):
@@ -364,7 +430,7 @@ def rule_martingale_detect(
         if rule_id < MARTINGALE_RULE_ID_BASE or rule_id > MARTINGALE_RULE_ID_MAX:
             rule_id = MARTINGALE_RULE_ID_BASE + rule_idx
 
-        for g in candidates:
+        for g in fresh_candidates:
             add_count = int(g["add_count"])
             if add_count < min_add:
                 continue  # not a ladder yet (single open, or too few adds)
@@ -432,8 +498,15 @@ def scan_martingale(
     scan_interval_min: int = 10,
     rules: List[Dict[str, Any]],
     previous_alerts: Optional[List[Dict[str, Any]]] = None,
+    lookback_override_sec: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Run one event-gated martingale scan across the 3 monitored servers."""
+    """Run one event-gated martingale scan across the 3 monitored servers.
+
+    `lookback_override_sec` (OPT-0038 R2): when set, the opens look-back window
+    is this many seconds instead of the fixed `scan_interval_min*60 + buffer`.
+    The fast-tier scheduler feeds an *adaptive* value = (now − last_success) +
+    buffer so a skipped/late tick widens the next window and no open ages out of
+    coverage unseen. None → legacy fixed window (scan-now / tests)."""
     start = time.time()
 
     norm_rules: List[Dict[str, Any]] = []
@@ -454,7 +527,11 @@ def scan_martingale(
         return _empty_result(start)
 
     now = datetime.now(timezone.utc)
-    lookback_sec = int(scan_interval_min) * 60 + _LOOKBACK_BUFFER_SEC
+    lookback_sec = (
+        int(lookback_override_sec)
+        if lookback_override_sec is not None
+        else int(scan_interval_min) * 60 + _LOOKBACK_BUFFER_SEC
+    )
 
     conn = _get_connection(settings)
     try:
@@ -473,6 +550,13 @@ def scan_martingale(
         currency_map = {
             k: (v.get("currency") or "USD") for k, v in info_map.items()
         }
+
+        # OPT-0038 R1: per-account snapshot freshness (mt4_users.MODIFY_TIME).
+        candidate_loginsids = {
+            f"{SID_MAP[s]}-{l}"
+            for (s, l) in candidate_logins if s in SID_MAP
+        }
+        modify_map = _query_modify_time_map(conn, candidate_loginsids)
 
         # Open-position snapshot for the candidate logins, per server cluster.
         rows: List[Dict[str, Any]] = []
@@ -509,6 +593,12 @@ def scan_martingale(
             if info:
                 g["group"] = info.get("group")
                 g["zipcode"] = info.get("zipcode")
+            # OPT-0038 R1: carry the event-gated open (NOT the snapshot's own
+            # latest leg — a stale snapshot missing the new leg reports an older
+            # one) + the account's snapshot freshness, so rule_martingale_detect
+            # can skip groups whose ladder hasn't synced yet.
+            g["gate_latest_open_dt"] = open_groups[key]["latest_open_dt"]
+            g["snapshot_modify_dt"] = modify_map.get(loginsid) if loginsid else None
             candidates.append(g)
 
         alerts = rule_martingale_detect(

@@ -39,6 +39,7 @@ def reset_state(monkeypatch):
     """
     monkeypatch.setattr(bs, "_scheduler", None)
     monkeypatch.setattr(bs, "_latest_result", None)
+    monkeypatch.setattr(bs, "_event_gated_last_scan_at", None)
     yield
     if bs._scheduler is not None:
         try:
@@ -252,6 +253,92 @@ def test_run_scan_fast_burst_runs_burst_and_event_gated(monkeypatch, temp_db):
     assert martingale_called, "martingale must run in fast tier (OPT-0037)"
     assert not qoc_called
     assert not qp_called
+
+
+def _capture_event_gated_kwargs(monkeypatch):
+    """Patch the event-gated scans to record their kwargs; returns the dicts."""
+    burst_called, qoc_called, qp_called = [], [], []
+    _stub_scan_funcs(monkeypatch, burst_called, qoc_called, qp_called)
+    captured: dict[str, dict] = {}
+
+    def make(name):
+        def fn(*a, **kw):
+            captured[name] = kw
+            return {
+                "alerts": [], "summary": {"suspicious_count": 0,
+                                          "total_accounts_scanned": 0},
+                "scan_time_ms": 1, "scanned_at": "2026-05-16T00:00:00Z",
+                "_universe_pairs": set(),
+            }
+        return fn
+
+    monkeypatch.setattr(
+        "app.services.rule_leverage_abuse_service.scan_leverage_abuse",
+        make("leverage"))
+    monkeypatch.setattr(
+        "app.services.rule_martingale_service.scan_martingale",
+        make("martingale"))
+    return captured
+
+
+def test_fast_tier_cold_start_lookback_is_one_cadence_plus_buffer(
+    monkeypatch, temp_db
+):
+    """OPT-0038 R2: first fast tick (no prior scan) uses 60s cadence + 120s
+    buffer = 180s adaptive look-back, and records last_scan_at for next time."""
+    captured = _capture_event_gated_kwargs(monkeypatch)
+    assert bs._event_gated_last_scan_at is None
+
+    bs._run_scan(tier="fast_burst")
+
+    expected = bs.BURST_FAST_TIER_INTERVAL_SEC + bs._EVENT_GATED_LOOKBACK_BUFFER_SEC
+    assert captured["leverage"]["lookback_override_sec"] == expected
+    assert captured["martingale"]["lookback_override_sec"] == expected
+    assert bs._event_gated_last_scan_at is not None  # advanced for next tick
+
+
+def test_fast_tier_adaptive_lookback_widens_after_gap(monkeypatch, temp_db):
+    """A skipped/late tick (last scan well in the past) widens the next window to
+    (now − last_scan) + buffer instead of the fixed 180s."""
+    from datetime import datetime, timedelta, timezone
+    # Pretend the last successful event-gated scan was 600s ago.
+    monkeypatch.setattr(
+        bs, "_event_gated_last_scan_at",
+        datetime.now(timezone.utc) - timedelta(seconds=600))
+    captured = _capture_event_gated_kwargs(monkeypatch)
+
+    bs._run_scan(tier="fast_burst")
+
+    lb = captured["leverage"]["lookback_override_sec"]
+    # ~600 + 120 buffer, with a little wall-clock slack; capped below the max.
+    assert 700 <= lb <= 740
+    assert lb <= bs._EVENT_GATED_MAX_LOOKBACK_SEC
+
+
+def test_fast_tier_adaptive_lookback_capped(monkeypatch, temp_db):
+    """After a long outage the window is capped so we never fire a multi-hour
+    opens scan."""
+    from datetime import datetime, timedelta, timezone
+    monkeypatch.setattr(
+        bs, "_event_gated_last_scan_at",
+        datetime.now(timezone.utc) - timedelta(hours=6))
+    captured = _capture_event_gated_kwargs(monkeypatch)
+
+    bs._run_scan(tier="fast_burst")
+
+    assert captured["leverage"]["lookback_override_sec"] == bs._EVENT_GATED_MAX_LOOKBACK_SEC
+
+
+def test_all_tier_uses_fixed_window_no_override(monkeypatch, temp_db):
+    """scan-now ('all') keeps the fixed configured window — override stays None
+    and the adaptive timestamp is NOT touched."""
+    captured = _capture_event_gated_kwargs(monkeypatch)
+
+    bs._run_scan(tier="all")
+
+    assert captured["leverage"]["lookback_override_sec"] is None
+    assert captured["martingale"]["lookback_override_sec"] is None
+    assert bs._event_gated_last_scan_at is None  # 'all' tier doesn't track
 
 
 def test_run_scan_slow_skips_burst_and_event_gated(monkeypatch, temp_db):

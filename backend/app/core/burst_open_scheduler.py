@@ -48,6 +48,18 @@ _scan_lock = threading.Lock()
 # silently running below its 60s cadence — exactly when the settle-window blind
 # spot reopens — so we count + log them at INFO instead of swallowing at DEBUG.
 _fast_tier_skip_count = 0
+# OPT-0038 R2: adaptive look-back for the two event-gated rules on the fast tier.
+# We remember when the event-gated section last ran; the next tick's opens
+# look-back = (now − last_scan) + buffer, so a skipped/late/long tick widens the
+# next window instead of letting an open age out of the fixed ~180s coverage
+# unseen (silent miss). Reset to None on process start → cold-start tick uses one
+# cadence + buffer.
+_event_gated_last_scan_at: datetime | None = None
+_EVENT_GATED_LOOKBACK_BUFFER_SEC = 120
+# Cap so a long outage / cold start can't fire a multi-hour opens scan; beyond
+# this we accept that opens older than the cap during downtime are not re-scanned
+# (they'd be stale snapshots anyway). 30 min comfortably covers normal skip runs.
+_EVENT_GATED_MAX_LOOKBACK_SEC = 1800
 # Independent lock so the Gap Trade daily job never blocks the 5-min burst
 # tick (or vice versa). They write to the same `alert_events` table but
 # touch different rule_id ranges, so concurrent runs are safe.
@@ -164,7 +176,7 @@ def _run_scan(*, tier: str = "all") -> None:
     Reads config from SQLite, runs SQL + rule engine, merges into the
     in-memory cache, writes to scan_history, and cleans up old records.
     """
-    global _latest_result
+    global _latest_result, _event_gated_last_scan_at
 
     from ..core.config import get_settings
     from ..core.risk_monitor_db import (
@@ -221,6 +233,28 @@ def _run_scan(*, tier: str = "all") -> None:
         event_gated_interval_min = (
             1 if tier == "fast_burst" else int(config["scan_interval_min"])
         )
+        # OPT-0038 R2: on the fast tier, replace the fixed ~180s window with an
+        # adaptive look-back = (now − last successful event-gated scan) + buffer,
+        # capped. A skipped/late tick (lock contention, slow query, restart) thus
+        # auto-widens the next window so no open slips past unseen. Other tiers
+        # ('all' scan-now, 'slow') keep the fixed window → override stays None.
+        event_gated_lookback_sec: int | None = None
+        now_tick: datetime | None = None
+        if tier == "fast_burst":
+            now_tick = datetime.now(timezone.utc)
+            if _event_gated_last_scan_at is None:
+                gap_sec = float(BURST_FAST_TIER_INTERVAL_SEC)  # cold start
+            else:
+                gap_sec = (now_tick - _event_gated_last_scan_at).total_seconds()
+            event_gated_lookback_sec = int(min(
+                max(gap_sec, BURST_FAST_TIER_INTERVAL_SEC)
+                + _EVENT_GATED_LOOKBACK_BUFFER_SEC,
+                _EVENT_GATED_MAX_LOOKBACK_SEC,
+            ))
+            logger.debug(
+                "Event-gated adaptive lookback: %ds (gap since last scan %.0fs)",
+                event_gated_lookback_sec, gap_sec,
+            )
 
         # Always merge SQLite-recent QP alerts into the dedup pool — see
         # `_build_quick_profit_prev_alerts` for why in-memory alone is unsafe.
@@ -297,6 +331,7 @@ def _run_scan(*, tier: str = "all") -> None:
                     scan_interval_min=event_gated_interval_min,
                     rules=leverage_config["rules"],
                     previous_alerts=leverage_prev,
+                    lookback_override_sec=event_gated_lookback_sec,
                 )
             except Exception:
                 logger.error("Leverage abuse scan failed", exc_info=True)
@@ -318,9 +353,19 @@ def _run_scan(*, tier: str = "all") -> None:
                     scan_interval_min=event_gated_interval_min,
                     rules=martingale_config["rules"],
                     previous_alerts=martingale_prev,
+                    lookback_override_sec=event_gated_lookback_sec,
                 )
             except Exception:
                 logger.error("Martingale scan failed", exc_info=True)
+
+        # OPT-0038 R2: mark this fast tick as the new "last successful event-gated
+        # scan" so the NEXT tick's adaptive look-back starts from here. Advanced
+        # even when both rules are disabled / emitted nothing — the opens window
+        # up to now_tick has been covered, so there's nothing for a later tick to
+        # re-scan. A scan that raised was swallowed above, but the window is still
+        # considered attempted; the overlap buffer absorbs the rare partial miss.
+        if tier == "fast_burst" and now_tick is not None:
+            _event_gated_last_scan_at = now_tick
 
         # Build this tick's alerts. For tiered modes ('fast_burst'/'slow'),
         # we MERGE with the not-touched alerts from _latest_result so the
