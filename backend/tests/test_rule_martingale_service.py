@@ -60,17 +60,15 @@ def _candidate(
     latest_open=BASE + timedelta(seconds=30),
     currency="USD",
     gate_latest_open_dt=...,
-    snapshot_modify_dt=...,
 ) -> dict[str, Any]:
     position_count = add_count + 1
-    # OPT-0038 R1: by default the snapshot is FRESH — gate open = latest leg, and
-    # mt4_users.MODIFY_TIME has advanced a few seconds past it — so the freshness
-    # guard passes and existing threshold tests are unaffected. Staleness tests
-    # override snapshot_modify_dt to an earlier instant.
+    # OPT-0038 R1: by default the snapshot ladder is FRESH — its latest leg
+    # (`latest_open`) has reached the event-gated open — so the freshness guard
+    # passes and existing threshold tests are unaffected. Staleness tests set
+    # gate_latest_open_dt AHEAD of the snapshot's latest leg (the gated add hasn't
+    # replicated into the snapshot yet).
     if gate_latest_open_dt is ...:
         gate_latest_open_dt = latest_open
-    if snapshot_modify_dt is ...:
-        snapshot_modify_dt = latest_open + timedelta(seconds=5)
     return {
         "server": server,
         "login": login,
@@ -82,7 +80,6 @@ def _candidate(
         "first_open_dt": first_open,
         "latest_open_dt": latest_open,
         "gate_latest_open_dt": gate_latest_open_dt,
-        "snapshot_modify_dt": snapshot_modify_dt,
         "position_count": position_count,
         "add_count": add_count,
         "total_lots": round(anchor_lots + new_lots, 2),
@@ -228,28 +225,32 @@ def test_direction_and_symbol_are_independent_groups():
     assert keys == {("EURUSD", "Buy"), ("XAUUSD", "Buy")}  # Sell (profit) excluded
 
 
-# ── OPT-0038 R1: snapshot-freshness guard ───────────────────────────────
+# ── OPT-0038 R1: snapshot-freshness guard (ladder self-check) ────────────
 
-def test_stale_snapshot_skipped_when_modify_behind_open():
-    # mt4_users hasn't synced the new leg yet (modify_dt < the gated open) → the
-    # ladder we read may be partial → skip, don't misjudge.
+def test_stale_ladder_skipped_when_snapshot_behind_gate():
+    # The gated add (at +30s) hasn't replicated into the snapshot yet — the
+    # ladder's newest leg is still at +0s (< the gated open) → the ladder we read
+    # is partial → skip, don't misjudge off it.
     c = _candidate(
+        latest_open=BASE,
         gate_latest_open_dt=BASE + timedelta(seconds=30),
-        snapshot_modify_dt=BASE + timedelta(seconds=10),
     )
     assert rule_martingale_detect([c], [_rule()]) == []
 
 
-def test_missing_modify_dt_skipped():
-    # No snapshot row at all (account vanished from mt4_users) → fail-closed.
-    c = _candidate(snapshot_modify_dt=None)
-    assert rule_martingale_detect([c], [_rule()]) == []
-
-
-def test_fresh_snapshot_at_exact_boundary_fires():
-    # modify_dt == gated open → caught up (>=), so it fires.
+def test_fresh_ladder_at_exact_boundary_fires():
+    # snapshot latest leg == gated open → the gated add IS present (>=) → fires.
     open_dt = BASE + timedelta(seconds=30)
-    c = _candidate(gate_latest_open_dt=open_dt, snapshot_modify_dt=open_dt)
+    c = _candidate(latest_open=open_dt, gate_latest_open_dt=open_dt)
+    assert len(rule_martingale_detect([c], [_rule()])) == 1
+
+
+def test_ladder_ahead_of_gate_fires():
+    # Snapshot is even fresher than the gate (a newer leg arrived) → fires.
+    c = _candidate(
+        latest_open=BASE + timedelta(seconds=45),
+        gate_latest_open_dt=BASE + timedelta(seconds=30),
+    )
     assert len(rule_martingale_detect([c], [_rule()])) == 1
 
 
@@ -258,7 +259,6 @@ def test_no_gate_metadata_bypasses_guard():
     # subject to the freshness guard — guard only fires when gate data is present.
     c = _candidate()
     c.pop("gate_latest_open_dt")
-    c.pop("snapshot_modify_dt")
     assert len(rule_martingale_detect([c], [_rule()])) == 1
 
 

@@ -341,6 +341,36 @@ def test_all_tier_uses_fixed_window_no_override(monkeypatch, temp_db):
     assert bs._event_gated_last_scan_at is None  # 'all' tier doesn't track
 
 
+def test_fast_tier_failed_scan_does_not_advance_timestamp(monkeypatch, temp_db):
+    """OPT-0038 R2 / review #2: if an event-gated scan RAISES, the adaptive
+    timestamp must NOT advance — otherwise a multi-tick outage would march the
+    window past opens that were never scanned. A failed tick leaves the marker so
+    the next successful tick widens to cover the gap."""
+    burst_called, qoc_called, qp_called = [], [], []
+    _stub_scan_funcs(monkeypatch, burst_called, qoc_called, qp_called)
+
+    def boom(*a, **kw):
+        raise RuntimeError("MySQL unreachable")
+
+    monkeypatch.setattr(
+        "app.services.rule_leverage_abuse_service.scan_leverage_abuse", boom)
+
+    assert bs._event_gated_last_scan_at is None
+    bs._run_scan(tier="fast_burst")  # leverage raises, swallowed by _run_scan
+    assert bs._event_gated_last_scan_at is None, (
+        "timestamp must stay put when a scan failed, so the next tick widens")
+
+
+def test_fast_tier_successful_scan_advances_timestamp(monkeypatch, temp_db):
+    """Sanity counterpart: a clean fast tick DOES advance the marker."""
+    burst_called, qoc_called, qp_called = [], [], []
+    _stub_scan_funcs(monkeypatch, burst_called, qoc_called, qp_called)
+
+    assert bs._event_gated_last_scan_at is None
+    bs._run_scan(tier="fast_burst")
+    assert bs._event_gated_last_scan_at is not None
+
+
 def test_run_scan_slow_skips_burst_and_event_gated(monkeypatch, temp_db):
     """OPT-0037: slow tier runs qoc/qp/hedge only — NOT burst/leverage/martingale."""
     burst_called, qoc_called, qp_called = [], [], []

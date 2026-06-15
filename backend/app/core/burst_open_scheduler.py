@@ -319,6 +319,14 @@ def _run_scan(*, tier: str = "all") -> None:
         # in-memory last tick (via prev_alerts) PLUS recent leverage rows from
         # SQLite, so the first scan after a restart doesn't re-emit opens that
         # were already alerted (prev_alerts' SQLite portion only covers QP).
+        # OPT-0038 R2: track whether the event-gated section actually completed
+        # this tick. If a scan raises (e.g. MySQL unreachable), we must NOT
+        # advance `_event_gated_last_scan_at` — otherwise during a multi-tick
+        # outage the timestamp would keep advancing past opens we never scanned,
+        # and on recovery the adaptive window would be too narrow to catch up
+        # (silent miss). A failed tick leaves the timestamp where it was so the
+        # next successful tick widens to cover the whole gap (outsider-review #2).
+        event_gated_ok = True
         leverage_result: dict[str, Any] | None = None
         if include_leverage and leverage_config.get("enabled", True) and leverage_config.get("rules"):
             try:
@@ -334,6 +342,7 @@ def _run_scan(*, tier: str = "all") -> None:
                     lookback_override_sec=event_gated_lookback_sec,
                 )
             except Exception:
+                event_gated_ok = False
                 logger.error("Leverage abuse scan failed", exc_info=True)
 
         # Martingale (rule_id 111-120, event-gated). Dedup on
@@ -356,15 +365,17 @@ def _run_scan(*, tier: str = "all") -> None:
                     lookback_override_sec=event_gated_lookback_sec,
                 )
             except Exception:
+                event_gated_ok = False
                 logger.error("Martingale scan failed", exc_info=True)
 
         # OPT-0038 R2: mark this fast tick as the new "last successful event-gated
-        # scan" so the NEXT tick's adaptive look-back starts from here. Advanced
-        # even when both rules are disabled / emitted nothing — the opens window
-        # up to now_tick has been covered, so there's nothing for a later tick to
-        # re-scan. A scan that raised was swallowed above, but the window is still
-        # considered attempted; the overlap buffer absorbs the rare partial miss.
-        if tier == "fast_burst" and now_tick is not None:
+        # scan" so the NEXT tick's adaptive look-back starts from here — but ONLY
+        # if the section completed without a swallowed scan failure. On failure we
+        # leave the timestamp untouched so the next tick's window widens to cover
+        # this tick's interval too (no open ages out of coverage unseen during an
+        # outage). Advanced even when both rules are disabled / emitted nothing —
+        # then there were simply no opens to miss.
+        if tier == "fast_burst" and now_tick is not None and event_gated_ok:
             _event_gated_last_scan_at = now_tick
 
         # Build this tick's alerts. For tiered modes ('fast_burst'/'slow'),
