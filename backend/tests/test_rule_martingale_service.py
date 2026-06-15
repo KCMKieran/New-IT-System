@@ -59,8 +59,16 @@ def _candidate(
     first_open=BASE,
     latest_open=BASE + timedelta(seconds=30),
     currency="USD",
+    gate_latest_open_dt=...,
 ) -> dict[str, Any]:
     position_count = add_count + 1
+    # OPT-0038 R1: by default the snapshot ladder is FRESH — its latest leg
+    # (`latest_open`) has reached the event-gated open — so the freshness guard
+    # passes and existing threshold tests are unaffected. Staleness tests set
+    # gate_latest_open_dt AHEAD of the snapshot's latest leg (the gated add hasn't
+    # replicated into the snapshot yet).
+    if gate_latest_open_dt is ...:
+        gate_latest_open_dt = latest_open
     return {
         "server": server,
         "login": login,
@@ -71,6 +79,7 @@ def _candidate(
         "new_lots": new_lots,
         "first_open_dt": first_open,
         "latest_open_dt": latest_open,
+        "gate_latest_open_dt": gate_latest_open_dt,
         "position_count": position_count,
         "add_count": add_count,
         "total_lots": round(anchor_lots + new_lots, 2),
@@ -216,6 +225,43 @@ def test_direction_and_symbol_are_independent_groups():
     assert keys == {("EURUSD", "Buy"), ("XAUUSD", "Buy")}  # Sell (profit) excluded
 
 
+# ── OPT-0038 R1: snapshot-freshness guard (ladder self-check) ────────────
+
+def test_stale_ladder_skipped_when_snapshot_behind_gate():
+    # The gated add (at +30s) hasn't replicated into the snapshot yet — the
+    # ladder's newest leg is still at +0s (< the gated open) → the ladder we read
+    # is partial → skip, don't misjudge off it.
+    c = _candidate(
+        latest_open=BASE,
+        gate_latest_open_dt=BASE + timedelta(seconds=30),
+    )
+    assert rule_martingale_detect([c], [_rule()]) == []
+
+
+def test_fresh_ladder_at_exact_boundary_fires():
+    # snapshot latest leg == gated open → the gated add IS present (>=) → fires.
+    open_dt = BASE + timedelta(seconds=30)
+    c = _candidate(latest_open=open_dt, gate_latest_open_dt=open_dt)
+    assert len(rule_martingale_detect([c], [_rule()])) == 1
+
+
+def test_ladder_ahead_of_gate_fires():
+    # Snapshot is even fresher than the gate (a newer leg arrived) → fires.
+    c = _candidate(
+        latest_open=BASE + timedelta(seconds=45),
+        gate_latest_open_dt=BASE + timedelta(seconds=30),
+    )
+    assert len(rule_martingale_detect([c], [_rule()])) == 1
+
+
+def test_no_gate_metadata_bypasses_guard():
+    # Pure-engine candidate without gate info (e.g. legacy threshold test) is not
+    # subject to the freshness guard — guard only fires when gate data is present.
+    c = _candidate()
+    c.pop("gate_latest_open_dt")
+    assert len(rule_martingale_detect([c], [_rule()])) == 1
+
+
 # ── multi-rule ──────────────────────────────────────────────────────────
 
 def test_multi_rule_fires_only_clearing_rules():
@@ -226,6 +272,41 @@ def test_multi_rule_fires_only_clearing_rules():
     ]
     alerts = rule_martingale_detect([_candidate(anchor_lots=1.0, new_lots=1.0)], rules)
     assert {a["rule_id"] for a in alerts} == {111}
+
+
+# ── OPT-0038 R2: adaptive look-back override ─────────────────────────────
+
+class _DummyConn:
+    def close(self):
+        pass
+
+
+def test_lookback_override_used(monkeypatch):
+    captured: dict[str, Any] = {}
+
+    def fake_q(conn, *, lookback_sec, settle_sec, now):
+        captured["lookback"] = lookback_sec
+        return {}  # empty → scan early-returns before touching the snapshot
+
+    monkeypatch.setattr(svc, "_get_connection", lambda settings: _DummyConn())
+    monkeypatch.setattr(svc, "_query_recent_open_groups", fake_q)
+    svc.scan_martingale(
+        None, scan_interval_min=10, rules=[_rule()], lookback_override_sec=275,
+    )
+    assert captured["lookback"] == 275
+
+
+def test_lookback_default_when_no_override(monkeypatch):
+    captured: dict[str, Any] = {}
+
+    def fake_q(conn, *, lookback_sec, settle_sec, now):
+        captured["lookback"] = lookback_sec
+        return {}
+
+    monkeypatch.setattr(svc, "_get_connection", lambda settings: _DummyConn())
+    monkeypatch.setattr(svc, "_query_recent_open_groups", fake_q)
+    svc.scan_martingale(None, scan_interval_min=10, rules=[_rule()])
+    assert captured["lookback"] == 10 * 60 + svc._LOOKBACK_BUFFER_SEC
 
 
 # ── _build_position_groups: anchor / latest / CEN ───────────────────────

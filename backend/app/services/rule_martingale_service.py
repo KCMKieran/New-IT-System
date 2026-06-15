@@ -352,6 +352,36 @@ def rule_martingale_detect(
                 a.get("last_open") or "",
             ))
 
+    # OPT-0038 R1 — snapshot-freshness guard (rule-independent, so filter once).
+    # The open-position snapshot (mt4_trades / mt5_positions) lags the open by
+    # replication delay; if it has not caught up, the ladder we read is missing
+    # the newest leg → add_count / floating / anchor are computed off a partial
+    # ladder → silent misjudge. Guard DIRECTLY on the table we read: the snapshot
+    # ladder's own latest leg (`latest_open_dt`) must have reached the
+    # event-gated open (`gate_latest_open_dt`). If the snapshot's newest leg is
+    # still behind the gated open, the gated add hasn't replicated yet — skip and
+    # let the overlap window retry next tick. (An earlier draft proxied this via
+    # fxbackoffice.mt4_users.MODIFY_TIME, but that is a *different* table from the
+    # ladder and bumps on margin-recompute independently of trade replication, so
+    # it could pass on a partial ladder — OPT-0038 outsider-review #1.) Candidates
+    # without gate metadata (pure-engine threshold tests) bypass the guard.
+    fresh_candidates: List[Dict[str, Any]] = []
+    for g in candidates:
+        gate_open = g.get("gate_latest_open_dt")
+        if gate_open is not None:
+            snap_latest = g.get("latest_open_dt")
+            if snap_latest is None or snap_latest < gate_open:
+                logger.info(
+                    "Martingale: snapshot ladder behind gate for %s-%s %s/%s "
+                    "(snapshot latest=%s < gated open=%s) — skip, retry next tick",
+                    g.get("server"), g.get("login"), g.get("symbol"),
+                    g.get("direction"),
+                    _iso(snap_latest) if snap_latest else None,
+                    _iso(gate_open),
+                )
+                continue
+        fresh_candidates.append(g)
+
     alerts: List[Dict[str, Any]] = []
     for rule_idx, rule in enumerate(rules):
         if not rule.get("enabled", True):
@@ -364,7 +394,7 @@ def rule_martingale_detect(
         if rule_id < MARTINGALE_RULE_ID_BASE or rule_id > MARTINGALE_RULE_ID_MAX:
             rule_id = MARTINGALE_RULE_ID_BASE + rule_idx
 
-        for g in candidates:
+        for g in fresh_candidates:
             add_count = int(g["add_count"])
             if add_count < min_add:
                 continue  # not a ladder yet (single open, or too few adds)
@@ -432,8 +462,15 @@ def scan_martingale(
     scan_interval_min: int = 10,
     rules: List[Dict[str, Any]],
     previous_alerts: Optional[List[Dict[str, Any]]] = None,
+    lookback_override_sec: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Run one event-gated martingale scan across the 3 monitored servers."""
+    """Run one event-gated martingale scan across the 3 monitored servers.
+
+    `lookback_override_sec` (OPT-0038 R2): when set, the opens look-back window
+    is this many seconds instead of the fixed `scan_interval_min*60 + buffer`.
+    The fast-tier scheduler feeds an *adaptive* value = (now − last_success) +
+    buffer so a skipped/late tick widens the next window and no open ages out of
+    coverage unseen. None → legacy fixed window (scan-now / tests)."""
     start = time.time()
 
     norm_rules: List[Dict[str, Any]] = []
@@ -454,7 +491,11 @@ def scan_martingale(
         return _empty_result(start)
 
     now = datetime.now(timezone.utc)
-    lookback_sec = int(scan_interval_min) * 60 + _LOOKBACK_BUFFER_SEC
+    lookback_sec = (
+        int(lookback_override_sec)
+        if lookback_override_sec is not None
+        else int(scan_interval_min) * 60 + _LOOKBACK_BUFFER_SEC
+    )
 
     conn = _get_connection(settings)
     try:
@@ -509,6 +550,10 @@ def scan_martingale(
             if info:
                 g["group"] = info.get("group")
                 g["zipcode"] = info.get("zipcode")
+            # OPT-0038 R1: carry the event-gated open so rule_martingale_detect
+            # can verify the snapshot ladder's own latest leg has caught up to it
+            # (else the ladder is partial → skip, retry next tick).
+            g["gate_latest_open_dt"] = open_groups[key]["latest_open_dt"]
             candidates.append(g)
 
         alerts = rule_martingale_detect(

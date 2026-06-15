@@ -1,7 +1,7 @@
 ---
 id: OPT-0038
 title: event-gated 规则 fast-tier 硬化（马丁快照新鲜度守卫 + 自适应 lookback）
-status: wip
+status: done
 priority: P2
 area: backend
 effort: M
@@ -53,4 +53,34 @@ OPT-0037 live-with。
 
 ## 结果
 
-（claim + 做完时填）
+**交付（branch `opt/event-gated-tier-hardening`，2 commit）：**
+
+- **R1（达成，但实现优于原 AC）** — 马丁快照新鲜度守卫。原 AC 要求镜像滥用杠杆的
+  `mt4_users.MODIFY_TIME >= 开仓时间`。实现初版照此做了，但 Stage 1 outsider-review #1 指出
+  **马丁读的是 `mt4_trades`/`mt5_positions`，跟 MODIFY_TIME 不是同一张表**——MODIFY_TIME 在
+  保证金重算时跳、与成交行复制独立，守卫可能在残缺 ladder 上放行。改为**对实际读的表直接自检**：
+  要求快照 ladder 自身最新腿 `latest_open_dt >= gate_latest_open_dt`（事件门控检测到的开仓）。
+  更正确、且省掉 `_query_modify_time_map` 一次查询，并消掉 NULL/future-clock/query-throws 三个
+  失败模式。`rule_martingale_detect` 前置过滤 + INFO log。
+- **R2（达成）** — fast-tier 自适应 lookback。调度器记 `_event_gated_last_scan_at`，
+  `lookback = (now − last_success) + 120s buffer`，capped 1800s；两条 scan 加
+  `lookback_override_sec` 参，scan-now('all')/slow 保持固定窗口。Stage 1 review #2 指出原实现
+  **时间戳无条件推进、outage 期间会漏扫**——改为 `event_gated_ok` 标志门控，任一 scan 抛异常则
+  不推进，下一 tick 自动加宽补齐。
+- **测试** +14（马丁 R1 ladder 自检 4 / R2 override 2；杠杆 R2 override 2；调度器自适应+
+  outage 安全 6）。`verify.sh` 绿，backend 257 passed。
+
+**与 AC 偏差：** R1 用 ladder 自检替代 AC 字面的 MODIFY_TIME 代理（review 驱动，更正确）。
+R3（per-rule 静默告警端点）仍标"可选"，只落了 log 级观测，未做端点 → 见 follow-up。
+
+**Stage 1 outsider-review 处理记录（独立后台线程冷审）：**
+- #1 残缺 ladder silent-miss → **当场修**（commit f29493e，ladder 自检）。
+- #2 outage 时间戳推进漏扫 → **当场修**（commit f29493e，成功才推进 + 注释修正 review #7）。
+- #4 NULL/future MODIFY_TIME / query-throws → 被 #1 重构**吸收**（不再依赖 MODIFY_TIME）。
+
+**Follow-up（live-with，未修）：**
+- **三时钟偏移（review #2/#3）**：gate 下界用 MySQL `NOW()`，settle/adaptive 用 app 时钟。
+  **pre-existing**（固定窗口同款查询），非本 OPT 引入；常态 NTP 秒级偏移被 120s buffer 吸收。
+  根治需把 gate 下界改成 app 侧绝对时间戳传入（`OPEN_TIME >= %s`）——独立改动，未来按需立单。
+- **检测器静默可观测（review #5 = AC R3 可选项）**：stale-skip 速率 / lookback 撞 1800s cap
+  次数 / "N tick 零告警"心跳，目前只有 log，无聚合指标/告警端点。未来观测类 OPT 收口。

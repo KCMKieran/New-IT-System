@@ -363,8 +363,15 @@ def scan_leverage_abuse(
     scan_interval_min: int = 10,
     rules: List[Dict[str, Any]],
     previous_alerts: Optional[List[Dict[str, Any]]] = None,
+    lookback_override_sec: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Run one event-gated leverage-abuse scan across the 3 monitored servers."""
+    """Run one event-gated leverage-abuse scan across the 3 monitored servers.
+
+    `lookback_override_sec` (OPT-0038 R2): when set, the opens look-back window
+    is this many seconds instead of the fixed `scan_interval_min*60 + buffer`.
+    The fast-tier scheduler feeds an *adaptive* value = (now − last_success) +
+    buffer so a skipped/late tick widens the next window and no open ages out of
+    coverage unseen. None → legacy fixed window (scan-now / tests)."""
     start = time.time()
 
     norm_rules: List[Dict[str, Any]] = []
@@ -384,7 +391,11 @@ def scan_leverage_abuse(
         return _empty_result(start)
 
     now = datetime.now(timezone.utc)
-    lookback_sec = int(scan_interval_min) * 60 + _LOOKBACK_BUFFER_SEC
+    lookback_sec = (
+        int(lookback_override_sec)
+        if lookback_override_sec is not None
+        else int(scan_interval_min) * 60 + _LOOKBACK_BUFFER_SEC
+    )
 
     conn = _get_connection(settings)
     try:

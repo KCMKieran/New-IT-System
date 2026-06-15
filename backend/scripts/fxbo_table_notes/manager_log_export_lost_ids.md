@@ -1,0 +1,2 @@
+- manager_log 导出遗漏补偿队列：增量导出时漏掉的 manager_log.id 落这里待重导
+- 配套 `manager_log_export_last_id`（导出游标）一起看

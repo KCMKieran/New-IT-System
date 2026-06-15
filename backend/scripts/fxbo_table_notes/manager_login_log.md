@@ -1,0 +1,3 @@
+- CRM 后台员工登录历史：每次后台管理员登录写一行（`managerId` + `ip` + `createdAt`）
+- `managerId`→managers.id（ON DELETE CASCADE，员工删除则其登录记录一并删）
+- 排查"某员工从哪个 IP 登录/异地登录"走 `IDX_managerId_createdAt` 或 `IDX_managerId_ip`

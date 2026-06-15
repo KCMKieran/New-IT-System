@@ -211,6 +211,40 @@ def test_settle_delay_ignores_too_recent_opens(monkeypatch):
     assert out[("MT4_Live", 2)]["total_lots"] == 2.0
 
 
+# ── OPT-0038 R2: adaptive look-back override ─────────────────────────────
+
+class _DummyConn:
+    def close(self): pass
+
+
+def test_lookback_override_used(monkeypatch):
+    captured: dict[str, Any] = {}
+
+    def fake_q(conn, *, lookback_sec, settle_sec, now):
+        captured["lookback"] = lookback_sec
+        return {}  # empty → scan early-returns
+
+    monkeypatch.setattr(svc, "_get_connection", lambda settings: _DummyConn())
+    monkeypatch.setattr(svc, "_query_recent_settled_opens", fake_q)
+    svc.scan_leverage_abuse(
+        None, scan_interval_min=10, rules=[_rule()], lookback_override_sec=275,
+    )
+    assert captured["lookback"] == 275
+
+
+def test_lookback_default_when_no_override(monkeypatch):
+    captured: dict[str, Any] = {}
+
+    def fake_q(conn, *, lookback_sec, settle_sec, now):
+        captured["lookback"] = lookback_sec
+        return {}
+
+    monkeypatch.setattr(svc, "_get_connection", lambda settings: _DummyConn())
+    monkeypatch.setattr(svc, "_query_recent_settled_opens", fake_q)
+    svc.scan_leverage_abuse(None, scan_interval_min=10, rules=[_rule()])
+    assert captured["lookback"] == 10 * 60 + svc._LOOKBACK_BUFFER_SEC
+
+
 # ── _get_margin_snapshot: CEN + demo exclusion ─────────────────────────
 
 class _FakeCursor:

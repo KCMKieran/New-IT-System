@@ -65,6 +65,10 @@ TIER_A = [
     "psps",
     "ib_tree",
     "ib_tree_with_self",
+    "manager_log",
+    "manager_login_log",
+    "manager_log_export_last_id",
+    "manager_log_export_lost_ids",
 ]
 
 # One-line purposes for the index (Tier A required; Tier B best-effort).
@@ -91,6 +95,10 @@ PURPOSE = {
     "psps": "PSP 支付通道配置；cid=0 即 CN 通道",
     "ib_tree": "IB 层级闭包表（ancestor/descendant）",
     "ib_tree_with_self": "IB 层级闭包表含自身行",
+    "manager_log": "CRM 后台操作审计日志（text 自然语言事件，如 Created/Updated wallet #id [address]）",
+    "manager_login_log": "CRM 后台管理员登录日志（managerId + ip + 时间）",
+    "manager_log_export_last_id": "manager_log 导出游标，单行表存最后已导出 id",
+    "manager_log_export_lost_ids": "manager_log 导出遗漏补偿队列（待重导的 id）",
     # Tier B best-effort
     "ib_processed_tickets": "IB 佣金计算过的 ticket 明细（计算引擎内部）",
     "stats_daily_snapshot": "每日账户全量快照（计算引擎内部）",
@@ -101,7 +109,6 @@ PURPOSE = {
     "ib_rules": "IB 佣金规则定义",
     "ib_rules_conditions": "IB 规则触发条件",
     "user_log_emails": "发给客户的邮件日志（含正文，大表）",
-    "manager_log": "CRM 后台操作日志",
     "transactions_log": "transactions 变更日志",
     "transactions_log_old": "transactions 旧版变更日志（历史遗留）",
     "transactions_meta": "transactions 附加元数据",

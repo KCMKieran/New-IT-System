@@ -1,0 +1,2 @@
+- manager_log 增量导出游标：单行表，`id` = 最后一次已导出的 manager_log.id（下游 ETL 从这里续传）
+- 配套 `manager_log_export_lost_ids`（导出遗漏补偿队列）一起看
