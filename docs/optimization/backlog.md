@@ -10,7 +10,6 @@
 
 | ID | Branch | Claim 日期 | 备注 |
 |----|--------|-----------|------|
-| [OPT-0038](./items/OPT-0038-event-gated-tier-hardening.md) | opt/event-gated-tier-hardening | 2026-06-15 | 马丁快照新鲜度守卫 + fast-tier 自适应 lookback |
 
 ## ✅ 待领取（Ready）
 
