@@ -10,6 +10,7 @@
 
 | ID | Branch | Claim 日期 | 备注 |
 |----|--------|-----------|------|
+| [OPT-0037](./items/OPT-0037-settle-window-blind-spot.md) | opt/settle-window-blind-spot | 2026-06-15 | event-gated 规则 settle-window 快进快出漏检（滥用杠杆+马丁）；方案选型待定 |
 
 ## ✅ 待领取（Ready）
 
