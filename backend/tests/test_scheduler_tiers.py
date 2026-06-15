@@ -117,9 +117,12 @@ def test_burst_scan_enabled_false_skips_everything(
 
 # ── _run_scan tier dispatch ──────────────────────────────────────────────
 
-def _stub_scan_funcs(monkeypatch, burst_called, qoc_called, qp_called):
-    """Patch the 3 scan_* functions; record whether each was called.
+def _stub_scan_funcs(monkeypatch, burst_called, qoc_called, qp_called,
+                     leverage_called=None, martingale_called=None):
+    """Patch the scan_* functions; record whether each was called.
     Returns minimal results so _run_scan can finish without MySQL.
+    Pass leverage_called / martingale_called lists to assert fast-tier
+    membership (OPT-0037).
     """
     def fake_burst(*a, **kw):
         burst_called.append(True)
@@ -169,11 +172,13 @@ def _stub_scan_funcs(monkeypatch, burst_called, qoc_called, qp_called):
             "_universe_pairs": {("MT4_Live", 4)},
         }
 
-    # Leverage Abuse (rule_id 101-110, OPT-0030) joined the slow tier; stub it
-    # too so the detector set is deterministic (the real scan reaches MySQL +
-    # emits nondeterministic rule_id 101 snapshot alerts). Runs in 'all' and
-    # 'slow', skipped in 'fast_burst'.
+    # Leverage Abuse (rule_id 101-110, OPT-0030) moved to the FAST tier in
+    # OPT-0037; stub it so the detector set is deterministic (the real scan
+    # reaches MySQL + emits nondeterministic rule_id 101 snapshot alerts).
+    # Runs in 'all' and 'fast_burst', skipped in 'slow'.
     def fake_leverage(*a, **kw):
+        if leverage_called is not None:
+            leverage_called.append(True)
         return {
             "alerts": [{"rule_id": 101, "server": "MT4_Live", "login": 5,
                         "symbol": "", "first_open": None}],
@@ -192,11 +197,13 @@ def _stub_scan_funcs(monkeypatch, burst_called, qoc_called, qp_called):
     monkeypatch.setattr(
         "app.services.rule_quick_profit_service.scan_quick_profit", fake_qp,
     )
-    # Martingale (rule_id 111-120, OPT-0033) joined the slow tier; stub it too
-    # so the detector set is deterministic (the real scan reaches MySQL + emits
-    # nondeterministic rule_id 111 alerts). Runs in 'all' and 'slow', skipped in
-    # 'fast_burst'.
+    # Martingale (rule_id 111-120, OPT-0033) moved to the FAST tier in OPT-0037;
+    # stub it so the detector set is deterministic (the real scan reaches MySQL +
+    # emits nondeterministic rule_id 111 alerts). Runs in 'all' and 'fast_burst',
+    # skipped in 'slow'.
     def fake_martingale(*a, **kw):
+        if martingale_called is not None:
+            martingale_called.append(True)
         return {
             "alerts": [{"rule_id": 111, "server": "MT4_Live", "login": 6,
                         "symbol": "EURUSD", "first_open": "2026-05-16T00:00:00Z"}],
@@ -231,71 +238,103 @@ def test_run_scan_all_runs_all_three(monkeypatch, temp_db):
     assert rule_ids == {1, 51, 61, 91, 101, 111}
 
 
-def test_run_scan_fast_burst_runs_only_burst(monkeypatch, temp_db):
+def test_run_scan_fast_burst_runs_burst_and_event_gated(monkeypatch, temp_db):
+    """OPT-0037: fast tier runs burst + leverage + martingale, NOT qoc/qp."""
     burst_called, qoc_called, qp_called = [], [], []
-    _stub_scan_funcs(monkeypatch, burst_called, qoc_called, qp_called)
+    leverage_called, martingale_called = [], []
+    _stub_scan_funcs(monkeypatch, burst_called, qoc_called, qp_called,
+                     leverage_called, martingale_called)
 
     bs._run_scan(tier="fast_burst")
 
     assert burst_called
+    assert leverage_called, "leverage abuse must run in fast tier (OPT-0037)"
+    assert martingale_called, "martingale must run in fast tier (OPT-0037)"
     assert not qoc_called
     assert not qp_called
 
 
-def test_run_scan_slow_skips_burst(monkeypatch, temp_db):
+def test_run_scan_slow_skips_burst_and_event_gated(monkeypatch, temp_db):
+    """OPT-0037: slow tier runs qoc/qp/hedge only — NOT burst/leverage/martingale."""
     burst_called, qoc_called, qp_called = [], [], []
-    _stub_scan_funcs(monkeypatch, burst_called, qoc_called, qp_called)
+    leverage_called, martingale_called = [], []
+    _stub_scan_funcs(monkeypatch, burst_called, qoc_called, qp_called,
+                     leverage_called, martingale_called)
 
     bs._run_scan(tier="slow")
 
     assert not burst_called
+    assert not leverage_called, "leverage moved to fast tier — must skip in slow"
+    assert not martingale_called, "martingale moved to fast tier — must skip in slow"
     assert qoc_called
     assert qp_called
 
 
 def test_run_scan_fast_burst_preserves_slow_tier_alerts(monkeypatch, temp_db):
-    """After fast_burst runs, prior slow-tier alerts (rule_id >= 51) must
-    still be visible in _latest_result.alerts (frontend cache stays accurate).
+    """After fast_burst runs, prior SLOW-tier-owned alerts (51-100: qoc/qp/hedge)
+    must still be visible in _latest_result.alerts (frontend cache stays
+    accurate). The fast-owned rules (1-50, 101-120) are freshly re-emitted.
     """
     burst_called, qoc_called, qp_called = [], [], []
     _stub_scan_funcs(monkeypatch, burst_called, qoc_called, qp_called)
 
-    # Seed: prior 'all' scan left burst + QOC + QP + hedge alerts in cache
+    # Seed: prior 'all' scan left all six detectors' alerts in cache
     bs._run_scan(tier="all")
     assert bs._latest_result is not None
     initial_rule_ids = sorted(a["rule_id"] for a in bs._latest_result["alerts"])
     assert initial_rule_ids == [1, 51, 61, 91, 101, 111]
 
-    # Reset call counters and re-stub (burst only returns slightly different)
     burst_called.clear(); qoc_called.clear(); qp_called.clear()
 
-    # Now run fast tier — burst regenerates, slow-tier alerts MUST be retained
+    # Now run fast tier — burst/leverage/martingale regenerate; the slow-owned
+    # alerts (51/61/91) MUST be retained from the prior cycle.
     bs._run_scan(tier="fast_burst")
     rule_ids = sorted(a["rule_id"] for a in bs._latest_result["alerts"])
-    assert 1 in rule_ids   # burst still there (fresh)
-    assert 51 in rule_ids  # QOC retained from prior cycle
-    assert 61 in rule_ids  # QP retained from prior cycle
-    assert 91 in rule_ids  # hedge (slow tier, rule_id >= 51) retained too
-    assert 101 in rule_ids  # leverage abuse (slow tier) retained too
-    assert 111 in rule_ids  # martingale (slow tier) retained too
+    assert 1 in rule_ids    # burst (fast-owned, fresh)
+    assert 101 in rule_ids  # leverage abuse (fast-owned now, fresh — OPT-0037)
+    assert 111 in rule_ids  # martingale (fast-owned now, fresh — OPT-0037)
+    assert 51 in rule_ids   # QOC retained from prior cycle (slow-owned)
+    assert 61 in rule_ids   # QP retained from prior cycle (slow-owned)
+    assert 91 in rule_ids   # hedge retained from prior cycle (slow-owned)
 
 
-def test_run_scan_slow_preserves_burst_alerts(monkeypatch, temp_db):
-    """Symmetric: slow tick must keep prior fast-tier burst alerts in cache."""
+def test_run_scan_slow_preserves_fast_tier_alerts(monkeypatch, temp_db):
+    """Symmetric: slow tick must keep prior fast-tier-owned alerts (burst 1-50 +
+    leverage 101-110 + martingale 111-120) in cache (OPT-0037)."""
     burst_called, qoc_called, qp_called = [], [], []
     _stub_scan_funcs(monkeypatch, burst_called, qoc_called, qp_called)
 
     bs._run_scan(tier="fast_burst")
     assert bs._latest_result is not None
-    assert any(a["rule_id"] == 1 for a in bs._latest_result["alerts"])
+    seeded = {a["rule_id"] for a in bs._latest_result["alerts"]}
+    assert {1, 101, 111} <= seeded  # fast tier emitted all three
 
     burst_called.clear(); qoc_called.clear(); qp_called.clear()
 
     bs._run_scan(tier="slow")
     rule_ids = sorted(a["rule_id"] for a in bs._latest_result["alerts"])
-    assert 1 in rule_ids   # burst from prior fast tick retained
-    assert 51 in rule_ids  # new QOC
-    assert 61 in rule_ids  # new QP
+    assert 1 in rule_ids    # burst from prior fast tick retained
+    assert 101 in rule_ids  # leverage abuse (fast-owned) retained across slow tick
+    assert 111 in rule_ids  # martingale (fast-owned) retained across slow tick
+    assert 51 in rule_ids   # new QOC
+    assert 61 in rule_ids   # new QP
+
+
+# ── tier-ownership predicate (OPT-0037) ──────────────────────────────────
+
+def test_is_fast_tier_rule_id_boundary():
+    """Fast tier owns burst (1-50) + leverage (101-110) + martingale (111-120);
+    slow tier owns qoc/qp/hedge (51-100). Gap Trade (71-90) is never cached, so
+    it falls on the slow side. Locks the cache-merge boundary."""
+    fast = [1, 50, 101, 110, 111, 120]
+    slow = [51, 60, 61, 70, 71, 90, 91, 100]
+    for rid in fast:
+        assert bs._is_fast_tier_rule_id(rid) is True, f"{rid} should be fast"
+    for rid in slow:
+        assert bs._is_fast_tier_rule_id(rid) is False, f"{rid} should be slow"
+    # Defensive: None / 0 coerce to slow side (never crash the merge).
+    assert bs._is_fast_tier_rule_id(None) is False
+    assert bs._is_fast_tier_rule_id(0) is False
 
 
 # ── lock + flag check on fast scan ────────────────────────────────────────

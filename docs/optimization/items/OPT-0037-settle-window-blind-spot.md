@@ -38,23 +38,27 @@ related: [[OPT-0030]], [[OPT-0033]], [[OPT-0011]], [[OPT-0012]]
     **MT4 不可行**（无 symbol/margin 配置表）；正是 OPT-0030「三难点」有意绕开的路
   - **L4 接受+文档+测试硬化**：零负载，维持现状盲区
 
-## 待决策（方案选型 — 见分析文档 §6）
+## 方案选型 — **方案 A（提速兜底）已选定**（2026-06-15 用户拍板）
 
-> ⚠ **本 OPT 的 AC 取决于方案选型，需用户/业务拍板后定稿**。三种取向成本/覆盖/风险差异大：
-> - **方案 A（提速兜底）** = L1+L2：盲区砍到物理下限，代价常驻负载
-> - **方案 B（MT5 重算）** = L3：MT5 抓全、MT4 仍盲，工程重
-> - **方案 C（接受+文档+测试硬化）** = L4：不动检测、零负载，明确边界
+= L1（移 fast tier）+ L2（降 settle）。未采纳 B（MT5 重算，MT4 补不齐）/ C（纯文档）。
 
-## AC（验收标准 — 方案选定后补全）
+## AC（验收标准）
 
-- [ ] **（全方案共有）** 把 §4 盲区边界写进 risk-monitor skill（滥用杠杆 + 马丁两节）+
-      测试验证指引（「验证 event-gated 规则时持仓须 >90s，且别在两次扫描间开平」）
-- [ ] **（方案 A）** 101–110 / 111–120 移入 fast tier；settle 调至 ~30s；dedup 吃 overlap
-      重复；新增/扩展 scheduler tier 测试；实测盲区下降
-- [ ] **（方案 B）** MT5 路径从 `mt5_symbols`+成交价重算开仓时 margin level；MT4 标注
-      不支持；单测覆盖重算公式（含 CEN / 不同合约规模）
-- [ ] **（方案 C）** 仅文档 + 测试硬化 + 可选 L2 降 settle
-- [ ] `verify.sh` 绿（tsc + vitest + pytest 硬闸）
+- [x] **L1**：101–110 / 111–120 从 slow 移入 fast tier（`include_*` 改
+      `tier in ("all","fast_burst")`）；cache merge 边界改 `_is_fast_tier_rule_id`
+      （fast 拥 1-50+101-120 / slow 拥 51-100）；fast tier 下 `scan_interval_min=1`
+      使 lookback 缩到 ~180s 减少 overlap 重复读
+- [x] **L2**：两条规则 `_SETTLE_SEC` 60 → 30s（仍 > 17s 同步下限，`MODIFY_TIME>=开仓`
+      守卫兜底）
+- [x] scheduler tier 测试：`test_scheduler_tiers.py` 扩 boundary 断言 +
+      fast-tier 成员（leverage/martingale 在 fast 跑、slow 跳）+ 双向 cache 保留
+- [x] 文档：risk-monitor skill（架构图 / 两规则行 / SETTLE / scheduler / env flag /
+      merge 边界 anti-pattern / Implementation Status）+ 分析文档 §6 决策
+- [x] `verify.sh` 绿（backend pytest 242 / tsc / vitest 77；eslint 344 为历史 advisory）
+
+## 结果
+
+（close 时填 —— 含 Stage 1 review 处理记录）
 
 ## 结果
 

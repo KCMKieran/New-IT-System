@@ -73,7 +73,13 @@ MAX_LEVERAGE_RULES = 10
 
 # Only evaluate opens at least this old, so fxbackoffice.mt4_users has synced
 # the new position before we read its margin level (see module docstring).
-_SETTLE_SEC = 60
+# OPT-0037: lowered 60→30 to shrink the "closed before settle" blind spot.
+# 30s sits safely above the measured min sync latency (17s), and the
+# `modify_dt >= last_open_dt` guard in rule_leverage_abuse_detect backstops any
+# not-yet-synced read (it skips + the overlap window retries next tick). Pairs
+# with running this rule in the 60s fast tier so positions held >~90s are
+# reliably caught (settle 30s + one fast-tier cadence 60s).
+_SETTLE_SEC = 30
 # Extra look-back beyond the scan interval so the processable window
 # [now-LOOKBACK, now-SETTLE] always covers a full interval with overlap; the
 # overlap is de-duplicated on (rule, server, login, open_time).

@@ -63,6 +63,21 @@ def _fast_tier_enabled() -> bool:
     return os.getenv("BURST_FAST_TIER_ENABLED", "false").lower() == "true"
 
 
+def _is_fast_tier_rule_id(rule_id: Any) -> bool:
+    """Which tier owns a rule_id's alerts for the in-memory cache merge.
+
+    Fast tier (60s) owns burst (1-50) PLUS the two event-gated rules whose
+    snapshot read must happen close to the open or it misses positions that
+    open-and-close within the settle window (OPT-0037 blind spot): leverage
+    abuse (101-110) + martingale (111-120). Slow tier owns quick-open-close
+    (51-60) + quick-profit (61-70) + hedge-open (91-100). Gap Trade (71-90)
+    never enters this cache (its cron path writes straight to alert_events),
+    so it is irrelevant here and falls on the slow side by default.
+    """
+    rid = int(rule_id or 0)
+    return 1 <= rid <= 50 or 101 <= rid <= 120
+
+
 def _gap_trade_intraday_enabled() -> bool:
     # Default OFF — dev containers run their own scheduler against the same
     # .env (flock election is per-container), so this must be opt-in per
@@ -112,12 +127,16 @@ def _build_quick_profit_prev_alerts(
 def _run_scan(*, tier: str = "all") -> None:
     """Execute one scan cycle.
 
-    OPT-0012 tier modes:
-    - 'all'         → legacy, runs burst + quick_oc + quick_profit (default
-                      when fast tier disabled; preserves prior behavior)
-    - 'fast_burst'  → burst only (called by fast tier 60s job)
-    - 'slow'        → quick_oc + quick_profit only (skips burst when fast
-                      tier owns it)
+    OPT-0012 / OPT-0037 tier modes:
+    - 'all'         → legacy, runs every detector (default when fast tier
+                      disabled; preserves prior behavior; also the scan-now path)
+    - 'fast_burst'  → burst + leverage-abuse + martingale (called by fast tier
+                      60s job). The two event-gated rules joined the fast tier in
+                      OPT-0037 so their margin/position snapshot is read close to
+                      the open (settle 30s + 60s cadence ⇒ holds >~90s reliably
+                      caught), shrinking the "closed before settle" blind spot.
+    - 'slow'        → quick_oc + quick_profit + hedge only (skips the rules the
+                      fast tier owns)
 
     Reads config from SQLite, runs SQL + rule engine, merges into the
     in-memory cache, writes to scan_history, and cleans up old records.
@@ -150,13 +169,16 @@ def _run_scan(*, tier: str = "all") -> None:
     # min cadence matches its analyst-followup mental model.
     include_hedge = tier in ("all", "slow")
     # Leverage Abuse (rule_id 101-110): event-gated (OPT-0030 Phase 2) — finds
-    # recently-OPENED accounts and reads their margin level at open. Slow tier;
-    # 'all' branch lets scan-now (tier='all') refresh it on demand.
-    include_leverage = tier in ("all", "slow")
+    # recently-OPENED accounts and reads their margin level at open. OPT-0037
+    # moved it to the FAST tier (60s): the snapshot must be read close to the
+    # open, else an open-then-close inside the settle window reads a flat
+    # account and the abuse is missed. 'all' branch lets scan-now refresh it.
+    include_leverage = tier in ("all", "fast_burst")
     # Martingale (rule_id 111-120): event-gated like Leverage Abuse — a recent
-    # add gates evaluation against the open-position snapshot. Slow tier; 'all'
-    # branch lets scan-now refresh it on demand.
-    include_martingale = tier in ("all", "slow")
+    # add gates evaluation against the open-position snapshot. OPT-0037 moved it
+    # to the FAST tier too (an add-then-close inside the settle window left the
+    # snapshot empty → the whole ladder vanished). 'all' lets scan-now refresh.
+    include_martingale = tier in ("all", "fast_burst")
 
     try:
         config = load_config()
@@ -166,6 +188,16 @@ def _run_scan(*, tier: str = "all") -> None:
         leverage_config = load_leverage_abuse_config()
         martingale_config = load_martingale_config()
         settings = get_settings()
+
+        # OPT-0037: the two event-gated rules now run on the 60s fast tier. Feed
+        # them a 1-min cadence so their opens look-back shrinks to ~180s
+        # (1*60 + _LOOKBACK_BUFFER_SEC) instead of re-scanning a full 5-min
+        # window every 60s — the overlap is still de-duped on open_time, this
+        # just trims redundant MySQL reads. scan-now ('all') keeps the full
+        # configured interval so a manual refresh covers a wider window.
+        event_gated_interval_min = (
+            1 if tier == "fast_burst" else int(config["scan_interval_min"])
+        )
 
         # Always merge SQLite-recent QP alerts into the dedup pool — see
         # `_build_quick_profit_prev_alerts` for why in-memory alone is unsafe.
@@ -239,7 +271,7 @@ def _run_scan(*, tier: str = "all") -> None:
                 )
                 leverage_result = scan_leverage_abuse(
                     settings,
-                    scan_interval_min=config["scan_interval_min"],
+                    scan_interval_min=event_gated_interval_min,
                     rules=leverage_config["rules"],
                     previous_alerts=leverage_prev,
                 )
@@ -260,7 +292,7 @@ def _run_scan(*, tier: str = "all") -> None:
                 )
                 martingale_result = scan_martingale(
                     settings,
-                    scan_interval_min=config["scan_interval_min"],
+                    scan_interval_min=event_gated_interval_min,
                     rules=martingale_config["rules"],
                     previous_alerts=martingale_prev,
                 )
@@ -285,18 +317,21 @@ def _run_scan(*, tier: str = "all") -> None:
             this_tick_alerts.extend(martingale_result["alerts"])
 
         if tier == "fast_burst":
-            # Keep slow-tier alerts (rule_id >= 51) from previous result;
-            # replace burst portion (rule_id 1-50)
+            # Keep slow-tier-owned alerts (51-100) from previous result;
+            # replace the fast-tier-owned portion (burst 1-50 + leverage
+            # 101-110 + martingale 111-120) with this tick's. See
+            # _is_fast_tier_rule_id (OPT-0037 broadened fast-tier ownership).
             kept = [
                 a for a in ((_latest_result or {}).get("alerts") or [])
-                if a.get("rule_id", 0) >= 51
+                if not _is_fast_tier_rule_id(a.get("rule_id", 0))
             ]
             merged_alerts = list(this_tick_alerts) + kept
         elif tier == "slow":
-            # Keep burst portion from previous result; replace slow portion
+            # Keep fast-tier-owned portion (1-50, 101-120) from previous
+            # result; replace the slow portion (51-100) with this tick's.
             kept = [
                 a for a in ((_latest_result or {}).get("alerts") or [])
-                if a.get("rule_id", 0) < 51
+                if _is_fast_tier_rule_id(a.get("rule_id", 0))
             ]
             merged_alerts = kept + list(this_tick_alerts)
         else:
@@ -393,12 +428,16 @@ def _locked_scan() -> None:
 
 
 def _locked_fast_burst_scan() -> None:
-    """OPT-0012 fast tier: burst-only scan, every 60s.
+    """OPT-0012 fast tier: every 60s. Runs burst + (OPT-0037) the two
+    event-gated rules leverage-abuse + martingale.
 
     Uses the SAME _scan_lock as slow tier — they share `_latest_result`
     state. If a slow tick is mid-flight, the fast tick skips (no big deal
     at 60s cadence; next tick picks it up). Worst case under heavy load:
-    one fast tick skipped every ~10 min when slow tier runs.
+    one fast tick skipped every ~10 min when slow tier runs. The added
+    leverage/martingale scans make each fast tick a bit heavier (extra opens
+    query + margin/position snapshot every 60s) — the accepted cost of
+    closing the settle-window blind spot.
     """
     if not _fast_tier_enabled():
         return
@@ -725,9 +764,10 @@ def start_burst_scheduler() -> None:
         id=JOB_ID,
         replace_existing=True,
     )
-    # OPT-0012: dedicated fast tier for Burst Open. Runs every 60s when
+    # OPT-0012: dedicated fast tier. Runs every 60s when
     # BURST_FAST_TIER_ENABLED=true. The slow-tier job above switches to
-    # 'slow' mode (skips burst) so detectors don't double-run.
+    # 'slow' mode (skips the fast-owned rules) so detectors don't double-run.
+    # OPT-0037: fast tier now also runs leverage-abuse + martingale.
     if _fast_tier_enabled():
         _scheduler.add_job(
             _locked_fast_burst_scan,
@@ -736,7 +776,8 @@ def start_burst_scheduler() -> None:
             replace_existing=True,
         )
         logger.info(
-            "Burst fast tier started: every %ds (slow tier skips burst)",
+            "Fast tier started: every %ds (burst + leverage + martingale; "
+            "slow tier skips them)",
             BURST_FAST_TIER_INTERVAL_SEC,
         )
     # Gap Trade: Mon–Sat at 07:20 HKT (Asia/Hong_Kong). Cron fires

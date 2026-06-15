@@ -69,7 +69,11 @@ MAX_MARTINGALE_RULES = 10
 
 # Only evaluate opens at least this old so the new order is already reflected in
 # the open-positions snapshot before we read it (same rationale as OPT-0030).
-_SETTLE_SEC = 60
+# OPT-0037: lowered 60→30 to shrink the "ladder closed before settle" blind spot
+# (an add-then-close inside the settle window left the position snapshot empty →
+# the group vanished and was never reported). Pairs with running this rule in the
+# 60s fast tier so ladders held >~90s are reliably caught.
+_SETTLE_SEC = 30
 # Extra look-back beyond the scan interval so the processable window
 # [now-LOOKBACK, now-SETTLE] always covers a full interval with overlap; the
 # overlap is de-duplicated on (rule, server, login, symbol, direction, open).
