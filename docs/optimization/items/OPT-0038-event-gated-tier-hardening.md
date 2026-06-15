@@ -1,7 +1,7 @@
 ---
 id: OPT-0038
 title: event-gated 规则 fast-tier 硬化（马丁快照新鲜度守卫 + 自适应 lookback）
-status: ready
+status: wip
 priority: P2
 area: backend
 effort: M
