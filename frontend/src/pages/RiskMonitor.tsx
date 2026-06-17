@@ -1575,19 +1575,14 @@ export default function RiskMonitor() {
         }
         /* 备注 (remark) column tint — red, kept distinct from the balance blue /
            net-profit violet / gap-trade amber. Translucent so zebra striping
-           shows through. Applied via remarkColDef cellClass/headerClass across
-           every account-level tab. */
+           shows through. Applied via remarkColDef cellClass across every
+           account-level tab. Cells only — the header is intentionally NOT
+           tinted (per request). */
         .risk-monitor-theme .rm-remark-cell {
           background-color: rgba(239, 68, 68, 0.07);
         }
-        .risk-monitor-theme .rm-remark-header {
-          background-color: rgba(239, 68, 68, 0.12);
-        }
         .dark .risk-monitor-theme .rm-remark-cell {
           background-color: rgba(248, 113, 113, 0.14);
-        }
-        .dark .risk-monitor-theme .rm-remark-header {
-          background-color: rgba(248, 113, 113, 0.22);
         }
       `}</style>
 
