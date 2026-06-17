@@ -138,6 +138,13 @@ def _apply_pragmas(conn: sqlite3.Connection) -> None:
 # each averaging <5 alert rows → well under 25 MB even in worst case.
 _RETENTION_DAYS = 30
 
+# Account-remarks audit trail (R7) retention. Much more generous than the 30-day
+# scan/alert window because it's a low-volume financial-control audit log (a few
+# rows per human edit, not 144 scans/day) and its whole value is being able to
+# look back at who changed/deleted a note. 365 days bounds unbounded growth
+# while keeping a year of history.
+_REMARKS_HISTORY_RETENTION_DAYS = 365
+
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS burst_open_config (
     id                INTEGER PRIMARY KEY CHECK (id = 1),
@@ -450,6 +457,41 @@ CREATE TABLE IF NOT EXISTS alert_martingale_detail (
     floating_pnl   REAL,
     add_count      INTEGER
 );
+
+-- Account Remarks (风控账户备注): one shared, server-persisted note per
+-- (server, login) account, surfaced as a remark column across the account-level
+-- risk-monitor tabs. Decoupled from alert data — the frontend pulls the full
+-- remark map separately and merges it via valueGetter. `author` is a display
+-- name sourced from the claimed View Profile (advisory only, NOT auth) — real
+-- accountability lives in account_remarks_history (device-id + trace-id).
+CREATE TABLE IF NOT EXISTS account_remarks (
+    server      TEXT    NOT NULL,
+    login       INTEGER NOT NULL,
+    note        TEXT    NOT NULL,
+    author      TEXT    NOT NULL,           -- display name (client-supplied; advisory)
+    updated_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    PRIMARY KEY (server, login)
+);
+
+-- Append-only audit trail for account_remarks (R7). Every upsert/delete writes
+-- a row capturing old/new note + the client-supplied X-Device-ID and the
+-- server-generated trace id so a destructive edit is recoverable and
+-- attributable. Bounded by the retention purge (rows older than
+-- _REMARKS_HISTORY_RETENTION_DAYS are pruned) so the trail can't grow forever.
+CREATE TABLE IF NOT EXISTS account_remarks_history (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    server      TEXT    NOT NULL,
+    login       INTEGER NOT NULL,
+    action      TEXT    NOT NULL,           -- 'upsert' | 'delete'
+    old_note    TEXT,
+    new_note    TEXT,
+    author      TEXT,                       -- client display name (advisory)
+    device_id   TEXT,                       -- X-Device-ID (client-supplied; best-effort)
+    trace_id    TEXT,                       -- server-generated request trace id
+    at          TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_account_remarks_history_login
+    ON account_remarks_history(server, login, at DESC);
 """
 
 # Default rule seeded on first run (3s / 3 orders / 5 lots)
@@ -567,6 +609,15 @@ def init_risk_monitor_db() -> None:
         deleted_history = conn.execute(
             f"DELETE FROM scan_history WHERE scanned_at < {cutoff_expr}"
         ).rowcount
+        # Bound account_remarks_history growth (F-history). Far longer window
+        # (365 days) than the scan/alert tables since it's a low-volume audit
+        # trail — one extra DELETE in the same purge path.
+        remarks_cutoff_expr = (
+            f"datetime('now', '-{_REMARKS_HISTORY_RETENTION_DAYS} days')"
+        )
+        deleted_remarks_history = conn.execute(
+            f"DELETE FROM account_remarks_history WHERE at < {remarks_cutoff_expr}"
+        ).rowcount
         conn.commit()
         if deleted_events or deleted_history:
             logger.info(
@@ -574,6 +625,12 @@ def init_risk_monitor_db() -> None:
                 deleted_events,
                 deleted_history,
                 _RETENTION_DAYS,
+            )
+        if deleted_remarks_history:
+            logger.info(
+                "Risk monitor startup purge: removed %d account_remarks_history rows older than %d days",
+                deleted_remarks_history,
+                _REMARKS_HISTORY_RETENTION_DAYS,
             )
 
     # ALTER TABLE DROP COLUMN frees pages but leaves the file the same size

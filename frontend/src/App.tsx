@@ -4,6 +4,7 @@ import { AuthProvider, useAuth } from "@/providers/auth-provider"
 import { LazyErrorBoundary, PageLoader, lazyWithRetry } from "@/components/LazyErrorBoundary"
 import { pruneStaleGridKeys } from "@/hooks/useGridColumnPersist"
 import { ensureDeviceId } from "@/lib/view-profiles/device-id"
+import { Toaster } from "@/components/ui/sonner"
 
 const DashboardLayout = lazyWithRetry(() => import("@/layouts/DashboardLayout"))
 const LoginPage = lazyWithRetry(() => import("@/pages/Login"))
@@ -121,6 +122,9 @@ function App() {
         </Suspense>
         </LazyErrorBoundary>
       </BrowserRouter>
+      {/* App-root toast outlet — sonner toast() calls (e.g. account-remarks
+          save / 409 conflict messages) need this mounted once to render. */}
+      <Toaster richColors closeButton />
     </AuthProvider>
   )
 }

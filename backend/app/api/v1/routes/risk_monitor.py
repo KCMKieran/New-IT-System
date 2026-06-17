@@ -24,7 +24,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncIterator, Iterator, Optional
 from urllib.parse import quote
 
-from fastapi import APIRouter, HTTPException, Query, Request, status
+from fastapi import APIRouter, Header, HTTPException, Path, Query, Request, status
 from fastapi.responses import StreamingResponse
 
 from ....core.alerts_pubsub import subscribe as sse_subscribe
@@ -61,7 +61,12 @@ from ....services.rule_quick_profit_service import (
     refresh_floating_for_alerts,
 )
 from ....core.config import get_settings
+from ....core.logging_config import trace_id_var
+from ....services import account_remarks_service as remarks_svc
 from ....schemas.risk_monitor import (
+    REMARK_SERVER_WHITELIST,
+    AccountRemark,
+    AccountRemarkList,
     AlertEvent,
     AlertsResponse,
     AlertsStats,
@@ -81,6 +86,7 @@ from ....schemas.risk_monitor import (
     QuickProfitConfig,
     QuickProfitFloatingRefreshItem,
     QuickProfitFloatingRefreshResponse,
+    RemarkUpsert,
 )
 
 logger = logging.getLogger(__name__)
@@ -2322,3 +2328,100 @@ async def martingale_alerts_export(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(exc),
         ) from exc
+
+
+# ── Account Remarks (风控账户备注) ──────────────────────────
+#
+# Shared, server-persisted per-account notes surfaced as a remark column across
+# the account-level tabs. Decoupled from alert data: the frontend pulls the full
+# map here and merges via valueGetter. Business logic + audit live in
+# account_remarks_service; this layer is HTTP-only.
+#
+# Security (docs/features/account-remarks.md §4):
+#   R1 optimistic-lock conflict → 409.   R2 note>2000 / R8 bad server → 422.
+#   R6/R7 — server-generated trace id + best-effort, client-supplied X-Device-ID
+#   (no auth binding) captured into the audit trail.
+
+
+def _validate_remark_path(server: str, login: int) -> None:
+    """R8: reject anything outside the server whitelist / non-positive login
+    before it can reach the DB. 422 mirrors a Pydantic validation failure."""
+    if server not in REMARK_SERVER_WHITELIST:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"invalid server '{server}'; expected one of "
+                f"{sorted(REMARK_SERVER_WHITELIST)}"
+            ),
+        )
+    if login <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="login must be a positive integer",
+        )
+
+
+@router.get("/remarks", response_model=AccountRemarkList)
+def list_account_remarks():
+    """Full remark map for all accounts (no pagination — the set is small)."""
+    rows = remarks_svc.get_all_remarks()
+    return AccountRemarkList(
+        data=[AccountRemark(**r) for r in rows],
+        total=len(rows),
+    )
+
+
+@router.put("/remarks/{server}/{login}", response_model=AccountRemark)
+def upsert_account_remark(
+    body: RemarkUpsert,
+    server: str = Path(...),
+    login: int = Path(...),
+    x_device_id: str | None = Header(default=None),
+):
+    """Create or update an account remark.
+
+    R1: a conflicting `expected_updated_at` (someone else edited the row first)
+    returns 409 Conflict. R2/R8/F4: oversize|empty note / bad server|login → 422
+    (note via Pydantic, server|login here). R6/R7: the server-generated trace id
+    (not a client-settable header) plus the best-effort, client-supplied
+    X-Device-ID are recorded into the append-only audit trail.
+    """
+    _validate_remark_path(server, login)
+    try:
+        row = remarks_svc.upsert_remark(
+            server=server,
+            login=login,
+            note=body.note,
+            author=body.author,
+            device_id=x_device_id,
+            trace_id=trace_id_var.get(),
+            expected_updated_at=body.expected_updated_at,
+        )
+    except remarks_svc.RemarkConflict as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    return AccountRemark(**row)
+
+
+@router.delete("/remarks/{server}/{login}")
+def delete_account_remark(
+    server: str = Path(...),
+    login: int = Path(...),
+    author: str = Query(default=""),
+    x_device_id: str | None = Header(default=None),
+):
+    """Delete a remark (R8-validated). The live row is removed but the old note
+    survives in the append-only audit trail (R7), so deletion is recoverable.
+    Deleting a non-existent remark is a no-op (`deleted: false`).
+
+    `author` (F6) is forwarded so delete history rows are attributable like
+    upsert rows. The trace id is the server-generated one (F9); X-Device-ID is
+    best-effort, client-supplied attribution (no auth binding)."""
+    _validate_remark_path(server, login)
+    deleted = remarks_svc.delete_remark(
+        server=server,
+        login=login,
+        author=author,
+        device_id=x_device_id,
+        trace_id=trace_id_var.get(),
+    )
+    return {"ok": True, "deleted": deleted}

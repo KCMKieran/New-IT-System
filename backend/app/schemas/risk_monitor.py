@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 # ── Rule & Config ──────────────────────────────────────────
@@ -532,3 +532,66 @@ class QuickProfitFloatingRefreshItem(BaseModel):
 
 class QuickProfitFloatingRefreshResponse(BaseModel):
     items: List[QuickProfitFloatingRefreshItem]
+
+
+# ── Account Remarks (风控账户备注) ──────────────────────────
+#
+# Shared, server-persisted note per (server, login) account, surfaced as a
+# remark column across the account-level risk-monitor tabs. This is a
+# user-input + all-staff-visible write surface, so the schema enforces the
+# security bounds spelled out in docs/features/account-remarks.md §4:
+#   R2 — note capped at 2000 chars (oversize → 422, SQL never touched).
+#   R8 — `server` whitelisted + `login` positive int (else → 422).
+#   F4 — `note` non-empty after strip (empty/whitespace-only → 422).
+
+# Account servers that own a remark anchor. login numbers are NOT unique across
+# servers, so (server, login) is the only safe key. Anything outside this set is
+# rejected before it can pollute the table (R8).
+REMARK_SERVER_WHITELIST: frozenset[str] = frozenset({"MT4_Live", "MT4_Live2", "MT5"})
+
+# R2: hard cap on a single note's length. Generous for a research note but small
+# enough that no single row can blow up the SQLite file.
+REMARK_NOTE_MAX_LEN = 2000
+
+
+class RemarkUpsert(BaseModel):
+    """Request body for PUT /risk-monitor/remarks/{server}/{login}.
+
+    `note` is bounded at REMARK_NOTE_MAX_LEN (R2) and must be non-empty after
+    stripping surrounding whitespace (F4): an empty/whitespace-only note is
+    rejected with 422, never stored. `author` is an advisory display name only
+    (best-effort, client-supplied attribution — no auth binding; the audited
+    server-side trace id + X-Device-ID, R6, are the accountability trail).
+    `expected_updated_at` carries the optimistic-lock token (R1): the
+    `updated_at` the client last read. When present and it no longer matches the
+    live row, the upsert is rejected with a 409 instead of silently overwriting
+    a concurrent edit.
+    """
+    note: str = Field(..., min_length=1, max_length=REMARK_NOTE_MAX_LEN)
+    author: str = Field(default="", max_length=120)
+    expected_updated_at: Optional[str] = Field(default=None, max_length=40)
+
+    @field_validator("note")
+    @classmethod
+    def _strip_note(cls, v: str) -> str:
+        """Strip surrounding whitespace and reject an empty-after-strip note
+        (F4). Raises ValueError → FastAPI surfaces it as a 422."""
+        stripped = v.strip()
+        if not stripped:
+            raise ValueError("note must not be empty or whitespace-only")
+        return stripped
+
+
+class AccountRemark(BaseModel):
+    """A single live remark row."""
+    server: str
+    login: int
+    note: str
+    author: str
+    updated_at: str
+
+
+class AccountRemarkList(BaseModel):
+    """Full remark map (no pagination — the set is small, a few hundred rows)."""
+    data: List[AccountRemark]
+    total: int

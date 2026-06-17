@@ -14,7 +14,15 @@
  * Roadmap: docs/features/risk-monitor-roadmap.md
  * Skill: .cursor/skills/risk-monitor/SKILL.md
  */
-import { useEffect, useState, useRef, useCallback, useMemo } from "react";
+import {
+  useEffect,
+  useState,
+  useRef,
+  useCallback,
+  useMemo,
+  createContext,
+  useContext,
+} from "react";
 import { useRiskMonitorStream } from "@/hooks/useRiskMonitorStream";
 import { useSearchParams } from "react-router-dom";
 import { useTheme } from "@/components/theme-provider";
@@ -87,6 +95,69 @@ import {
   formatCommission,
 } from "@/lib/commission";
 import { InfoHeader } from "@/components/ui/info-header";
+import { useAccountRemarks } from "@/hooks/useAccountRemarks";
+import type { UseAccountRemarks } from "@/hooks/useAccountRemarks";
+import {
+  remarkColDef,
+  REMARK_COL_ID,
+  csvSafeRemark,
+} from "@/lib/account-remarks/remarkColDef";
+import { RemarkEditDialog } from "@/components/account-remarks/RemarkEditDialog";
+
+// ── Account remarks (feat/account-remarks) ────────────────
+//
+// The 备注 column is shared across the 6 account-level tabs. Because every tab
+// is forceMounted (see the Tabs render below), calling useAccountRemarks() per
+// tab would fire 6 identical fetches and keep 6 divergent maps. Instead the
+// page mounts ONE store + ONE edit dialog and hands both to the tabs through a
+// context, so the remarks map is fetched/stored once and a single dialog drives
+// every tab's edits. The remarks store is fully decoupled from the alerts data,
+// so each tab's auto-refresh of alert rows never touches the remarks map
+// (account-remarks.md §3).
+interface RemarkContextValue {
+  /** Shared remarks store (one per page). */
+  store: UseAccountRemarks;
+  /** Open the page-level edit dialog for an account. */
+  openEditor: (server: string, login: number) => void;
+}
+
+const RemarkContext = createContext<RemarkContextValue | null>(null);
+
+/** Access the shared remarks store + dialog opener from inside a tab. */
+function useRemarkContext(): RemarkContextValue {
+  const ctx = useContext(RemarkContext);
+  if (!ctx) {
+    throw new Error("useRemarkContext must be used within RemarkContext.Provider");
+  }
+  return ctx;
+}
+
+/**
+ * F2: repaint ONLY the remark column when the shared remarks map changes.
+ *
+ * The remark colDef reads the map via a stable ref (remarksRef), so the map's
+ * identity is intentionally kept OUT of each grid's columnDefs deps — otherwise
+ * a new columnDefs reference on every fetch/save/delete would snap the column
+ * order/width/visibility back to the columnDefs order and wipe the user's
+ * persisted layout (grid-column-persist.md ~§11). The trade-off is the column
+ * won't auto-recompute; this effect nudges just the remark cells via
+ * refreshCells when the map value changes. Pass every grid api ref that hosts a
+ * remark column (e.g. the main grid + the aggregated grid).
+ */
+function useRefreshRemarkColumn(
+  remarks: Map<string, unknown>,
+  // Read-only ref view so a `GridApi<AlertEvent>` ref is accepted covariantly
+  // alongside the column-persist hook's `GridApi` ref.
+  ...apiRefs: { readonly current: GridApi | null }[]
+): void {
+  useEffect(() => {
+    for (const ref of apiRefs) {
+      ref.current?.refreshCells({ columns: [REMARK_COL_ID], force: true });
+    }
+    // apiRefs are stable refs; depend on the map value (intentional repaint).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [remarks]);
+}
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -812,7 +883,16 @@ async function exportGridAsCsv(opts: {
 
   api.setGridOption("rowData", all);
   try {
-    api.exportDataAsCsv({ fileName: opts.fileName });
+    api.exportDataAsCsv({
+      fileName: opts.fileName,
+      // R5 (CSV formula injection): the remark column renders as plain text on
+      // screen (no leading-quote artefact), so its quoting is applied here at
+      // export time only. Every other column passes through untouched.
+      processCellCallback: (params) =>
+        params.column.getColId() === REMARK_COL_ID
+          ? csvSafeRemark(params.value as string | null | undefined)
+          : params.value,
+    });
   } finally {
     api.setGridOption("rowData", currentRows);
   }
@@ -1357,7 +1437,23 @@ export default function RiskMonitor() {
     active?.scrollIntoView({ inline: "nearest", block: "nearest" });
   }, [activeTab]);
 
+  // Account remarks (feat/account-remarks): one shared store + one dialog for
+  // every account-level tab. editTarget drives the single dialog instance.
+  const remarksStore = useAccountRemarks();
+  const [editTarget, setEditTarget] = useState<{
+    server: string;
+    login: number;
+  } | null>(null);
+  const openEditor = useCallback((server: string, login: number) => {
+    setEditTarget({ server, login });
+  }, []);
+  const remarkContext = useMemo<RemarkContextValue>(
+    () => ({ store: remarksStore, openEditor }),
+    [remarksStore, openEditor],
+  );
+
   return (
+    <RemarkContext.Provider value={remarkContext}>
     <div className="flex min-w-0 flex-col gap-4 p-4 lg:p-6">
       <Tabs
         value={activeTab}
@@ -1478,7 +1574,27 @@ export default function RiskMonitor() {
           background-color: rgba(192, 132, 252, 0.22);
         }
       `}</style>
+
+      {/* Single shared remark editor for every account-level tab. Driven by
+          editTarget; reads the live row from the shared store so detail and
+          aggregated views of the same (server, login) edit one note. */}
+      {editTarget && (
+        <RemarkEditDialog
+          open={editTarget !== null}
+          onOpenChange={(o) => {
+            if (!o) setEditTarget(null);
+          }}
+          server={editTarget.server}
+          login={editTarget.login}
+          existing={remarksStore.getRemark(editTarget.server, editTarget.login)}
+          onSave={remarksStore.saveRemark}
+          onDelete={remarksStore.deleteRemark}
+          onRefetch={remarksStore.refetch}
+          formatTime={fmtTime}
+        />
+      )}
     </div>
+    </RemarkContext.Provider>
   );
 }
 
@@ -1488,6 +1604,8 @@ function BurstOpenTab({ active }: { active: boolean }) {
   const { theme } = useTheme();
   const isDarkMode = theme === "dark";
   const isMobile = useIsMobile();
+  const { store: remarksStore, openEditor: openRemarkEditor } =
+    useRemarkContext();
   const gridRef = useRef<AgGridReact<AlertEvent>>(null);
   const gridApiRef = useRef<GridApi<AlertEvent> | null>(null);
   const gridStyle = useGridThemeStyle(isDarkMode);
@@ -2095,8 +2213,16 @@ function BurstOpenTab({ active }: { active: boolean }) {
         valueFormatter: (p) => (p.value ? `1:${p.value}` : "—"),
       },
       { headerName: "账户组", field: "group", colId: "group", width: 150 },
+      remarkColDef<AlertEvent>({
+        remarksRef: remarksStore.remarksRef,
+        onEdit: openRemarkEditor,
+      }),
     ],
-    [],
+    // F2: deps must stay stable — NO `remarksStore.remarks` (its Map identity
+    // changes on every fetch/save/delete and would reset persisted column
+    // layout). The colDef reads the map via remarksRef; a refreshCells effect
+    // below repaints just the remark column when the map changes.
+    [openRemarkEditor, remarksStore.remarksRef],
   );
 
   // OPT-0027: columns for the aggregated view (per-loginsid fold).
@@ -2188,8 +2314,20 @@ function BurstOpenTab({ active }: { active: boolean }) {
         valueFormatter: (p) => fmtTime(p.value),
       },
       { headerName: "账户组", field: "group", colId: "group", width: 160 },
+      remarkColDef<BurstOpenAggregatedRow>({
+        remarksRef: remarksStore.remarksRef,
+        onEdit: openRemarkEditor,
+      }),
     ],
-    [],
+    // F2: stable deps only — see the columnDefs note above.
+    [openRemarkEditor, remarksStore.remarksRef],
+  );
+
+  // F2: repaint the remark column on both grids when the shared map changes.
+  useRefreshRemarkColumn(
+    remarksStore.remarks,
+    gridApiRef,
+    aggColumnPersist.gridApiRef,
   );
 
   const rangeLabel =
@@ -2641,6 +2779,8 @@ function QuickOpenCloseTab({ active }: { active: boolean }) {
   const { theme } = useTheme();
   const isDarkMode = theme === "dark";
   const isMobile = useIsMobile();
+  const { store: remarksStore, openEditor: openRemarkEditor } =
+    useRemarkContext();
   const gridStyle = useGridThemeStyle(isDarkMode);
   const columnPersist = useGridColumnPersist(
     "RISK_MONITOR_QUICK_OPEN_CLOSE_GRID_STATE_V1",
@@ -3069,9 +3209,19 @@ function QuickOpenCloseTab({ active }: { active: boolean }) {
             .join(", ") ?? "",
       },
       { headerName: "账户组", field: "group", colId: "group", width: 150 },
+      remarkColDef<AlertEvent>({
+        remarksRef: remarksStore.remarksRef,
+        onEdit: openRemarkEditor,
+      }),
     ],
-    [],
+    // F2: stable deps only — NO `remarksStore.remarks` (Map identity churns and
+    // would reset persisted column layout). colDef reads via remarksRef; the
+    // refreshCells effect repaints the remark column when the map changes.
+    [openRemarkEditor, remarksStore.remarksRef],
   );
+
+  // F2: repaint the remark column when the shared map changes (reads via ref).
+  useRefreshRemarkColumn(remarksStore.remarks, columnPersist.gridApiRef);
 
   const rangeLabel =
     rangePreset === "custom" && customRange?.from
@@ -4018,6 +4168,8 @@ function QuickProfitTab({ active }: { active: boolean }) {
   const { theme } = useTheme();
   const isDarkMode = theme === "dark";
   const isMobile = useIsMobile();
+  const { store: remarksStore, openEditor: openRemarkEditor } =
+    useRemarkContext();
   const gridStyle = useGridThemeStyle(isDarkMode);
   const gridApiRef = useRef<GridApi<AlertEvent> | null>(null);
   const columnPersist = useGridColumnPersist(
@@ -4532,9 +4684,19 @@ function QuickProfitTab({ active }: { active: boolean }) {
           estimateCommission(r.symbol, r.total_lots, r.group),
       }),
       { headerName: "账户组", field: "group", colId: "group", width: 150 },
+      remarkColDef<AlertEvent>({
+        remarksRef: remarksStore.remarksRef,
+        onEdit: openRemarkEditor,
+      }),
     ],
-    [],
+    // F2: stable deps only — NO `remarksStore.remarks` (Map identity churns and
+    // would reset persisted column layout). colDef reads via remarksRef; the
+    // refreshCells effect repaints the remark column when the map changes.
+    [openRemarkEditor, remarksStore.remarksRef],
   );
+
+  // F2: repaint the remark column when the shared map changes (reads via ref).
+  useRefreshRemarkColumn(remarksStore.remarks, columnPersist.gridApiRef);
 
   const rangeLabel =
     rangePreset === "custom" && customRange?.from
@@ -5096,6 +5258,8 @@ function HedgeOpenTab({ active }: { active: boolean }) {
   const { theme } = useTheme();
   const isDarkMode = theme === "dark";
   const isMobile = useIsMobile();
+  const { store: remarksStore, openEditor: openRemarkEditor } =
+    useRemarkContext();
   const gridStyle = useGridThemeStyle(isDarkMode);
   const columnPersist = useGridColumnPersist(
     "RISK_MONITOR_HEDGE_OPEN_GRID_STATE_V1",
@@ -5573,8 +5737,15 @@ function HedgeOpenTab({ active }: { active: boolean }) {
             ?.map((o) => `${o.direction} ${o.lots}`)
             .join(", ") ?? "",
       },
+      remarkColDef<AlertEvent>({
+        remarksRef: remarksStore.remarksRef,
+        onEdit: openRemarkEditor,
+      }),
     ],
-    [],
+    // F2: stable deps only — NO `remarksStore.remarks` (Map identity churns and
+    // would reset persisted column layout). colDef reads via remarksRef; the
+    // refreshCells effect repaints the remark column when the map changes.
+    [openRemarkEditor, remarksStore.remarksRef],
   );
 
   // Columns for the aggregated view. Distinct from `columnDefs` so:
@@ -5687,8 +5858,22 @@ function HedgeOpenTab({ active }: { active: boolean }) {
         valueFormatter: (p) => fmtTime(p.value),
       },
       { headerName: "账户组", field: "group", colId: "group", width: 160 },
+      remarkColDef<HedgeOpenAggregatedRow>({
+        remarksRef: remarksStore.remarksRef,
+        onEdit: openRemarkEditor,
+      }),
     ],
-    [],
+    // F2: stable deps only — NO `remarksStore.remarks` (Map identity churns and
+    // would reset persisted column layout). colDef reads via remarksRef; the
+    // refreshCells effect repaints the remark column when the map changes.
+    [openRemarkEditor, remarksStore.remarksRef],
+  );
+
+  // F2: repaint the remark column on both grids when the shared map changes.
+  useRefreshRemarkColumn(
+    remarksStore.remarks,
+    columnPersist.gridApiRef,
+    aggColumnPersist.gridApiRef,
   );
 
   const rangeLabel =
@@ -6382,6 +6567,8 @@ function LeverageAbuseTab({ active }: { active: boolean }) {
   const { theme } = useTheme();
   const isDarkMode = theme === "dark";
   const isMobile = useIsMobile();
+  const { store: remarksStore, openEditor: openRemarkEditor } =
+    useRemarkContext();
   const gridStyle = useGridThemeStyle(isDarkMode);
   const columnPersist = useGridColumnPersist(
     "RISK_MONITOR_LEVERAGE_ABUSE_GRID_STATE_V1",
@@ -6830,9 +7017,19 @@ function LeverageAbuseTab({ active }: { active: boolean }) {
       // negative=red) per user request; other tabs keep the B-book inversion.
       netProfitColDef({ colorClass: netProfitConventionalColorClass }),
       { headerName: "账户组", field: "group", colId: "group", width: 160 },
+      remarkColDef<AlertEvent>({
+        remarksRef: remarksStore.remarksRef,
+        onEdit: openRemarkEditor,
+      }),
     ],
-    [],
+    // F2: stable deps only — NO `remarksStore.remarks` (Map identity churns and
+    // would reset persisted column layout). colDef reads via remarksRef; the
+    // refreshCells effect repaints the remark column when the map changes.
+    [openRemarkEditor, remarksStore.remarksRef],
   );
+
+  // F2: repaint the remark column when the shared map changes (reads via ref).
+  useRefreshRemarkColumn(remarksStore.remarks, columnPersist.gridApiRef);
 
   const rangeLabel =
     rangePreset === "custom" && customRange?.from
@@ -7398,6 +7595,8 @@ function MartingaleTab({ active }: { active: boolean }) {
   const { theme } = useTheme();
   const isDarkMode = theme === "dark";
   const isMobile = useIsMobile();
+  const { store: remarksStore, openEditor: openRemarkEditor } =
+    useRemarkContext();
   const gridStyle = useGridThemeStyle(isDarkMode);
   const columnPersist = useGridColumnPersist(
     "RISK_MONITOR_MARTINGALE_GRID_STATE_V1",
@@ -7884,9 +8083,19 @@ function MartingaleTab({ active }: { active: boolean }) {
       },
       netDepositColDef(),
       { headerName: "账户组", field: "group", colId: "group", width: 160 },
+      remarkColDef<AlertEvent>({
+        remarksRef: remarksStore.remarksRef,
+        onEdit: openRemarkEditor,
+      }),
     ],
-    [],
+    // F2: stable deps only — NO `remarksStore.remarks` (Map identity churns and
+    // would reset persisted column layout). colDef reads via remarksRef; the
+    // refreshCells effect repaints the remark column when the map changes.
+    [openRemarkEditor, remarksStore.remarksRef],
   );
+
+  // F2: repaint the remark column when the shared map changes (reads via ref).
+  useRefreshRemarkColumn(remarksStore.remarks, columnPersist.gridApiRef);
 
   const rangeLabel =
     rangePreset === "custom" && customRange?.from
