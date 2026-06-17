@@ -111,7 +111,14 @@ export function remarkColDef<TRow extends RemarkRow>(
     // Tooltip mirrors the note (RiskMonitor grids enable browser tooltips) so a
     // long note is readable on hover without widening the column.
     tooltipValueGetter: (p) => (p.value ? String(p.value) : null),
-    cellClass: "cursor-pointer",
+    // Red tint marking the remark column, applied across every account-level
+    // tab. Mirrors the balanceColDef / netProfitColDef cellClass+headerClass
+    // pattern — the actual translucent colors live in RiskMonitor.tsx's <style>
+    // block (`.rm-remark-cell` / `.rm-remark-header`, light + dark) so the tint
+    // stays distinct from the balance blue / net-profit violet and lets zebra
+    // striping show through. `cursor-pointer` stays for the click-to-edit hint.
+    cellClass: "rm-remark-cell cursor-pointer",
+    headerClass: "rm-remark-header",
     onCellClicked: (e) => {
       if (e.data) onEdit(e.data.server, e.data.login);
     },
