@@ -683,6 +683,15 @@ function fmtCurrency(v: number | null | undefined): string {
  */
 const DISPLAY_TIME_ZONE = "Etc/GMT-3";
 
+/**
+ * Gap Trade rule 81 thresholds are TEMPORARILY hardcoded in the backend
+ * (`rule_gap_trade_gap_service.evaluate_gap_rules`): two fixed rules —
+ * A) 净入金>0 且赚回≥1×本金 ($1000+); B) 净出金客户 ($1000+). While hardcoded
+ * the config drawer must not let users edit thresholds, so we hide the "设置"
+ * button. Flip to `true` (and re-route the backend params) to re-open tuning.
+ */
+const GAP_TRADE_CONFIG_EDITABLE = false;
+
 /** Parse a backend timestamp (ISO with Z, or naive `YYYY-MM-DD HH:mm:ss`) into a Date. Returns null on failure. */
 function parseBackendTime(v: string | null | undefined): Date | null {
   if (!v) return null;
@@ -9538,10 +9547,10 @@ function GapTradeTab({ active }: { active: boolean }) {
         },
       },
       {
-        // Triggered-by label spells out the current threshold values so
-        // analysts don't have to crack open the config drawer to know
-        // why a row fired. Falls back to short labels when the config
-        // hasn't loaded yet (gapColumns rebuilds when `config` settles).
+        // Triggered-by label for the two HARDCODED rules (config drawer
+        // disabled). Rule A = ratio_x1 (净入金>0 且赚回≥1×本金, $1000+);
+        // Rule B = neg_deposit (净出金客户, $1000+). Legacy rows may still
+        // carry the old ratio/absolute/both values — keep them mapped.
         headerName: "触发条件",
         field: "triggered_by" as keyof AlertEvent,
         colId: "triggered_by",
@@ -9549,19 +9558,18 @@ function GapTradeTab({ active }: { active: boolean }) {
         cellRenderer: (params: { value?: string | null }) => {
           const v = params.value;
           if (!v) return null;
-          const usd = config?.gap_profit?.min_profit_usd;
-          const ratio = config?.gap_profit?.profit_ratio_min;
-          const usdLbl = usd != null ? `Profit > $${usd.toLocaleString()}` : "绝对";
-          const ratioLbl = ratio != null ? `Profit/净入金 > ${ratio}×` : "比率";
           const labelMap: Record<string, string> = {
-            absolute: usdLbl,
-            ratio: ratioLbl,
-            both: `${usdLbl} + ${ratioLbl}`,
+            ratio_x1: "赚回 ≥1×净入金 ($1000+)",
+            neg_deposit: "净出金客户 ($1000+)",
+            // legacy values (pre-hardcode rows)
+            absolute: "绝对 Profit ($1000+)",
+            ratio: "Profit/净入金 ≥1×",
+            both: "比率 + 绝对",
           };
           const variant =
-            v === "both"
+            v === "neg_deposit"
               ? "destructive"
-              : v === "ratio"
+              : v === "ratio_x1"
                 ? "secondary"
                 : "outline";
           return (
@@ -9585,10 +9593,9 @@ function GapTradeTab({ active }: { active: boolean }) {
         getCommission: () => null,
       }),
     ],
-    // Rebuild when gap_profit thresholds change so the "触发条件" badge
-    // tracks the live config (e.g. user lowers min_profit_usd in the
-    // drawer → existing rows immediately re-label without a reload).
-    [config?.gap_profit?.min_profit_usd, config?.gap_profit?.profit_ratio_min],
+    // Thresholds are hardcoded now (config drawer disabled), so the "触发条件"
+    // badge text is fixed — no config dependency, stable column defs.
+    [],
   );
 
   // Row class: yellow highlight for shared-IP SO+AB rows. Keeps the prior
@@ -9646,10 +9653,12 @@ function GapTradeTab({ active }: { active: boolean }) {
               />
               {exporting ? "导出中..." : "导出 CSV"}
             </Button>
-            <Button variant="outline" size="sm" onClick={handleOpenConfig}>
-              <Settings2 className="h-4 w-4 mr-1.5" />
-              设置
-            </Button>
+            {GAP_TRADE_CONFIG_EDITABLE && (
+              <Button variant="outline" size="sm" onClick={handleOpenConfig}>
+                <Settings2 className="h-4 w-4 mr-1.5" />
+                设置
+              </Button>
+            )}
           </div>
         </div>
 
@@ -9672,11 +9681,7 @@ function GapTradeTab({ active }: { active: boolean }) {
             compact
             label="Gap Trade 超额获利客户"
             value={gapClientCount}
-            description={
-              config
-                ? `累积 P&L ≥ ${config.gap_profit.profit_ratio_min}× 净入金 或 ≥ $${config.gap_profit.min_profit_usd.toLocaleString()}`
-                : "累积 P&L ≥ 1 倍本金 或 ≥ $1000"
-            }
+            description="规则A: 赚回 ≥1×净入金 ($1000+) · 规则B: 净出金客户 ($1000+)"
             dotColor={RULE_SUMMARY_CARD_STYLES[2].dot}
             textColor={RULE_SUMMARY_CARD_STYLES[2].value}
           />
@@ -9921,7 +9926,7 @@ function GapTradeTab({ active }: { active: boolean }) {
                 {detailRow.rule_id === GAP_TRADE_SO_RULE_ID ? (
                   <GapTradeSoDetail row={detailRow} />
                 ) : (
-                  <GapTradeGapDetail row={detailRow} gapConfig={config?.gap_profit} />
+                  <GapTradeGapDetail row={detailRow} />
                 )}
               </div>
             </>
@@ -10407,30 +10412,24 @@ function GapTradeSoDetail({ row }: { row: AlertEvent }) {
 }
 
 /** Per-client gap-profit detail panel — full contributing-account list + symbols. */
-function GapTradeGapDetail({
-  row,
-  gapConfig,
-}: {
-  row: AlertEvent;
-  gapConfig?: GapTradeGapRuleConfig;
-}) {
+function GapTradeGapDetail({ row }: { row: AlertEvent }) {
   const loginSids = (row.contributing_login_sids || "")
     .split(",")
     .filter(Boolean);
   const symbols = (row.symbols || "").split(",").filter(Boolean);
-  // Resolve "触发条件" to the actual threshold copy used in the table so
-  // the Sheet stays in lockstep with the table label.
+  // Resolve "触发条件" to the same fixed copy used in the table (thresholds
+  // are hardcoded — config drawer disabled). Legacy values kept mapped.
   const triggeredLabel = (() => {
     const v = row.triggered_by;
     if (!v) return "—";
-    const usd = gapConfig?.min_profit_usd;
-    const ratio = gapConfig?.profit_ratio_min;
-    const usdLbl = usd != null ? `Profit > $${usd.toLocaleString()}` : "绝对";
-    const ratioLbl = ratio != null ? `Profit/净入金 > ${ratio}×` : "比率";
-    if (v === "absolute") return usdLbl;
-    if (v === "ratio") return ratioLbl;
-    if (v === "both") return `${usdLbl} + ${ratioLbl}`;
-    return v;
+    const labelMap: Record<string, string> = {
+      ratio_x1: "赚回 ≥1×净入金 ($1000+)",
+      neg_deposit: "净出金客户 ($1000+)",
+      absolute: "绝对 Profit ($1000+)",
+      ratio: "Profit/净入金 ≥1×",
+      both: "比率 + 绝对",
+    };
+    return labelMap[v] ?? v;
   })();
   return (
     <>
