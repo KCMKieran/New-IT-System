@@ -3,13 +3,15 @@ Gap Trade — per-client window profit detection (rule_id = 81).
 
 For each client (``mt4_users.userid``) that has closed trades inside the
 MT 00:00–02:00 weekday window, sum the closed P&L across ALL the client's
-accounts (CEN-normalised), then flag the client when EITHER threshold trips:
+accounts (CEN-normalised), then flag the client via TWO hardcoded rules
+(OR'd). The frontend config drawer is disabled, so the thresholds are no
+longer user-tunable — see ``evaluate_gap_rules`` for the canonical logic:
 
-- ``profit_ratio_min``  : total_profit_usd / net_deposit_hist >= 1.0 by default
-- ``min_profit_usd``    : total_profit_usd                    >= 1000 by default
+- Rule A (positive net deposit): ratio >= 1x AND profit >= $1000
+- Rule B (net withdrawer):       net_deposit <= 0 AND profit >= $1000
 
-Either-or so we maximise recall — a tiny-deposit client doubling their
-balance OR a large-deposit client clearing $1000 in 2h both surface.
+Rule B closes the negative-net-deposit blind spot (clients who already
+withdrew more than they deposited were previously dropped entirely).
 
 Rule IDs 81-90 are reserved for this detector (only 81 used today).
 """
@@ -31,7 +33,48 @@ logger = logging.getLogger(__name__)
 GAP_TRADE_GAP_RULE_ID = 81
 GAP_TRADE_GAP_RULE_LABEL = "Gap Trade · 超额 Profit"
 
+# --- Hardcoded trigger rules (frontend config is disabled) -----------------
+# Two fixed rules, OR'd. The user-tunable profit_ratio_min / min_profit_usd /
+# min_net_deposit_hist params are intentionally IGNORED now (the gap-trade
+# config drawer is disabled in the frontend). To re-open tuning, re-enable the
+# drawer and route these constants back to the passed-in params.
+#
+#   Rule A (positive net deposit, doubled-up):
+#       net_deposit > 0  AND  profit / net_deposit >= 1.0  AND  profit >= $1000
+#   Rule B (net withdrawer — fixes the negative-deposit blind spot):
+#       net_deposit <= 0 AND  profit >= $1000
+#
+# `profit >= $1000` is a universal gate shared by both rules.
+HARDCODED_PROFIT_GATE_USD = 1000.0
+HARDCODED_RATIO_MIN = 1.0
+
 _CENT_SUFFIXES = (".cent", ".kcmc")
+
+
+def evaluate_gap_rules(
+    total_profit: float, net_deposit: Optional[float]
+) -> Tuple[bool, Optional[str]]:
+    """Pure threshold evaluation for the two hardcoded rules.
+
+    Returns ``(triggered, triggered_by)`` where ``triggered_by`` is one of
+    ``"ratio_x1"`` (Rule A) / ``"neg_deposit"`` (Rule B) / ``None``.
+
+    Kept side-effect-free so it can be unit tested without a DB.
+    """
+    if net_deposit is None:
+        return False, None
+    # Universal gate — both rules require >= $1000 absolute profit.
+    if total_profit < HARDCODED_PROFIT_GATE_USD:
+        return False, None
+    # Rule B: net withdrawers (net deposit <= 0). The ratio is meaningless
+    # here (negative / zero denominator), so absolute profit alone decides.
+    if net_deposit <= 0:
+        return True, "neg_deposit"
+    # Rule A: positive net deposit and the client cleared >= 1x of it.
+    ratio = total_profit / net_deposit
+    if ratio >= HARDCODED_RATIO_MIN:
+        return True, "ratio_x1"
+    return False, None
 
 _SID_TO_SERVER_LABEL: Dict[int, str] = {1: "MT4_Live", 5: "MT5", 6: "MT4_Live2"}
 
@@ -189,9 +232,9 @@ def detect_gap_trade_gap_profit(
     start_mt: datetime,
     end_mt: datetime,
     sid_list: List[int],
-    profit_ratio_min: float,
-    min_profit_usd: float,
-    min_net_deposit_hist: float,
+    profit_ratio_min: float,    # IGNORED — hardcoded rules (see evaluate_gap_rules)
+    min_profit_usd: float,      # IGNORED
+    min_net_deposit_hist: float,  # IGNORED
     strict_deposit: bool = False,
 ) -> Dict[str, Any]:
     """Aggregate window P&L per client and emit threshold-clearing alerts.
@@ -200,6 +243,11 @@ def detect_gap_trade_gap_profit(
     client (userid) — even though the schema also stores a primary
     ``login`` field (the highest-profit-contributing account), the canonical
     aggregation unit is the client.
+
+    NOTE: ``profit_ratio_min`` / ``min_profit_usd`` / ``min_net_deposit_hist``
+    are accepted for call-site compatibility but IGNORED — triggering now uses
+    the two hardcoded rules in ``evaluate_gap_rules`` (frontend config drawer
+    disabled). Re-route them to re-enable user tuning.
     """
     t0 = time.perf_counter()
     sid_tuple = tuple(sorted(set(int(s) for s in sid_list)))
@@ -300,26 +348,19 @@ def detect_gap_trade_gap_profit(
                 continue
             net_deposit = nd_map.get(userid)
             if net_deposit is None:
+                # Net withdrawers can have a real (negative) net deposit, so
+                # only a genuinely missing lookup (None) is dropped here —
+                # net_deposit <= 0 flows through to Rule B below.
                 dropped_no_deposit += 1
                 continue
-            if net_deposit < float(min_net_deposit_hist):
-                # Filter out tiny-deposit clients so the ratio doesn't
-                # explode on $1 deposits.
-                dropped_low_deposit += 1
-                continue
-            ratio = total_profit / net_deposit if net_deposit > 0 else 0.0
 
-            triggered_ratio = ratio >= float(profit_ratio_min)
-            triggered_abs = total_profit >= float(min_profit_usd)
-            if not (triggered_ratio or triggered_abs):
+            # Two hardcoded rules (config drawer disabled). See
+            # `evaluate_gap_rules` for the exact thresholds.
+            triggered, triggered_by = evaluate_gap_rules(total_profit, net_deposit)
+            if not triggered:
                 dropped_below_threshold += 1
                 continue
-            if triggered_ratio and triggered_abs:
-                triggered_by = "both"
-            elif triggered_ratio:
-                triggered_by = "ratio"
-            else:
-                triggered_by = "absolute"
+            ratio = total_profit / net_deposit if net_deposit > 0 else 0.0
 
             # Primary contributing account: highest profit one. The shared
             # `(server, login)` fields point to this account; the full set
