@@ -48,7 +48,7 @@ def get_open_positions_today(settings: Settings, source: str = "mt4_live") -> di
     - sid 6: MT4 Live2
     - sid 5: MT5
     - Uses closeDate = '1970-01-01' for optimized index usage.
-    - Automatically handles cent accounts (profit / 100).
+    - Automatically handles cent accounts (.kcmc/.cent): both volume and profit / 100.
     - Excludes test/demo accounts based on groups table.
     """
 
@@ -75,9 +75,13 @@ def get_open_positions_today(settings: Settings, source: str = "mt4_live") -> di
     sql = f"""
         SELECT
           t.SYMBOL AS symbol,
-          -- Use 'lots' virtual column for volume
-          SUM(CASE WHEN t.CMD = 0 THEN t.lots ELSE 0 END) AS volume_buy,
-          SUM(CASE WHEN t.CMD = 1 THEN t.lots ELSE 0 END) AS volume_sell,
+          -- Use 'lots' virtual column for volume; cent accounts (.kcmc/.cent) are scaled by 100
+          SUM(CASE WHEN t.CMD = 0 THEN
+            (CASE WHEN t.SYMBOL LIKE '%%.kcmc' OR t.SYMBOL LIKE '%%.cent' THEN t.lots / 100 ELSE t.lots END)
+          ELSE 0 END) AS volume_buy,
+          SUM(CASE WHEN t.CMD = 1 THEN
+            (CASE WHEN t.SYMBOL LIKE '%%.kcmc' OR t.SYMBOL LIKE '%%.cent' THEN t.lots / 100 ELSE t.lots END)
+          ELSE 0 END) AS volume_sell,
           -- Use 'totalProfit' (Profit+Swap+Comm) and handle cent accounts
           SUM(CASE WHEN t.CMD = 0 THEN 
             (CASE WHEN t.SYMBOL LIKE '%%.kcmc' OR t.SYMBOL LIKE '%%.cent' THEN t.totalProfit / 100 ELSE t.totalProfit END)
@@ -168,8 +172,13 @@ def get_symbol_cross_server_summary(settings: Settings, symbol: str) -> dict[str
           %(source)s AS source,
           -- Use GROUP_CONCAT to show which symbols were included
           GROUP_CONCAT(DISTINCT t.SYMBOL SEPARATOR ', ') AS symbol,
-          SUM(CASE WHEN t.CMD = 0 THEN t.lots ELSE 0 END) AS volume_buy,
-          SUM(CASE WHEN t.CMD = 1 THEN t.lots ELSE 0 END) AS volume_sell,
+          -- cent accounts (.kcmc/.cent) are scaled by 100
+          SUM(CASE WHEN t.CMD = 0 THEN
+            (CASE WHEN t.SYMBOL LIKE '%%.kcmc' OR t.SYMBOL LIKE '%%.cent' THEN t.lots / 100 ELSE t.lots END)
+          ELSE 0 END) AS volume_buy,
+          SUM(CASE WHEN t.CMD = 1 THEN
+            (CASE WHEN t.SYMBOL LIKE '%%.kcmc' OR t.SYMBOL LIKE '%%.cent' THEN t.lots / 100 ELSE t.lots END)
+          ELSE 0 END) AS volume_sell,
           SUM(CASE WHEN t.CMD = 0 THEN 
             (CASE WHEN t.SYMBOL LIKE '%%.kcmc' OR t.SYMBOL LIKE '%%.cent' THEN t.totalProfit / 100 ELSE t.totalProfit END)
           ELSE 0 END) AS profit_buy,

@@ -82,27 +82,15 @@ function profitClass(n: number): string {
   return "text-foreground";
 }
 
-// Format volume with 2 significant digits for better readability
-// Examples: 0.00048 → 0.00048, 1.4000000000000001 → 1.4, 213.33000000000035 → 213.33
+// Format volume with 2 decimal places (consistent with profit columns).
+// Exception: very small lots (< 0.01, e.g. cent-symbol volumes) keep up to 5
+// decimals so they don't collapse to "0.00".
 function formatVolume(n: number): string {
-  if (n === 0) return "0";
-  const abs = Math.abs(n);
-  if (abs < 0.01) {
-    // For very small numbers, show up to 5 decimal places
+  const abs = Math.abs(n || 0);
+  if (abs > 0 && abs < 0.01) {
     return n.toFixed(5).replace(/\.?0+$/, "");
-  } else if (abs < 1) {
-    // For numbers < 1, show up to 4 decimal places
-    return n.toFixed(4).replace(/\.?0+$/, "");
-  } else if (abs < 10) {
-    // For numbers < 10, show up to 3 decimal places
-    return n.toFixed(3).replace(/\.?0+$/, "");
-  } else if (abs < 100) {
-    // For numbers < 100, show up to 2 decimal places
-    return n.toFixed(2).replace(/\.?0+$/, "");
-  } else {
-    // For larger numbers, show up to 1 decimal place
-    return n.toFixed(1).replace(/\.?0+$/, "");
   }
+  return format2(n);
 }
 
 function StatCard({

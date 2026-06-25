@@ -7,8 +7,8 @@ class OpenPositionsRow(BaseModel):
     """
     Aggregated open positions per symbol.
     - symbol: instrument symbol
-    - volume_buy/volume_sell: sum(volume)/100 by direction
-    - profit_buy/profit_sell: sum(profit) by direction
+    - volume_buy/volume_sell: sum(lots) by direction; cent accounts (.kcmc/.cent) scaled /100
+    - profit_buy/profit_sell: sum(profit) by direction; cent accounts (.kcmc/.cent) scaled /100
     - profit_total: total profit (buy + sell)
     """
 
