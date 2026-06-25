@@ -1,17 +1,35 @@
 """
 Gap Trade — per-client window profit detection (rule_id = 81).
 
-For each client (``mt4_users.userid``) that has closed trades inside the
-MT 00:00–02:00 weekday window, sum the closed P&L across ALL the client's
-accounts (CEN-normalised), then flag the client via TWO hardcoded rules
-(OR'd). The frontend config drawer is disabled, so the thresholds are no
-longer user-tunable — see ``evaluate_gap_rules`` for the canonical logic:
+Targets the *hold-across-the-gap* pattern: the MT server takes a daily break
+~MT 00:00–01:00 (and stays shut all weekend). A client pre-positions in the
+hour before the break, holds across it, and closes in the hour after the
+reopen. Only trades matching that timing are summed per client:
 
-- Rule A (positive net deposit): ratio >= 1x AND profit >= $1000
-- Rule B (net withdrawer):       net_deposit <= 0 AND profit >= $1000
+- ``OPEN_TIME``  in the previous TRADING day's 23:00–24:00 MT band (pre-position)
+- ``CLOSE_TIME`` in the scan day's 01:00–02:00 MT band              (post-reopen close)
 
-Rule B closes the negative-net-deposit blind spot (clients who already
-withdrew more than they deposited were previously dropped entirely).
+The open band is the previous CALENDAR day for a Tue–Sat scan, but steps back
+to FRIDAY for a Monday scan — a Monday-morning gap close pairs with a Friday
+23:00–24:00 open that was held across the entire weekend (see
+``_resolve_open_band``). Sat/Sun have no 23:00 trading session.
+
+Window bands are derived inside ``detect_gap_trade_gap_profit`` from the scan
+window passed by the scheduler — the SO+AB detector (rule 71) keeps the full
+MT 00:00–02:00 window untouched.
+
+For each client (``mt4_users.userid``) the gap-attributed closed P&L is summed
+across ALL the client's accounts (CEN-normalised), then the client is flagged
+via TWO hardcoded rules **OR'd** (frontend config drawer disabled). See
+``evaluate_gap_rules`` for the canonical logic:
+
+- Rule 1 (net withdrawer):   net_deposit <= 0 AND profit >= $1000
+- Rule 2 (positive deposit):  net_deposit > 0 AND profit / net_deposit >= 1.0 AND profit >= $1000
+
+``profit >= $1000`` is a hard floor on BOTH rules. Rule 1 covers the
+negative-net-deposit blind spot (net withdrawers, where the ratio is
+undefined). Clients whose net-deposit lookup fails (None) match neither rule
+and are not flagged.
 
 Rule IDs 81-90 are reserved for this detector (only 81 used today).
 """
@@ -34,43 +52,81 @@ GAP_TRADE_GAP_RULE_ID = 81
 GAP_TRADE_GAP_RULE_LABEL = "Gap Trade · 超额 Profit"
 
 # --- Hardcoded trigger rules (frontend config is disabled) -----------------
-# Two fixed rules, OR'd. The user-tunable profit_ratio_min / min_profit_usd /
-# min_net_deposit_hist params are intentionally IGNORED now (the gap-trade
-# config drawer is disabled in the frontend). To re-open tuning, re-enable the
-# drawer and route these constants back to the passed-in params.
+# Two fixed rules, OR'd (satisfy EITHER to flag). The user-tunable
+# profit_ratio_min / min_profit_usd / min_net_deposit_hist params are
+# intentionally IGNORED now (the gap-trade config drawer is disabled in the
+# frontend). To re-open tuning, re-enable the drawer and route these constants
+# back to the passed-in params.
 #
-#   Rule A (positive net deposit, doubled-up):
-#       net_deposit > 0  AND  profit / net_deposit >= 1.0  AND  profit >= $1000
-#   Rule B (net withdrawer — fixes the negative-deposit blind spot):
+#   Rule 1 (net withdrawer — fixes the negative-deposit blind spot):
 #       net_deposit <= 0 AND  profit >= $1000
+#   Rule 2 (positive net deposit, doubled-up):
+#       net_deposit > 0  AND  profit / net_deposit >= 1.0  AND  profit >= $1000
 #
-# `profit >= $1000` is a universal gate shared by both rules.
+# `profit >= $1000` is a hard floor shared by both rules.
 HARDCODED_PROFIT_GATE_USD = 1000.0
 HARDCODED_RATIO_MIN = 1.0
 
 _CENT_SUFFIXES = (".cent", ".kcmc")
 
+# --- Gap-attribution time bands (rule 81, MT local hours) ------------------
+# A trade counts toward a client's gap profit only if it was OPENED in the
+# previous day's [OPEN_BAND_START_HOUR, 24:00) band AND CLOSED in the scan
+# day's [CLOSE_BAND_START_HOUR, CLOSE_BAND_END_HOUR) band — i.e. held across
+# the daily break (e.g. gold's ~00:00–01:00 MT break). Independent of the
+# SO+AB (rule 71) window, which still spans the full MT 00:00–02:00.
+GAP81_OPEN_BAND_START_HOUR = 23   # pre-break 23:00 (pre-position)
+GAP81_CLOSE_BAND_START_HOUR = 1   # scan day 01:00 (post-reopen)
+GAP81_CLOSE_BAND_END_HOUR = 2     # scan day 02:00
+
+
+def _resolve_open_band(window_day: datetime) -> Tuple[datetime, datetime]:
+    """Resolve the pre-break OPEN band [23:00, 24:00) for a scan day.
+
+    The MT server takes a daily break ~00:00–01:00 and stays shut all weekend
+    (Sat–Sun). So the pre-break session — the hour before the break that
+    precedes the scan day's 01:00–02:00 reopen — is:
+
+    - the PREVIOUS CALENDAR day for a Tue–Sat scan, but
+    - FRIDAY for a Monday scan (stepping back over the closed weekend; a
+      position held Fri 23:00 → Mon 01:00 spanned the whole weekend gap).
+
+    Sat/Sun have no 23:00–24:00 trading session, so we walk back until we land
+    on a weekday (Mon–Fri). ``window_day`` is midnight of the scan day.
+    """
+    open_day = window_day - timedelta(days=1)
+    while open_day.weekday() in (5, 6):  # 5=Sat, 6=Sun — no 23:00 session
+        open_day -= timedelta(days=1)
+    open_start = open_day.replace(hour=GAP81_OPEN_BAND_START_HOUR)
+    open_end = open_day + timedelta(days=1)  # next 00:00 (= open_day 24:00)
+    return open_start, open_end
+
 
 def evaluate_gap_rules(
     total_profit: float, net_deposit: Optional[float]
 ) -> Tuple[bool, Optional[str]]:
-    """Pure threshold evaluation for the two hardcoded rules.
+    """Pure threshold evaluation for the two OR'd hardcoded rules.
 
     Returns ``(triggered, triggered_by)`` where ``triggered_by`` is one of
-    ``"ratio_x1"`` (Rule A) / ``"neg_deposit"`` (Rule B) / ``None``.
+    ``"neg_deposit"`` (Rule 1) / ``"ratio_x1"`` (Rule 2) / ``None``.
+
+    ``profit >= $1000`` is a hard floor on both rules. A missing net-deposit
+    lookup (None) matches neither rule.
 
     Kept side-effect-free so it can be unit tested without a DB.
     """
     if net_deposit is None:
+        # Ratio undefined and the net-withdrawer rule needs a known sign — a
+        # missing lookup matches neither rule.
         return False, None
-    # Universal gate — both rules require >= $1000 absolute profit.
+    # Shared hard floor — both rules require >= $1000 absolute profit.
     if total_profit < HARDCODED_PROFIT_GATE_USD:
         return False, None
-    # Rule B: net withdrawers (net deposit <= 0). The ratio is meaningless
-    # here (negative / zero denominator), so absolute profit alone decides.
+    # Rule 1: net withdrawers (net deposit <= 0). The ratio is meaningless here
+    # (negative / zero denominator), so the absolute floor alone decides.
     if net_deposit <= 0:
         return True, "neg_deposit"
-    # Rule A: positive net deposit and the client cleared >= 1x of it.
+    # Rule 2: positive net deposit AND the client cleared >= 1x of it.
     ratio = total_profit / net_deposit
     if ratio >= HARDCODED_RATIO_MIN:
         return True, "ratio_x1"
@@ -110,11 +166,19 @@ def _to_usd(value: Any, is_cent: bool) -> float:
 def _query_closed_trades_in_window(
     conn,
     *,
-    start_mt: datetime,
-    end_mt: datetime,
+    close_start: datetime,
+    close_end: datetime,
+    open_start: datetime,
+    open_end: datetime,
     sid_list: Tuple[int, ...],
 ) -> List[Dict[str, Any]]:
-    """All closed market trades in [start_mt, end_mt) for the given sids.
+    """Gap-attributed closed market trades for the given sids.
+
+    A trade qualifies only if it was held across the daily break:
+    ``CLOSE_TIME in [close_start, close_end)`` AND
+    ``OPEN_TIME  in [open_start, open_end)``. The open band sits on the
+    PREVIOUS day, so the OPEN/CLOSE pair brackets the break (see the band
+    constants at module top).
 
     Aggregation lives in Python so we can join per-client + per-symbol +
     per-cent-flag without forcing the DB to do CASE-based CEN division
@@ -126,7 +190,8 @@ def _query_closed_trades_in_window(
     - demo / test groups excluded
     """
     sid_sql = "(" + ",".join(str(int(x)) for x in sid_list) + ")"
-    close_dates = sorted({start_mt.date(), end_mt.date()})
+    # closeDate is a partition key — bound it to the close band's date(s).
+    close_dates = sorted({close_start.date(), close_end.date()})
     date_sql = "(" + ",".join(f"'{d.isoformat()}'" for d in close_dates) + ")"
 
     sql = f"""
@@ -152,6 +217,8 @@ def _query_closed_trades_in_window(
     WHERE L.closeDate IN {date_sql}
       AND L.CLOSE_TIME >= %s
       AND L.CLOSE_TIME <  %s
+      AND L.OPEN_TIME  >= %s
+      AND L.OPEN_TIME  <  %s
       AND L.sid       IN {sid_sql}
       AND L.CMD       IN (0, 1)
       AND (L.isDeleted = 0 OR L.isDeleted IS NULL)
@@ -161,7 +228,7 @@ def _query_closed_trades_in_window(
       AND LOWER(U.NAME)     NOT LIKE '%%test%%'
     """
     with conn.cursor() as cur:
-        cur.execute(sql, (start_mt, end_mt))
+        cur.execute(sql, (close_start, close_end, open_start, open_end))
         return cur.fetchall()
 
 
@@ -262,13 +329,39 @@ def detect_gap_trade_gap_profit(
         profit_ratio_min, min_profit_usd, min_net_deposit_hist,
     )
 
+    # Derive the gap-attribution bands from the scan window. The close band is
+    # [01:00, 02:00) of the scan day, clamped to the caller's window (the
+    # intraday tier passes a growing end_mt). The open band is the previous
+    # TRADING day's [23:00, 24:00) — Friday for a Monday scan, since the MT
+    # server breaks ~00:00–01:00 and stays shut over the weekend (see
+    # _resolve_open_band). The scheduler passes start_mt = scan-day 00:00.
+    window_day = start_mt.replace(hour=0, minute=0, second=0, microsecond=0)
+    close_start = max(start_mt, window_day.replace(hour=GAP81_CLOSE_BAND_START_HOUR))
+    close_end = min(end_mt, window_day.replace(hour=GAP81_CLOSE_BAND_END_HOUR))
+    open_start, open_end = _resolve_open_band(window_day)
+    if close_start >= close_end:
+        # Intraday tier before the close band opens (now < 01:00) — nothing
+        # could have closed in the gap window yet.
+        logger.info(
+            "Gap Trade gap-profit: close band not open yet "
+            "(close_start=%s >= close_end=%s) — skip",
+            close_start, close_end,
+        )
+        return {"alerts": [], "scan_time_ms": int((time.perf_counter() - t0) * 1000)}
+    logger.info(
+        "Gap Trade gap-profit: gap bands open=[%s, %s) close=[%s, %s)",
+        open_start, open_end, close_start, close_end,
+    )
+
     conn = _get_connection(settings)
     try:
         sql_t0 = time.perf_counter()
         rows = _query_closed_trades_in_window(
             conn,
-            start_mt=start_mt,
-            end_mt=end_mt,
+            close_start=close_start,
+            close_end=close_end,
+            open_start=open_start,
+            open_end=open_end,
             sid_list=sid_tuple,
         )
         sql_ms = int((time.perf_counter() - sql_t0) * 1000)
@@ -348,13 +441,13 @@ def detect_gap_trade_gap_profit(
                 continue
             net_deposit = nd_map.get(userid)
             if net_deposit is None:
-                # Net withdrawers can have a real (negative) net deposit, so
-                # only a genuinely missing lookup (None) is dropped here —
-                # net_deposit <= 0 flows through to Rule B below.
+                # Net withdrawers have a real (negative) net deposit, so only a
+                # genuinely missing lookup (None) is dropped here — net_deposit
+                # <= 0 flows through to Rule 1 below.
                 dropped_no_deposit += 1
                 continue
 
-            # Two hardcoded rules (config drawer disabled). See
+            # Two OR'd hardcoded rules (config drawer disabled). See
             # `evaluate_gap_rules` for the exact thresholds.
             triggered, triggered_by = evaluate_gap_rules(total_profit, net_deposit)
             if not triggered:
