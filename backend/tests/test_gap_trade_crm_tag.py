@@ -345,7 +345,26 @@ def test_consecutive_failures_abort_round(tag_db, monkeypatch):
 
 def test_heartbeat_emails_even_with_zero_changes(tag_db, monkeypatch):
     sent, _ = run_round(tag_db, monkeypatch, alerts=[], heartbeat=True)
-    assert len(sent) == 1  # daily proof-of-life from the 07:20 final scan
+    assert len(sent) == 1  # daily proof-of-life when heartbeat is requested
+
+
+def test_zero_changes_no_heartbeat_sends_nothing(tag_db, monkeypatch):
+    # The default 07:20 behaviour: a quiet morning (no rows) emails NOTHING.
+    sent, _ = run_round(tag_db, monkeypatch, alerts=[], heartbeat=False)
+    assert sent == []
+
+
+def test_heartbeat_email_flag_default_off(monkeypatch):
+    # The 07:20 scheduler gates the heartbeat behind this flag; default OFF, and
+    # only the literal string "true" enables it (matches project flag convention).
+    from app.core.burst_open_scheduler import _gap_trade_crm_heartbeat_email
+
+    monkeypatch.delenv("GAP_TRADE_CRM_HEARTBEAT_EMAIL", raising=False)
+    assert _gap_trade_crm_heartbeat_email() is False
+    monkeypatch.setenv("GAP_TRADE_CRM_HEARTBEAT_EMAIL", "1")
+    assert _gap_trade_crm_heartbeat_email() is False
+    monkeypatch.setenv("GAP_TRADE_CRM_HEARTBEAT_EMAIL", "true")
+    assert _gap_trade_crm_heartbeat_email() is True
 
 
 def test_empty_mail_to_skips_email_but_keeps_outbox(tag_db, monkeypatch):

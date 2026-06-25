@@ -120,6 +120,16 @@ def _gap_trade_intraday_enabled() -> bool:
     return os.getenv("GAP_TRADE_INTRADAY_ENABLED", "false").lower() == "true"
 
 
+def _gap_trade_crm_heartbeat_email() -> bool:
+    # Default OFF — the 07:20 final scan emails ONLY when the round produced
+    # rows (tagged / failed / skipped), there is an outbox backlog, or a
+    # write-cap warning. A quiet morning (no gap-trade clients) sends NOTHING.
+    # Set GAP_TRADE_CRM_HEARTBEAT_EMAIL=true to restore the unconditional daily
+    # proof-of-life email (trade-off: you lose the dead-man signal that the
+    # pipeline ran — silence then can't be told apart from a crashed cron).
+    return os.getenv("GAP_TRADE_CRM_HEARTBEAT_EMAIL", "false").lower() == "true"
+
+
 def _in_intraday_window_hkt(now_hkt_h: int, now_hkt_m: int) -> bool:
     """Pure window check, unit-tested for the boundary minutes."""
     hm = (now_hkt_h, now_hkt_m)
@@ -683,8 +693,9 @@ def _run_gap_trade_scan() -> None:
         # OPT-0032: CRM risk-tag pipeline on the final rule-81 hit set.
         # Shares the audit-table dedup with the intraday tier, so clients
         # already tagged intraday come back skipped_dedup here (no second
-        # POST, no duplicate email). heartbeat=True → this is the one
-        # unconditional daily email proving the pipeline ran.
+        # POST, no duplicate email). The daily proof-of-life email is opt-in
+        # (GAP_TRADE_CRM_HEARTBEAT_EMAIL, default OFF) — by default we email
+        # ONLY when there's something to report (rows / outbox / cap warning).
         try:
             from ..services.gap_trade_crm_tag_service import process_gap_trade_crm_tags
             from .risk_monitor_db import get_crm_tag_rows_for_window
@@ -711,7 +722,7 @@ def _run_gap_trade_scan() -> None:
                 scan_label="final 07:20 HKT",
                 crm_tag_config=config.crm_tag.model_dump(),
                 extra_note=note,
-                heartbeat=True,
+                heartbeat=_gap_trade_crm_heartbeat_email(),
             )
         except Exception:
             # Tagging must never break the detection scan that feeds the
