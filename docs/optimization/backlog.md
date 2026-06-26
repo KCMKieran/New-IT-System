@@ -21,6 +21,7 @@
 | [OPT-0002](./items/OPT-0002-browser-cache-pattern-doc.md) | P2 | docs | S | 现有浏览器缓存模式归纳成复用文档 |
 | [OPT-0003](./items/OPT-0003-risk-monitor-sqlite-perf.md) | P1 | db | L | Risk-monitor SQLite 数据增长后的性能方案 |
 | [OPT-0028](./items/OPT-0028-risk-monitor-aggregator-hardening.md) | P2 | mixed | M | Risk-monitor 聚合视图硬化（SQL 性能 + 语义确定性，同时覆盖 burst + hedge） |
+| [OPT-0039](./items/OPT-0039-risk-monitor-aggregate-toggle-state-loss.md) | P1 | frontend | M | Risk-monitor 聚合切换丢失列持久化 + 计算列(净赚/佣金试算)排序失效（burst + hedge 同款） |
 
 ## 💡 想法（Ideas）—— 还不能直接 claim
 
