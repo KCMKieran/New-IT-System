@@ -57,6 +57,15 @@ idea ──scope──▶ ready ──claim──▶ wip ──finish──▶ d
 - **done**：已合到 main。row 追加到 done.md，从 backlog.md 删掉。
 - **dropped**：决定不做。原因写在 item 文件的 **结果** 段。
 
+## ⚠ 执行隔离铁律 —— OPT 建好后换新 worker 执行（用户拍板 2026-06-26）
+
+**file / claim 一个 OPT 之后，绝不在同一个对话里接着做实施。** file（或 file+claim）做完即停，把实施交给一个**全新的 chat / Task / worker**。
+
+- **为什么**：file 一个 OPT 之前通常已做了大量分析/调查（读代码、定位 root cause、写 item 文件），filing 会话的 context 往往已用掉很多。换全新 worker 实施 = 干净的 context 预算 + 强制 item 文件自洽。
+- **硬要求**：file 时把 `items/OPT-NNNN-*.md` 写到**无前置 context 的 worker 照着就能开干**（完整背景 + `file:line` + root cause + AC + 待用户决策的开放问题）。
+- **交接**：file 完明确告诉用户「请新开对话/worker 说『做 OPT-NNNN』来实施」。用户若要求就地起后台 worker，用 `Agent`/`Task` 起**全新 subagent**（不继承当前对话 context），brief 指向 item 文件路径。
+- 这条**覆盖** §A+「file+claim 然后立刻实施」的默认：claim（动 backlog + commit + 开 branch）可在 filing 会话顺手做，但**写代码必须在新 worker**。
+
 ## 工作流
 
 > 设计原则：**单一 OPT 在 main 上的流程 commit 尽量少**，把 file/claim/close 压成尽量少的 git 事件，留出空间给真正的代码 commit。但**不硬凑数字**——见下面两类生命周期。
@@ -87,7 +96,7 @@ idea ──scope──▶ ready ──claim──▶ wip ──finish──▶ d
 
 1. 同 A 步骤 1–3，但 item frontmatter 直接写 `status: wip`，backlog.md 把行直接加进 **WIP** 表（跳过 Ready）。
 2. **写代码前立刻 commit**：`chore(opt): file+claim OPT-NNNN <slug>`。
-3. `git checkout -b opt/<slug>`，开干。
+3. `git checkout -b opt/<slug>`，然后**停——换新 worker 实施**（见 [§执行隔离铁律](#-执行隔离铁律--opt-建好后换新-worker-执行用户拍板-2026-06-26)）。不在本会话写代码。
 
 > 跟原来"先 docs(opt): file 再 chore(opt): claim"两条 commit 比，这里合并成一条。砍掉的那条对未来的 reader 没价值（中间没有他人参与的 window），但给 main 历史挪出了空间。
 
