@@ -152,7 +152,16 @@ function useRefreshRemarkColumn(
 ): void {
   useEffect(() => {
     for (const ref of apiRefs) {
-      ref.current?.refreshCells({ columns: [REMARK_COL_ID], force: true });
+      // OPT-0039: after the aggregate-toggle key-remount (BurstOpen/HedgeOpen),
+      // the hidden branch's grid is unmounted but its gridApiRef still points
+      // at a destroyed AG-Grid api (the persist hook never nulls it on unmount,
+      // and the detail branch's manual gridApiRef is never reassigned by the
+      // aggregated branch). A bare `?.refreshCells` would then log
+      // "grid has been destroyed" error spam when a remark is edited while the
+      // aggregated view is shown. isDestroyed() (AG-Grid v34) skips the dead api.
+      if (ref.current && !ref.current.isDestroyed()) {
+        ref.current.refreshCells({ columns: [REMARK_COL_ID], force: true });
+      }
     }
     // apiRefs are stable refs; depend on the map value (intentional repaint).
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1113,6 +1122,14 @@ function netProfitColDef<
     // formatted currency, matching the on-screen text).
     valueFormatter: (p) =>
       p.value == null ? "—" : fmtCurrency(p.value as number),
+    // OPT-0039: net_profit IS server-sortable (backend ORDER BY on
+    // equity − net_deposit_hist; see SORTABLE_ALERT_COLS / SORTABLE_COL_IDS),
+    // so this comparator is NOT a fake sort — it only re-orders the current
+    // page consistently with the server sort, and its null→-1 matches SQLite's
+    // NULL-lowest ordering (nulls first ASC, last DESC). Contrast
+    // estCommissionColDef(): that column is frontend-only (D03, CN-only) and
+    // cannot be server-sorted, so it drops its comparator and is sortable:false
+    // — a comparator there would be a fake sort under server-side pagination.
     comparator: (a: number | null, b: number | null) => {
       if (a == null && b == null) return 0;
       if (a == null) return -1;
