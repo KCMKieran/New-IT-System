@@ -1,7 +1,7 @@
 ---
 id: OPT-0039
 title: Risk-monitor 聚合视图切换丢失列持久化 + 计算列(净赚/佣金试算)排序失效
-status: wip
+status: done
 priority: P1
 area: mixed
 effort: M
@@ -166,3 +166,12 @@ risk-monitor 批量下单 tab 的「聚合」功能有两个用户可感知缺�
 - [ ] 持久化不回退：取消态被正确记住，刷新后仍是默认列倒序。
 - [ ] `tsc` + `vitest` 绿（`./verify.sh`）。纯前端无 pytest 影响。
 - [ ] 回归：正常 asc/desc 排序、Phase 1 的 net_profit 服务端排序、聚合 toggle 列偏好保留都不受影响。
+
+### Phase 2 结果（完成 2026-06-26，commit `055afc2`）
+
+- ✅ 8 个 `onSortChanged` handler 全覆盖（6 账户级明细 + burst-agg + hedge-agg）。取消态（`active === undefined`）时 `applyColumnState({ state: [{ colId: <fallback>, sort: "desc" }], defaultState: { sort: null } })` 把默认列 ▼ 显形。
+- ✅ fallback 列：账户级 = `scanned_at`（∈ `SORTABLE_COL_IDS`），burst-agg + hedge-agg = `total_lots`（分别 ∈ `BURST_AGG_SORTABLE_COL_IDS` / `HEDGE_AGG_SORTABLE_COL_IDS`，hedge 的 total_lots 已核对）。
+- ✅ 防循环：回声事件因默认列在白名单 → 走「active 存在」分支 → 不再 apply → 自然终止；`sortBy` 值不变不重复 fetch。聚合 handler 的 apply 放在既有 `if (!aggColumnPersist.isApplying())` 守卫内。
+- ✅ 未改 `sortingOrder`（保持三态）、未改后端。Phase 1（net_profit 服务端排序 / est_commission sortable:false / 聚合 toggle key）均未动，diff 为 handler 体内增量。
+- ✅ `tsc` + `vitest`（97）绿。纯前端 1 文件 +100，pytest 不受影响。
+- ⏳ **需人在 dev 点验**（worker 连不上 `10.6.20.138:5173`）：账户级三态 ▼→▲→`scanned_at` ▼；聚合三态第三下 `total_lots` ▼；取消态刷新后仍是默认列倒序（持久化 round-trip）。

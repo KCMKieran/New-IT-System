@@ -10,7 +10,6 @@
 
 | ID | Branch | Claim 日期 | 备注 |
 |----|--------|-----------|------|
-| [OPT-0039](./items/OPT-0039-risk-monitor-aggregate-toggle-state-loss.md) | opt/risk-monitor-aggregate-toggle-state-loss-phase2 | 2026-06-26 | Phase 2：取消排序态显形（方案 B）；换新 worker 实施 |
 
 ## ✅ 待领取（Ready）
 

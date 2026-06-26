@@ -2099,6 +2099,18 @@ function BurstOpenTab({ active }: { active: boolean }) {
     const nextSortOrder = active?.sort === "asc" ? "asc" : "desc";
     setSortBy(nextSortBy);
     setSortOrder(nextSortOrder);
+    // OPT-0039 Phase 2: on the 3rd click the grid clears the column arrow, but
+    // the server still falls back to `scanned_at DESC`. Re-apply the fallback
+    // column's ▼ arrow so the active order stays visible (cycle:
+    // <col> ▼ → <col> ▲ → scanned_at ▼). The echo onSortChanged finds
+    // `scanned_at` active (it's whitelisted) → takes the branch above → does
+    // NOT re-apply → terminates; sortBy is unchanged so no extra fetch.
+    if (!active) {
+      e.api.applyColumnState({
+        state: [{ colId: "scanned_at", sort: "desc" }],
+        defaultState: { sort: null },
+      });
+    }
   }, []);
 
   const columnDefs: ColDef<AlertEvent>[] = useMemo(
@@ -2658,6 +2670,20 @@ function BurstOpenTab({ active }: { active: boolean }) {
                   activeCol?.sort === "asc" ? "asc" : "desc";
                 setAggSortBy(nextSortBy);
                 setAggSortOrder(nextSortOrder);
+                // OPT-0039 Phase 2: on the 3rd click the grid clears the column
+                // arrow, but the server still falls back to `total_lots DESC`.
+                // Re-apply the fallback column's ▼ arrow so the active order
+                // stays visible (cycle: <col> ▼ → <col> ▲ → total_lots ▼). The
+                // echo onSortChanged finds `total_lots` active (it's whitelisted)
+                // → takes the branch above → does NOT re-apply → terminates;
+                // aggSortBy is unchanged so no extra fetch. Guarded by the
+                // outer isApplying() check so mount-time restore is left alone.
+                if (!activeCol) {
+                  e.api.applyColumnState({
+                    state: [{ colId: "total_lots", sort: "desc" }],
+                    defaultState: { sort: null },
+                  });
+                }
               }
               aggColumnPersist.gridEventProps.onSortChanged();
             }}
@@ -3118,6 +3144,18 @@ function QuickOpenCloseTab({ active }: { active: boolean }) {
     const nextSortOrder = activeCol?.sort === "asc" ? "asc" : "desc";
     setSortBy(nextSortBy);
     setSortOrder(nextSortOrder);
+    // OPT-0039 Phase 2: on the 3rd click the grid clears the column arrow, but
+    // the server still falls back to `scanned_at DESC`. Re-apply the fallback
+    // column's ▼ arrow so the active order stays visible (cycle:
+    // <col> ▼ → <col> ▲ → scanned_at ▼). The echo onSortChanged finds
+    // `scanned_at` active (it's whitelisted) → takes the branch above → does
+    // NOT re-apply → terminates; sortBy is unchanged so no extra fetch.
+    if (!activeCol) {
+      e.api.applyColumnState({
+        state: [{ colId: "scanned_at", sort: "desc" }],
+        defaultState: { sort: null },
+      });
+    }
   }, []);
 
   const handleSaveConfig = async () => {
@@ -4565,6 +4603,18 @@ function QuickProfitTab({ active }: { active: boolean }) {
     const nextSortOrder = activeCol?.sort === "asc" ? "asc" : "desc";
     setSortBy(nextSortBy);
     setSortOrder(nextSortOrder);
+    // OPT-0039 Phase 2: on the 3rd click the grid clears the column arrow, but
+    // the server still falls back to `scanned_at DESC`. Re-apply the fallback
+    // column's ▼ arrow so the active order stays visible (cycle:
+    // <col> ▼ → <col> ▲ → scanned_at ▼). The echo onSortChanged finds
+    // `scanned_at` active (it's whitelisted) → takes the branch above → does
+    // NOT re-apply → terminates; sortBy is unchanged so no extra fetch.
+    if (!activeCol) {
+      e.api.applyColumnState({
+        state: [{ colId: "scanned_at", sort: "desc" }],
+        defaultState: { sort: null },
+      });
+    }
   }, []);
 
   const handleSaveConfig = async () => {
@@ -5651,6 +5701,18 @@ function HedgeOpenTab({ active }: { active: boolean }) {
     const nextSortOrder = activeCol?.sort === "asc" ? "asc" : "desc";
     setSortBy(nextSortBy);
     setSortOrder(nextSortOrder);
+    // OPT-0039 Phase 2: on the 3rd click the grid clears the column arrow, but
+    // the server still falls back to `scanned_at DESC`. Re-apply the fallback
+    // column's ▼ arrow so the active order stays visible (cycle:
+    // <col> ▼ → <col> ▲ → scanned_at ▼). The echo onSortChanged finds
+    // `scanned_at` active (it's whitelisted) → takes the branch above → does
+    // NOT re-apply → terminates; sortBy is unchanged so no extra fetch.
+    if (!activeCol) {
+      e.api.applyColumnState({
+        state: [{ colId: "scanned_at", sort: "desc" }],
+        defaultState: { sort: null },
+      });
+    }
   }, []);
 
   const handleSaveConfig = async () => {
@@ -6231,6 +6293,20 @@ function HedgeOpenTab({ active }: { active: boolean }) {
                   activeCol?.sort === "asc" ? "asc" : "desc";
                 setAggSortBy(nextSortBy);
                 setAggSortOrder(nextSortOrder);
+                // OPT-0039 Phase 2: on the 3rd click the grid clears the column
+                // arrow, but the server still falls back to `total_lots DESC`.
+                // Re-apply the fallback column's ▼ arrow so the active order
+                // stays visible (cycle: <col> ▼ → <col> ▲ → total_lots ▼). The
+                // echo onSortChanged finds `total_lots` active (it's whitelisted)
+                // → takes the branch above → does NOT re-apply → terminates;
+                // aggSortBy is unchanged so no extra fetch. Guarded by the
+                // outer isApplying() check so mount-time restore is left alone.
+                if (!activeCol) {
+                  e.api.applyColumnState({
+                    state: [{ colId: "total_lots", sort: "desc" }],
+                    defaultState: { sort: null },
+                  });
+                }
               }
               aggColumnPersist.gridEventProps.onSortChanged();
             }}
@@ -6929,6 +7005,18 @@ function LeverageAbuseTab({ active }: { active: boolean }) {
     }
     setSortBy(nextSortBy);
     setSortOrder(nextSortOrder);
+    // OPT-0039 Phase 2: on the 3rd click the grid clears the column arrow, but
+    // the server still falls back to `scanned_at DESC`. Re-apply the fallback
+    // column's ▼ arrow so the active order stays visible (cycle:
+    // <col> ▼ → <col> ▲ → scanned_at ▼). The echo onSortChanged finds
+    // `scanned_at` active (it's whitelisted) → takes the branch above → does
+    // NOT re-apply → terminates; sortBy is unchanged so no extra fetch.
+    if (!activeCol) {
+      e.api.applyColumnState({
+        state: [{ colId: "scanned_at", sort: "desc" }],
+        defaultState: { sort: null },
+      });
+    }
   }, []);
 
   const handleSaveConfig = async () => {
@@ -7935,6 +8023,18 @@ function MartingaleTab({ active }: { active: boolean }) {
       activeCol?.sort === "asc" ? "asc" : "desc";
     setSortBy(nextSortBy);
     setSortOrder(nextSortOrder);
+    // OPT-0039 Phase 2: on the 3rd click the grid clears the column arrow, but
+    // the server still falls back to `scanned_at DESC`. Re-apply the fallback
+    // column's ▼ arrow so the active order stays visible (cycle:
+    // <col> ▼ → <col> ▲ → scanned_at ▼). The echo onSortChanged finds
+    // `scanned_at` active (it's whitelisted) → takes the branch above → does
+    // NOT re-apply → terminates; sortBy is unchanged so no extra fetch.
+    if (!activeCol) {
+      e.api.applyColumnState({
+        state: [{ colId: "scanned_at", sort: "desc" }],
+        defaultState: { sort: null },
+      });
+    }
   }, []);
 
   const handleSaveConfig = async () => {
