@@ -304,6 +304,10 @@ const SORTABLE_COL_IDS = new Set<string>([
   "login",
   "currency",
   "net_deposit_hist",
+  // Derived 淨賺 column (equity − net_deposit_hist). Server-sortable via the
+  // backend ORDER BY expression; see SORTABLE_ALERT_COLS / _SORT_COL_DB_NAME
+  // (OPT-0039). Shared by all account-level detail tabs that render this col.
+  "net_profit",
   "symbol",
   "order_count",
   "total_lots",
@@ -1146,8 +1150,13 @@ function estCommissionColDef<TRow>(opts: {
   return {
     headerName,
     colId,
+    // 佣金试算 is D03 pure-frontend logic (@/lib/commission, CN-only) — the
+    // backend cannot compute or sort it. Under server-side pagination a
+    // comparator would only reorder the current page, producing a "fake"
+    // sort (header arrow shows, data order ignores it). So mark it
+    // non-sortable rather than wire a misleading comparator (OPT-0039).
+    sortable: false,
     width,
-    sortable: true,
     cellClass: "ag-right-aligned-cell",
     // Use InfoHeader (with ℹ icon) so users see a visible affordance — the
     // raw `headerTooltip` string is invisible unless they hover the text.
@@ -1155,12 +1164,6 @@ function estCommissionColDef<TRow>(opts: {
     headerComponentParams: { tooltip: EST_COMMISSION_TOOLTIP },
     valueGetter: (p) => (p.data ? getCommission(p.data) : null),
     cellRenderer: (p: { value: number | null }) => formatCommission(p.value),
-    comparator: (a: number | null, b: number | null) => {
-      if (a == null && b == null) return 0;
-      if (a == null) return -1;
-      if (b == null) return 1;
-      return a - b;
-    },
   };
 }
 
@@ -2612,7 +2615,12 @@ function BurstOpenTab({ active }: { active: boolean }) {
       >
         {aggregated ? (
           /* OPT-0027: aggregated view (per-loginsid fold). */
+          /* OPT-0039: distinct `key` per ternary branch forces React to
+             unmount/remount instead of reusing one AgGridReact instance, so
+             onGridReady re-fires and the correct persist hook
+             (aggColumnPersist vs columnPersist) loads/saves its own state. */
           <AgGridReact<BurstOpenAggregatedRow>
+            key="agg"
             rowData={aggRows}
             columnDefs={aggregatedColumnDefs}
             defaultColDef={defaultColDef}
@@ -2645,6 +2653,7 @@ function BurstOpenTab({ active }: { active: boolean }) {
           />
         ) : (
           <AgGridReact<AlertEvent>
+            key="detail"
             ref={gridRef}
             rowData={alerts}
             columnDefs={columnDefs}
@@ -6179,7 +6188,12 @@ function HedgeOpenTab({ active }: { active: boolean }) {
         style={gridStyle}
       >
         {aggregated ? (
+          /* OPT-0039: distinct `key` per ternary branch — see burst-open
+             above. Without it React reuses one AgGridReact instance across
+             the aggregate toggle, onGridReady never re-fires, and a column
+             reset overwrites the persisted detail-view column prefs. */
           <AgGridReact<HedgeOpenAggregatedRow>
+            key="agg"
             rowData={aggRows}
             columnDefs={aggregatedColumnDefs}
             defaultColDef={defaultColDef}
@@ -6212,6 +6226,7 @@ function HedgeOpenTab({ active }: { active: boolean }) {
           />
         ) : (
           <AgGridReact<AlertEvent>
+            key="detail"
             rowData={alerts}
             columnDefs={columnDefs}
             defaultColDef={defaultColDef}
