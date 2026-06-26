@@ -33,6 +33,10 @@ SORTABLE_ALERT_COLS: frozenset[str] = frozenset({
     "equity_per_lot", "total_open_lots", "leverage",
     "currency", "zipcode", "first_open", "last_open", "hold_duration_sec", "total_profit_usd",
     "net_deposit_hist",
+    # Derived "淨賺" column (equity − net_deposit_hist). Both operands are
+    # plain ae.* columns, so the derived expression is server-sortable even
+    # though the frontend renders it via a valueGetter (OPT-0039).
+    "net_profit",
     # Quick Profit columns
     "realized_profit", "floating_profit_snapshot", "position_status",
     # Gap Trade columns (sub-rule 71 SO+AB, 81 per-client window profit)
@@ -76,6 +80,12 @@ _SORT_COL_DB_NAME: dict[str, str] = {
     "last_open":        "ae.last_open",
     "net_deposit_hist": "ae.net_deposit_hist",
     "total_profit_usd": "ae.total_profit_usd",
+    # Derived 淨賺. SQLite treats the result as NULL when either operand is
+    # NULL, and orders NULL as the lowest value — matching the frontend
+    # comparator's `null → -1` (nulls sort first in ASC, last in DESC).
+    # equity / net_deposit_hist are already stored in USD (not cents), so no
+    # CEN division is applied here.
+    "net_profit":       "(ae.equity - ae.net_deposit_hist)",
     "group":            "ae.account_group",  # frontend alias
     # Quick OC detail
     "hold_duration_sec": "qoc.hold_duration_sec",

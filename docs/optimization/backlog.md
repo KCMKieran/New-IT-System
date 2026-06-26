@@ -10,7 +10,6 @@
 
 | ID | Branch | Claim 日期 | 备注 |
 |----|--------|-----------|------|
-| [OPT-0039](./items/OPT-0039-risk-monitor-aggregate-toggle-state-loss.md) | opt/risk-monitor-aggregate-toggle-state-loss | 2026-06-26 | 后台 worker 实施（worktree 隔离）|
 
 ## ✅ 待领取（Ready）
 

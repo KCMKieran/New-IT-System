@@ -1,7 +1,7 @@
 ---
 id: OPT-0039
 title: Risk-monitor 聚合视图切换丢失列持久化 + 计算列(净赚/佣金试算)排序失效
-status: wip
+status: done
 priority: P1
 area: mixed
 effort: M
@@ -88,4 +88,31 @@ risk-monitor 批量下单 tab 的「聚合」功能有两个用户可感知缺�
 > ⚠ 注意：`net_profit` 列出现在哪些账户级 tab，就要确认那些 tab 的后端 `/alerts` 排序都认这个派生列（burst-open / 快开快平 / 快速获利 / 对冲 / 滥用杠杆 共用同一套排序白名单逻辑，核对是否一处改全受益）。聚合视图（burst-agg / hedge-agg）无 equity，不涉及。
 
 ## 结果
-<done 时填>
+
+**完成 2026-06-26**（branch `opt/risk-monitor-aggregate-toggle-state-loss`，2 commit：`0922326` 实现 + `ff6441b` 冷审修复）。
+
+### 实际交付 vs AC
+
+- ✅ **Bug 1（淨賺真排序）**：后端 `net_profit` 加入 `SORTABLE_ALERT_COLS` + `_SORT_COL_DB_NAME` 映射到派生 `(ae.equity - ae.net_deposit_hist)`。SQLite 把 NULL 当最低值，恰好对齐前端 comparator 的 `null → -1`（ASC nulls-first / DESC nulls-last），无需额外 NULLS FIRST/LAST。equity/net_deposit_hist 均已存 USD，无 CEN 二次除。前端 `SORTABLE_COL_IDS` 加 `"net_profit"`。核对：5 个账户级 tab 的 `handleSortChanged` 共用同一 `SORTABLE_COL_IDS` Set，一处改全受益。pytest 覆盖（见下）。
+- ✅ **佣金试算列**：`estCommissionColDef()` 改 `sortable:false` 并删除已无意义的 comparator（D03 纯前端，服务端分页下无法排序，避免假性排序）。
+- ✅ **Bug 2（聚合 toggle 保列偏好）**：burst-open + hedge-open 两处三元各加稳定 `key="agg"/"detail"`，强制 React 卸载/重挂 → `onGridReady` 重跑 → 正确 persist hook 加载/保存。聚合视图自身偏好也因此首次能持久化（原先 onGridReady 不触发，聚合偏好也存不住）。
+- ✅ **gap-trade 核对**：**不受影响**——三表（clientPairAgg / soAbAlerts / gapAlerts）各在独立 `<div>` JSX 位置、各自 persist hook（`clientPairPersist`/`soAbPersist`/`gapPersist`），纵向堆叠非同位三元，本就独立挂载，`onGridReady` 各自正常触发。
+- ✅ `tsc` + `vitest`（97）绿；`pytest` net_profit 套件 9 测试全过。31 个 `test_burst_open_aggregated`/`test_hedge_open_aggregated` 失败为 **main pre-existing**（aggregated endpoint 在该 sandbox 返回 `[]`，环境/数据依赖，非本 OPT；已在 main 上独立复现确认）。
+- ✅ 回归：未触发聚合的其他 5 个账户级 tab 排序/持久化逻辑未动（whitelist 是增量加项）。
+
+### Stage 1 冷审 finding 处理记录（独立后台 reviewer，3 条全「当场修」commit `ff6441b`）
+
+- **#1（当场修）**：key-remount 后被销毁 grid 的 `gridApiRef` 仍指向已销毁 api（`useGridColumnPersist` 卸载时不清空 ref），`useRefreshRemarkColumn` 改备注时对死 grid `refreshCells` → console error spam（v34 不抛错）。在唯一 consumer 加 `if (ref.current && !ref.current.isDestroyed())` 守卫。
+- **#2（当场修）**：前后端排序白名单无防漂移耦合（加可排序计算列要改 3 处，漏后端→静默 fallback `scanned_at`=本 OPT 刚修的假性排序复现）。加 anti-drift 测试 `test_sortable_alert_cols_all_have_db_mapping`（断言每个 `SORTABLE_ALERT_COLS` 成员有 `_SORT_COL_DB_NAME` 映射）；并补 equity-NULL、相同 net_profit 的 `id DESC` 跨页 tiebreaker、ASC 跨页 NULL-first 三条测试。
+- **#3（当场修）**：net_profit 保留 client comparator 而 est_commission 删了——加注释说明 net_profit 是服务端可排序列（comparator 仅当页防御性一致排序），est_commission 是纯前端不可排序（comparator 会是假性排序），消除两 colDef 左右矛盾观感。
+
+### Follow-up（live with，留 paper trail）
+
+- **CEN 单位**（冷审 #4）：后端注释断言 equity/net_deposit_hist 存 USD 非 cents，未实测核对真实 CEN 户。**排序方向两种存法都对**（前后端同字段），仅显示值若实为 cents 会差 100×——但 淨賺 列显示是 OPT-0027 引入、非本 OPT 新增。值得未来拿真实 CEN 告警行一行核。
+- **SQLite 派生表达式排序无索引**（冷审 #5）：`ORDER BY (equity - net_deposit_hist)` 走全过滤扫描+排序，OFFSET 深分页同样退化。当前 30 天保留 ~20k 行封顶，可接受；若保留期增长再加生成列/索引。
+- **死代码 `gridRef`**（冷审 #7）：`RiskMonitor.tsx:1635` 声明赋值未读，nitpick，未清。
+- **31 个 aggregated 测试在 main 上红**：与本 OPT 无关，但发现 burst/hedge aggregated 测试套件目前在 main 红（环境数据依赖 vs 真回归未定），值得单独 file 一个 item 排查。
+
+### 文档跟进
+
+按笔记建议，应在 risk-monitor / grid-column-persist 文档「Adding a Column」段补一句：**前端计算列若要可排序，要么后端支持该派生列排序并加进两边白名单（+ anti-drift 测试已落地），要么显式 `sortable:false`，不能只给 comparator**（否则服务端分页下假性排序）。
