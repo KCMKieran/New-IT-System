@@ -1,7 +1,7 @@
 ---
 id: OPT-0039
 title: Risk-monitor 聚合视图切换丢失列持久化 + 计算列(净赚/佣金试算)排序失效
-status: done
+status: wip
 priority: P1
 area: mixed
 effort: M
@@ -116,3 +116,53 @@ risk-monitor 批量下单 tab 的「聚合」功能有两个用户可感知缺�
 ### 文档跟进
 
 按笔记建议，应在 risk-monitor / grid-column-persist 文档「Adding a Column」段补一句：**前端计算列若要可排序，要么后端支持该派生列排序并加进两边白名单（+ anti-drift 测试已落地），要么显式 `sortable:false`，不能只给 comparator**（否则服务端分页下假性排序）。
+
+---
+
+## § 后续扩展 / Phase 2（reopen 2026-06-26）—— 取消排序态显形（方案 B）
+
+> reopen 理由：同主题（OPT-0039 排序/聚合切换体验）的后续 phase，非正交目标 → reopen 不开新单（用户拍板 2026-06-26）。branch `opt/risk-monitor-aggregate-toggle-state-loss-phase2`。
+
+### 问题（Phase 1 上线后用户实测发现）
+
+账户级 tab 点列头排序，循环是 **desc → asc → 取消（null）**（`sortingOrder={["desc","asc",null]}`，8 处）。但表走**服务端排序+分页**，后端永远要 `ORDER BY`，所以「取消」态在 `handleSortChanged` 里 fallback 到默认列（账户级 = `scanned_at`，聚合 = `total_lots`/`total_count`）。
+
+**症状**：点到第三下（取消），AG-Grid 清掉当前列箭头，数据跳回默认列倒序——但**默认列的箭头不会自动显形**（`handleSortChanged` 只更新前端 server 状态 `sortBy/sortOrder`，不把箭头重新画回默认列）。用户看到「全部无箭头 + 数据莫名跳动」，感觉「只有 asc/desc 两态，没有取消态」。这套行为早于 OPT-0039 就存在，Phase 1 让 net_profit 可排序后把它暴露出来。
+
+### 方案 B（用户选定）—— 取消时让默认列箭头显形
+
+取消排序（第三下、无 active 排序列）时，**程序化把默认列的 ▼（desc）箭头重新 apply 回去**，让用户明确看到「现在按 <默认列> 倒序」，而不是无箭头 limbo。三态全部可读：`<列> ▼ → <列> ▲ → 默认列 ▼`。
+
+### 涉及的 8 个 onSortChanged（每个用它自己**现有的 fallback 列**作为要显形的默认列）
+
+| grid | 行（Phase 1 后，会漂移，按 colId/结构定位）| fallback 默认列 |
+|---|---|---|
+| burst-open 明细 | `handleSortChanged` ~`:2093` | `scanned_at` |
+| burst-open 聚合 | inline onSortChanged ~`:2654`（`BURST_AGG_SORTABLE_COL_IDS`）| `total_lots` |
+| 快开快平 | ~`:3089` 附近 | `scanned_at` |
+| 快速获利 | ~`:4536` 附近 | `scanned_at` |
+| 对冲 明细 | ~`:5622` 附近 | `scanned_at` |
+| 对冲 聚合 | ~`:6196`（`HEDGE_AGG_SORTABLE_COL_IDS`）| `total_lots`（核对）|
+| 滥用杠杆 | ~`:6885` 附近 | `scanned_at` |
+| 马丁 | ~`:7899` 附近 | `scanned_at` |
+
+> 用 `grep -n "getColumnState().find" frontend/src/pages/RiskMonitor.tsx` 定位全部 handler，逐个核对它现有的 fallback 列字符串（`: "scanned_at"` / `: "total_lots"` / `: "total_count"`），那个就是要 apply 回去的默认列。
+
+### 实施要点
+
+1. **触发条件**：handler 里 `active = getColumnState().find(c => c.sort)` 为 `undefined`（即取消态）时，才 apply 默认列箭头。`active` 存在（用户正常 asc/desc）时不动。
+2. **apply 方式**：`e.api.applyColumnState({ state: [{ colId: <fallback>, sort: "desc" }], defaultState: { sort: null } })`，把默认列设 desc、其余清空。
+3. **防循环/防回声**：`applyColumnState` 会再触发一次 `onSortChanged`。因为 fallback 列（`scanned_at`/`total_lots`）**都在各自白名单里**，回声事件里 `active` = 默认列（已找到）→ 走「active 存在」分支 → **不再** apply → 自然终止（最多多一次 no-op 事件，`sortBy` 值不变不会重复 fetch）。
+   - 聚合 handler 已有 `if (!aggColumnPersist.isApplying())` 守卫——apply 默认列时要走该 hook 的 apply 包装（或临时置 isApplying），避免回声事件重入。明细 handler 无此守卫，靠「fallback 列在白名单 → 回声走 active 分支」自然终止即可；若仍担心，加一个 `isReapplyingRef` 本地守卫。
+4. **持久化**：apply 默认列 sort 会被 `useGridColumnPersist` 的 throttledSave 记下（sort 也在持久化范围）——这是**期望行为**（取消→默认被记住），无需特殊处理。
+5. **不要**改 `sortingOrder`（保持三态），不要改后端（纯前端 UX）。
+
+### Phase 2 验收标准
+
+- [ ] 任一账户级 tab：列 ▼ → ▲ → 第三下，**默认列（发现时间）显出 ▼ 箭头**，数据按发现时间倒序，用户能明确看到当前排序态。
+- [ ] 聚合视图同理：第三下显出默认列（total_lots）▼。
+- [ ] 无排序循环 / 无重复 fetch（apply 回声事件不触发二次请求）。
+- [ ] 8 个 grid 全覆盖（含 hedge 聚合的 total_lots 核对）。
+- [ ] 持久化不回退：取消态被正确记住，刷新后仍是默认列倒序。
+- [ ] `tsc` + `vitest` 绿（`./verify.sh`）。纯前端无 pytest 影响。
+- [ ] 回归：正常 asc/desc 排序、Phase 1 的 net_profit 服务端排序、聚合 toggle 列偏好保留都不受影响。
