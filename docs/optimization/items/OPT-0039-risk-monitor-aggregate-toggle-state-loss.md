@@ -1,9 +1,9 @@
 ---
 id: OPT-0039
 title: Risk-monitor 聚合视图切换丢失列持久化 + 计算列(净赚/佣金试算)排序失效
-status: ready
+status: wip
 priority: P1
-area: frontend
+area: mixed
 effort: M
 created: 2026-06-26
 related: [[OPT-0027]] [[OPT-0028]] [[OPT-0015]] [[OPT-0016]]
@@ -80,10 +80,12 @@ risk-monitor 批量下单 tab 的「聚合」功能有两个用户可感知缺�
 - Bug 1 的 `net_profit`/`est_commission` 在 OPT-0027 加聚合视图 + 淨賺列（2026-06-03）之后引入，当时只接了前端 comparator，漏了「服务端排序白名单」这一层——这是「计算列 + 服务端排序」的语义冲突。修复后应在 SKILL.md「Adding a Column」段补一句：**前端计算列若要可排序，要么后端支持该派生列排序并加进两边白名单，要么显式 `sortable:false`，不能只给 comparator**（否则服务端分页下假性排序）。
 - 与 OPT-0028（聚合视图 SQL 性能 + 语义硬化，backend）正交：本 OPT 是**前端状态硬化**。两者可独立做。
 
-## 开放问题（claim 前/执行中需用户决策）
+## 决策（用户 2026-06-26 拍板，开放问题已关闭）
 
-1. **淨賺列排序**：(a) 加后端 `net_profit = equity − net_deposit_hist` 排序支持（淨賺真正可跨页排序，但后端要算派生列）；还是 (b) 直接 `sortable:false`（诚实，但用户失去按淨賺排序能力）？用户表述「净赚排序有问题」似乎是**想要**能排 → 倾向 (a)。
-2. **佣金试算列**：纯前端 D03 逻辑，后端无法排。(a) `sortable:false`；还是 (b) 接受「仅排当前页」并去掉服务端 fallback 干扰？倾向 (a)。
+1. **淨賺列排序 → 加后端排序支持**：后端 `SORTABLE_ALERT_COLS`（`risk_monitor_db.py` / 相关 service）加 `net_profit`，按派生表达式 `equity − net_deposit_hist` 排序（注意 CEN/null 语义要与前端 comparator 一致：null 排最前/最后需对齐当前 `comparator` 的 `null → -1`）；前端 `SORTABLE_COL_IDS`（`RiskMonitor.tsx:299`）加 `"net_profit"`。淨賺真正可跨页排序。**需 pytest 覆盖新排序列。**
+2. **佣金试算列 → `sortable:false`**：`estCommissionColDef()`（`RiskMonitor.tsx:1134`）改 `sortable:false`（D03 纯前端逻辑，后端无法排序，避免假性排序）。不要发服务端 sort_by。
+
+> ⚠ 注意：`net_profit` 列出现在哪些账户级 tab，就要确认那些 tab 的后端 `/alerts` 排序都认这个派生列（burst-open / 快开快平 / 快速获利 / 对冲 / 滥用杠杆 共用同一套排序白名单逻辑，核对是否一处改全受益）。聚合视图（burst-agg / hedge-agg）无 equity，不涉及。
 
 ## 结果
 <done 时填>
