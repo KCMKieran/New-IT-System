@@ -53,6 +53,10 @@ from app.core.fund_flow_scheduler import (
     start_fund_flow_scheduler,
     stop_fund_flow_scheduler,
 )
+from app.core.xauusd_snapshot_scheduler import (
+    start_xauusd_snapshot_scheduler,
+    stop_xauusd_snapshot_scheduler,
+)
 
 
 # When running with `uvicorn --workers N`, only one worker should run the
@@ -127,6 +131,7 @@ async def lifespan(app: FastAPI):
         start_login_ip_scheduler()
         start_client_roace_scheduler()
         start_fund_flow_scheduler()
+        start_xauusd_snapshot_scheduler()
     else:
         logger.info(
             f"Worker pid={os.getpid()} did not get scheduler lock — HTTP only"
@@ -135,6 +140,7 @@ async def lifespan(app: FastAPI):
     yield
 
     if owns_scheduler:
+        stop_xauusd_snapshot_scheduler()
         stop_fund_flow_scheduler()
         stop_client_roace_scheduler()
         stop_login_ip_scheduler()

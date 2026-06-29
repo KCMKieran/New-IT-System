@@ -1,6 +1,8 @@
 import * as React from "react";
 import { apiFetch } from "@/lib/fetch";
 
+import XauusdPositionChart from "@/components/position/XauusdPositionChart";
+
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -402,6 +404,9 @@ export default function PositionPage() {
 
   return (
     <div className="relative space-y-4 px-1 pb-6 sm:px-4 lg:px-6">
+      {/* XAUUSD 持仓分钟级记录图表（OPT-0040）— 页面最顶部 */}
+      <XauusdPositionChart />
+
       {/* 跨服务器品种汇总查询 */}
       <Card className="mt-4 border-primary/20 bg-primary/5">
         <CardContent className="pt-6">

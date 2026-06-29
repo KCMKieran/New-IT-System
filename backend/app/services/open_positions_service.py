@@ -41,6 +41,124 @@ def _get_excluded_groupsids(settings: Settings) -> list[str]:
         return []
 
 
+def compute_net_position(volume_buy: float, volume_sell: float) -> float:
+    """Net position = total Buy lots − total Sell lots.
+
+    Positive ⇒ the company is net long, negative ⇒ net short. Pure helper so
+    the snapshot scheduler and the detail query share one definition (and it
+    is trivially unit-testable).
+    """
+    return (volume_buy or 0.0) - (volume_sell or 0.0)
+
+
+_SID_MAP = {"mt4_live": 1, "mt4_live2": 6, "mt5": 5}
+
+
+def get_xauusd_position_detail(settings: Settings) -> dict[str, Any]:
+    """Per (server, symbol) open-position detail for all XAUUSD* products.
+
+    Runs across the 3 servers in parallel (same pattern as the cross-server
+    summary) but, unlike that summary, keeps the **product dimension** —
+    GROUP BY t.SYMBOL with a `SYMBOL LIKE 'XAUUSD%'` filter — so each
+    (server, symbol) combination is its own row. Cent accounts (.kcmc/.cent)
+    are scaled /100, and the standard demo/test exclusion is reused.
+
+    Returns {"ok": bool, "items": [{server, symbol, volume_buy, volume_sell,
+    net_position}, ...]}. Used by the minute-level snapshot scheduler.
+    """
+    sources = ["mt4_live", "mt4_live2", "mt5"]
+
+    excluded_groupsids = _get_excluded_groupsids(settings)
+    if excluded_groupsids:
+        groupsid_placeholders = ", ".join(
+            [f"%(excluded_g{i})s" for i in range(len(excluded_groupsids))]
+        )
+        groupsid_condition = f"OR u.groupsid IN ({groupsid_placeholders})"
+        groupsid_params = {f"excluded_g{i}": g for i, g in enumerate(excluded_groupsids)}
+    else:
+        groupsid_condition = ""
+        groupsid_params = {}
+
+    sql = f"""
+        SELECT
+          t.SYMBOL AS symbol,
+          SUM(CASE WHEN t.CMD = 0 THEN
+            (CASE WHEN t.SYMBOL LIKE '%%.kcmc' OR t.SYMBOL LIKE '%%.cent' THEN t.lots / 100 ELSE t.lots END)
+          ELSE 0 END) AS volume_buy,
+          SUM(CASE WHEN t.CMD = 1 THEN
+            (CASE WHEN t.SYMBOL LIKE '%%.kcmc' OR t.SYMBOL LIKE '%%.cent' THEN t.lots / 100 ELSE t.lots END)
+          ELSE 0 END) AS volume_sell
+        FROM mt4_trades t
+        WHERE t.sid = %(sid)s
+          AND t.SYMBOL LIKE 'XAUUSD%%'
+          AND t.closeDate = '1970-01-01'
+          AND t.CMD IN (0, 1)
+          AND t.LOGIN NOT LIKE '7%%'
+          AND NOT EXISTS (
+            SELECT 1
+            FROM mt4_users u
+            WHERE u.LOGIN = t.LOGIN
+              AND u.sid = t.sid
+              AND (
+                u.NAME LIKE %(like_test)s
+                OR (
+                    (u.`GROUP` LIKE %(like_test)s OR u.NAME LIKE %(like_test)s)
+                    AND (u.`GROUP` LIKE %(like_kcm)s OR u.`GROUP` LIKE %(like_testkcm)s)
+                )
+                {groupsid_condition}
+              )
+          )
+        GROUP BY t.SYMBOL
+        ORDER BY t.SYMBOL
+        """
+
+    def fetch_source_data(source_name: str) -> list[dict[str, Any]]:
+        sid = _SID_MAP.get(source_name)
+        params = {
+            "sid": sid,
+            "like_test": "%test%",
+            "like_kcm": "KCM%",
+            "like_testkcm": "testKCM%",
+            **groupsid_params,
+        }
+        conn = pymysql.connect(
+            host=settings.DB_HOST,
+            user=settings.DB_USER,
+            password=settings.DB_PASSWORD,
+            database=settings.FXBACK_DB_NAME,
+            port=int(settings.DB_PORT),
+            charset=settings.DB_CHARSET,
+            cursorclass=pymysql.cursors.DictCursor,
+        )
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                rows = cur.fetchall()
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            volume_buy = float(row.get("volume_buy") or 0.0)
+            volume_sell = float(row.get("volume_sell") or 0.0)
+            out.append(
+                {
+                    "server": source_name,
+                    "symbol": row.get("symbol") or "",
+                    "volume_buy": volume_buy,
+                    "volume_sell": volume_sell,
+                    "net_position": compute_net_position(volume_buy, volume_sell),
+                }
+            )
+        return out
+
+    try:
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            per_server = list(executor.map(fetch_source_data, sources))
+        items = [row for server_rows in per_server for row in server_rows]
+        return {"ok": True, "items": items}
+    except Exception as exc:
+        logger.error(f"Error in get_xauusd_position_detail: {exc}")
+        return {"ok": False, "items": [], "error": str(exc)}
+
+
 def get_open_positions_today(settings: Settings, source: str = "mt4_live") -> dict[str, Any]:
     """
     Query all open positions using the consolidated mt4_trades table.
