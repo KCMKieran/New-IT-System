@@ -153,6 +153,6 @@ VERIFY: FAIL — backend pytest (预存在 date-rot，与本 OPT 无关)
 
 ### 跟进项 / 注意
 
-- dev 容器跑同一份 .env，scheduler flock 是 per-container 选主，所以 1min 快照在 dev/prod 不会双写；如需 dev 关掉设 `XAUUSD_SNAPSHOT_SCHEDULER_ENABLED=false`。
-- 未做活的 MySQL 联调（无法在本环境连只读副本跑真查询）；明细 SQL 照搬 `/today` 已验证的 cent/排除写法，仅改为 `LIKE 'XAUUSD%'`。建议上线后核对首批快照行数/数值。
+- ⚠ **上线时发现并修正**：原以为「flock per-container 选主 → dev/prod 不双写」是**错的**。dev 挂载 `backend -> /app`、prod 挂载 `backend/data -> /app/data`，指向**同一个** `backend/data/risk_monitor.db`；flock 只在容器内部去重 worker，**不跨容器**——dev leader 与 prod leader 各自往同一文件写，确实双写（实测 dev `:21` 节奏 + prod `:33` 节奏，无重复键但双倍写入 + 双倍 MySQL 负载）。修复：`backend/docker-compose.dev.yml` 加 `XAUUSD_SNAPSHOT_SCHEDULER_ENABLED=false`，与既有 `BURST_SCAN_ENABLED=false`/`GAP_TRADE_SCAN_ENABLED=false` 同约定（dev 共享 prod SQLite，所有 scheduler 在 dev 必须显式关）。已重启 dev 验证停写。
+- ✅ MySQL 联调已在 prod 完成（之前本环境无副本访问）：scheduler 启动即写入首批 **9 行/tick**（3 server × 各 XAUUSD 产品），数值合理、`net=buy-sell` 正确、UTC Z 格式正确。明细 SQL（`/today` 写法 + `LIKE 'XAUUSD%'`）在真副本跑通。
 - `view-profiles` manifest 未纳入本图表的筛选偏好（bucket/server/symbol 为调查上下文，按约定不持久化）。

@@ -36,6 +36,10 @@ services:
       # work; only the periodic background tick is suppressed here.
       - BURST_SCAN_ENABLED=false
       - GAP_TRADE_SCAN_ENABLED=false
+      # OPT-0040 — same reason: dev shares backend/data/risk_monitor.db with
+      # prod, so the 1-min XAUUSD snapshot scheduler must be off in dev or it
+      # double-writes xauusd_position_snapshots (+doubles the MySQL load).
+      - XAUUSD_SNAPSHOT_SCHEDULER_ENABLED=false
       # OPT-0032 — dev must NEVER fire the intraday tier or live CRM tag
       # writes (shared .env carries prod-true values; compose environment
       # entries override env_file).
