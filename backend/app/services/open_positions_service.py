@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+import time
 from typing import Any
 from concurrent.futures import ThreadPoolExecutor
 
@@ -10,15 +12,38 @@ from ..core.logging_config import get_logger
 
 logger = get_logger(__name__)
 
+# Module-level TTL cache for the excluded (demo/test) groupsids. These change
+# rarely, but the snapshot scheduler calls _get_excluded_groupsids every 60s,
+# so re-querying each tick is wasteful. Cache the list for 1h; a simple
+# time-checked global guarded by a Lock is enough for the scheduler thread.
+_EXCLUDED_GROUPSIDS_TTL_SEC = 3600
+_excluded_groupsids_cache: list[str] | None = None
+_excluded_groupsids_cached_at: float = 0.0
+_excluded_groupsids_lock = threading.Lock()
+
 
 def _get_excluded_groupsids(settings: Settings) -> list[str]:
     """
-    Pre-fetch groupsids that should be excluded (demo/test groups).
-    This is cached per request to avoid repeated queries.
+    Fetch the groupsids that should be excluded (demo/test groups).
+
+    Result is cached at module level for _EXCLUDED_GROUPSIDS_TTL_SEC (1h) so
+    repeated scheduler ticks reuse it instead of re-querying MySQL every call;
+    on cache miss/expiry it re-queries. On query failure returns [] (and does
+    not poison the cache) so callers degrade gracefully.
     """
+    global _excluded_groupsids_cache, _excluded_groupsids_cached_at
+
+    now = time.monotonic()
+    with _excluded_groupsids_lock:
+        if (
+            _excluded_groupsids_cache is not None
+            and now - _excluded_groupsids_cached_at < _EXCLUDED_GROUPSIDS_TTL_SEC
+        ):
+            return _excluded_groupsids_cache
+
     sql = """
-        SELECT groupsid 
-        FROM fxbackoffice.groups 
+        SELECT groupsid
+        FROM fxbackoffice.groups
         WHERE groupsid LIKE '%demo%' OR groupsid LIKE '%test%'
     """
     try:
@@ -30,12 +55,18 @@ def _get_excluded_groupsids(settings: Settings) -> list[str]:
             port=int(settings.DB_PORT),
             charset=settings.DB_CHARSET,
             cursorclass=pymysql.cursors.DictCursor,
+            connect_timeout=5,
+            read_timeout=20,
         )
         with conn:
             with conn.cursor() as cur:
                 cur.execute(sql)
                 rows = cur.fetchall()
-        return [row["groupsid"] for row in rows]
+        result = [row["groupsid"] for row in rows]
+        with _excluded_groupsids_lock:
+            _excluded_groupsids_cache = result
+            _excluded_groupsids_cached_at = time.monotonic()
+        return result
     except Exception as e:
         logger.error(f"Failed to fetch excluded groupsids: {e}")
         return []
@@ -129,6 +160,8 @@ def get_xauusd_position_detail(settings: Settings) -> dict[str, Any]:
             port=int(settings.DB_PORT),
             charset=settings.DB_CHARSET,
             cursorclass=pymysql.cursors.DictCursor,
+            connect_timeout=5,
+            read_timeout=20,
         )
         with conn:
             with conn.cursor() as cur:
@@ -149,14 +182,37 @@ def get_xauusd_position_detail(settings: Settings) -> dict[str, Any]:
             )
         return out
 
+    def fetch_source_data_safe(source_name: str) -> tuple[str, list[dict[str, Any]], str | None]:
+        """Wrap one server's fetch so a single failure can't zero out the batch.
+
+        Returns (source, rows, error). On failure logs a warning and treats the
+        server as empty so the union of the successful servers is still written.
+        """
+        try:
+            return source_name, fetch_source_data(source_name), None
+        except Exception as exc:  # noqa: BLE001 - isolate per-server failure
+            logger.warning(
+                "XAUUSD detail fetch failed for %s; treating as empty: %s",
+                source_name,
+                exc,
+            )
+            return source_name, [], str(exc)
+
     try:
         with ThreadPoolExecutor(max_workers=3) as executor:
-            per_server = list(executor.map(fetch_source_data, sources))
-        items = [row for server_rows in per_server for row in server_rows]
-        return {"ok": True, "items": items}
+            results = list(executor.map(fetch_source_data_safe, sources))
     except Exception as exc:
+        # Executor-level failure (not a per-server query error) — keep the old
+        # all-or-nothing fallback so the caller still sees ok=False.
         logger.error(f"Error in get_xauusd_position_detail: {exc}")
         return {"ok": False, "items": [], "error": str(exc)}
+
+    items = [row for _src, server_rows, _err in results for row in server_rows]
+    failed_servers = [src for src, _rows, err in results if err is not None]
+    out: dict[str, Any] = {"ok": True, "items": items}
+    if failed_servers:
+        out["failed_servers"] = failed_servers
+    return out
 
 
 def get_open_positions_today(settings: Settings, source: str = "mt4_live") -> dict[str, Any]:

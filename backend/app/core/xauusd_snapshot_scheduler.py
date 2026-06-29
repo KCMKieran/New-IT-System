@@ -52,6 +52,18 @@ def _run_snapshot_once() -> int:
             return 0
 
         rows = result.get("items", [])
+        # Skip writing an empty batch. With partial-server resilience an empty
+        # items list means EVERY server failed (a healthy all-flat moment still
+        # emits per-symbol rows), so appending it would create a misleading
+        # "all positions closed" dip in the chart. Better to leave a gap.
+        if not rows:
+            failed = result.get("failed_servers")
+            logger.warning(
+                "XAUUSD snapshot produced 0 rows%s — skipping write",
+                f" (failed servers: {failed})" if failed else "",
+            )
+            return 0
+
         captured_at = (
             datetime.now(timezone.utc)
             .isoformat(timespec="seconds")

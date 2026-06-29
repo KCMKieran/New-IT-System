@@ -9,7 +9,7 @@ import {
   Legend,
   ResponsiveContainer,
 } from "recharts";
-import { format, startOfDay, endOfDay, subDays } from "date-fns";
+import { format, subDays } from "date-fns";
 import { DateRange } from "react-day-picker";
 import { Calendar as CalendarIcon, Download, RefreshCw } from "lucide-react";
 
@@ -89,9 +89,21 @@ export default function XauusdPositionChart() {
   );
   const [exporting, setExporting] = React.useState(false);
 
+  // Track mount so a late-resolving fetch never setState after unmount.
+  const isMountedRef = React.useRef(true);
+  React.useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
   const fetchHistory = React.useCallback(
-    async (signal?: AbortSignal) => {
-      setLoading(true);
+    async (signal?: AbortSignal, opts?: { background?: boolean }) => {
+      const background = opts?.background ?? false;
+      // Background polls must not flip the spinner (avoids flicker every 60s);
+      // only the initial/filter/manual fetch shows the loading state.
+      if (!background) setLoading(true);
       setError(null);
       try {
         const params = new URLSearchParams({
@@ -107,12 +119,15 @@ export default function XauusdPositionChart() {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const json = (await res.json()) as HistoryResponse;
         if (!json.ok) throw new Error(json.error || "unknown error");
+        if (signal?.aborted || !isMountedRef.current) return;
         setData(json);
       } catch (e: unknown) {
         if ((e as Error)?.name === "AbortError") return;
-        setError(e instanceof Error ? e.message : String(e));
+        if (isMountedRef.current) {
+          setError(e instanceof Error ? e.message : String(e));
+        }
       } finally {
-        setLoading(false);
+        if (!background && isMountedRef.current) setLoading(false);
       }
     },
     [bucketMin, server, symbol],
@@ -126,13 +141,19 @@ export default function XauusdPositionChart() {
   }, [fetchHistory]);
 
   // Poll every 60s so the chart + "recording" badge stay live (snapshots are
-  // written once a minute). Skipped while a fetch is mid-flight via signal.
+  // written once a minute). Hold the controller so we can abort the previous
+  // in-flight poll before each tick and any in-flight poll on cleanup.
   React.useEffect(() => {
+    let controller: AbortController | null = null;
     const id = setInterval(() => {
-      const controller = new AbortController();
-      fetchHistory(controller.signal);
+      controller?.abort();
+      controller = new AbortController();
+      fetchHistory(controller.signal, { background: true });
     }, 60_000);
-    return () => clearInterval(id);
+    return () => {
+      clearInterval(id);
+      controller?.abort();
+    };
   }, [fetchHistory]);
 
   const lastCaptured = data?.last_captured_at ?? null;
@@ -147,8 +168,14 @@ export default function XauusdPositionChart() {
     if (!exportRange?.from || !exportRange?.to) return;
     setExporting(true);
     try {
-      const start = startOfDay(exportRange.from).toISOString();
-      const end = endOfDay(exportRange.to).toISOString();
+      // Day bounds must be in HK time (UTC+8, fixed, no DST), not the
+      // browser's local zone — otherwise a non-HK browser exports the wrong
+      // window. Build the +08:00 ISO from the picked calendar dates, then
+      // .toISOString() converts to the UTC the backend expects.
+      const fromDay = format(exportRange.from, "yyyy-MM-dd");
+      const toDay = format(exportRange.to, "yyyy-MM-dd");
+      const start = new Date(`${fromDay}T00:00:00+08:00`).toISOString();
+      const end = new Date(`${toDay}T23:59:59+08:00`).toISOString();
       const res = await apiFetch(
         `/api/v1/xauusd-positions/export?start=${encodeURIComponent(
           start,
@@ -221,10 +248,7 @@ export default function XauusdPositionChart() {
           size="sm"
           variant="ghost"
           className="h-8 w-fit gap-1.5 px-2 text-xs"
-          onClick={() => {
-            const controller = new AbortController();
-            fetchHistory(controller.signal);
-          }}
+          onClick={() => fetchHistory()}
           disabled={loading}
         >
           <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />

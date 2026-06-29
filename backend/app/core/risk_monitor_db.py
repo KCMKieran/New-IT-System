@@ -1803,31 +1803,122 @@ def append_xauusd_snapshots(captured_at: str, rows: list[dict[str, Any]]) -> int
             inserted += 1
 
         # Retention purge (60 days). Cheap on the indexed captured_at column.
-        cutoff_expr = f"datetime('now', '-{_XAUUSD_SNAPSHOT_RETENTION_DAYS} days')"
+        # captured_at is fixed-width UTC ISO8601 ("...T...Z"); emit the cutoff
+        # in the SAME format so the lexicographic `<` compare is exact at the
+        # boundary (datetime('now',...) yields a space-separated, no-Z string
+        # which would mis-order around the boundary minute).
+        cutoff_expr = (
+            "strftime('%Y-%m-%dT%H:%M:%SZ', 'now', "
+            f"'-{_XAUUSD_SNAPSHOT_RETENTION_DAYS} days')"
+        )
         conn.execute(
             f"DELETE FROM xauusd_position_snapshots WHERE captured_at < {cutoff_expr}"
         )
     return inserted
 
 
+def _xauusd_snapshot_filter_clause(
+    server: str | None, symbol: str | None
+) -> tuple[str, list[Any]]:
+    """Build the optional `AND server = ? / AND symbol = ?` SQL + params.
+
+    Pushing these into SQL lets the read path use idx_xau_snap_srv_sym instead
+    of filtering in Python after a full-window fetch.
+    """
+    clause = ""
+    params: list[Any] = []
+    if server:
+        clause += " AND server = ?"
+        params.append(server)
+    if symbol:
+        clause += " AND symbol = ?"
+        params.append(symbol)
+    return clause, params
+
+
 def fetch_xauusd_snapshots(
-    start_iso: str, end_iso: str
+    start_iso: str,
+    end_iso: str,
+    server: str | None = None,
+    symbol: str | None = None,
 ) -> list[dict[str, Any]]:
     """Return raw XAUUSD snapshot rows with captured_at in [start_iso, end_iso].
 
-    Ordered by captured_at ASC so both the downsampler and the CSV export get
-    a chronological stream. Timestamps are compared as strings — safe because
+    Optional `server` / `symbol` are pushed into SQL (indexed). Ordered by
+    captured_at ASC so both the downsampler and the CSV export get a
+    chronological stream. Timestamps are compared as strings — safe because
     every captured_at is the same fixed-width UTC ISO8601 format.
     """
+    filter_sql, filter_params = _xauusd_snapshot_filter_clause(server, symbol)
     with get_risk_monitor_db() as conn:
         cur = conn.execute(
             "SELECT captured_at, server, symbol, volume_buy, volume_sell, net_position "
             "FROM xauusd_position_snapshots "
-            "WHERE captured_at >= ? AND captured_at <= ? "
+            "WHERE captured_at >= ? AND captured_at <= ?"
+            f"{filter_sql} "
             "ORDER BY captured_at ASC, server ASC, symbol ASC",
-            (start_iso, end_iso),
+            (start_iso, end_iso, *filter_params),
         )
         return [dict(row) for row in cur.fetchall()]
+
+
+def iter_xauusd_snapshots(
+    start_iso: str,
+    end_iso: str,
+    server: str | None = None,
+    symbol: str | None = None,
+) -> Iterator[dict[str, Any]]:
+    """Stream raw XAUUSD snapshot rows in [start_iso, end_iso] via a cursor.
+
+    Same shape/order as fetch_xauusd_snapshots but yields rows in batches of
+    1000 so a large CSV export is never fully materialized in memory. The
+    connection stays open for the lifetime of the generator.
+    """
+    filter_sql, filter_params = _xauusd_snapshot_filter_clause(server, symbol)
+    with get_risk_monitor_db() as conn:
+        cur = conn.execute(
+            "SELECT captured_at, server, symbol, volume_buy, volume_sell, net_position "
+            "FROM xauusd_position_snapshots "
+            "WHERE captured_at >= ? AND captured_at <= ?"
+            f"{filter_sql} "
+            "ORDER BY captured_at ASC, server ASC, symbol ASC",
+            (start_iso, end_iso, *filter_params),
+        )
+        while True:
+            batch = cur.fetchmany(1000)
+            if not batch:
+                break
+            for row in batch:
+                yield dict(row)
+
+
+def fetch_xauusd_distinct_dimensions(
+    start_iso: str, end_iso: str
+) -> dict[str, list[str]]:
+    """Return the distinct servers/symbols present in the UNFILTERED window.
+
+    Cheap DISTINCTs used to populate the chart's filter dropdowns, so the main
+    history fetch can be server/symbol filtered without the other dropdown
+    options disappearing.
+    """
+    with get_risk_monitor_db() as conn:
+        servers = [
+            row["server"]
+            for row in conn.execute(
+                "SELECT DISTINCT server FROM xauusd_position_snapshots "
+                "WHERE captured_at >= ? AND captured_at <= ? ORDER BY server",
+                (start_iso, end_iso),
+            ).fetchall()
+        ]
+        symbols = [
+            row["symbol"]
+            for row in conn.execute(
+                "SELECT DISTINCT symbol FROM xauusd_position_snapshots "
+                "WHERE captured_at >= ? AND captured_at <= ? ORDER BY symbol",
+                (start_iso, end_iso),
+            ).fetchall()
+        ]
+    return {"servers": servers, "symbols": symbols}
 
 
 def get_xauusd_last_captured_at() -> str | None:
