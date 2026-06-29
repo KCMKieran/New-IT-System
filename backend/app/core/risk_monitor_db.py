@@ -155,6 +155,11 @@ _RETENTION_DAYS = 30
 # while keeping a year of history.
 _REMARKS_HISTORY_RETENTION_DAYS = 365
 
+# XAUUSD position snapshots (OPT-0040) retention. 60 days as decided — long
+# enough for the custom-range CSV export to be useful, bounded so the table
+# can't grow without limit.
+_XAUUSD_SNAPSHOT_RETENTION_DAYS = 60
+
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS burst_open_config (
     id                INTEGER PRIMARY KEY CHECK (id = 1),
@@ -502,6 +507,27 @@ CREATE TABLE IF NOT EXISTS account_remarks_history (
 );
 CREATE INDEX IF NOT EXISTS idx_account_remarks_history_login
     ON account_remarks_history(server, login, at DESC);
+
+-- XAUUSD position snapshots (OPT-0040): minute-level stock snapshot of the
+-- company's open XAUUSD* positions, one row per (server, symbol). Written by
+-- xauusd_snapshot_scheduler every 1 min. Retained 60 days (longer than the
+-- 30-day scan/alert window — this is a low-volume time series, ~9 rows/min ≈
+-- 13k rows/day ≈ 780k rows over 60 days, trivial for SQLite). `net_position`
+-- is stored pre-computed (volume_buy - volume_sell) so the read path / chart
+-- never recomputes it.
+CREATE TABLE IF NOT EXISTS xauusd_position_snapshots (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    captured_at   TEXT NOT NULL,   -- ISO8601 UTC, e.g. 2026-06-29T06:32:00Z
+    server        TEXT NOT NULL,   -- mt4_live | mt4_live2 | mt5
+    symbol        TEXT NOT NULL,   -- XAUUSD | XAUUSD.kcmc | XAUUSD.cent ...
+    volume_buy    REAL NOT NULL,
+    volume_sell   REAL NOT NULL,
+    net_position  REAL NOT NULL    -- volume_buy - volume_sell
+);
+CREATE INDEX IF NOT EXISTS idx_xau_snap_time
+    ON xauusd_position_snapshots(captured_at DESC);
+CREATE INDEX IF NOT EXISTS idx_xau_snap_srv_sym
+    ON xauusd_position_snapshots(server, symbol, captured_at DESC);
 """
 
 # Default rule seeded on first run (3s / 3 orders / 5 lots)
@@ -1743,6 +1769,166 @@ def append_scan_and_events(
             )
 
     return batch_id
+
+
+# ── XAUUSD position snapshots (OPT-0040) ──────────────────
+
+def append_xauusd_snapshots(captured_at: str, rows: list[dict[str, Any]]) -> int:
+    """Persist one minute's batch of XAUUSD position snapshot rows atomically.
+
+    `rows` is a list of dicts with keys: server, symbol, volume_buy,
+    volume_sell, net_position. All rows share the single `captured_at`
+    timestamp (UTC ISO8601, e.g. "2026-06-29T06:32:00Z"). Also purges rows
+    older than the 60-day retention window in the same transaction so the
+    table stays bounded even if the read path is never hit.
+
+    Returns the number of snapshot rows inserted.
+    """
+    inserted = 0
+    with get_risk_monitor_db() as conn:
+        for r in rows:
+            conn.execute(
+                "INSERT INTO xauusd_position_snapshots "
+                "(captured_at, server, symbol, volume_buy, volume_sell, net_position) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    captured_at,
+                    r.get("server", ""),
+                    r.get("symbol", ""),
+                    float(r.get("volume_buy") or 0.0),
+                    float(r.get("volume_sell") or 0.0),
+                    float(r.get("net_position") or 0.0),
+                ),
+            )
+            inserted += 1
+
+        # Retention purge (60 days). Cheap on the indexed captured_at column.
+        # captured_at is fixed-width UTC ISO8601 ("...T...Z"); emit the cutoff
+        # in the SAME format so the lexicographic `<` compare is exact at the
+        # boundary (datetime('now',...) yields a space-separated, no-Z string
+        # which would mis-order around the boundary minute).
+        cutoff_expr = (
+            "strftime('%Y-%m-%dT%H:%M:%SZ', 'now', "
+            f"'-{_XAUUSD_SNAPSHOT_RETENTION_DAYS} days')"
+        )
+        conn.execute(
+            f"DELETE FROM xauusd_position_snapshots WHERE captured_at < {cutoff_expr}"
+        )
+    return inserted
+
+
+def _xauusd_snapshot_filter_clause(
+    server: str | None, symbol: str | None
+) -> tuple[str, list[Any]]:
+    """Build the optional `AND server = ? / AND symbol = ?` SQL + params.
+
+    Pushing these into SQL lets the read path use idx_xau_snap_srv_sym instead
+    of filtering in Python after a full-window fetch.
+    """
+    clause = ""
+    params: list[Any] = []
+    if server:
+        clause += " AND server = ?"
+        params.append(server)
+    if symbol:
+        clause += " AND symbol = ?"
+        params.append(symbol)
+    return clause, params
+
+
+def fetch_xauusd_snapshots(
+    start_iso: str,
+    end_iso: str,
+    server: str | None = None,
+    symbol: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return raw XAUUSD snapshot rows with captured_at in [start_iso, end_iso].
+
+    Optional `server` / `symbol` are pushed into SQL (indexed). Ordered by
+    captured_at ASC so both the downsampler and the CSV export get a
+    chronological stream. Timestamps are compared as strings — safe because
+    every captured_at is the same fixed-width UTC ISO8601 format.
+    """
+    filter_sql, filter_params = _xauusd_snapshot_filter_clause(server, symbol)
+    with get_risk_monitor_db() as conn:
+        cur = conn.execute(
+            "SELECT captured_at, server, symbol, volume_buy, volume_sell, net_position "
+            "FROM xauusd_position_snapshots "
+            "WHERE captured_at >= ? AND captured_at <= ?"
+            f"{filter_sql} "
+            "ORDER BY captured_at ASC, server ASC, symbol ASC",
+            (start_iso, end_iso, *filter_params),
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+
+def iter_xauusd_snapshots(
+    start_iso: str,
+    end_iso: str,
+    server: str | None = None,
+    symbol: str | None = None,
+) -> Iterator[dict[str, Any]]:
+    """Stream raw XAUUSD snapshot rows in [start_iso, end_iso] via a cursor.
+
+    Same shape/order as fetch_xauusd_snapshots but yields rows in batches of
+    1000 so a large CSV export is never fully materialized in memory. The
+    connection stays open for the lifetime of the generator.
+    """
+    filter_sql, filter_params = _xauusd_snapshot_filter_clause(server, symbol)
+    with get_risk_monitor_db() as conn:
+        cur = conn.execute(
+            "SELECT captured_at, server, symbol, volume_buy, volume_sell, net_position "
+            "FROM xauusd_position_snapshots "
+            "WHERE captured_at >= ? AND captured_at <= ?"
+            f"{filter_sql} "
+            "ORDER BY captured_at ASC, server ASC, symbol ASC",
+            (start_iso, end_iso, *filter_params),
+        )
+        while True:
+            batch = cur.fetchmany(1000)
+            if not batch:
+                break
+            for row in batch:
+                yield dict(row)
+
+
+def fetch_xauusd_distinct_dimensions(
+    start_iso: str, end_iso: str
+) -> dict[str, list[str]]:
+    """Return the distinct servers/symbols present in the UNFILTERED window.
+
+    Cheap DISTINCTs used to populate the chart's filter dropdowns, so the main
+    history fetch can be server/symbol filtered without the other dropdown
+    options disappearing.
+    """
+    with get_risk_monitor_db() as conn:
+        servers = [
+            row["server"]
+            for row in conn.execute(
+                "SELECT DISTINCT server FROM xauusd_position_snapshots "
+                "WHERE captured_at >= ? AND captured_at <= ? ORDER BY server",
+                (start_iso, end_iso),
+            ).fetchall()
+        ]
+        symbols = [
+            row["symbol"]
+            for row in conn.execute(
+                "SELECT DISTINCT symbol FROM xauusd_position_snapshots "
+                "WHERE captured_at >= ? AND captured_at <= ? ORDER BY symbol",
+                (start_iso, end_iso),
+            ).fetchall()
+        ]
+    return {"servers": servers, "symbols": symbols}
+
+
+def get_xauusd_last_captured_at() -> str | None:
+    """Return the most recent snapshot timestamp (for the 'recording' badge)."""
+    with get_risk_monitor_db() as conn:
+        row = conn.execute(
+            "SELECT captured_at FROM xauusd_position_snapshots "
+            "ORDER BY captured_at DESC LIMIT 1"
+        ).fetchone()
+        return row["captured_at"] if row else None
 
 
 # ── Alert events (read path) ──────────────────────────────

@@ -1,7 +1,7 @@
 ---
 id: OPT-0040
 title: XAUUSD 持仓分钟级快照记录 + /position 页顶部 24h 图表 + 自定义范围 CSV 导出
-status: wip
+status: done
 priority: P1
 area: mixed
 effort: L
@@ -94,4 +94,65 @@ related: [[OPT-0006]] [[OPT-0035]]
 
 ## 结果
 
-（实施后填写）
+实施于 2026-06-29（branch `opt/xauusd-position-snapshots`）。
+
+### 交付 vs AC
+
+| AC | 状态 | 说明 |
+|---|---|---|
+| 1. 新表 + 2 索引 | ✅ | `xauusd_position_snapshots` 表 + `idx_xau_snap_time` / `idx_xau_snap_srv_sym` 加进 `risk_monitor_db.py` 的 `_SCHEMA_SQL`（CREATE TABLE/INDEX IF NOT EXISTS），复用 `risk_monitor.db`（无新 DB 文件）。 |
+| 2. 明细查询函数 | ✅ | `open_positions_service.get_xauusd_position_detail()`：3 server 并行（ThreadPoolExecutor）、`SYMBOL LIKE 'XAUUSD%'` + `GROUP BY t.SYMBOL`、cent 账户 /100、复用 `_get_excluded_groupsids` + `LOGIN NOT LIKE '7%'` 排除逻辑、`net_position = buy - sell`（`compute_net_position()` helper）。 |
+| 3. 1min scheduler + 60 天保留 + env 开关 | ✅ | `core/xauusd_snapshot_scheduler.py`，`IntervalTrigger(minutes=1)`，env `XAUUSD_SNAPSHOT_SCHEDULER_ENABLED`（默认 true），启动即先抓一次。保留清理在写入路径 `append_xauusd_snapshots()`（`_XAUUSD_SNAPSHOT_RETENTION_DAYS = 60`）。在 `main.py` lifespan 按现有模式注册（受 scheduler flock 选主保护）。 |
+| 4. 2 只读端点 | ✅ | `GET /api/v1/xauusd-positions/history?hours=24&bucket_min=5[&server=&symbol=]` 与 `GET /api/v1/xauusd-positions/export?start=&end=`（CSV）。 |
+| 5. Position.tsx 顶部图表 | ✅ | `components/position/XauusdPositionChart.tsx` 渲染在页面最顶部：recharts 三线图（Buy/Sell/Net）、"记录中" 绿点 Badge + 最后快照 HK 时间、5/10min 桶切换、server/产品筛选下拉、自定义范围 CSV 导出（apiFetch blob 下载，带 X-API-Key）、60s 轮询。 |
+| 6. verify.sh 全绿 | ⚠ 见下 | 我的改动这一切片全绿；但 backend pytest 闸门因**与本 OPT 无关的预存在 date-rot 失败**整体红。 |
+
+### 降采样如何工作（history 端点）
+
+纯函数在 `services/xauusd_snapshot_service.py`（经 outsider-review 修正后为**单步、瞬时一致**）：
+1. `fetch_xauusd_snapshots(start, end, server=, symbol=)` 取窗口内原始 1min 行，server/symbol 过滤**下推到 SQL**（用 `idx_xau_snap_srv_sym` 索引）。下拉选项由 `fetch_xauusd_distinct_dimensions` 单独取（不受筛选影响）。
+2. `aggregate_points(rows, bucket_min)`：按 `bucket_start()`（下取整到 5/10min 边界）分桶；**每桶找出该桶内的最大 captured_at（最近真实瞬时），只对该瞬时的行跨 series 求和** → `{time, buy, sell, net}` 升序。position 是 stock 量：桶代表取「最近一个真实快照时刻的公司合计」，中途已平仓的 series（该时刻无行）正确计 0，不再把桶内更早的过期值带进合计（修复 review finding A 的「幻影持仓」）。`bucket_min` 仅接受 5/10，其它回落 5。
+
+### verify.sh 结果（outsider-review 修复后，commit `dbabb9a`）
+
+```
+frontend tsc    ✓ PASS
+frontend vitest ✓ PASS
+backend pytest  ✗ FAIL — 40 failed, 281 passed
+VERIFY: FAIL — backend pytest (预存在 date-rot，与本 OPT 无关)
+```
+
+**这 40 个失败与本 OPT 无关，是预存在的 date-rot**：对照实验——把本 OPT 改动 stash 掉后 baseline 仍是 `40 failed`；加上本 OPT 后仍是 `40 failed / 281 passed`（本 OPT 14 个新/改测试全过，**0 新增失败**）。根因：`test_net_profit_sort.py` / `test_hedge_open_aggregated.py` / `test_leverage_abuse_filter.py` / `test_burst_open_aggregated.py` 把种子 `scanned_at` 硬编码在 `2026-05` 附近，当前日期 `2026-06-29` 已超 30 天保留窗口，`append_scan_and_events` 的清理在 seed 后立即删行 → 查询返回 0。**已另立跟进 OPT 修复（把这些测试的固定日期改成相对 now，恢复 verify 闸门可信度）。**
+
+本 OPT 自身切片全绿：`test_xauusd_snapshot_service.py` 14 个测试（net_position + 桶瞬时聚合含掉线 series 用例 + 导出范围校验 + server/symbol SQL 过滤 + 流式 + 60 天清理 Z 格式边界 + 单 server 失败容错）全过；frontend tsc + vitest 全过；`XauusdPositionChart.tsx` eslint 0 error。
+
+### Stage 1 outsider-review 处理记录（冷审 → 10 条 finding 全部当场修，commit `dbabb9a`）
+
+冷审（无前置 context 的独立 reviewer）发现 10 条，curate 后用户选「全部当场在 branch 上修」：
+
+| # | 严重度 | finding | 处理 |
+|---|---|---|---|
+| A | 🔴 正确性 | 降采样跨瞬时求和 → 桶边幻影 Net（series 中途平仓时旧值仍被求和） | 修：`aggregate_points` 改为「每桶只对最近瞬时的行求和」，掉线 series 计 0；加 dropout 用例测试 |
+| B | 🔴 scaling | CSV 导出无范围上限 + 全量物化，长读饿死 WAL checkpoint → 其他 scheduler `SQLITE_BUSY` 丢 tick | 修：服务端 7 天上限（超限/非法 400）+ `StreamingResponse` + `fetchmany(1000)` 游标流式 |
+| C | 🔴 scaling | `/history` `hours` 上限 1440（60d），可拉 78 万行进 Python | 修：上限降到 48h；server/symbol 过滤下推 SQL；下拉选项走单独 DISTINCT |
+| D | 🔴 故障 | pymysql 无 connect/read 超时，副本卡死则快照永久冻结 | 修：两处 connect 加 `connect_timeout=5, read_timeout=20` |
+| E | 🟡 | `executor.map` all-or-nothing：一个 server 失败 → 全部 server 零行 | 修：每 server 独立 try，healthy 的照写；items 空时 scheduler 跳过写入（避免假性「全平仓」） |
+| F | 🟡 | 前端 60s poll 的 AbortController 从不 abort（泄漏 + 无 last-write-wins 守卫 + spinner 闪烁） | 修：controller 存 ref、每 tick/卸载 abort、`{background}` 跳过 setLoading、isMountedRef 守卫 |
+| G | 🟡 | `idx_xau_snap_srv_sym` 死索引（过滤在 Python）→ 纯写放大 | 由 C 解决：过滤下推 SQL 后该索引被用上 |
+| H | 🟡 | CSV 日界用浏览器本地时区，非 HK 浏览器导出窗口与图表不符 | 修：`onExport` 显式按 HK（UTC+8 固定）构造日界再 `toISOString()` |
+| I | ⚪ | `_get_excluded_groupsids` docstring 称「cached per request」实则每 tick 重查（第 4 个 MySQL 查询/min） | 修：加模块级 3600s TTL 缓存（Lock 守卫），docstring 改为属实 |
+| J | ⚪ | 60 天清理 cutoff 格式（空格无 Z）与 `captured_at`（`...T..Z`）字典序比较错位（宽松 <1 天） | 修：cutoff 改 `strftime('%Y-%m-%dT%H:%M:%SZ','now','-60 days')`，比较精确 |
+
+冷审同时确认 scheduler flock 选主 + insert/purge 原子事务**无跨 worker 双写**，设计正确。
+
+### 开放问题的默认决策
+
+- **多 series 线条过多** → 默认聚合全部 server×产品为 3 条公司合计线（Buy/Sell/Net），图表上给 server 下拉 + 产品下拉下钻到单 server / 单产品（"全部" 为默认）。后端 history 端点接 `server`/`symbol` 可选参数实现。
+- **降采样默认桶** = 5min，前端给 5/10 切换胶囊。
+- **CSV 范围选择器** = 复用 `DashboardPnlHistory` 同款 shadcn `Calendar` range popover；默认范围近 24h；起止按浏览器（HK）日界转 UTC ISO（`toISOString()` 带 Z）传给后端。
+
+### 跟进项 / 注意
+
+- dev 容器跑同一份 .env，scheduler flock 是 per-container 选主，所以 1min 快照在 dev/prod 不会双写；如需 dev 关掉设 `XAUUSD_SNAPSHOT_SCHEDULER_ENABLED=false`。
+- 未做活的 MySQL 联调（无法在本环境连只读副本跑真查询）；明细 SQL 照搬 `/today` 已验证的 cent/排除写法，仅改为 `LIKE 'XAUUSD%'`。建议上线后核对首批快照行数/数值。
+- `view-profiles` manifest 未纳入本图表的筛选偏好（bucket/server/symbol 为调查上下文，按约定不持久化）。

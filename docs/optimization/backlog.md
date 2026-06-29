@@ -10,7 +10,6 @@
 
 | ID | Branch | Claim 日期 | 备注 |
 |----|--------|-----------|------|
-| [OPT-0040](./items/OPT-0040-xauusd-position-snapshots.md) | opt/xauusd-position-snapshots | 2026-06-29 | XAUUSD 持仓分钟级快照 + /position 顶部 24h 三线图 + 自定义范围 CSV（60 天保留，复用 risk_monitor.db） |
 
 ## ✅ 待领取（Ready）
 
