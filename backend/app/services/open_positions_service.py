@@ -319,7 +319,16 @@ def get_open_positions_today(settings: Settings, source: str = "mt4_live") -> di
 
 def get_symbol_cross_server_summary(settings: Settings, symbol: str) -> dict[str, Any]:
     """
-    Query a specific symbol's summary across all servers (mt4_live, mt4_live2, mt5).
+    Query a symbol's open positions across all servers (mt4_live, mt4_live2, mt5).
+
+    The result is broken out **per (server, symbol)**: the SQL groups by
+    ``t.SYMBOL`` so a fuzzy match (``XAUUSD (Related)``) returns one row per
+    distinct matched symbol instead of merging them via GROUP_CONCAT. An exact
+    match still yields at most one row per server. Each row carries
+    ``net_lots`` = volume_buy − volume_sell, and a grand ``total`` is summed
+    across every returned row. Servers with no matching position contribute no
+    rows (the frontend renders the full server list and fills the gaps).
+
     Excludes test/demo accounts based on groups table.
     """
     sources = ["mt4_live", "mt4_live2", "mt5"]
@@ -343,9 +352,7 @@ def get_symbol_cross_server_summary(settings: Settings, symbol: str) -> dict[str
 
     sql = f"""
         SELECT
-          %(source)s AS source,
-          -- Use GROUP_CONCAT to show which symbols were included
-          GROUP_CONCAT(DISTINCT t.SYMBOL SEPARATOR ', ') AS symbol,
+          t.SYMBOL AS symbol,
           -- cent accounts (.kcmc/.cent) are scaled by 100
           SUM(CASE WHEN t.CMD = 0 THEN
             (CASE WHEN t.SYMBOL LIKE '%%.kcmc' OR t.SYMBOL LIKE '%%.cent' THEN t.lots / 100 ELSE t.lots END)
@@ -353,17 +360,17 @@ def get_symbol_cross_server_summary(settings: Settings, symbol: str) -> dict[str
           SUM(CASE WHEN t.CMD = 1 THEN
             (CASE WHEN t.SYMBOL LIKE '%%.kcmc' OR t.SYMBOL LIKE '%%.cent' THEN t.lots / 100 ELSE t.lots END)
           ELSE 0 END) AS volume_sell,
-          SUM(CASE WHEN t.CMD = 0 THEN 
+          SUM(CASE WHEN t.CMD = 0 THEN
             (CASE WHEN t.SYMBOL LIKE '%%.kcmc' OR t.SYMBOL LIKE '%%.cent' THEN t.totalProfit / 100 ELSE t.totalProfit END)
           ELSE 0 END) AS profit_buy,
-          SUM(CASE WHEN t.CMD = 1 THEN 
+          SUM(CASE WHEN t.CMD = 1 THEN
             (CASE WHEN t.SYMBOL LIKE '%%.kcmc' OR t.SYMBOL LIKE '%%.cent' THEN t.totalProfit / 100 ELSE t.totalProfit END)
           ELSE 0 END) AS profit_sell,
           SUM(CASE WHEN t.SYMBOL LIKE '%%.kcmc' OR t.SYMBOL LIKE '%%.cent' THEN t.totalProfit / 100 ELSE t.totalProfit END) AS profit_total
         FROM mt4_trades t
         WHERE t.sid = %(sid)s
           AND (
-            CASE 
+            CASE
               WHEN %(is_fuzzy)s = 1 THEN t.SYMBOL LIKE CONCAT(%(symbol)s, '%%')
               ELSE t.SYMBOL = %(symbol)s
             END
@@ -374,7 +381,7 @@ def get_symbol_cross_server_summary(settings: Settings, symbol: str) -> dict[str
           AND NOT EXISTS (
             SELECT 1
             FROM mt4_users u
-            WHERE u.LOGIN = t.LOGIN 
+            WHERE u.LOGIN = t.LOGIN
               AND u.sid = t.sid
               AND (
                 u.NAME LIKE %(like_test)s
@@ -385,16 +392,17 @@ def get_symbol_cross_server_summary(settings: Settings, symbol: str) -> dict[str
                 {groupsid_condition}
               )
           )
+        GROUP BY t.SYMBOL
+        ORDER BY t.SYMBOL
         """
 
-    def fetch_source_data(source_name: str):
+    def fetch_source_data(source_name: str) -> list[dict[str, Any]]:
         sid = sid_map.get(source_name)
         # Check if it's a fuzzy search (e.g., 'XAUUSD (Related)')
         is_fuzzy = 1 if " (Related)" in symbol else 0
         clean_symbol = symbol.replace(" (Related)", "")
 
         params = {
-            "source": source_name,
             "sid": sid,
             "symbol": clean_symbol,
             "is_fuzzy": is_fuzzy,
@@ -403,7 +411,7 @@ def get_symbol_cross_server_summary(settings: Settings, symbol: str) -> dict[str
             "like_testkcm": "testKCM%",
             **groupsid_params,
         }
-        
+
         try:
             conn = pymysql.connect(
                 host=settings.DB_HOST,
@@ -413,65 +421,59 @@ def get_symbol_cross_server_summary(settings: Settings, symbol: str) -> dict[str
                 port=int(settings.DB_PORT),
                 charset=settings.DB_CHARSET,
                 cursorclass=pymysql.cursors.DictCursor,
+                connect_timeout=5,
+                read_timeout=20,
             )
             with conn:
                 with conn.cursor() as cur:
                     cur.execute(sql, params)
-                    res = cur.fetchone()
-                    if not res:
-                        # Return empty record if no data for this server
-                        return {
-                            "source": source_name,
-                            "symbol": symbol,
-                            "volume_buy": 0.0,
-                            "volume_sell": 0.0,
-                            "profit_buy": 0.0,
-                            "profit_sell": 0.0,
-                            "profit_total": 0.0
-                        }
-                    # Replace None values with 0 to prevent frontend/calculation issues
-                    return {
-                        "source": res.get("source") or source_name,
-                        "symbol": res.get("symbol") or symbol,
-                        "volume_buy": res.get("volume_buy") or 0.0,
-                        "volume_sell": res.get("volume_sell") or 0.0,
-                        "profit_buy": res.get("profit_buy") or 0.0,
-                        "profit_sell": res.get("profit_sell") or 0.0,
-                        "profit_total": res.get("profit_total") or 0.0,
+                    rows = cur.fetchall()
+            out: list[dict[str, Any]] = []
+            for res in rows:
+                volume_buy = float(res.get("volume_buy") or 0.0)
+                volume_sell = float(res.get("volume_sell") or 0.0)
+                out.append(
+                    {
+                        "source": source_name,
+                        "symbol": res.get("symbol") or clean_symbol,
+                        "volume_buy": volume_buy,
+                        "volume_sell": volume_sell,
+                        "net_lots": compute_net_position(volume_buy, volume_sell),
+                        "profit_buy": float(res.get("profit_buy") or 0.0),
+                        "profit_sell": float(res.get("profit_sell") or 0.0),
+                        "profit_total": float(res.get("profit_total") or 0.0),
                     }
+                )
+            return out
         except Exception as e:
+            # Isolate per-server failure so one bad server can't blank the batch.
             logger.error(f"Error fetching data for {source_name}: {e}")
-            return {
-                "source": source_name,
-                "symbol": symbol,
-                "volume_buy": 0.0,
-                "volume_sell": 0.0,
-                "profit_buy": 0.0,
-                "profit_sell": 0.0,
-                "profit_total": 0.0,
-                "error": str(e)
-            }
+            return []
 
     try:
         with ThreadPoolExecutor(max_workers=3) as executor:
-            items = list(executor.map(fetch_source_data, sources))
-
-        # Calculate Grand Total
-        total = {
-            "source": "Total",
-            "symbol": symbol,
-            # Use `or 0` to handle None values (dict.get only returns default when key is missing, not when value is None)
-            "volume_buy": sum(i.get("volume_buy") or 0 for i in items),
-            "volume_sell": sum(i.get("volume_sell") or 0 for i in items),
-            "profit_buy": sum(i.get("profit_buy") or 0 for i in items),
-            "profit_sell": sum(i.get("profit_sell") or 0 for i in items),
-            "profit_total": sum(i.get("profit_total") or 0 for i in items),
-        }
-
-        return {"ok": True, "items": items, "total": total}
+            per_server = list(executor.map(fetch_source_data, sources))
     except Exception as exc:
         logger.error(f"Error in get_symbol_cross_server_summary: {exc}")
         return {"ok": False, "items": [], "error": str(exc)}
+
+    items = [row for server_rows in per_server for row in server_rows]
+
+    # Grand total across every (server, symbol) row.
+    total_volume_buy = sum(i["volume_buy"] for i in items)
+    total_volume_sell = sum(i["volume_sell"] for i in items)
+    total = {
+        "source": "Total",
+        "symbol": symbol,
+        "volume_buy": total_volume_buy,
+        "volume_sell": total_volume_sell,
+        "net_lots": compute_net_position(total_volume_buy, total_volume_sell),
+        "profit_buy": sum(i["profit_buy"] for i in items),
+        "profit_sell": sum(i["profit_sell"] for i in items),
+        "profit_total": sum(i["profit_total"] for i in items),
+    }
+
+    return {"ok": True, "items": items, "total": total}
 
 
 

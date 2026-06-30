@@ -59,10 +59,15 @@ type SymbolSummaryRow = {
   symbol: string;
   volume_buy: number;
   volume_sell: number;
+  net_lots: number;
   profit_buy: number;
   profit_sell: number;
   profit_total: number;
 };
+
+// Fixed display order for the cross-server summary so all three servers are
+// always listed (even when one has no matching position).
+const SUMMARY_SERVERS = ["mt4_live", "mt4_live2", "mt5"] as const;
 
 type SymbolSummaryResp = {
   ok: boolean;
@@ -93,6 +98,14 @@ function formatVolume(n: number): string {
     return n.toFixed(5).replace(/\.?0+$/, "");
   }
   return format2(n);
+}
+
+// Net lots = Lots(Buy) − Lots(Sell). Show an explicit sign so net long (+) vs
+// net short (−) reads at a glance; color reuses the green/red signed convention
+// already used for profit on this page.
+function formatNetLots(n: number): string {
+  const v = n || 0;
+  return (v > 0 ? "+" : "") + formatVolume(v);
 }
 
 function StatCard({
@@ -250,6 +263,34 @@ export default function PositionPage() {
     }
     return sum;
   }, [items]);
+
+  // Group the cross-server summary rows by server (fixed order), computing a
+  // per-server subtotal. Servers with no matching position still appear (empty
+  // group) so the table always lists all three.
+  const summaryGroups = React.useMemo(() => {
+    const items = summaryData?.items ?? [];
+    return SUMMARY_SERVERS.map((source) => {
+      const rows = items.filter((r) => r.source === source);
+      const subtotal = rows.reduce(
+        (acc, r) => {
+          acc.volume_buy += r.volume_buy || 0;
+          acc.volume_sell += r.volume_sell || 0;
+          acc.profit_buy += r.profit_buy || 0;
+          acc.profit_sell += r.profit_sell || 0;
+          acc.profit_total += r.profit_total || 0;
+          return acc;
+        },
+        {
+          volume_buy: 0,
+          volume_sell: 0,
+          profit_buy: 0,
+          profit_sell: 0,
+          profit_total: 0,
+        },
+      );
+      return { source, rows, subtotal };
+    });
+  }, [summaryData]);
 
   const columns = React.useMemo<ColumnDef<OpenPositionsItem>[]>(
     () => [
@@ -455,16 +496,17 @@ export default function PositionPage() {
             {summaryData && (
               <div className="space-y-6 animate-in fade-in slide-in-from-top-2 duration-300">
                 {/* 各服务器对比表 */}
-                <div className="overflow-hidden rounded-md border shadow-sm">
-                  <Table>
+                <div className="overflow-x-auto rounded-md border shadow-sm">
+                  <Table className="min-w-[760px]">
                     <TableHeader>
                       <TableRow className="bg-muted/50">
                         <TableHead>服务器</TableHead>
-                        <TableHead>包含产品</TableHead>
+                        <TableHead>产品 (Symbol)</TableHead>
                         <TableHead className="text-right">Lots (Buy)</TableHead>
                         <TableHead className="text-right">
                           Lots (Sell)
                         </TableHead>
+                        <TableHead className="text-right">Net Lots</TableHead>
                         <TableHead className="text-right">
                           Profit (Buy)
                         </TableHead>
@@ -477,49 +519,126 @@ export default function PositionPage() {
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {summaryData.items.map((row) => (
-                        <TableRow key={row.source}>
-                          <TableCell className="font-medium">
-                            {row.source}
-                          </TableCell>
-                          <TableCell
-                            className="max-w-[200px] truncate"
-                            title={row.symbol}
-                          >
-                            {row.symbol || "-"}
-                          </TableCell>
-                          <TableCell className="text-right tabular-nums">
-                            {formatVolume(row.volume_buy)}
-                          </TableCell>
-                          <TableCell className="text-right tabular-nums">
-                            {formatVolume(row.volume_sell)}
-                          </TableCell>
-                          <TableCell
-                            className={`text-right tabular-nums ${profitClass(row.profit_buy)}`}
-                          >
-                            {format2(row.profit_buy)}
-                          </TableCell>
-                          <TableCell
-                            className={`text-right tabular-nums ${profitClass(row.profit_sell)}`}
-                          >
-                            {format2(row.profit_sell)}
-                          </TableCell>
-                          <TableCell
-                            className={`text-right tabular-nums ${profitClass(row.profit_total)}`}
-                          >
-                            {format2(row.profit_total)}
-                          </TableCell>
-                        </TableRow>
-                      ))}
+                      {summaryGroups.map((group) => {
+                        const hasSubtotal = group.rows.length > 1;
+                        // rowSpan covers the symbol rows (or 1 placeholder row
+                        // when empty) plus the subtotal row when present.
+                        const span =
+                          Math.max(group.rows.length, 1) + (hasSubtotal ? 1 : 0);
+                        if (group.rows.length === 0) {
+                          return (
+                            <TableRow key={group.source}>
+                              <TableCell className="font-medium align-middle">
+                                {group.source}
+                              </TableCell>
+                              <TableCell
+                                colSpan={7}
+                                className="text-sm text-muted-foreground"
+                              >
+                                无持仓
+                              </TableCell>
+                            </TableRow>
+                          );
+                        }
+                        return (
+                          <React.Fragment key={group.source}>
+                            {group.rows.map((row, idx) => (
+                              <TableRow key={`${group.source}-${row.symbol}`}>
+                                {idx === 0 && (
+                                  <TableCell
+                                    rowSpan={span}
+                                    className="font-medium align-middle border-r"
+                                  >
+                                    {group.source}
+                                  </TableCell>
+                                )}
+                                <TableCell className="font-medium">
+                                  {row.symbol || "-"}
+                                </TableCell>
+                                <TableCell className="text-right tabular-nums">
+                                  {formatVolume(row.volume_buy)}
+                                </TableCell>
+                                <TableCell className="text-right tabular-nums">
+                                  {formatVolume(row.volume_sell)}
+                                </TableCell>
+                                <TableCell
+                                  className={`text-right tabular-nums font-medium ${profitClass(row.net_lots)}`}
+                                >
+                                  {formatNetLots(row.net_lots)}
+                                </TableCell>
+                                <TableCell
+                                  className={`text-right tabular-nums ${profitClass(row.profit_buy)}`}
+                                >
+                                  {format2(row.profit_buy)}
+                                </TableCell>
+                                <TableCell
+                                  className={`text-right tabular-nums ${profitClass(row.profit_sell)}`}
+                                >
+                                  {format2(row.profit_sell)}
+                                </TableCell>
+                                <TableCell
+                                  className={`text-right tabular-nums ${profitClass(row.profit_total)}`}
+                                >
+                                  {format2(row.profit_total)}
+                                </TableCell>
+                              </TableRow>
+                            ))}
+                            {hasSubtotal && (
+                              <TableRow className="bg-muted/40 font-semibold">
+                                <TableCell className="text-muted-foreground">
+                                  小计
+                                </TableCell>
+                                <TableCell className="text-right tabular-nums">
+                                  {formatVolume(group.subtotal.volume_buy)}
+                                </TableCell>
+                                <TableCell className="text-right tabular-nums">
+                                  {formatVolume(group.subtotal.volume_sell)}
+                                </TableCell>
+                                <TableCell
+                                  className={`text-right tabular-nums ${profitClass(
+                                    group.subtotal.volume_buy -
+                                      group.subtotal.volume_sell,
+                                  )}`}
+                                >
+                                  {formatNetLots(
+                                    group.subtotal.volume_buy -
+                                      group.subtotal.volume_sell,
+                                  )}
+                                </TableCell>
+                                <TableCell
+                                  className={`text-right tabular-nums ${profitClass(group.subtotal.profit_buy)}`}
+                                >
+                                  {format2(group.subtotal.profit_buy)}
+                                </TableCell>
+                                <TableCell
+                                  className={`text-right tabular-nums ${profitClass(group.subtotal.profit_sell)}`}
+                                >
+                                  {format2(group.subtotal.profit_sell)}
+                                </TableCell>
+                                <TableCell
+                                  className={`text-right tabular-nums ${profitClass(group.subtotal.profit_total)}`}
+                                >
+                                  {format2(group.subtotal.profit_total)}
+                                </TableCell>
+                              </TableRow>
+                            )}
+                          </React.Fragment>
+                        );
+                      })}
                       {summaryData.total && (
                         <TableRow className="bg-amber-100/70 dark:bg-amber-900/40 font-bold border-t-2">
                           <TableCell>TOTAL</TableCell>
-                          <TableCell>All Related</TableCell>
+                          <TableCell>All</TableCell>
                           <TableCell className="text-right tabular-nums">
                             {formatVolume(summaryData.total.volume_buy)}
                           </TableCell>
                           <TableCell className="text-right tabular-nums">
                             {formatVolume(summaryData.total.volume_sell)}
+                          </TableCell>
+                          <TableCell
+                            className={`text-right tabular-nums ${profitClass(summaryData.total.net_lots)}`}
+                          >
+                            {formatNetLots(summaryData.total.net_lots)}
                           </TableCell>
                           <TableCell
                             className={`text-right tabular-nums ${profitClass(summaryData.total.profit_buy)}`}

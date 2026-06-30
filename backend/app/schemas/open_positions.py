@@ -27,10 +27,21 @@ class OpenPositionsResponse(BaseModel):
 
 
 class SymbolSummaryRow(BaseModel):
+    """One (server, symbol) open-position row.
+
+    For an exact symbol (e.g. ``XAUUSD``) each server yields at most one row.
+    For a fuzzy match (``XAUUSD (Related)``) the per-server result is broken
+    out into one row per distinct symbol so the frontend can list them
+    individually instead of merging via GROUP_CONCAT.
+
+    - net_lots: volume_buy − volume_sell (positive ⇒ net long, negative ⇒ net short)
+    """
+
     source: str
     symbol: str
     volume_buy: float
     volume_sell: float
+    net_lots: float
     profit_buy: float
     profit_sell: float
     profit_total: float
