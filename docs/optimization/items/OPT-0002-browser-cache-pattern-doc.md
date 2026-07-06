@@ -1,7 +1,7 @@
 ---
 id: OPT-0002
 title: 现有浏览器缓存模式归纳成复用文档
-status: ready
+status: wip
 priority: P2
 area: docs
 effort: S

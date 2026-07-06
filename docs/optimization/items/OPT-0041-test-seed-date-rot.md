@@ -1,7 +1,7 @@
 ---
 id: OPT-0041
 title: 修复 backend pytest date-rot —— 测试种子日期硬编码超过 30 天保留窗导致闸门长期红
-status: ready
+status: wip
 priority: P1
 area: tests
 effort: S

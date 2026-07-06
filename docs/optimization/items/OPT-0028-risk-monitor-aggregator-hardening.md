@@ -1,7 +1,7 @@
 ---
 id: OPT-0028
 title: Risk-monitor 聚合视图硬化（SQL 性能 + 语义确定性，同时覆盖 burst + hedge）
-status: ready
+status: wip
 priority: P2
 area: mixed
 effort: M
