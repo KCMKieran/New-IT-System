@@ -37,6 +37,7 @@ const IBReportPage = lazyWithRetry(() => import("@/pages/IBReport"))
 const IBFinancialMonitorPage = lazyWithRetry(() => import("@/pages/IBFinancialMonitor"))
 const RiskMonitorPage = lazyWithRetry(() => import("@/pages/RiskMonitor"))
 const FundFlowMonitorPage = lazyWithRetry(() => import("@/pages/cs/FundFlowMonitor"))
+const IBTreeQueryPage = lazyWithRetry(() => import("@/pages/cs/IBTreeQuery"))
 const SettingsPage = lazyWithRetry(() => import("@/pages/Settings"))
 const SearchPage = lazyWithRetry(() => import("@/pages/Search"))
 
@@ -102,6 +103,7 @@ function App() {
               <Route path="ib-financial-monitor" element={<IBFinancialMonitorPage />} />
               <Route path="risk-monitor" element={<RiskMonitorPage />} />
               <Route path="cs/fund-flow-monitor" element={<FundFlowMonitorPage />} />
+              <Route path="cs/ib-tree" element={<IBTreeQueryPage />} />
               {/* test page removed */}
               <Route path="settings" element={<SettingsPage />} />
               <Route path="search" element={<SearchPage />} />

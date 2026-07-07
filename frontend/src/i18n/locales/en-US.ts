@@ -49,6 +49,7 @@ export const enUS = {
     clientReturnRate: "Client Return Rate",
     ibFinancialMonitor: "IB Financial Monitor",
     fundFlowMonitor: "Frequent Fund Flow",
+    ibTreeQuery: "IB Tree Lookup",
     home: "Home",
   },
   
@@ -81,6 +82,7 @@ export const enUS = {
     ibidLots: "IBID Lots Lookup",
     clientReturnRate: "Client Return Rate",
     ibFinancialMonitor: "IB Financial Monitor",
+    ibTreeQuery: "IB Tree Lookup",
   },
   
   ibidLotsPage: {

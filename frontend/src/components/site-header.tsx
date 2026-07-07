@@ -33,6 +33,7 @@ const routeToKeyMap: Record<string, string> = {
   "/customer-pnl-monitor-v2": "pages.customerPnLMonitorV2",
   "/settings": "pages.settings",
   "/search": "pages.search",
+  "/cs/ib-tree": "pages.ibTreeQuery",
 }
 
 export function SiteHeader() {
