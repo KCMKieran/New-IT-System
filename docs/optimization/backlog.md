@@ -22,6 +22,7 @@
 |----|--------|------|--------|------|
 | [OPT-0001](./items/OPT-0001-risk-monitor-tab-cache.md) | P2 | frontend | M | Risk-monitor 四个 tab 切换状态/缓存优化 |
 | [OPT-0003](./items/OPT-0003-risk-monitor-sqlite-perf.md) | P1 | db | L | Risk-monitor SQLite 数据增长后的性能方案 |
+| [OPT-0044](./items/OPT-0044-alert-mail-hardening.md) | P2 | backend | M | 告警邮件中心 hardening：发送移出扫描锁 / digest 渲染上限 / digest UNIQUE 认领 / 注册表 dataclass 化 |
 
 ## 💡 想法（Ideas）—— 还不能直接 claim
 
