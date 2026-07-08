@@ -699,8 +699,8 @@ const DISPLAY_TIME_ZONE = "Etc/GMT-3";
 /**
  * Gap Trade rule 81 thresholds are TEMPORARILY hardcoded in the backend
  * (`rule_gap_trade_gap_service.evaluate_gap_rules`): two rules OR'd, both with
- * a $1000 hard floor — 1) 净入金≤0 且 利润 ≥ $1000; 2) 净入金>0 且赚回 ≥1×净入金
- * 且 利润 ≥ $1000. Only trades held across the daily break count (OPEN 前一
+ * a $100 hard floor — 1) 净入金≤0 且 利润 ≥ $100; 2) 净入金>0 且赚回 ≥1×净入金
+ * 且 利润 ≥ $100. Only trades held across the daily break count (OPEN 前一
  * 交易日 23:00–24:00 + CLOSE 当天 01:00–02:00 MT; 周一回看到周五 — MT 服务器
  * 00:00–01:00 休盘且周末停盘). While hardcoded the config drawer
  * must not let users edit thresholds, so we hide the "设置" button. Flip to
@@ -9695,8 +9695,8 @@ function GapTradeTab({ active }: { active: boolean }) {
           const v = params.value;
           if (!v) return null;
           const labelMap: Record<string, string> = {
-            ratio_x1: "赚回 ≥1×净入金 ($1000+)",
-            neg_deposit: "净出金客户 ($1000+)",
+            ratio_x1: "赚回 ≥1×净入金 ($100+)",
+            neg_deposit: "净出金客户 ($100+)",
             // legacy values (pre-hardcode rows)
             absolute: "绝对 Profit ($1000+)",
             ratio: "Profit/净入金 ≥1×",
@@ -9817,7 +9817,7 @@ function GapTradeTab({ active }: { active: boolean }) {
             compact
             label="Gap Trade 超额获利客户"
             value={gapClientCount}
-            description="规则1: 净出金 且 利润≥$1000 · 规则2: 净入金>0 且 赚回≥1×净入金 ($1000+) · 仅扛过缺口的持仓 (开 23-24 / 平 01-02 MT)"
+            description="规则1: 净出金 且 利润≥$100 · 规则2: 净入金>0 且 赚回≥1×净入金 ($100+) · 仅扛过缺口的持仓 (开 23-24 / 平 01-02 MT)"
             dotColor={RULE_SUMMARY_CARD_STYLES[2].dot}
             textColor={RULE_SUMMARY_CARD_STYLES[2].value}
           />
@@ -10559,8 +10559,8 @@ function GapTradeGapDetail({ row }: { row: AlertEvent }) {
     const v = row.triggered_by;
     if (!v) return "—";
     const labelMap: Record<string, string> = {
-      ratio_x1: "赚回 ≥1×净入金 ($1000+)",
-      neg_deposit: "净出金客户 ($1000+)",
+      ratio_x1: "赚回 ≥1×净入金 ($100+)",
+      neg_deposit: "净出金客户 ($100+)",
       // legacy values (pre-hardcode rows)
       absolute: "绝对 Profit ($1000+)",
       ratio: "Profit/净入金 ≥1×",

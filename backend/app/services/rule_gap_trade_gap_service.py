@@ -23,10 +23,10 @@ across ALL the client's accounts (CEN-normalised), then the client is flagged
 via TWO hardcoded rules **OR'd** (frontend config drawer disabled). See
 ``evaluate_gap_rules`` for the canonical logic:
 
-- Rule 1 (net withdrawer):   net_deposit <= 0 AND profit >= $1000
-- Rule 2 (positive deposit):  net_deposit > 0 AND profit / net_deposit >= 1.0 AND profit >= $1000
+- Rule 1 (net withdrawer):   net_deposit <= 0 AND profit >= $100
+- Rule 2 (positive deposit):  net_deposit > 0 AND profit / net_deposit >= 1.0 AND profit >= $100
 
-``profit >= $1000`` is a hard floor on BOTH rules. Rule 1 covers the
+``profit >= $100`` is a hard floor on BOTH rules. Rule 1 covers the
 negative-net-deposit blind spot (net withdrawers, where the ratio is
 undefined). Clients whose net-deposit lookup fails (None) match neither rule
 and are not flagged.
@@ -59,12 +59,13 @@ GAP_TRADE_GAP_RULE_LABEL = "Gap Trade · 超额 Profit"
 # back to the passed-in params.
 #
 #   Rule 1 (net withdrawer — fixes the negative-deposit blind spot):
-#       net_deposit <= 0 AND  profit >= $1000
+#       net_deposit <= 0 AND  profit >= $100
 #   Rule 2 (positive net deposit, doubled-up):
-#       net_deposit > 0  AND  profit / net_deposit >= 1.0  AND  profit >= $1000
+#       net_deposit > 0  AND  profit / net_deposit >= 1.0  AND  profit >= $100
 #
-# `profit >= $1000` is a hard floor shared by both rules.
-HARDCODED_PROFIT_GATE_USD = 1000.0
+# `profit >= $100` is a hard floor shared by both rules.
+# 2026-07-08: lowered 1000 -> 100 per user request.
+HARDCODED_PROFIT_GATE_USD = 100.0
 HARDCODED_RATIO_MIN = 1.0
 
 _CENT_SUFFIXES = (".cent", ".kcmc")
@@ -110,7 +111,7 @@ def evaluate_gap_rules(
     Returns ``(triggered, triggered_by)`` where ``triggered_by`` is one of
     ``"neg_deposit"`` (Rule 1) / ``"ratio_x1"`` (Rule 2) / ``None``.
 
-    ``profit >= $1000`` is a hard floor on both rules. A missing net-deposit
+    ``profit >= $100`` is a hard floor on both rules. A missing net-deposit
     lookup (None) matches neither rule.
 
     Kept side-effect-free so it can be unit tested without a DB.
@@ -119,7 +120,7 @@ def evaluate_gap_rules(
         # Ratio undefined and the net-withdrawer rule needs a known sign — a
         # missing lookup matches neither rule.
         return False, None
-    # Shared hard floor — both rules require >= $1000 absolute profit.
+    # Shared hard floor — both rules require >= $100 absolute profit.
     if total_profit < HARDCODED_PROFIT_GATE_USD:
         return False, None
     # Rule 1: net withdrawers (net deposit <= 0). The ratio is meaningless here

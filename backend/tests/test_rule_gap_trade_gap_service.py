@@ -2,10 +2,10 @@
 
 Covers the pure threshold evaluator `evaluate_gap_rules`:
 
-    Rule 1 (net withdrawer):  net_deposit <= 0 AND profit >= $1000          -> "neg_deposit"
-    Rule 2 (positive deposit): net_deposit > 0 AND ratio >= 1x AND profit >= $1000 -> "ratio_x1"
+    Rule 1 (net withdrawer):  net_deposit <= 0 AND profit >= $100           -> "neg_deposit"
+    Rule 2 (positive deposit): net_deposit > 0 AND ratio >= 1x AND profit >= $100 -> "ratio_x1"
 
-`profit >= $1000` is a hard floor on BOTH rules. A missing net-deposit
+`profit >= $100` is a hard floor on BOTH rules. A missing net-deposit
 lookup (None) matches neither rule.
 """
 from datetime import datetime, timedelta
@@ -29,32 +29,32 @@ def _first_weekday(target_weekday: int) -> datetime:
 
 def test_constants_pinned():
     # Guard against accidental drift of the hardcoded thresholds.
-    assert HARDCODED_PROFIT_GATE_USD == 1000.0
+    assert HARDCODED_PROFIT_GATE_USD == 100.0
     assert HARDCODED_RATIO_MIN == 1.0
 
 
-# --- Rule 2: positive net deposit (ratio AND $1000 floor) ------------------
+# --- Rule 2: positive net deposit (ratio AND $100 floor) -------------------
 
 def test_rule2_fires_ratio_and_profit_both_met():
-    # ratio = 2000/1000 = 2.0 >= 1 AND profit 2000 >= 1000
+    # ratio = 2000/1000 = 2.0 >= 1 AND profit 2000 >= 100
     assert evaluate_gap_rules(2000.0, 1000.0) == (True, "ratio_x1")
 
 
-def test_rule2_exact_boundary_ratio_1x_profit_1000():
-    # ratio exactly 1.0, profit exactly 1000 -> both boundaries inclusive
-    assert evaluate_gap_rules(1000.0, 1000.0) == (True, "ratio_x1")
+def test_rule2_exact_boundary_ratio_1x_profit_at_floor():
+    # ratio exactly 1.0, profit exactly at the $100 floor -> both boundaries inclusive
+    assert evaluate_gap_rules(100.0, 100.0) == (True, "ratio_x1")
 
 
 def test_rule2_ratio_below_1x_does_not_fire_even_with_big_profit():
     # Big-deposit client: $10k profit but only 0.1x of net deposit -> NO fire.
-    # The $1000 floor does NOT rescue a sub-1x ratio (this is the AND, the key
+    # The $100 floor does NOT rescue a sub-1x ratio (this is the AND, the key
     # reason there is no absolute-only path).
     assert evaluate_gap_rules(10000.0, 100000.0) == (False, None)
 
 
 def test_rule2_ratio_met_but_profit_below_floor_does_not_fire():
-    # Tiny-deposit doubler: ratio 1.58 but profit only $158 -> below $1000 floor.
-    assert evaluate_gap_rules(158.0, 100.0) == (False, None)
+    # Tiny-deposit doubler: ratio 1.58 but profit only $15.80 -> below $100 floor.
+    assert evaluate_gap_rules(15.8, 10.0) == (False, None)
 
 
 def test_rule2_small_deposit_big_profit_fires():
@@ -74,8 +74,8 @@ def test_rule1_zero_deposit_with_profit_fires():
 
 
 def test_rule1_negative_deposit_below_floor_does_not_fire():
-    # Net withdrawer but only $500 profit -> below $1000 floor.
-    assert evaluate_gap_rules(500.0, -5000.0) == (False, None)
+    # Net withdrawer but only $50 profit -> below $100 floor.
+    assert evaluate_gap_rules(50.0, -5000.0) == (False, None)
 
 
 def test_rule1_takes_precedence_for_nonpositive_deposit():
@@ -94,8 +94,8 @@ def test_zero_profit_never_fires():
 
 
 def test_profit_just_below_floor_does_not_fire():
-    assert evaluate_gap_rules(999.99, 100.0) == (False, None)
-    assert evaluate_gap_rules(999.99, -100.0) == (False, None)
+    assert evaluate_gap_rules(99.99, 10.0) == (False, None)
+    assert evaluate_gap_rules(99.99, -100.0) == (False, None)
 
 
 def test_negative_profit_never_fires():
