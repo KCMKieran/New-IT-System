@@ -3012,6 +3012,25 @@ def ensure_mail_dispatch_cursor(subscription_id: int) -> int:
         return max_id
 
 
+def fast_forward_mail_dispatch_cursor(subscription_id: int) -> int:
+    """Move the subscription's cursor to the current MAX(alert_events.id).
+
+    Used when a subscription flips enabled 0 -> 1: disabled subscriptions
+    are skipped by the dispatcher (load_mail_subscriptions(enabled_only)),
+    so their cursor freezes while alerts keep accumulating. Without this
+    fast-forward, the first tick after re-enable would pull the whole
+    skipped window (up to a full fetch batch) and mail weeks-old incidents
+    as fresh. Forward-only (delegates to the upsert), so it can never
+    regress a cursor that is already ahead; also initializes a missing row.
+    """
+    with get_risk_monitor_db() as conn:
+        max_id = int(
+            conn.execute("SELECT COALESCE(MAX(id), 0) FROM alert_events").fetchone()[0]
+        )
+    update_mail_dispatch_cursor(subscription_id, max_id)
+    return max_id
+
+
 def update_mail_dispatch_cursor(subscription_id: int, last_alert_id: int) -> None:
     """Forward-only upsert of the per-subscription mail cursor.
 

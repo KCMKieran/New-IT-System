@@ -25,6 +25,8 @@ from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from ..core.config import get_settings
+
 # ── Shared validation constants ──────────────────────────────────────────────
 
 # Comparison operators supported by the generalized dispatcher (OPT-0043).
@@ -53,15 +55,31 @@ MAX_RECIPIENTS = 20  # sanity cap on to/cc lists
 
 
 def _validate_recipients(value: str, *, field_name: str) -> str:
-    """Validate a comma-separated recipient list; returns the trimmed value."""
+    """Validate a comma-separated recipient list; returns the trimmed value.
+
+    Beyond the syntactic check, every address must belong to an allowed
+    recipient domain (Settings.ALERT_MAIL_ALLOWED_DOMAINS, env-overridable).
+    This is the server-side guard shared by subscription create/update
+    (mail_to / mail_cc) and test-send (recipient): without it, anyone
+    holding the frontend API key could relay client financial data to an
+    arbitrary external mailbox.
+    """
     parts = [p.strip() for p in value.split(",") if p.strip()]
     if not parts:
         raise ValueError(f"{field_name} must contain at least one address")
     if len(parts) > MAX_RECIPIENTS:
         raise ValueError(f"{field_name} exceeds {MAX_RECIPIENTS} addresses")
+    allowed_domains = get_settings().ALERT_MAIL_ALLOWED_DOMAINS
     for addr in parts:
         if not _EMAIL_RE.match(addr):
             raise ValueError(f"{field_name} contains an invalid address: {addr!r}")
+        domain = addr.rsplit("@", 1)[-1].lower()
+        if domain not in allowed_domains:
+            raise ValueError(
+                f"{field_name} contains an address outside the allowed "
+                f"recipient domains: {addr!r} (allowed: "
+                f"{', '.join(sorted(allowed_domains))})"
+            )
     return ", ".join(parts)
 
 

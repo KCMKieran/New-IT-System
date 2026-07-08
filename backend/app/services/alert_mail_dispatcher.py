@@ -88,9 +88,41 @@ _DIGEST_DUE_WINDOW_MIN = 15
 # the boxed-alert dedup + forward-only cursor make the re-run a no-op.
 _digest_last_run: Dict[int, str] = {}
 
-# Fallback anchor for the test-send endpoint: the 2026-07-03 userId 154795
-# main case (62 buy + 62 sell NZDJPY same second, equity -$44,697).
-TEST_SEND_FALLBACK_ALERT_ID = 273504
+# ── Test-send fallback sample ──────────────────────────────
+# SAMPLE DATA ONLY — a frozen in-code snapshot of the 2026-07-03 userId
+# 154795 main case (alert id 273504: 62 buy + 62 sell NZDJPY opened the
+# same second, 533.2 matched lots, equity -$44,697). The test-send endpoint
+# renders this when no recent alert matches the subscription's conditions.
+# It deliberately does NOT reference a live alert_events row by id: the
+# 30-day retention purge deletes historical rows, and a purged pinned id
+# would make test-send fail forever. Keys mirror the aliased row shape the
+# hedge fetchers return (_hedge_mail_rows_to_dicts: account_group → group).
+# Never persisted, never dispatched — pure preview rendering.
+TEST_SEND_SAMPLE_ALERT: Dict[str, Any] = {
+    "id": 273504,
+    "scanned_at": "2026-07-03T08:05:00Z",
+    "rule_id": 91,
+    "rule_label": "Rule 1 — 默认对冲检测",
+    "server": "MT5",
+    "login": 60011332,
+    "symbol": "NZDJPY",
+    "order_count": 124,
+    "total_lots": 1066.4,
+    "first_open": "2026-07-03T08:00:56Z",
+    "last_open": "2026-07-03T08:00:56Z",
+    "equity": -44696.65,
+    "balance": -44696.65,
+    "group": "KCM\\5SD_P15L10",
+    "currency": "USD",
+    "zipcode": None,
+    "net_deposit_hist": 139.89,
+    "buy_count": 62,
+    "sell_count": 62,
+    "buy_lots": 533.2,
+    "sell_lots": 533.2,
+    "window_start": "2026-07-03T08:00:56Z",
+    "window_end": "2026-07-03T08:00:56Z",
+}
 
 # How far back the already-boxed dedup looks when the cursor was held back.
 # Cooldown holdbacks resolve within minutes; 7 days is a generous ceiling.
@@ -980,19 +1012,20 @@ def _test_send(
     source: Dict[str, Any],
     recipient: Optional[str],
     send_fn: SendFn,
-    fallback_alert_id: Optional[int] = None,
+    fallback_sample: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Render the most recent condition-matching alert and send a [TEST] copy.
 
-    Falls back to the module's pinned sample alert when no recent alert
-    matches. Does NOT touch the outbox or cursor — pure preview path.
-    Raises ValueError when no renderable alert exists; SMTP errors from
-    send_fn propagate (the route maps them to 502).
+    Falls back to the module's frozen in-code sample alert when no recent
+    alert matches (never a DB row — the retention purge would delete it).
+    Does NOT touch the outbox or cursor — pure preview path. Raises
+    ValueError when no renderable alert exists (module without a fallback
+    sample); SMTP errors from send_fn propagate (the route maps them to 502).
     """
     t0 = time.time()
     allowed = allowed_rule_ids(sub)
-    if fallback_alert_id is None:
-        fallback_alert_id = source.get("fallback_alert_id")
+    if fallback_sample is None:
+        fallback_sample = source.get("fallback_sample")
 
     alert: Optional[Dict[str, Any]] = None
     match: Optional[Dict[str, Any]] = None
@@ -1007,16 +1040,14 @@ def _test_send(
             alert, match = candidate, m
             break
     if alert is None:
-        rows = source["fetch_by_ids"]([fallback_alert_id]) if fallback_alert_id else []
-        if not rows:
+        if not fallback_sample:
             raise ValueError(
-                f"No matching alert found and fallback alert id "
-                f"{fallback_alert_id} does not exist"
+                "No matching alert found and the module has no fallback sample"
             )
-        alert = rows[0]
+        alert = dict(fallback_sample)  # copy: the frozen sample stays frozen
         used_fallback = True
         match = evaluate_subscription_conditions(alert, sub, source) or {
-            # Fallback row no longer matching current conditions still renders.
+            # Sample not matching current conditions still renders.
             **(source["match_context"](alert) or dict(source.get("empty_context") or {})),
             "labels": ["(fallback sample - conditions not re-evaluated)"],
         }
@@ -1042,7 +1073,7 @@ def send_test_email(
     recipient: Optional[str] = None,
     *,
     send_fn: Optional[SendFn] = None,
-    fallback_alert_id: int = TEST_SEND_FALLBACK_ALERT_ID,
+    fallback_sample: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """v1 entry point (hedge_open module, first enabled subscription).
 
@@ -1058,7 +1089,7 @@ def send_test_email(
     source = _resolve_source(sub)
     if source is None:
         raise ValueError("hedge_open module is not registered in MAIL_SOURCES")
-    return _test_send(sub, source, recipient, send_fn, fallback_alert_id)
+    return _test_send(sub, source, recipient, send_fn, fallback_sample)
 
 
 def send_test_email_for_subscription(

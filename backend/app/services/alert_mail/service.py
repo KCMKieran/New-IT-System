@@ -39,7 +39,7 @@ class ResendConflict(RuntimeError):
 
 
 class NoRenderableAlert(RuntimeError):
-    """Test-send: no match AND fallback row purged → 409."""
+    """Test-send: no match AND the module has no fallback sample → 409."""
 
 
 class MailSendFailed(RuntimeError):
@@ -135,12 +135,18 @@ def _validate_against_registry(
 
     Legacy {"any": [...]} trees are exempt from field validation — they can
     only be already-stored v1 rows carried through a partial update.
+
+    Condition values are coerced IN PLACE to the field's declared registry
+    type (float/int/str) so a raw API client sending {"value": "100"} for a
+    float field stores 100.0 and the dispatcher's == comparison stays
+    numeric; uncoercible values reject with 422.
     """
     try:
         registry.validate_module(module)
         registry.validate_rule_ids(module, rule_ids)
         if conditions and "any" not in conditions:
             registry.validate_condition_fields(module, conditions)
+            registry.coerce_condition_values(module, conditions)
     except ValueError as exc:
         raise InvalidSubscription(str(exc)) from exc
 
@@ -242,6 +248,16 @@ def update_subscription(
 
     if not rm_db.update_mail_subscription(subscription_id, fields):
         raise SubscriptionNotFound(f"subscription {subscription_id} not found")
+
+    # enabled false→true transition: fast-forward the dispatch cursor to the
+    # current alert_events high-water mark. Disabled subscriptions are
+    # skipped by the dispatcher, so the cursor froze at disable time —
+    # without this the first tick after re-enable would replay the whole
+    # skipped window (up to a full 500-row batch) and mail weeks-old
+    # incidents as fresh alerts.
+    if data.get("enabled") and not stored.get("enabled"):
+        rm_db.fast_forward_mail_dispatch_cursor(subscription_id)
+
     return get_subscription(subscription_id)
 
 
@@ -260,8 +276,8 @@ def test_send(subscription_id: int, recipient: Optional[str]) -> Dict[str, Any]:
     except LookupError as exc:
         raise SubscriptionNotFound(str(exc)) from exc
     except ValueError as exc:
-        # "No matching alert found and fallback ... does not exist" — the
-        # module registration errors also land here, same operator fix
+        # "No matching alert found and the module has no fallback sample" —
+        # the module registration errors also land here, same operator fix
         # (config), same 409-ish "cannot render right now" semantics per
         # the frozen contract.
         raise NoRenderableAlert(str(exc)) from exc

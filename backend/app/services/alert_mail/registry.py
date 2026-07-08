@@ -35,8 +35,11 @@ Registry entry contract (every key required unless noted):
   fetch_recent      (limit=...) -> [alert] — newest first (test-send scan)
   template_builder  (hits, *, subscription, sibling_map, test) ->
                     (subject, body_html)
-  fallback_alert_id int — pinned sample alert for test-send when nothing
-                    recent matches
+  fallback_sample   dict — frozen in-code sample alert (aliased row shape,
+                    same keys as the fetchers return) rendered by test-send
+                    when nothing recent matches. Deliberately NOT a DB row
+                    id: the 30-day retention purge would delete a pinned
+                    row and break test-send forever
 
 v2 registers only `hedge_open`; the structure is ready for the other 5
 risk-monitor tabs + fund-flow (one entry each, follow-up).
@@ -45,6 +48,7 @@ risk-monitor tabs + fund-flow (one entry each, follow-up).
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ...core.risk_monitor_db import (
@@ -62,7 +66,7 @@ from ..rule_hedge_open_service import (
 # NOTE: alert_mail_dispatcher imports this module lazily (inside functions);
 # this top-level import is therefore cycle-safe in both import orders.
 from ..alert_mail_dispatcher import (
-    TEST_SEND_FALLBACK_ALERT_ID,
+    TEST_SEND_SAMPLE_ALERT,
     build_hedge_digest_email,
     matched_lots_std,
 )
@@ -157,7 +161,7 @@ MAIL_SOURCES: Dict[str, Dict[str, Any]] = {
         "fetch_for_day": fetch_hedge_alerts_for_day,
         "fetch_recent": fetch_recent_hedge_alerts,
         "template_builder": build_hedge_digest_email,
-        "fallback_alert_id": TEST_SEND_FALLBACK_ALERT_ID,
+        "fallback_sample": TEST_SEND_SAMPLE_ALERT,
     },
 }
 
@@ -216,6 +220,61 @@ def validate_rule_ids(module: str, rule_ids: Optional[List[int]]) -> None:
         raise ValueError(
             f"rule_ids {bad} outside module {module!r} band [{lo}, {hi}]"
         )
+
+
+def _coerce_int(value: Any) -> int:
+    """Strict int coercion: '5' / 5.0 → 5; '5.5' / 5.5 / 'abc' raise."""
+    if isinstance(value, bool):
+        raise ValueError("boolean is not a valid int condition value")
+    f = float(value)
+    i = int(f)
+    if i != f:
+        raise ValueError("value is not an integer")
+    return i
+
+
+def _coerce_float(value: Any) -> float:
+    if isinstance(value, bool):
+        raise ValueError("boolean is not a valid float condition value")
+    f = float(value)
+    if not math.isfinite(f):
+        raise ValueError("value is not a finite number")
+    return f
+
+
+_FIELD_TYPE_COERCERS: Dict[str, Callable[[Any], Any]] = {
+    "float": _coerce_float,
+    "int": _coerce_int,
+    "str": str,
+}
+
+
+def coerce_condition_values(module: str, tree: Optional[Dict[str, Any]]) -> None:
+    """Coerce every condition value IN PLACE to the field's declared type.
+
+    filterable_fields declares each field as float/int/str; a raw API client
+    may send {"field": "equity", "op": "==", "value": "100"} — without
+    coercion the stored string never ==-matches the alert's 100.0 in the
+    dispatcher (_compare falls into string comparison). Coercing at
+    create/update time keeps the evaluator numeric for numeric fields.
+    Uncoercible values raise ValueError (route maps to 422). Call AFTER
+    validate_condition_fields — unknown fields must already be rejected.
+    """
+    if not tree:
+        return
+    fields = validate_module(module)["filterable_fields"]
+    for cond in tree.get("conditions") or []:
+        field = str(cond.get("field") or "")
+        ftype = fields[field][0]
+        coerce = _FIELD_TYPE_COERCERS[ftype]
+        value = cond.get("value")
+        try:
+            cond["value"] = coerce(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"condition value {value!r} for field {field!r} is not a "
+                f"valid {ftype}: {exc}"
+            ) from exc
 
 
 def validate_condition_fields(module: str, tree: Optional[Dict[str, Any]]) -> None:

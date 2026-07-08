@@ -63,7 +63,9 @@ def _iso(dt: datetime) -> str:
     )
 
 
-def _insert_hedge_alert(login: int = 60011332, lots: float = 533.2) -> int:
+def _insert_hedge_alert(
+    login: int = 60011332, lots: float = 533.2, equity: float = -100.0
+) -> int:
     iso = _iso(NOW)
     rm_db.append_scan_and_events(
         scanned_at=iso, scan_interval_min=5, accounts_scanned=1,
@@ -73,7 +75,7 @@ def _insert_hedge_alert(login: int = 60011332, lots: float = 533.2) -> int:
             "server": "MT5", "login": login, "symbol": "NZDJPY",
             "order_count": 4, "total_lots": lots * 2,
             "first_open": iso, "last_open": iso,
-            "equity": -100.0, "balance": -100.0, "group": "KCM\\demoX",
+            "equity": equity, "balance": equity, "group": "KCM\\demoX",
             "orders": [], "currency": "USD", "zipcode": None,
             "net_deposit_hist": 10.0,
             "buy_count": 2, "sell_count": 2,
@@ -384,9 +386,32 @@ def test_test_send_unknown_subscription_404(client, sent_mail):
     assert r.status_code == 404
 
 
-def test_test_send_no_renderable_alert_409(client, sent_mail):
-    # Empty alert_events AND the pinned fallback id doesn't exist here.
+def test_test_send_empty_table_uses_sample_fixture(client, sent_mail):
+    """Regression: the fallback used to reference live DB row 273504, which
+    the 30-day retention purge deletes — test-send must keep working with an
+    EMPTY alert_events table via the frozen in-code sample."""
     r = client.post("/api/v1/alert-mail/subscriptions/1/test-send", json={})
+    assert r.status_code == 200, r.text
+    data = r.json()["data"]
+    assert data["used_fallback"] is True
+    assert data["subject"].startswith("[TEST] ")
+    assert data["recipient"] == KIERAN
+    assert len(sent_mail) == 1
+    assert "NZDJPY" in sent_mail[0]["body"]
+    # Pure preview: no outbox row, nothing persisted.
+    assert rm_db.get_mail_outbox_rows(1, ("pending", "sent", "failed")) == []
+
+
+def test_test_send_unregistered_module_409(client, sent_mail):
+    # NoRenderableAlert mapping still covered: a subscription whose module
+    # is not in MAIL_SOURCES cannot render a test mail.
+    sub_id = rm_db.insert_mail_subscription({
+        "name": "ghost", "module": "not_registered", "rule_ids": None,
+        "conditions_json": "{}", "mail_to": KIERAN, "mail_cc": None,
+        "mode": "realtime", "cooldown_min": 0, "digest_time": None,
+        "enabled": 1, "updated_at": _iso(NOW), "updated_by": "test",
+    })
+    r = client.post(f"/api/v1/alert-mail/subscriptions/{sub_id}/test-send", json={})
     assert r.status_code == 409
     assert sent_mail == []
 
@@ -568,3 +593,177 @@ def test_resend_failure_on_sent_row_restores_delivery_record(client, monkeypatch
 def test_resend_unknown_id_404(client, sent_mail):
     r = client.post("/api/v1/alert-mail/outbox/12345/resend")
     assert r.status_code == 404
+
+
+# ── Re-enable fast-forwards the dispatch cursor (stale-replay regression) ────
+
+def test_reenable_fast_forwards_cursor_no_stale_replay(client):
+    """Regression: disabled subscriptions are skipped by the dispatcher, so
+    their cursor freezes; on re-enable the next tick used to pull the whole
+    skipped window (up to 500 alerts) and mail weeks-old incidents as fresh.
+    The enabled false→true update must fast-forward the cursor to the
+    current MAX(alert_events.id)."""
+    from app.services import alert_mail_dispatcher as amd
+
+    sent: list[dict] = []
+
+    def cap(*, subject, body, to, cc=None):
+        sent.append({"subject": subject, "body": body, "to": to})
+
+    # Disable the seed subscription — its cursor freezes here.
+    r = client.put("/api/v1/alert-mail/subscriptions/1", headers=DEVICE,
+                   json={"enabled": False})
+    assert r.status_code == 200
+
+    # Alerts land while the subscription is disabled (the skipped window);
+    # they match the seed conditions and would have been replayed as fresh.
+    stale_id = _insert_hedge_alert(login=60011332)
+
+    # Re-enable → cursor fast-forwards past the skipped window.
+    r = client.put("/api/v1/alert-mail/subscriptions/1", headers=DEVICE,
+                   json={"enabled": True})
+    assert r.status_code == 200
+    assert rm_db.get_mail_dispatch_cursor(1) >= stale_id
+
+    summary = amd.dispatch_alert_mails(now=NOW, send_fn=cap)
+    assert summary["composed"] == 0
+    assert sent == []  # nothing from the skipped window
+
+    # Alerts arriving AFTER re-enable dispatch normally — and only those.
+    new_id = _insert_hedge_alert(login=60011999)
+    summary = amd.dispatch_alert_mails(now=NOW + timedelta(minutes=5), send_fn=cap)
+    assert summary["composed"] == 1
+    assert len(sent) == 1
+    row = rm_db.get_mail_outbox_rows(1, ("sent",))[0]
+    assert json.loads(row["alert_ids_json"]) == [new_id]
+
+
+def test_update_without_enable_transition_keeps_cursor(client):
+    """A no-transition update (enabled stays true) must NOT move the cursor —
+    only the false→true edge fast-forwards."""
+    rm_db.update_mail_dispatch_cursor(1, 0)
+    _insert_hedge_alert(login=60011332)
+    r = client.put("/api/v1/alert-mail/subscriptions/1", headers=DEVICE,
+                   json={"enabled": True, "cooldown_min": 45})
+    assert r.status_code == 200
+    assert rm_db.get_mail_dispatch_cursor(1) == 0
+
+
+# ── Recipient domain allowlist (open-relay regression) ───────────────────────
+
+def test_create_recipient_domain_outside_allowlist_rejected(client):
+    r = client.post("/api/v1/alert-mail/subscriptions", headers=DEVICE,
+                    json=_valid_payload(mail_to="attacker@gmail.com"))
+    assert r.status_code == 422
+    assert "attacker@gmail.com" in r.text
+
+    # mail_cc is enforced too — CC is just as much of an exfil channel.
+    r = client.post("/api/v1/alert-mail/subscriptions", headers=DEVICE,
+                    json=_valid_payload(mail_cc=f"{KIERAN}, exfil@evil.io"))
+    assert r.status_code == 422
+    assert "exfil@evil.io" in r.text
+
+
+def test_create_allowed_domains_pass(client):
+    # Both default-allowed domains pass (incl. the OPT-0042 seed address).
+    r = client.post("/api/v1/alert-mail/subscriptions", headers=DEVICE,
+                    json=_valid_payload(mail_to=f"{KIERAN}, ops@kcmtrade.com"))
+    assert r.status_code == 201, r.text
+
+
+def test_update_recipient_domain_outside_allowlist_rejected(client):
+    r = client.put("/api/v1/alert-mail/subscriptions/1", headers=DEVICE,
+                   json={"mail_to": "bad@outlook.com"})
+    assert r.status_code == 422
+    assert "bad@outlook.com" in r.text
+
+    r = client.put("/api/v1/alert-mail/subscriptions/1", headers=DEVICE,
+                   json={"mail_to": "ops@kcmtrade.com"})
+    assert r.status_code == 200
+    assert r.json()["data"]["mail_to"] == "ops@kcmtrade.com"
+
+
+def test_test_send_recipient_domain_outside_allowlist_rejected(client, sent_mail):
+    _insert_hedge_alert()
+    r = client.post("/api/v1/alert-mail/subscriptions/1/test-send",
+                    json={"recipient": "leak@gmail.com"})
+    assert r.status_code == 422
+    assert "leak@gmail.com" in r.text
+    assert sent_mail == []  # nothing left the building
+
+
+def test_recipient_domain_env_override(client, monkeypatch):
+    monkeypatch.setenv("ALERT_MAIL_ALLOWED_DOMAINS", "example.org")
+    r = client.post("/api/v1/alert-mail/subscriptions", headers=DEVICE,
+                    json=_valid_payload(mail_to="ops@example.org"))
+    assert r.status_code == 201, r.text
+    # The default domains are REPLACED by the override, not extended.
+    r = client.post("/api/v1/alert-mail/subscriptions", headers=DEVICE,
+                    json=_valid_payload(name="second", mail_to=KIERAN))
+    assert r.status_code == 422
+
+
+# ── Condition value coercion (string "100" == 100.0 regression) ──────────────
+
+def test_condition_string_value_coerced_and_matches(client):
+    """Regression: a raw API client sending {"op": "==", "value": "100"} had
+    the string stored verbatim; the evaluator string-compared "100" vs 100.0
+    and never matched. The value must be coerced to the field's registry
+    type at create time and then numeric-match in the dispatcher."""
+    from app.services import alert_mail_dispatcher as amd
+
+    # Isolate from the seed subscription.
+    client.put("/api/v1/alert-mail/subscriptions/1", headers=DEVICE,
+               json={"enabled": False})
+
+    r = client.post("/api/v1/alert-mail/subscriptions", headers=DEVICE,
+                    json=_valid_payload(conditions={
+                        "logic": "and",
+                        "conditions": [
+                            {"field": "equity", "op": "==", "value": "100"},
+                        ],
+                    }))
+    assert r.status_code == 201, r.text
+    stored = r.json()["data"]["conditions"]["conditions"][0]["value"]
+    assert stored == 100.0
+    assert isinstance(stored, float)
+
+    sent: list[str] = []
+
+    def cap(*, subject, body, to, cc=None):
+        sent.append(to)
+
+    # First tick initializes the new subscription's cursor at the current
+    # high-water mark; the matching alert must arrive after that.
+    amd.dispatch_alert_mails(now=NOW, send_fn=cap)
+    assert sent == []
+    _insert_hedge_alert(login=60011777, equity=100.0)
+    summary = amd.dispatch_alert_mails(now=NOW + timedelta(minutes=1), send_fn=cap)
+    assert summary["composed"] == 1
+    assert len(sent) == 1
+
+
+def test_condition_int_field_string_value_coerced(client):
+    r = client.post("/api/v1/alert-mail/subscriptions", headers=DEVICE,
+                    json=_valid_payload(conditions={
+                        "logic": "and",
+                        "conditions": [
+                            {"field": "orders_per_side", "op": "==", "value": "5"},
+                        ],
+                    }))
+    assert r.status_code == 201, r.text
+    stored = r.json()["data"]["conditions"]["conditions"][0]["value"]
+    assert stored == 5
+    assert isinstance(stored, int)
+
+
+def test_condition_garbage_value_422(client):
+    r = client.post("/api/v1/alert-mail/subscriptions", headers=DEVICE,
+                    json=_valid_payload(conditions={
+                        "logic": "and",
+                        "conditions": [
+                            {"field": "equity", "op": "==", "value": "not-a-number"},
+                        ],
+                    }))
+    assert r.status_code == 422
+    assert "not-a-number" in r.text

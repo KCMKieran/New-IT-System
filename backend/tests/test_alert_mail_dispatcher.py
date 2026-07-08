@@ -615,6 +615,19 @@ def test_ensure_cursor_existing_row_untouched(temp_db):
     assert rm_db.ensure_mail_dispatch_cursor(1) == 42
 
 
+def test_fast_forward_cursor_moves_to_high_water_mark(temp_db):
+    """Re-enable helper: cursor jumps to MAX(alert_events.id), forward-only."""
+    sub_id = rm_db.load_mail_subscriptions(module="hedge_open")[0]["id"]
+    rm_db.update_mail_dispatch_cursor(sub_id, 1)
+    aid = _insert(_hedge_alert())
+    assert rm_db.fast_forward_mail_dispatch_cursor(sub_id) == aid
+    assert rm_db.get_mail_dispatch_cursor(sub_id) == aid
+    # Forward-only: a cursor already ahead never regresses.
+    rm_db.update_mail_dispatch_cursor(sub_id, aid + 100)
+    rm_db.fast_forward_mail_dispatch_cursor(sub_id)
+    assert rm_db.get_mail_dispatch_cursor(sub_id) == aid + 100
+
+
 # ── test-send path ─────────────────────────────────────────
 
 def test_send_test_email_uses_most_recent_match(temp_db):
@@ -629,14 +642,17 @@ def test_send_test_email_uses_most_recent_match(temp_db):
     assert "60011332" in mail.sent[0]["body"]
 
 
-def test_send_test_email_falls_back_to_pinned_alert(temp_db):
-    # Only a non-matching alert exists; point the fallback at it.
-    aid = _insert(_hedge_alert(buy_lots=0.5, sell_lots=0.5, buy_count=1, sell_count=1))
+def test_send_test_email_falls_back_to_sample_fixture(temp_db):
+    # Only a non-matching alert exists → the frozen in-code sample renders.
+    _insert(_hedge_alert(buy_lots=0.5, sell_lots=0.5, buy_count=1, sell_count=1))
     mail = MailCapture()
-    result = amd.send_test_email(send_fn=mail, fallback_alert_id=aid)
+    result = amd.send_test_email(send_fn=mail)
     assert result["used_fallback"] is True
-    assert result["alert_id"] == aid
+    assert result["alert_id"] == amd.TEST_SEND_SAMPLE_ALERT["id"]
     assert len(mail.sent) == 1
+    assert mail.sent[0]["subject"].startswith("[TEST] ")
+    body = mail.sent[0]["body"]
+    assert "60011332" in body and "NZDJPY" in body
 
 
 def test_send_test_email_recipient_override(temp_db):
@@ -647,6 +663,25 @@ def test_send_test_email_recipient_override(temp_db):
     assert mail.sent[0]["to"] == "someone@kcmtrade.com"
 
 
-def test_send_test_email_no_alert_raises(temp_db):
+def test_send_test_email_empty_table_uses_sample_fixture(temp_db):
+    """Regression: the old fallback referenced live DB row 273504, which the
+    30-day retention purge deletes — after that, test-send with no recent
+    matching alert failed forever. The frozen in-code sample must keep
+    test-send working even with a completely EMPTY alert_events table."""
+    mail = MailCapture()
+    result = amd.send_test_email(send_fn=mail)
+    assert result["used_fallback"] is True
+    assert result["alert_id"] == amd.TEST_SEND_SAMPLE_ALERT["id"]
+    assert len(mail.sent) == 1
+    assert mail.sent[0]["subject"].startswith("[TEST] ")
+    # The sample mirrors the real 2026-07-03 case (62 buy + 62 sell NZDJPY).
+    body = mail.sent[0]["body"]
+    assert "62 buy + 62 sell" in body
+    assert "-44,696.65" in body
+    # The frozen sample dict itself was not mutated by the render.
+    assert amd.TEST_SEND_SAMPLE_ALERT["buy_lots"] == 533.2
+
+
+def test_send_test_email_without_sample_raises(temp_db):
     with pytest.raises(ValueError):
-        amd.send_test_email(send_fn=MailCapture(), fallback_alert_id=273504)
+        amd.send_test_email(send_fn=MailCapture(), fallback_sample={})

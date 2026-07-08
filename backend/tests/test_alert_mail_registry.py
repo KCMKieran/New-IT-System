@@ -180,6 +180,53 @@ def test_validate_condition_fields():
         registry.validate_condition_fields("hedge_open", bad)
 
 
+def test_coerce_condition_values_to_declared_types():
+    """Regression: a raw API client sending string values ('100') stored them
+    verbatim, and _compare's == branch string-compared '100' vs 100.0 —
+    never matching. Values must be coerced to the registry-declared type."""
+    tree = {
+        "logic": "and",
+        "conditions": [
+            {"field": "equity", "op": "==", "value": "100"},       # float field
+            {"field": "orders_per_side", "op": ">=", "value": "5"},  # int field
+            {"field": "total_lots", "op": ">", "value": 7},          # int → float
+        ],
+    }
+    registry.coerce_condition_values("hedge_open", tree)
+    assert tree["conditions"][0]["value"] == 100.0
+    assert isinstance(tree["conditions"][0]["value"], float)
+    assert tree["conditions"][1]["value"] == 5
+    assert isinstance(tree["conditions"][1]["value"], int)
+    assert isinstance(tree["conditions"][2]["value"], float)
+
+
+def test_coerce_condition_values_rejects_garbage():
+    bad_float = {"logic": "and",
+                 "conditions": [{"field": "equity", "op": "==", "value": "abc"}]}
+    with pytest.raises(ValueError):
+        registry.coerce_condition_values("hedge_open", bad_float)
+    non_integer = {"logic": "and",
+                   "conditions": [{"field": "orders_per_side", "op": "==", "value": "5.5"}]}
+    with pytest.raises(ValueError):
+        registry.coerce_condition_values("hedge_open", non_integer)
+    non_finite = {"logic": "and",
+                  "conditions": [{"field": "equity", "op": "==", "value": "nan"}]}
+    with pytest.raises(ValueError):
+        registry.coerce_condition_values("hedge_open", non_finite)
+
+
+def test_coerced_string_value_matches_numeric_field():
+    """End of the == bug: after coercion, equity == 100.0 matches an alert
+    whose equity is exactly 100.0."""
+    tree = {"logic": "and",
+            "conditions": [{"field": "equity", "op": "==", "value": "100"}]}
+    registry.coerce_condition_values("hedge_open", tree)
+    alert = _hedge_alert(equity=100.0)
+    assert amd.evaluate_generic_conditions(alert, tree, HEDGE) is not None
+    alert2 = _hedge_alert(equity=100.5)
+    assert amd.evaluate_generic_conditions(alert2, tree, HEDGE) is None
+
+
 # ── Generic condition evaluation ───────────────────────────
 
 def _tree(logic: str, *conds: dict) -> dict:
