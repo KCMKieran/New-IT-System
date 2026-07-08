@@ -169,8 +169,15 @@ def _build_quick_profit_prev_alerts(
         return prev
 
 
-def _run_scan(*, tier: str = "all") -> None:
+def _run_scan(*, tier: str = "all", dispatch_mail: bool = False) -> None:
     """Execute one scan cycle.
+
+    `dispatch_mail` is True ONLY on the SCHEDULED slow tick (`_locked_scan`).
+    The manual scan-now path (`trigger_scan_now`, tier='all') must NOT
+    dispatch mail: dev and prod backends share the same prod SQLite (commit
+    355052b context), so a developer clicking 立即扫描 in dev would run the
+    dispatcher concurrently with prod's slow tick — duplicate emails and
+    real alert mail fired from dev. Only prod's scheduler owns dispatch.
 
     OPT-0012 / OPT-0037 tier modes:
     - 'all'         → legacy, runs every detector (default when fast tier
@@ -473,6 +480,22 @@ def _run_scan(*, tier: str = "all") -> None:
             alerts=this_tick_alerts,
         )
 
+        # OPT-0042: hedge-open mail alert dispatcher. Runs on the SCHEDULED
+        # slow tick only (`dispatch_mail` — never the manual scan-now path,
+        # see docstring: dev shares prod's SQLite) right after this tick's
+        # alerts are persisted — the dispatcher's cursor pull over
+        # alert_events sees them immediately. Fully fenced: an SMTP outage
+        # or a dispatcher bug must NEVER break the scan pipeline (the outbox
+        # inside the dispatcher makes a swallowed failure retryable anyway),
+        # and send_email's socket timeout bounds how long a hung SMTP
+        # connection can hold _scan_lock.
+        if include_hedge and dispatch_mail:
+            try:
+                from ..services.alert_mail_dispatcher import dispatch_alert_mails
+                dispatch_alert_mails()
+            except Exception:
+                logger.error("Alert mail dispatch failed (non-fatal)", exc_info=True)
+
         # OPT-0013: notify SSE subscribers of the new tick. Lightweight
         # payload (no full alert bodies) — frontend does an incremental
         # /alerts fetch on receipt. publish() is thread-safe.
@@ -510,8 +533,9 @@ def _locked_scan() -> None:
         return
     try:
         # When fast tier owns burst, slow tier explicitly skips it; else
-        # legacy 'all' mode keeps prior behavior exactly.
-        _run_scan(tier="slow" if _fast_tier_enabled() else "all")
+        # legacy 'all' mode keeps prior behavior exactly. The scheduled
+        # slow tick is the ONLY caller that dispatches alert mail.
+        _run_scan(tier="slow" if _fast_tier_enabled() else "all", dispatch_mail=True)
     finally:
         _scan_lock.release()
 

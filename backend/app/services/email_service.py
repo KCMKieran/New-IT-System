@@ -26,6 +26,14 @@ logger = logging.getLogger(__name__)
 # Attachment can be a file path string or a dict with 'filepath' and optional 'cid' (for inline images)
 Attachment = Union[str, dict]
 
+# Explicit SMTP socket timeout. The stdlib default is None (block forever):
+# a silently blackholed connection to smtp.office365.com would then hang
+# connect/starttls/login indefinitely — and several callers (the risk-monitor
+# alert mail dispatcher, gap-trade digests) run inside the scan lock, so a
+# hang there would halt the entire scan pipeline until process restart.
+# 30s bounds each socket operation, not the whole send.
+_SMTP_TIMEOUT_SEC = 30
+
 
 def send_email(
     subject: str,
@@ -87,7 +95,9 @@ def send_email(
     cc_list = [addr.strip() for addr in cc.split(",") if addr.strip()] if cc else []
     all_recipients = to_list + cc_list
 
-    server = smtplib.SMTP(settings.SMTP_SERVER, settings.SMTP_PORT)
+    server = smtplib.SMTP(
+        settings.SMTP_SERVER, settings.SMTP_PORT, timeout=_SMTP_TIMEOUT_SEC
+    )
     try:
         server.starttls()
         server.login(settings.SMTP_USERNAME, settings.SMTP_PASSWORD)
