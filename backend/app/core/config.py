@@ -67,6 +67,10 @@ class Settings:
     # View profiles (OPT-0035): device-ids allowed to force-release a stuck claim
     VIEW_PROFILES_ADMIN_DEVICES: set[str]
 
+
+    # Alert mail center (OPT-0042/0043): recipient domain allowlist
+    ALERT_MAIL_ALLOWED_DOMAINS: set[str]
+
     def __init__(self) -> None:
         self.DB_HOST = os.environ.get("DB_HOST")
         self.DB_USER = os.environ.get("DB_USER")
@@ -161,6 +165,22 @@ class Settings:
         self.VIEW_PROFILES_ADMIN_DEVICES = {
             d.strip()
             for d in os.environ.get("VIEW_PROFILES_ADMIN_DEVICES", "").split(",")
+            if d.strip()
+        }
+
+
+        # Alert mail center (OPT-0042/0043): server-side recipient domain
+        # allowlist. Subscription mail_to/mail_cc and test-send recipients may
+        # only target mailboxes in these domains — anyone holding the frontend
+        # API key could otherwise create a subscription (or test-send) routing
+        # client financial data to an arbitrary external address. Comma-
+        # separated env override; a blank/unset env falls back to the default.
+        self.ALERT_MAIL_ALLOWED_DOMAINS = {
+            d.strip().lower().lstrip("@")
+            for d in (
+                os.environ.get("ALERT_MAIL_ALLOWED_DOMAINS")
+                or "kohleservices.com,kcmtrade.com"
+            ).split(",")
             if d.strip()
         }
 

@@ -1877,7 +1877,8 @@ def hedge_mail_test_send(payload: HedgeMailTestSendRequest):
     other request while this one waits on SMTP.
 
     Renders the most recent alert matching the mail subscription's
-    conditions (fallback: the pinned 2026-07-03 real case, alert id 273504)
+    conditions (fallback: a frozen in-code sample of the 2026-07-03 real
+    case — never a live DB row, which the retention purge would delete)
     and sends it to `payload.recipient` — defaulting to the subscription's
     own mail_to. Pure preview: no outbox row, no cursor movement.
     """

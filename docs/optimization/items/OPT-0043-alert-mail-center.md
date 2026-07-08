@@ -1,7 +1,7 @@
 ---
 id: OPT-0043
 title: 风控告警邮件中心 v2 —— Risk Control 下新页面：订阅规则 / 发送记录 / 全局设置，源注册表泛化
-status: wip
+status: done
 priority: P1
 area: mixed
 effort: L
@@ -90,3 +90,21 @@ related: [[OPT-0042]] [[OPT-0032]] [[OPT-0035]]
 - 全局限流保险丝、收件人组、按角色权限（平台级问题）。
 - 本页面 grid/filter key 纳入 view-profiles PROFILE_MANIFEST。
 - Webhook 渠道（Slack/Telegram）——outbox 已留 status/error 通用结构。
+
+## 结果（2026-07-08 close）
+
+**实际交付 = AC 达成（AC3 部分除外，见下）**：源注册表 + /api/v1/alert-mail 全端点（sources / subscriptions CRUD / test-send / outbox 分页 / resend，device-id 记 updated_by）+ dispatcher 泛化（seed 订阅语义回归测试不变）+ digest 每日定时（单个分钟级调度 job 查到期订阅）+ 前端三 tab 页面（Sheet 四段式表单、outbox AG-Grid 走 useGridColumnPersist/useFilterPersist、i18n 双语）。闸门：tsc + vitest(115) 绿、pytest 376 过零新增失败；API E2E 全通含真实试发。docs/features/hedge-mail-alert.md + alert-mail-center.md + alert-mail-center skill（均本地资产）落地。
+
+**AC3 偏差**：Tab 2 outbox 展示/重发只过了 API 层——dev 关调度器且共享 prod SQLite，故意未手动触发真实 dispatch（会用未合并代码写 prod 游标）；上线后首轮真实命中即自然补验。
+
+**Stage 1 outsider-review（combined diff，覆盖 0042+0043）13 条 finding 处理记录**：
+- 当场修 4 条（commit f57de42）：停用→启用游标快进防旧告警回放；test-send 兜底改冻结 fixture（原 id 273504 会在 ~08-02 被保留清理删掉）；收件人域名白名单（kohleservices.com/kcmtrade.com + env 覆盖）堵开放中继；条件值按字段类型强转（"100"=="100.0" 永不匹配 bug）。
+- 立 [[OPT-0044]] hardening 4 条：SMTP 发送移出扫描锁（tick 只生成）、digest 巨型邮件 top-N 渲染上限、digest 跨进程 UNIQUE 认领、注册表 dataclass 化 + band-clamp 与检测侧抽共享函数。
+- Live with 5 条：webhook channel 列（表小时再决定，记 follow-up）；PUT last-write-wins 并发覆盖（单团队低频编辑）；死信只在 Tab 2 可见（可并入 morning-digest，follow-up）；死 envelope models + 预览重拉（并入 0044 顺带修）；杂项（硬编码 prod URL / AG-Grid 服务端分页排序观感 / 字段下架 WARNING 日志）。
+
+## Follow-up（更新）
+
+- [[OPT-0044]] alert-mail-hardening（已 file）：上述 4 条 + 死 envelope models 清理 + GET /outbox/{id}。
+- 其余 5 个 risk-monitor tab + fund-flow 注册进 MAIL_SOURCES；正式收件人从 kieran-only 扩到 risk team（等老板/risk 拍板）。
+- webhook 渠道（channel 列）、全局限流保险丝、收件人组、页面 key 纳入 view-profiles manifest。
+- 死信可观测：failed/dead 计数并入 morning-digest 或侧边栏 badge。

@@ -10,6 +10,7 @@ Append-only 日志。最新的写在最上面。
 
 | 日期 | ID | Commit | 标题 |
 |------|----|--------|------|
+| 2026-07-08 | [OPT-0043](./items/OPT-0043-alert-mail-center.md) | — | 风控告警邮件中心页面：/risk-alert-mail 三 tab（订阅/发送记录/设置）+ 源注册表（hedge_open 已注册，加模块=加一条 dict）+ 订阅 CRUD API + dispatcher 泛化 + digest 每日定时；闸门 tsc+vitest(115)+pytest 零新增失败，E2E 真实试发验证；Stage 1 冷审 13 条→4 当场修（游标快进/兜底fixture/域名白名单/==强转）+ 4 打包 [[OPT-0044]] hardening + 5 live-with |
 | 2026-07-08 | [OPT-0042](./items/OPT-0042-hedge-mail-alert.md) | — | 对冲刷佣邮件告警 v1：alert_events 之上的通知层内核（mail_subscriptions/outbox/cursor 三表 + seed 订阅 A∪B 条件含 .cent÷100）+ slow-tick dispatcher（digest/30min 冷却 via 游标 holdback/outbox 重试上限+死信/SMTP 30s 超时）+ test-send 端点；7 天回测精确命中 60011332/60011333 零噪音，真实邮件验证送达；workflow 内 review 7 条确认全修 |
 | 2026-06-29 | [OPT-0040](./items/OPT-0040-xauusd-position-snapshots.md) | — | XAUUSD 持仓分钟级快照（复用 risk_monitor.db）+ /position 顶部 Buy/Sell/Net 三线图（5/10min 桶降采样）+ 自定义范围流式 CSV 导出（60 天保留）；含 outsider-review 10 条 finding 当场全修 |
 | 2026-06-26 | [OPT-0039 Phase 2](./items/OPT-0039-risk-monitor-aggregate-toggle-state-loss.md) | — | 取消排序态显形（方案 B）。服务端排序表三态循环 desc→asc→取消，第三下取消时之前数据跳回默认列倒序但不显箭头，用户以为「只有 asc/desc」。修法：8 个 onSortChanged handler 在无 active 排序列（取消态）时，程序化 `applyColumnState` 把默认列（账户级=scanned_at，聚合=total_lots）的 ▼ 重新画上，三态全部可读。回声事件因默认列在白名单里走「active 存在」分支自然终止，无循环/无重复 fetch。纯前端 1 文件 +100，tsc+vitest(97) 绿。Stage 1 用户选不 review。需人在 dev 点一遍确认三态视觉 |

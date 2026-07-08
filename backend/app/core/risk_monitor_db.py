@@ -3012,6 +3012,25 @@ def ensure_mail_dispatch_cursor(subscription_id: int) -> int:
         return max_id
 
 
+def fast_forward_mail_dispatch_cursor(subscription_id: int) -> int:
+    """Move the subscription's cursor to the current MAX(alert_events.id).
+
+    Used when a subscription flips enabled 0 -> 1: disabled subscriptions
+    are skipped by the dispatcher (load_mail_subscriptions(enabled_only)),
+    so their cursor freezes while alerts keep accumulating. Without this
+    fast-forward, the first tick after re-enable would pull the whole
+    skipped window (up to a full fetch batch) and mail weeks-old incidents
+    as fresh. Forward-only (delegates to the upsert), so it can never
+    regress a cursor that is already ahead; also initializes a missing row.
+    """
+    with get_risk_monitor_db() as conn:
+        max_id = int(
+            conn.execute("SELECT COALESCE(MAX(id), 0) FROM alert_events").fetchone()[0]
+        )
+    update_mail_dispatch_cursor(subscription_id, max_id)
+    return max_id
+
+
 def update_mail_dispatch_cursor(subscription_id: int, last_alert_id: int) -> None:
     """Forward-only upsert of the per-subscription mail cursor.
 
@@ -3244,3 +3263,194 @@ def fetch_recent_hedge_alerts(limit: int = 500) -> list[dict[str, Any]]:
             (int(limit),),
         ).fetchall()
     return _hedge_mail_rows_to_dicts(rows)
+
+
+# ── Mail center CRUD helpers (OPT-0043, /api/v1/alert-mail) ─
+# Row movers only — validation and registry checks live in
+# services/alert_mail/service.py.
+
+# Whitelist of writable mail_subscriptions columns (JSON columns receive
+# already-serialized TEXT values from the service layer).
+_MAIL_SUB_WRITABLE_COLS = (
+    "name", "module", "rule_ids", "conditions_json", "mail_to", "mail_cc",
+    "mode", "cooldown_min", "digest_time", "enabled", "updated_at", "updated_by",
+)
+
+
+def insert_mail_subscription(fields: dict[str, Any]) -> int:
+    """Insert one mail_subscriptions row; returns the new id."""
+    cols = [c for c in _MAIL_SUB_WRITABLE_COLS if c in fields]
+    placeholders = ",".join(["?"] * len(cols))
+    with get_risk_monitor_db() as conn:
+        cur = conn.execute(
+            f"INSERT INTO mail_subscriptions ({','.join(cols)}) "
+            f"VALUES ({placeholders})",
+            [fields[c] for c in cols],
+        )
+        return int(cur.lastrowid or 0)
+
+
+def update_mail_subscription(subscription_id: int, fields: dict[str, Any]) -> bool:
+    """Partial UPDATE of one subscription row. Returns False on unknown id."""
+    cols = [c for c in _MAIL_SUB_WRITABLE_COLS if c in fields]
+    if not cols:
+        return True
+    sets = ", ".join(f"{c} = ?" for c in cols)
+    with get_risk_monitor_db() as conn:
+        cur = conn.execute(
+            f"UPDATE mail_subscriptions SET {sets} WHERE id = ?",
+            [fields[c] for c in cols] + [int(subscription_id)],
+        )
+        return int(cur.rowcount or 0) == 1
+
+
+def delete_mail_subscription(subscription_id: int) -> bool:
+    """Delete one subscription plus its dispatch cursor row.
+
+    mail_outbox history rows are deliberately KEPT (audit trail; the outbox
+    JOIN then reports subscription_name = NULL). Returns False on unknown id.
+    """
+    with get_risk_monitor_db() as conn:
+        cur = conn.execute(
+            "DELETE FROM mail_subscriptions WHERE id = ?", (int(subscription_id),)
+        )
+        conn.execute(
+            "DELETE FROM mail_dispatch_cursor WHERE subscription_id = ?",
+            (int(subscription_id),),
+        )
+        return int(cur.rowcount or 0) == 1
+
+
+def get_mail_subscription_send_stats(sent_7d_since_iso: str) -> dict[int, dict[str, Any]]:
+    """Per-subscription derived stats for the mail-center list UI.
+
+    last_sent_at = latest notified_at of a status='sent' outbox row;
+    sent_7d = count of status='sent' rows notified at/after the cutoff.
+    """
+    with get_risk_monitor_db() as conn:
+        rows = conn.execute(
+            """
+            SELECT subscription_id,
+                   MAX(notified_at) AS last_sent_at,
+                   SUM(CASE WHEN notified_at >= ? THEN 1 ELSE 0 END) AS sent_7d
+            FROM mail_outbox
+            WHERE status = 'sent'
+            GROUP BY subscription_id
+            """,
+            (sent_7d_since_iso,),
+        ).fetchall()
+    return {
+        int(r["subscription_id"]): {
+            "last_sent_at": r["last_sent_at"],
+            "sent_7d": int(r["sent_7d"] or 0),
+        }
+        for r in rows
+    }
+
+
+def query_mail_outbox(
+    *,
+    page: int = 1,
+    page_size: int = 50,
+    module: str | None = None,
+    subscription_id: int | None = None,
+    status: str | None = None,
+    start_iso: str | None = None,
+    end_iso: str | None = None,
+    include_body: bool = False,
+) -> tuple[list[dict[str, Any]], int, dict[str, int]]:
+    """Paginated outbox ledger, newest first, subscription JOINed.
+
+    Returns (rows, total, status_counts). status_counts covers the CURRENT
+    filter minus the status filter itself (Tab-2 status chips). body_html
+    is NULLed out unless include_body (list payload weight).
+    """
+    clauses: list[str] = []
+    params: list[Any] = []
+    if module is not None:
+        clauses.append("s.module = ?")
+        params.append(module)
+    if subscription_id is not None:
+        clauses.append("o.subscription_id = ?")
+        params.append(int(subscription_id))
+    if start_iso:
+        clauses.append("o.created_at >= ?")
+        params.append(start_iso)
+    if end_iso:
+        clauses.append("o.created_at <= ?")
+        params.append(end_iso)
+    base_where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    from_join = (
+        " FROM mail_outbox o LEFT JOIN mail_subscriptions s ON s.id = o.subscription_id"
+    )
+
+    status_clause = ""
+    status_params: list[Any] = []
+    if status is not None:
+        status_clause = (" AND " if clauses else " WHERE ") + "o.status = ?"
+        status_params.append(status)
+
+    body_col = "o.body_html" if include_body else "NULL AS body_html"
+    offset = max(0, (int(page) - 1) * int(page_size))
+    with get_risk_monitor_db() as conn:
+        total = int(conn.execute(
+            f"SELECT COUNT(*){from_join}{base_where}{status_clause}",
+            params + status_params,
+        ).fetchone()[0])
+        count_rows = conn.execute(
+            f"SELECT o.status, COUNT(*) AS n{from_join}{base_where} GROUP BY o.status",
+            params,
+        ).fetchall()
+        rows = conn.execute(
+            f"""
+            SELECT o.id, o.subscription_id, o.alert_ids_json, o.subject,
+                   {body_col}, o.recipients, o.status, o.error, o.attempts,
+                   o.claimed_at, o.created_at, o.notified_at,
+                   s.name AS subscription_name, s.module AS module
+            {from_join}{base_where}{status_clause}
+            ORDER BY o.created_at DESC, o.id DESC
+            LIMIT ? OFFSET ?
+            """,
+            params + status_params + [int(page_size), offset],
+        ).fetchall()
+    status_counts = {str(r["status"]): int(r["n"]) for r in count_rows}
+    return [dict(r) for r in rows], total, status_counts
+
+
+def get_mail_outbox_row(outbox_id: int) -> dict[str, Any] | None:
+    """One full outbox row (body included), subscription JOINed."""
+    with get_risk_monitor_db() as conn:
+        row = conn.execute(
+            """
+            SELECT o.id, o.subscription_id, o.alert_ids_json, o.subject,
+                   o.body_html, o.recipients, o.status, o.error, o.attempts,
+                   o.claimed_at, o.created_at, o.notified_at,
+                   s.name AS subscription_name, s.module AS module,
+                   s.mail_cc AS subscription_mail_cc
+            FROM mail_outbox o
+            LEFT JOIN mail_subscriptions s ON s.id = o.subscription_id
+            WHERE o.id = ?
+            """,
+            (int(outbox_id),),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def claim_mail_outbox_row_for_resend(outbox_id: int, claimed_at: str) -> bool:
+    """Claim an outbox row for a MANUAL resend (cross-process safe).
+
+    Unlike the dispatcher claim (pending/failed only), a manual resend may
+    revive 'dead' rows and deliberately re-deliver 'sent' ones. Rows that
+    are 'pending' or 'sending' belong to the dispatcher / another claimer —
+    the claim loses and the route replies 409.
+    """
+    with get_risk_monitor_db() as conn:
+        cur = conn.execute(
+            """
+            UPDATE mail_outbox
+            SET status = 'sending', claimed_at = ?, attempts = attempts + 1
+            WHERE id = ? AND status IN ('failed', 'dead', 'sent')
+            """,
+            (claimed_at, int(outbox_id)),
+        )
+        return int(cur.rowcount or 0) == 1
