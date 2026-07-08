@@ -18,6 +18,7 @@ from apscheduler.triggers.cron import CronTrigger
 logger = logging.getLogger(__name__)
 
 JOB_ID = "ib_financial_daily_report"
+DIGEST_JOB_ID = "alert_mail_digest_dispatch"
 HKT = ZoneInfo("Asia/Hong_Kong")
 
 # Module-level singleton; initialised by start_scheduler()
@@ -54,6 +55,22 @@ def _send_daily_report() -> None:
         logger.error("Scheduled report failed", exc_info=True)
 
 
+def _dispatch_digest_mails_job() -> None:
+    """Job function: compose due digest-mode alert mail subscriptions.
+
+    OPT-0043: digest subscriptions send once daily at their per-subscription
+    `digest_time` (HKT). Times are user-editable at runtime, so instead of
+    one cron job per subscription this single minutely job asks the
+    dispatcher which subscriptions are due — a no-op SQLite read on idle
+    minutes. Fully fenced: a mail problem must never kill the scheduler.
+    """
+    try:
+        from ..services.alert_mail_dispatcher import dispatch_digest_mails
+        dispatch_digest_mails()
+    except Exception:
+        logger.error("Alert mail digest dispatch failed (non-fatal)", exc_info=True)
+
+
 def start_scheduler() -> None:
     """Start the background scheduler using report_config from SQLite.
 
@@ -79,6 +96,17 @@ def start_scheduler() -> None:
         CronTrigger(hour=hour, minute=minute, timezone=HKT),
         id=JOB_ID,
         replace_existing=True,
+    )
+    # OPT-0043: minutely due-check for digest-mode alert mail subscriptions
+    # (see _dispatch_digest_mails_job). Guarded by the same SCHEDULER_ENABLED
+    # switch above, so dev (which shares prod's SQLite) never double-sends.
+    _scheduler.add_job(
+        _dispatch_digest_mails_job,
+        CronTrigger(minute="*", timezone=HKT),
+        id=DIGEST_JOB_ID,
+        replace_existing=True,
+        coalesce=True,
+        misfire_grace_time=120,
     )
     _scheduler.start()
     logger.info(f"Scheduler started: daily report at {hour:02d}:{minute:02d} HKT")

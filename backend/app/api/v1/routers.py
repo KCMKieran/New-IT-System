@@ -27,6 +27,7 @@ from .routes.client_log import router as client_log_router
 from .routes.fund_flow_monitor import router as fund_flow_monitor_router
 from .routes.view_profiles import router as view_profiles_router
 from .routes.ib_tree import router as ib_tree_router
+from .routes.alert_mail import router as alert_mail_router
 
 
 api_v1_router = APIRouter()
@@ -57,3 +58,4 @@ api_v1_router.include_router(client_log_router, tags=["client-log"])
 api_v1_router.include_router(fund_flow_monitor_router, tags=["fund-flow-monitor"])
 api_v1_router.include_router(view_profiles_router, tags=["view-profiles"])
 api_v1_router.include_router(ib_tree_router, tags=["ib-tree"])
+api_v1_router.include_router(alert_mail_router, tags=["alert-mail"])

@@ -50,6 +50,7 @@ export const enUS = {
     ibFinancialMonitor: "IB Financial Monitor",
     fundFlowMonitor: "Frequent Fund Flow",
     ibTreeQuery: "IB Tree Lookup",
+    riskAlertMail: "Alert Mail Center",
     home: "Home",
   },
   
@@ -83,8 +84,9 @@ export const enUS = {
     clientReturnRate: "Client Return Rate",
     ibFinancialMonitor: "IB Financial Monitor",
     ibTreeQuery: "IB Tree Lookup",
+    riskAlertMail: "Alert Mail Center",
   },
-  
+
   ibidLotsPage: {
     description: "This tool is only reachable from the corporate network or VPN.",
     note: "Use the button below to open the IBID lots lookup in a new tab.",
