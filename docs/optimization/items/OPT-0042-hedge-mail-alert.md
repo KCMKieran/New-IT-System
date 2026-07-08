@@ -1,7 +1,7 @@
 ---
 id: OPT-0042
 title: 对冲刷佣邮件告警 v1（灭火版）—— 批量对冲命中即发 digest 邮件，outbox 可靠投递
-status: wip
+status: done
 priority: P0
 area: backend
 effort: M
@@ -74,3 +74,13 @@ related: [[OPT-0021]] [[OPT-0032]] [[OPT-0043]]
 3. 条件回测复现：近 7 天数据上 A∪B 命中集合 = {60011332, 60011333, +cent 折算后存活的账户}，无碎单噪音。
 4. SMTP 故障模拟（mock）下 outbox 行保留并在下一 tick 重试。
 5. `cd backend && python -m pytest -q` 新增用例全绿、无新失败；scan 主流程不受 dispatcher 异常影响（异常被吞并 log）。
+
+## 结果（2026-07-08 close）
+
+**实际交付 = AC 全项达成**：三表 + seed 订阅（mail_to=kieran）、dispatcher 全链路、slow-tick 钩子、test-send 端点、30 个 pytest（全绿，41 个 date-rot 失败为 main pre-existing）。7 天回测 1834 条 hedge 告警 → 精确 2 命中（60011332 主案 / 60011333 彩排），零碎单噪音；真实邮件经 SMTP 送达 kieran 验证（alert 273504 渲染）。
+
+**与 spec 的偏差**（见实施记录）：冷却期"仍写 outbox"实现为游标 holdback + 下一封 digest 合并（可观测语义等价）；页脚链接硬编码 prod URL（后端无 frontend-base-url 配置）。
+
+**Workflow 内 review（实施期，非 Stage 1）**：4 视角 + 对抗核实，7 条确认全部当场修——SMTP 30s socket 超时（扫描锁内发信防挂死）、游标冷启动初始化到 MAX(id)（防 30 天历史回放）、重试上限 + dead 状态、rule_ids 生效、dev/prod 双进程 dispatch 护栏、test-send async 阻塞、扫描深度 500→2000。
+
+**Stage 1 outsider-review**：与 [[OPT-0043]] 合并跑（combined diff），处理记录见 OPT-0043 结果段。

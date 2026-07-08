@@ -595,3 +595,40 @@ class AccountRemarkList(BaseModel):
     """Full remark map (no pagination — the set is small, a few hundred rows)."""
     data: List[AccountRemark]
     total: int
+
+
+# ── Hedge mail alert (OPT-0042) ────────────────────────────
+
+class HedgeMailTestSendRequest(BaseModel):
+    """Body of POST /risk-monitor/hedge-mail/test-send.
+
+    `recipient` defaults to the seed subscription's mail_to when omitted.
+    Kept a plain constrained str (not EmailStr) — email-validator is not a
+    project dependency and the endpoint is an internal IT tool.
+    """
+    recipient: Optional[str] = Field(default=None, max_length=320)
+
+    @field_validator("recipient")
+    @classmethod
+    def _basic_email_shape(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        stripped = v.strip()
+        if not stripped:
+            return None
+        if "@" not in stripped or " " in stripped:
+            raise ValueError("recipient must be a single email address")
+        return stripped
+
+
+class HedgeMailTestSendData(BaseModel):
+    alert_id: int
+    used_fallback: bool
+    recipient: str
+    subject: str
+
+
+class HedgeMailTestSendResponse(BaseModel):
+    """Project-standard response shape: data + statistics."""
+    data: HedgeMailTestSendData
+    statistics: Dict[str, Any]

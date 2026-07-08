@@ -77,6 +77,9 @@ from ....schemas.risk_monitor import (
     BurstOpenScanResult,
     BurstOpenSummary,
     GapTradeConfig,
+    HedgeMailTestSendData,
+    HedgeMailTestSendRequest,
+    HedgeMailTestSendResponse,
     HedgeOpenAggregatedResponse,
     HedgeOpenAggregatedRow,
     HedgeOpenConfig,
@@ -1860,6 +1863,53 @@ async def hedge_open_alerts_aggregated(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(exc),
         ) from exc
+
+
+# ── Hedge mail alert test-send (OPT-0042) ──────────────────
+
+@router.post("/hedge-mail/test-send", response_model=HedgeMailTestSendResponse)
+def hedge_mail_test_send(payload: HedgeMailTestSendRequest):
+    """Send a [TEST] copy of the hedge-open digest to one recipient.
+
+    Deliberately a plain `def` (NOT async): send_test_email does a blocking
+    SMTP round-trip plus a 2000-row scan/evaluate loop. FastAPI runs sync
+    endpoints in its threadpool, so the event loop keeps serving every
+    other request while this one waits on SMTP.
+
+    Renders the most recent alert matching the mail subscription's
+    conditions (fallback: the pinned 2026-07-03 real case, alert id 273504)
+    and sends it to `payload.recipient` — defaulting to the subscription's
+    own mail_to. Pure preview: no outbox row, no cursor movement.
+    """
+    from ....services.alert_mail_dispatcher import send_test_email
+
+    t0 = time.time()
+    try:
+        result = send_test_email(recipient=payload.recipient)
+    except ValueError as exc:
+        # No subscription / no renderable alert — a data problem, not a bug.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except Exception as exc:
+        logger.error("Hedge mail test-send failed: %s", exc, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        ) from exc
+
+    return HedgeMailTestSendResponse(
+        data=HedgeMailTestSendData(
+            alert_id=result["alert_id"],
+            used_fallback=result["used_fallback"],
+            recipient=result["recipient"],
+            subject=result["subject"],
+        ),
+        statistics={
+            "query_time_ms": int((time.time() - t0) * 1000),
+        },
+    )
 
 
 # ── Leverage Abuse (滥用杠杆, rule 101-110) ─────────────────

@@ -528,6 +528,63 @@ CREATE INDEX IF NOT EXISTS idx_xau_snap_time
     ON xauusd_position_snapshots(captured_at DESC);
 CREATE INDEX IF NOT EXISTS idx_xau_snap_srv_sym
     ON xauusd_position_snapshots(server, symbol, captured_at DESC);
+
+-- ── Alert mail notification layer (OPT-0042, schema shared with the
+--    future v2 mail center OPT-0043 — v2 reuses these tables as-is) ──
+--
+-- mail_subscriptions: who gets notified about which alerts under which
+-- conditions. `conditions_json` is a declarative condition tree evaluated
+-- by services/alert_mail_dispatcher.py (the DB stores data only, never
+-- logic). `rule_ids` is a JSON array narrowing the module's rule band;
+-- NULL means "the whole band of `module`".
+CREATE TABLE IF NOT EXISTS mail_subscriptions (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    name            TEXT    NOT NULL,
+    module          TEXT    NOT NULL,            -- 'hedge_open' (v2: more modules)
+    rule_ids        TEXT,                        -- JSON array of rule ids, NULL = whole band
+    conditions_json TEXT    NOT NULL DEFAULT '{}',
+    mail_to         TEXT    NOT NULL,            -- comma-separated recipients
+    mail_cc         TEXT,
+    mode            TEXT    NOT NULL DEFAULT 'realtime',  -- 'realtime' | 'digest'
+    cooldown_min    INTEGER NOT NULL DEFAULT 30, -- per-login re-notify cooldown
+    digest_time     TEXT,                        -- 'HH:MM' HKT (mode='digest', v2)
+    enabled         INTEGER NOT NULL DEFAULT 1,
+    updated_at      TEXT,
+    updated_by      TEXT
+);
+
+-- mail_outbox: at-least-once delivery ledger. A row is written (pending)
+-- BEFORE the SMTP send; a sender then CLAIMS it (status='sending' +
+-- claimed_at, attempts+1) so two processes sharing this SQLite file can
+-- never send the same digest twice. Success stamps status='sent' +
+-- notified_at; failure stamps status='failed' + error and the next
+-- dispatcher tick retries — until the attempt cap (or a permanent SMTP
+-- rejection) marks it 'dead', a terminal status that is never retried.
+CREATE TABLE IF NOT EXISTS mail_outbox (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    subscription_id INTEGER NOT NULL,
+    alert_ids_json  TEXT    NOT NULL DEFAULT '[]',
+    subject         TEXT    NOT NULL,
+    body_html       TEXT    NOT NULL,
+    recipients      TEXT    NOT NULL,            -- comma-separated, frozen at compose time
+    status          TEXT    NOT NULL DEFAULT 'pending',  -- 'pending' | 'sending' | 'sent' | 'failed' | 'dead'
+    error           TEXT,
+    attempts        INTEGER NOT NULL DEFAULT 0,  -- send attempts so far (claim increments)
+    claimed_at      TEXT,                        -- last claim time (stale-claim requeue)
+    created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    notified_at     TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_mail_outbox_sub_status
+    ON mail_outbox(subscription_id, status, created_at DESC);
+
+-- mail_dispatch_cursor: per-subscription high-water-mark over alert_events.id.
+-- Advanced only past alerts that are settled (not matched, or included in a
+-- composed digest). Held back below cooldown-deferred hits so the next tick
+-- re-pulls and merges them into the next digest.
+CREATE TABLE IF NOT EXISTS mail_dispatch_cursor (
+    subscription_id INTEGER PRIMARY KEY,
+    last_alert_id   INTEGER NOT NULL DEFAULT 0
+);
 """
 
 # Default rule seeded on first run (3s / 3 orders / 5 lots)
@@ -582,6 +639,32 @@ INSERT INTO martingale_rules
 VALUES ('默认马丁检测', 1, 0.0, 1.0, 1, 0);
 """
 
+# OPT-0042 seed subscription: hedge-open wash-commission mail alert.
+# Conditions (A OR B, backtested on 7 days of real alerts, zero noise):
+#   A  min(buy_lots, sell_lots) in STANDARD lots >= 10  (.cent symbols /100)
+#   B  min(buy_count, sell_count) >= 5 AND matched standard lots >= 1
+# mail_to is Kieran only during the pilot phase (user decision 2026-07-08);
+# real business recipients are added later by editing this row.
+_SEED_MAIL_SUBSCRIPTION_SQL = """
+INSERT INTO mail_subscriptions
+    (name, module, rule_ids, conditions_json, mail_to, mail_cc,
+     mode, cooldown_min, digest_time, enabled, updated_at, updated_by)
+VALUES (
+    '批量对冲刷佣',
+    'hedge_open',
+    NULL,
+    '{"any": [{"type": "min_matched_lots_std", "min_matched_lots_std": 10.0}, {"type": "paired_orders", "min_orders_per_side": 5, "min_matched_lots_std": 1.0}]}',
+    'kieran.xiang@kohleservices.com',
+    NULL,
+    'realtime',
+    30,
+    NULL,
+    1,
+    strftime('%Y-%m-%dT%H:%M:%SZ','now'),
+    'OPT-0042 seed'
+);
+"""
+
 
 def init_risk_monitor_db() -> None:
     """Create tables if they don't exist. Seed default rule on first run.
@@ -613,8 +696,30 @@ def init_risk_monitor_db() -> None:
         mg_count = conn.execute("SELECT COUNT(*) FROM martingale_rules").fetchone()[0]
         if mg_count == 0:
             conn.execute(_SEED_MARTINGALE_RULE_SQL)
+        # OPT-0042: seed the hedge-open mail subscription once. Guarded by a
+        # module count (not table count) so a future v2 subscription for
+        # another module doesn't suppress this one and vice versa.
+        mail_sub_count = conn.execute(
+            "SELECT COUNT(*) FROM mail_subscriptions WHERE module = 'hedge_open'"
+        ).fetchone()[0]
+        if mail_sub_count == 0:
+            conn.execute(_SEED_MAIL_SUBSCRIPTION_SQL)
+        # OPT-0042: initialize the dispatch cursor at the CURRENT
+        # alert_events high-water mark for every subscription that has no
+        # cursor row yet (fresh seed above, or an existing subscription
+        # whose cursor row was never created / was lost). Without this a
+        # cold-start cursor of 0 would replay the entire 30-day alert
+        # backlog and email weeks-old incidents as fresh alerts.
+        conn.execute(
+            """
+            INSERT INTO mail_dispatch_cursor (subscription_id, last_alert_id)
+            SELECT s.id, (SELECT COALESCE(MAX(id), 0) FROM alert_events)
+            FROM mail_subscriptions s
+            WHERE s.id NOT IN (SELECT subscription_id FROM mail_dispatch_cursor)
+            """
+        )
         if (count == 0 or quick_count == 0 or qp_count == 0 or ho_count == 0
-                or la_count == 0 or mg_count == 0):
+                or la_count == 0 or mg_count == 0 or mail_sub_count == 0):
             conn.commit()
 
         # Lightweight column migrations for installations created before
@@ -628,6 +733,7 @@ def init_risk_monitor_db() -> None:
         _migrate_quick_profit_columns(conn)
         _migrate_gap_trade_config(conn)
         _migrate_gap_trade_crm_tag_log(conn)
+        _migrate_mail_outbox_columns(conn)
         scan_history_columns_dropped = _migrate_drop_scan_history_legacy_columns(conn)
         alert_events_split_done = _migrate_split_alert_events(conn)
         orphan_cols_dropped = _migrate_drop_orphan_alert_events_columns(conn)
@@ -699,6 +805,25 @@ def _migrate_leverage_streak_miss_count(conn: sqlite3.Connection) -> None:
             "ALTER TABLE account_leverage_streak "
             "ADD COLUMN miss_count INTEGER NOT NULL DEFAULT 0"
         )
+
+
+def _migrate_mail_outbox_columns(conn: sqlite3.Connection) -> None:
+    """Add mail_outbox.attempts / claimed_at (OPT-0042 hardening) if missing.
+
+    attempts backs the retry cap (terminal 'dead' status stops endless
+    identical SMTP failures); claimed_at backs the cross-process
+    'sending' claim + stale-claim requeue. Both additive and idempotent.
+    """
+    rows = list(conn.execute("PRAGMA table_info(mail_outbox)"))
+    if not rows:
+        return  # table not created yet (fresh install handles it via schema)
+    cols = {row[1] for row in rows}
+    if "attempts" not in cols:
+        conn.execute(
+            "ALTER TABLE mail_outbox ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0"
+        )
+    if "claimed_at" not in cols:
+        conn.execute("ALTER TABLE mail_outbox ADD COLUMN claimed_at TEXT")
 
 
 def _migrate_alert_events_columns(conn: sqlite3.Connection) -> None:
@@ -2786,3 +2911,336 @@ def get_alerts_by_ids(ids: list[int]) -> list[dict[str, Any]]:
             list(ids),
         ).fetchall()
     return [_row_to_alert_dict(r) for r in rows]
+
+
+# ── Alert mail notification layer (OPT-0042) ───────────────
+#
+# DB access for services/alert_mail_dispatcher.py. All condition-evaluation
+# and template logic lives in the service; these helpers only move rows.
+
+# Columns pulled for mail rendering: alert_events common fields + the
+# hedge-open detail (buy/sell split + window bounds), 1:1 JOIN by id.
+_HEDGE_MAIL_SELECT_SQL = """
+    ae.id, ae.scanned_at, ae.rule_id, ae.rule_label, ae.server, ae.login,
+    ae.symbol, ae.order_count, ae.total_lots, ae.first_open, ae.last_open,
+    ae.equity, ae.balance, ae.account_group, ae.currency, ae.zipcode,
+    ae.net_deposit_hist,
+    ho.buy_count, ho.sell_count, ho.buy_lots, ho.sell_lots,
+    ho.window_start, ho.window_end
+"""
+_HEDGE_MAIL_FROM_CLAUSE = """
+FROM alert_events ae
+JOIN alert_hedge_open_detail ho ON ho.id = ae.id
+"""
+
+# How long sent outbox rows are kept before purge. Matches the alert_events
+# retention window — an outbox row referencing purged alerts is dead weight.
+_MAIL_OUTBOX_RETENTION_DAYS = 30
+
+
+def load_mail_subscriptions(
+    module: str | None = None,
+    enabled_only: bool = False,
+) -> list[dict[str, Any]]:
+    """Read mail subscriptions; JSON columns parsed, enabled coerced to bool."""
+    sql = (
+        "SELECT id, name, module, rule_ids, conditions_json, mail_to, mail_cc, "
+        "mode, cooldown_min, digest_time, enabled, updated_at, updated_by "
+        "FROM mail_subscriptions"
+    )
+    clauses: list[str] = []
+    params: list[Any] = []
+    if module is not None:
+        clauses.append("module = ?")
+        params.append(module)
+    if enabled_only:
+        clauses.append("enabled = 1")
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
+    sql += " ORDER BY id"
+    with get_risk_monitor_db() as conn:
+        rows = conn.execute(sql, params).fetchall()
+    subs: list[dict[str, Any]] = []
+    for r in rows:
+        d = dict(r)
+        d["enabled"] = bool(d.get("enabled"))
+        for json_col, target in (("rule_ids", "rule_ids"), ("conditions_json", "conditions")):
+            raw = d.get(json_col)
+            try:
+                d[target] = json.loads(raw) if raw else ({} if json_col == "conditions_json" else None)
+            except (ValueError, TypeError):
+                logger.warning("mail_subscriptions.%s unparsable for id=%s", json_col, d.get("id"))
+                d[target] = {} if json_col == "conditions_json" else None
+        subs.append(d)
+    return subs
+
+
+def get_mail_dispatch_cursor(subscription_id: int) -> int:
+    """Return the subscription's last settled alert_events.id (0 = cold start)."""
+    with get_risk_monitor_db() as conn:
+        row = conn.execute(
+            "SELECT last_alert_id FROM mail_dispatch_cursor WHERE subscription_id = ?",
+            (subscription_id,),
+        ).fetchone()
+    return int(row["last_alert_id"]) if row else 0
+
+
+def ensure_mail_dispatch_cursor(subscription_id: int) -> int:
+    """Return the cursor, initializing a MISSING row to MAX(alert_events.id).
+
+    A subscription with no cursor row is NEW (or its cursor row was lost):
+    it must start dispatching from "now", not from id 0 — a 0 cold start
+    would replay the whole 30-day alert_events backlog and email
+    historical, already-handled matches as fresh alerts. INSERT OR IGNORE
+    keeps a concurrent initializer from failing.
+    """
+    with get_risk_monitor_db() as conn:
+        row = conn.execute(
+            "SELECT last_alert_id FROM mail_dispatch_cursor WHERE subscription_id = ?",
+            (subscription_id,),
+        ).fetchone()
+        if row is not None:
+            return int(row["last_alert_id"])
+        max_id = int(
+            conn.execute("SELECT COALESCE(MAX(id), 0) FROM alert_events").fetchone()[0]
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO mail_dispatch_cursor (subscription_id, last_alert_id) "
+            "VALUES (?, ?)",
+            (subscription_id, max_id),
+        )
+        return max_id
+
+
+def update_mail_dispatch_cursor(subscription_id: int, last_alert_id: int) -> None:
+    """Forward-only upsert of the per-subscription mail cursor.
+
+    Never regresses — a buggy caller pushing a stale id must not make the
+    dispatcher re-email alerts it already settled.
+    """
+    with get_risk_monitor_db() as conn:
+        conn.execute(
+            """
+            INSERT INTO mail_dispatch_cursor (subscription_id, last_alert_id)
+            VALUES (?, ?)
+            ON CONFLICT(subscription_id) DO UPDATE SET
+                last_alert_id = excluded.last_alert_id
+            WHERE excluded.last_alert_id > mail_dispatch_cursor.last_alert_id
+            """,
+            (subscription_id, int(last_alert_id)),
+        )
+
+
+def insert_mail_outbox(
+    subscription_id: int,
+    alert_ids: list[int],
+    subject: str,
+    body_html: str,
+    recipients: str,
+    created_at: str | None = None,
+) -> int:
+    """Write one pending outbox row (BEFORE the SMTP send — at-least-once)."""
+    with get_risk_monitor_db() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO mail_outbox
+                (subscription_id, alert_ids_json, subject, body_html,
+                 recipients, status, created_at)
+            VALUES (?, ?, ?, ?, ?, 'pending',
+                    COALESCE(?, strftime('%Y-%m-%dT%H:%M:%SZ','now')))
+            """,
+            (
+                int(subscription_id),
+                json.dumps([int(i) for i in alert_ids]),
+                subject,
+                body_html,
+                recipients,
+                created_at,
+            ),
+        )
+        return int(cur.lastrowid or 0)
+
+
+def mark_mail_outbox(
+    outbox_id: int,
+    status: str,
+    error: str | None = None,
+    notified_at: str | None = None,
+) -> None:
+    """Stamp a send attempt's result onto an outbox row."""
+    with get_risk_monitor_db() as conn:
+        conn.execute(
+            "UPDATE mail_outbox SET status = ?, error = ?, notified_at = ? "
+            "WHERE id = ?",
+            (status, error, notified_at, int(outbox_id)),
+        )
+
+
+def get_mail_outbox_rows(
+    subscription_id: int,
+    statuses: tuple[str, ...] = ("pending", "failed"),
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """Outbox rows in the given statuses, oldest first (retry ordering)."""
+    placeholders = ",".join(["?"] * len(statuses))
+    with get_risk_monitor_db() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT id, subscription_id, alert_ids_json, subject, body_html,
+                   recipients, status, error, attempts, claimed_at,
+                   created_at, notified_at
+            FROM mail_outbox
+            WHERE subscription_id = ? AND status IN ({placeholders})
+            ORDER BY id
+            LIMIT ?
+            """,
+            (int(subscription_id), *statuses, int(limit)),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def claim_mail_outbox_row(outbox_id: int, claimed_at: str) -> bool:
+    """Atomically claim an outbox row for sending (cross-process safe).
+
+    Flips status pending/failed → 'sending' and bumps the attempt counter
+    in ONE statement; the rowcount check makes exactly one process win when
+    dev and prod backends share this SQLite file. Returns True when this
+    caller owns the send.
+    """
+    with get_risk_monitor_db() as conn:
+        cur = conn.execute(
+            """
+            UPDATE mail_outbox
+            SET status = 'sending', claimed_at = ?, attempts = attempts + 1
+            WHERE id = ? AND status IN ('pending', 'failed')
+            """,
+            (claimed_at, int(outbox_id)),
+        )
+        return int(cur.rowcount or 0) == 1
+
+
+def requeue_stale_mail_outbox(cutoff_iso: str) -> int:
+    """Requeue 'sending' rows claimed before `cutoff_iso` back to 'failed'.
+
+    Covers a process that died (or was restarted) mid-send: its claim would
+    otherwise pin the row in 'sending' forever. Returns rows requeued.
+    """
+    with get_risk_monitor_db() as conn:
+        requeued = conn.execute(
+            """
+            UPDATE mail_outbox
+            SET status = 'failed',
+                error = COALESCE(error, 'send abandoned mid-flight (stale claim)')
+            WHERE status = 'sending' AND claimed_at < ?
+            """,
+            (cutoff_iso,),
+        ).rowcount
+    return int(requeued or 0)
+
+
+def get_recent_mail_outbox(subscription_id: int, since_iso: str) -> list[dict[str, Any]]:
+    """Outbox rows composed at/after `since_iso` (any status).
+
+    Feeds the per-login cooldown (a login inside any digest composed within
+    cooldown_min is cooled) and the already-boxed dedup for cursor holdback.
+    """
+    with get_risk_monitor_db() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, subscription_id, alert_ids_json, status, created_at
+            FROM mail_outbox
+            WHERE subscription_id = ? AND created_at >= ?
+            ORDER BY id
+            """,
+            (int(subscription_id), since_iso),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def purge_mail_outbox(days: int = _MAIL_OUTBOX_RETENTION_DAYS) -> int:
+    """Drop outbox rows older than the retention window. Returns rows deleted."""
+    with get_risk_monitor_db() as conn:
+        deleted = conn.execute(
+            f"DELETE FROM mail_outbox WHERE created_at < datetime('now', '-{int(days)} days')"
+        ).rowcount
+    return int(deleted or 0)
+
+
+def _hedge_mail_rows_to_dicts(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        d = dict(r)
+        # API-facing alias, consistent with _row_to_alert_dict.
+        d["group"] = d.pop("account_group", None)
+        out.append(d)
+    return out
+
+
+def fetch_hedge_alerts_after(last_alert_id: int, limit: int = 500) -> list[dict[str, Any]]:
+    """Hedge-open alerts (rule 91-100) with id strictly above the cursor, asc."""
+    with get_risk_monitor_db() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT {_HEDGE_MAIL_SELECT_SQL}
+            {_HEDGE_MAIL_FROM_CLAUSE}
+            WHERE ae.id > ? AND ae.rule_id BETWEEN 91 AND 100
+            ORDER BY ae.id
+            LIMIT ?
+            """,
+            (int(last_alert_id), int(limit)),
+        ).fetchall()
+    return _hedge_mail_rows_to_dicts(rows)
+
+
+def fetch_hedge_alerts_by_ids(ids: list[int]) -> list[dict[str, Any]]:
+    """Hedge-open alerts by primary key (detail JOINed). Empty in → empty out."""
+    if not ids:
+        return []
+    placeholders = ",".join(["?"] * len(ids))
+    with get_risk_monitor_db() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT {_HEDGE_MAIL_SELECT_SQL}
+            {_HEDGE_MAIL_FROM_CLAUSE}
+            WHERE ae.id IN ({placeholders})
+            """,
+            [int(i) for i in ids],
+        ).fetchall()
+    return _hedge_mail_rows_to_dicts(rows)
+
+
+def fetch_hedge_alerts_for_day(day: str) -> list[dict[str, Any]]:
+    """All hedge-open alerts whose window falls on UTC day `day` (YYYY-MM-DD).
+
+    Used for the sibling-account section of the digest ("other accounts
+    alerted today"). Day is taken from window_start falling back to
+    first_open then scanned_at, matching how the dispatcher derives it.
+    """
+    with get_risk_monitor_db() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT {_HEDGE_MAIL_SELECT_SQL}
+            {_HEDGE_MAIL_FROM_CLAUSE}
+            WHERE ae.rule_id BETWEEN 91 AND 100
+              AND substr(COALESCE(ho.window_start, ae.first_open, ae.scanned_at), 1, 10) = ?
+            ORDER BY ae.id
+            """,
+            (day,),
+        ).fetchall()
+    return _hedge_mail_rows_to_dicts(rows)
+
+
+def fetch_recent_hedge_alerts(limit: int = 500) -> list[dict[str, Any]]:
+    """Most recent hedge-open alerts, newest first (test-send candidate scan)."""
+    with get_risk_monitor_db() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT {_HEDGE_MAIL_SELECT_SQL}
+            {_HEDGE_MAIL_FROM_CLAUSE}
+            WHERE ae.rule_id BETWEEN 91 AND 100
+            ORDER BY ae.id DESC
+            LIMIT ?
+            """,
+            (int(limit),),
+        ).fetchall()
+    return _hedge_mail_rows_to_dicts(rows)
