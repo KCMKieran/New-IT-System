@@ -13,6 +13,8 @@
 | [OPT-0041](./items/OPT-0041-test-seed-date-rot.md) | opt/test-seed-date-rot | 2026-07-06 | 闸门修复，最先合 |
 | [OPT-0002](./items/OPT-0002-browser-cache-pattern-doc.md) | opt/browser-cache-pattern-doc | 2026-07-06 | 与 0041 并行（docs-only） |
 | [OPT-0028](./items/OPT-0028-risk-monitor-aggregator-hardening.md) | opt/aggregator-hardening | 2026-07-06 | 等 0041 merge 后开工（依赖测试转绿） |
+| [OPT-0042](./items/OPT-0042-hedge-mail-alert.md) | opt/hedge-mail-alert | 2026-07-08 | 对冲刷佣邮件告警 v1（灭火版），P0 |
+| [OPT-0043](./items/OPT-0043-alert-mail-center.md) | opt/alert-mail-center | 2026-07-08 | 告警邮件中心页面 v2，branch 从 0042 切出 |
 
 ## ✅ 待领取（Ready）
 
