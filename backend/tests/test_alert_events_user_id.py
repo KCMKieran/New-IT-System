@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import importlib.util
 import sqlite3
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -87,6 +88,57 @@ def test_migration_adds_user_id_to_legacy_table_idempotently(tmp_path):
         rm_db._migrate_alert_events_columns(conn)
         cols_after = {r[1] for r in conn.execute("PRAGMA table_info(alert_events)")}
         assert cols_after == cols
+
+
+def test_alter_guard_swallows_duplicate_column_only(tmp_path):
+    """F5: the guard ignores the duplicate-column race, re-raises the rest."""
+    with sqlite3.connect(str(tmp_path / "guard.db")) as conn:
+        conn.execute("CREATE TABLE t (a INTEGER, b INTEGER)")
+        # Column already exists → swallowed, no raise.
+        rm_db._alter_ignore_duplicate_column(
+            conn, "ALTER TABLE t ADD COLUMN b INTEGER"
+        )
+        # Any other OperationalError must still surface.
+        with pytest.raises(sqlite3.OperationalError):
+            rm_db._alter_ignore_duplicate_column(
+                conn, "ALTER TABLE no_such_table ADD COLUMN x INTEGER"
+            )
+
+
+class _StalePragmaConn:
+    """Simulates the multi-worker startup race: PRAGMA table_info reports a
+    stale (pre-migration) column set while the real table was ALREADY
+    migrated by another worker — so every check-then-ALTER in the losing
+    worker hits "duplicate column name"."""
+
+    def __init__(self, conn: sqlite3.Connection, stale_cols: list[str]):
+        self._conn = conn
+        self._stale_cols = stale_cols
+
+    def execute(self, sql: str, *args):
+        if "PRAGMA table_info" in sql:
+            return [
+                (i, name, "TEXT", 0, None, 0)
+                for i, name in enumerate(self._stale_cols)
+            ]
+        return self._conn.execute(sql, *args)
+
+    def commit(self) -> None:
+        self._conn.commit()
+
+
+def test_migration_survives_concurrent_worker_race(temp_db):
+    """F5: a losing worker (stale PRAGMA snapshot, table already migrated)
+    must boot cleanly instead of dying on "duplicate column name"."""
+    with sqlite3.connect(str(temp_db)) as conn:
+        stale = ["id", "scan_batch_id", "scanned_at", "rule_id", "rule_label",
+                 "server", "login", "symbol", "order_count", "total_lots"]
+        proxy = _StalePragmaConn(conn, stale)
+        # Table already carries currency/zipcode/.../user_id from init —
+        # every ALTER attempted here is a duplicate. Must not raise.
+        rm_db._migrate_alert_events_columns(proxy)
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(alert_events)")}
+        assert "user_id" in cols
 
 
 # ── Write path ────────────────────────────────────────────────────────────
@@ -310,3 +362,61 @@ def test_backfill_script_unresolved_rows_stay_null(temp_db):
         assert mod.null_stats(conn) == (1, 3)
     finally:
         conn.close()
+
+
+def test_backfill_script_uses_project_sid_map():
+    """F4: the script must reuse app.core.sql_helpers.SID_MAP, not a copy."""
+    from app.core.sql_helpers import SID_MAP as project_sid_map
+    mod = _load_backfill_module()
+    assert mod.SID_MAP is project_sid_map
+
+
+# ── Backfill script main(): dry-run writes nothing / apply commits ────────
+
+def _mock_mysql_conn(rows):
+    cursor = MagicMock()
+    cursor.fetchall.return_value = rows
+    conn = MagicMock()
+    conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
+    conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+    return conn
+
+
+def test_backfill_script_main_dry_run_writes_nothing(temp_db, monkeypatch):
+    """F1 regression: dry-run must leave every user_id NULL untouched."""
+    mod = _load_backfill_module()
+    _seed_backfill_rows(temp_db)
+
+    monkeypatch.setattr(
+        mod, "get_mysql_conn",
+        lambda: _mock_mysql_conn([{"loginsid": "1-100", "userId": 42}]),
+    )
+    monkeypatch.setattr(sys, "argv", ["backfill", "--sqlite", str(temp_db)])
+    assert mod.main() == 0
+
+    with sqlite3.connect(str(temp_db)) as conn:
+        null_count = conn.execute(
+            "SELECT COUNT(*) FROM alert_events WHERE user_id IS NULL"
+        ).fetchone()[0]
+    assert null_count == 3  # nothing written
+
+
+def test_backfill_script_main_apply_commits(temp_db, monkeypatch):
+    mod = _load_backfill_module()
+    _seed_backfill_rows(temp_db)
+
+    monkeypatch.setattr(
+        mod, "get_mysql_conn",
+        lambda: _mock_mysql_conn([{"loginsid": "1-100", "userId": 42}]),
+    )
+    monkeypatch.setattr(
+        sys, "argv", ["backfill", "--sqlite", str(temp_db), "--apply"]
+    )
+    assert mod.main() == 0
+
+    with sqlite3.connect(str(temp_db)) as conn:
+        user_ids = {
+            r[0]: r[1]
+            for r in conn.execute("SELECT login, user_id FROM alert_events")
+        }
+    assert user_ids == {100: 42, 200: 111, 300: 222}

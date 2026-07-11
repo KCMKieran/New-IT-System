@@ -827,6 +827,23 @@ def _migrate_mail_outbox_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE mail_outbox ADD COLUMN claimed_at TEXT")
 
 
+def _alter_ignore_duplicate_column(conn: sqlite3.Connection, sql: str) -> None:
+    """Run an ``ALTER TABLE ... ADD COLUMN``, swallowing the duplicate-column
+    race (OPT-0045 hardening).
+
+    With several uvicorn workers booting concurrently, each runs the same
+    PRAGMA check-then-ALTER sequence; the losers' ALTERs fail with
+    "duplicate column name" even though the schema already ended up correct —
+    an unguarded raise would kill the losing workers on startup. Any other
+    OperationalError (locked DB, missing table, syntax) still raises.
+    """
+    try:
+        conn.execute(sql)
+    except sqlite3.OperationalError as exc:
+        if "duplicate column" not in str(exc).lower():
+            raise
+
+
 def _migrate_alert_events_columns(conn: sqlite3.Connection) -> None:
     """Add any alert_events columns introduced after the initial schema.
 
@@ -835,17 +852,27 @@ def _migrate_alert_events_columns(conn: sqlite3.Connection) -> None:
     """
     cols = {row[1] for row in conn.execute("PRAGMA table_info(alert_events)")}
     if "currency" not in cols:
-        conn.execute("ALTER TABLE alert_events ADD COLUMN currency TEXT")
+        _alter_ignore_duplicate_column(
+            conn, "ALTER TABLE alert_events ADD COLUMN currency TEXT"
+        )
     if "zipcode" not in cols:
-        conn.execute("ALTER TABLE alert_events ADD COLUMN zipcode TEXT")
+        _alter_ignore_duplicate_column(
+            conn, "ALTER TABLE alert_events ADD COLUMN zipcode TEXT"
+        )
     if "total_profit_usd" not in cols:
-        conn.execute("ALTER TABLE alert_events ADD COLUMN total_profit_usd REAL")
+        _alter_ignore_duplicate_column(
+            conn, "ALTER TABLE alert_events ADD COLUMN total_profit_usd REAL"
+        )
     if "net_deposit_hist" not in cols:
-        conn.execute("ALTER TABLE alert_events ADD COLUMN net_deposit_hist REAL")
+        _alter_ignore_duplicate_column(
+            conn, "ALTER TABLE alert_events ADD COLUMN net_deposit_hist REAL"
+        )
     if "user_id" not in cols:
         # OPT-0045: CRM client id (fxbackoffice.mt4_users.userId). The V2
         # case engine groups alerts by client, so every alert row carries it.
-        conn.execute("ALTER TABLE alert_events ADD COLUMN user_id INTEGER")
+        _alter_ignore_duplicate_column(
+            conn, "ALTER TABLE alert_events ADD COLUMN user_id INTEGER"
+        )
     # OPT-0045: this index lives HERE (not in _SCHEMA_SQL) on purpose — on
     # pre-existing installs the schema script runs BEFORE the ADD COLUMN
     # above, and a CREATE INDEX referencing a not-yet-existing column would

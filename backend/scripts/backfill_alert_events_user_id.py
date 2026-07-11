@@ -13,9 +13,20 @@ What this script does:
         Rule 71 (Gap SO+AB) rows copy `alert_gap_so_detail.l_userid`;
         rule 81 (Gap Profit) rows copy `alert_gap_profit_detail.client_userid`.
         Their detail tables already carry the client id from detection.
-    Phase B (one batched MySQL roundtrip):
+    Phase B (chunked MySQL lookups):
         SELECT DISTINCT (server, login) for the remaining NULL rows, resolve
         `{sid}-{login}` → userId via fxbackoffice.mt4_users, then UPDATE.
+
+Live-DB safety (the app's scan loop writes this SQLite concurrently):
+    - Short write transactions only: all SELECT planning happens first;
+      Phase A commits immediately after its UPDATEs; Phase B commits every
+      ~500 accounts. The SQLite write lock is NEVER held across the MySQL
+      roundtrip, so a scan tick can always interleave its own writes.
+    - `PRAGMA busy_timeout=5000` on the script's connection so hitting an
+      in-flight scan write waits instead of failing "database is locked".
+    - MySQL IN-lists are chunked (~500 loginsids) — after an outage the
+      30-day distinct account set can be thousands; never ship one giant
+      IN-list at the production replica.
 
 Safety:
     - Idempotent: every UPDATE is scoped `WHERE user_id IS NULL`, so
@@ -49,8 +60,15 @@ from dotenv import load_dotenv
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SQLITE = BACKEND_ROOT / "data" / "risk_monitor.db"
 
-# Must match SID_MAP in backend/app/core/sql_helpers.py
-SID_MAP = {"MT4_Live": 1, "MT4_Live2": 6, "MT5": 5}
+# Import the project's single source of truth for server label → sid so a
+# server onboarded in the scan path can never drift out of this script.
+sys.path.insert(0, str(BACKEND_ROOT))
+from app.core.sql_helpers import SID_MAP  # noqa: E402
+
+# Chunk sizes: keep MySQL IN-lists bounded and SQLite write transactions
+# short (see "Live-DB safety" in the module docstring).
+MYSQL_IN_CHUNK = 500
+SQLITE_UPDATE_CHUNK = 500
 
 
 def get_mysql_conn():
@@ -96,7 +114,11 @@ def count_phase_a(conn: sqlite3.Connection) -> Dict[int, int]:
 
 
 def apply_phase_a(conn: sqlite3.Connection) -> int:
-    """Copy the detail-table client id into alert_events.user_id."""
+    """Copy the detail-table client id into alert_events.user_id.
+
+    Commits before returning — the write lock must be released before the
+    caller opens the (potentially slow) MySQL roundtrip of Phase B.
+    """
     total = 0
     for rule_id, table, col in _PHASE_A_SPECS:
         cur = conn.execute(
@@ -113,16 +135,18 @@ def apply_phase_a(conn: sqlite3.Connection) -> int:
             (rule_id,),
         )
         total += cur.rowcount
+    conn.commit()
     return total
 
 
-# ── Phase B: everything else via one batched mt4_users lookup ─────────────
+# ── Phase B: everything else via chunked mt4_users lookups ────────────────
 
 def fetch_phase_b_pairs(conn: sqlite3.Connection) -> List[Tuple[str, int]]:
     """DISTINCT (server, login) still NULL and NOT resolvable by Phase A.
 
-    The NOT EXISTS clauses keep this list identical in dry-run and apply
-    mode (in apply mode Phase A already ran, making them no-ops).
+    The NOT EXISTS clauses keep this list identical whether it runs before
+    or after Phase A's UPDATE (Phase-A-resolvable rows never appear here),
+    so main() can do ALL its SELECT planning up front.
     """
     rows = conn.execute(
         """
@@ -143,21 +167,25 @@ def fetch_phase_b_pairs(conn: sqlite3.Connection) -> List[Tuple[str, int]]:
 
 
 def build_user_id_map(mysql_conn, loginsids: List[str]) -> Dict[str, int]:
-    """Batch-resolve `{sid}-{login}` → userId from fxbackoffice.mt4_users."""
-    if not loginsids:
-        return {}
-    placeholders = ",".join(["%s"] * len(loginsids))
-    sql = (
-        f"SELECT loginsid, userId "
-        f"FROM fxbackoffice.mt4_users WHERE loginsid IN ({placeholders})"
-    )
-    with mysql_conn.cursor() as cur:
-        cur.execute(sql, tuple(loginsids))
-        return {
-            r["loginsid"]: int(r["userId"])
-            for r in cur.fetchall()
-            if r.get("userId") is not None
-        }
+    """Batch-resolve `{sid}-{login}` → userId from fxbackoffice.mt4_users.
+
+    IN-lists are chunked (MYSQL_IN_CHUNK) so a large backlog never ships
+    one multi-thousand-placeholder query at the production replica.
+    """
+    result: Dict[str, int] = {}
+    for i in range(0, len(loginsids), MYSQL_IN_CHUNK):
+        chunk = loginsids[i:i + MYSQL_IN_CHUNK]
+        placeholders = ",".join(["%s"] * len(chunk))
+        sql = (
+            f"SELECT loginsid, userId "
+            f"FROM fxbackoffice.mt4_users WHERE loginsid IN ({placeholders})"
+        )
+        with mysql_conn.cursor() as cur:
+            cur.execute(sql, tuple(chunk))
+            for r in cur.fetchall():
+                if r.get("userId") is not None:
+                    result[r["loginsid"]] = int(r["userId"])
+    return result
 
 
 def plan_phase_b(
@@ -184,19 +212,26 @@ def plan_phase_b(
 def apply_phase_b(
     conn: sqlite3.Connection, updates: List[Tuple[int, str, int]]
 ) -> int:
-    """UPDATE every NULL row of each resolved (server, login) account."""
+    """UPDATE every NULL row of each resolved (server, login) account.
+
+    Commits every SQLITE_UPDATE_CHUNK accounts so each write transaction
+    stays short — the live scan loop writes this DB concurrently and must
+    never wait behind one giant backfill transaction.
+    """
     total = 0
     cur = conn.cursor()
-    for user_id, server, login in updates:
-        cur.execute(
-            """
-            UPDATE alert_events
-            SET user_id = ?
-            WHERE user_id IS NULL AND server = ? AND login = ?
-            """,
-            (user_id, server, login),
-        )
-        total += cur.rowcount
+    for i in range(0, len(updates), SQLITE_UPDATE_CHUNK):
+        for user_id, server, login in updates[i:i + SQLITE_UPDATE_CHUNK]:
+            cur.execute(
+                """
+                UPDATE alert_events
+                SET user_id = ?
+                WHERE user_id IS NULL AND server = ? AND login = ?
+                """,
+                (user_id, server, login),
+            )
+            total += cur.rowcount
+        conn.commit()
     return total
 
 
@@ -239,6 +274,9 @@ def main() -> int:
     print()
 
     sqlite_conn = sqlite3.connect(str(sqlite_path))
+    # The app's scan loop writes this DB concurrently — wait up to 5s on a
+    # held write lock instead of failing "database is locked" immediately.
+    sqlite_conn.execute("PRAGMA busy_timeout=5000")
     try:
         cols = {row[1] for row in sqlite_conn.execute("PRAGMA table_info(alert_events)")}
         if "user_id" not in cols:
@@ -249,14 +287,22 @@ def main() -> int:
             )
             return 2
 
+        # ── Step 1: ALL SQLite SELECT planning up front (no write lock) ──
         null_before, total = null_stats(sqlite_conn)
         print(f"alert_events rows: {total} total, {null_before} with user_id IS NULL")
         if null_before == 0:
             print("Nothing to do.")
             return 0
 
-        # ── Phase A ────────────────────────────────────────────────────
         a_counts = count_phase_a(sqlite_conn)
+        pairs = fetch_phase_b_pairs(sqlite_conn)
+        loginsids = sorted({
+            f"{SID_MAP[server]}-{login}"
+            for server, login in pairs
+            if server in SID_MAP
+        })
+
+        # ── Step 2: Phase A UPDATEs — short transaction, commits inside ──
         print()
         print("Phase A (detail-table copy, no MySQL):")
         for rule_id, planned in a_counts.items():
@@ -265,13 +311,7 @@ def main() -> int:
             a_done = apply_phase_a(sqlite_conn)
             print(f"  applied: {a_done} rows updated")
 
-        # ── Phase B ────────────────────────────────────────────────────
-        pairs = fetch_phase_b_pairs(sqlite_conn)
-        loginsids = sorted({
-            f"{SID_MAP[server]}-{login}"
-            for server, login in pairs
-            if server in SID_MAP
-        })
+        # ── Step 3: MySQL resolution — SQLite write lock NOT held here ──
         print()
         print("Phase B (fxbackoffice.mt4_users lookup):")
         print(f"  distinct (server, login) pairs to resolve: {len(pairs)}")
@@ -296,8 +336,8 @@ def main() -> int:
             print("Dry-run complete. Re-run with --apply to commit.")
             return 0
 
+        # ── Step 4: Phase B UPDATEs — chunked short transactions ──
         b_done = apply_phase_b(sqlite_conn, updates)
-        sqlite_conn.commit()
         print(f"  applied: {b_done} rows updated")
 
         null_after, total_after = null_stats(sqlite_conn)
