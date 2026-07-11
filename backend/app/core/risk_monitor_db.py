@@ -258,7 +258,8 @@ CREATE TABLE IF NOT EXISTS alert_events (
     currency          TEXT,                -- "USD" or "CEN" (for display; equity/balance already USD)
     zipcode           TEXT,                -- client zipcode from fxbackoffice.mt4_users
     net_deposit_hist  REAL,                -- historical net deposit (client-return-rate formula)
-    total_profit_usd  REAL                 -- written by Quick OC / Quick Profit / Gap Profit; NULL for Burst & Gap SO
+    total_profit_usd  REAL,                -- written by Quick OC / Quick Profit / Gap Profit; NULL for Burst & Gap SO
+    user_id           INTEGER              -- CRM client id (fxbackoffice.mt4_users.userId); NULL when enrichment failed (OPT-0045)
 );
 
 -- Detail table for Quick Open-Close (rule_id 51-60).
@@ -841,6 +842,19 @@ def _migrate_alert_events_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE alert_events ADD COLUMN total_profit_usd REAL")
     if "net_deposit_hist" not in cols:
         conn.execute("ALTER TABLE alert_events ADD COLUMN net_deposit_hist REAL")
+    if "user_id" not in cols:
+        # OPT-0045: CRM client id (fxbackoffice.mt4_users.userId). The V2
+        # case engine groups alerts by client, so every alert row carries it.
+        conn.execute("ALTER TABLE alert_events ADD COLUMN user_id INTEGER")
+    # OPT-0045: this index lives HERE (not in _SCHEMA_SQL) on purpose — on
+    # pre-existing installs the schema script runs BEFORE the ADD COLUMN
+    # above, and a CREATE INDEX referencing a not-yet-existing column would
+    # abort the whole executescript. Creating it after the column check is
+    # correct on both fresh installs and upgrades, and idempotent.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_alert_events_user_scanned "
+        "ON alert_events(user_id, scanned_at DESC)"
+    )
     # Note: rule-specific columns (hold_duration_sec, realized_profit, all
     # gap_trade L/C/window_date cols, etc.) are intentionally NOT added here
     # anymore. They live in detail tables since the alert_events split
@@ -1830,6 +1844,7 @@ def append_scan_and_events(
                 alert.get("zipcode"),
                 alert.get("net_deposit_hist"),
                 alert.get("total_profit_usd"),
+                alert.get("user_id"),
             )
             event_cursor = conn.execute(common_insert_sql, common_values)
             event_id = event_cursor.lastrowid or 0
@@ -2190,7 +2205,7 @@ _COMMON_INSERT_COLS: tuple[str, ...] = (
     "first_open", "last_open",
     "equity", "balance", "equity_per_lot", "total_open_lots",
     "leverage", "account_group", "orders_json", "currency", "zipcode",
-    "net_deposit_hist", "total_profit_usd",
+    "net_deposit_hist", "total_profit_usd", "user_id",
 )
 
 # Detail table columns. Each list excludes `id` (filled from
