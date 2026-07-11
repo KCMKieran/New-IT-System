@@ -52,6 +52,11 @@ related: [[OPT-0045]] [[OPT-0046]]
    - 状态筛选（观察中/已处置/豁免/已归档）+ 行内标记处置（动作枚举 + 日期，写 case_actions）。
    - 行点开 = 案卷 Sheet：信号摘要时间线、分账户明细、处置历史。
 5. **∆1/∆30 列**：从 case_metrics_daily 取 T-1 / T-30 快照差值；快照不足 30 天时显示 "—"。
+6. **user_id NULL 修复接线**（OPT-0045 冷审 F2 并入，2026-07-11 用户拍板）：归集引擎是
+   user_id 的唯一消费方，本 OPT 负责把 `backend/scripts/backfill_alert_events_user_id.py`
+   的修复逻辑接进 APScheduler（每日一次即可）+ 每 tick 记 user_id NULL 计数 log——
+   否则 MySQL 故障期产生的 NULL 行终老 30 天，GROUP BY user_id 时被静默丢弃
+   （故障期的告警恰恰最不该丢）。
 
 ## 验收标准（AC）
 

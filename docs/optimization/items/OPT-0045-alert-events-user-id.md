@@ -1,7 +1,7 @@
 ---
 id: OPT-0045
 title: 风控V2 前置 —— alert_events 补 user_id 列 + 存量回填（归集引擎的硬前置）
-status: wip
+status: done
 priority: P1
 area: db
 effort: S
@@ -62,3 +62,39 @@ related: [[OPT-0046]] [[OPT-0047]]
 ## 开放问题
 
 - 无（方案已定，纯执行，~0.5-1 天）。
+
+## 结果（2026-07-11 closed）
+
+**交付 vs AC**（commits `ab55846` 实施 + `8f0b4f7` 冷审修复）：
+- AC2/3/4/5 全过：真库副本 + 真实 MySQL 实测——116,480 行 NULL 回填后剩 12（0.01%，
+  4 账户 mt4_users 天然缺行）、幂等重跑输出 0；案例 uid 127582 十七账户 4,065 行归并
+  同一 user_id；fail-open pytest 过；索引 PRAGMA 可见；新测试 18/18 绿。
+- AC1 部分：写路径/归并形态有 pytest 锁定；「dev 真实扫一轮」留到部署重启后（避免动
+  运行中共享 SQLite）。
+- 全量 backend 413 passed / 41 failed——失败清单与 main 干净基线 diff 逐条一致，
+  为既有日期 fixture 炸弹（fixture 硬编码 2026-05-28 超 30 天 retention 被启动清扫删），
+  **= WIP 中 OPT-0041 的修复范围**，不另立单。
+
+**Stage 1 冷审（9 findings）处理记录**：
+- F1 当场修：回填脚本事务重排——SELECT 规划前置 → Phase A 即时 commit → 才连 MySQL →
+  Phase B 500 行/块短事务；脚本连接补 busy_timeout=5000（原版写锁横跨 MySQL 往返最长
+  ~40s，活库上会丢 tick 告警）
+- F7 当场修：MySQL IN-list 500/块分块
+- F4 当场修：脚本删手抄 SID_MAP，import `app.core.sql_helpers.SID_MAP` + 同源断言测试
+- F5 当场修：`_alter_ignore_duplicate_column` helper——多 worker 启动 check-then-ALTER
+  竞态不再打死输家 worker（5 个 ALTER 全走 helper）
+- F2 并入 [[OPT-0047]]（交付内容第 6 条）：归集引擎负责把修复脚本接进 APScheduler +
+  每 tick NULL 计数 log
+- F3 live with：rule 71 AB 对告警 user_id 只归亏损腿（l_userid），获利腿 c_userid 不建案。
+  **OPT-0047 建案前必须拍归属规则**（从 detail 表读 c_userid 双边归档 or 双行方案），
+  事后重归属很痛
+- F6 live with：每 tick 对 mt4_users 多一次批查（get_account_info_map 已查同批账户），
+  1-10min 频率可忍，0046/0047 时可顺手把 userId 并进那条 SELECT
+- F8 部分覆盖（main() 级 dry-run/apply 测试已补），其余盲区 live with
+- F9 live with（get_user_id_map 的 loginsid 构造在 try 外，KeyError 会整批 NULL——
+  fail-open 语义不破，粒度粗）
+
+**Follow-up / 上线顺序**：部署重启（迁移自动跑）→ `backfill_alert_events_user_id.py
+--apply` → NULL 补写接线归 OPT-0047。另：F5 同款竞态在
+`_migrate_leverage_streak_miss_count` / `_migrate_mail_outbox_columns` 仍存在（范围外，
+下次动那两个函数时顺手包 helper）。

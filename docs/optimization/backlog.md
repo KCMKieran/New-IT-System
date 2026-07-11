@@ -13,7 +13,6 @@
 | [OPT-0041](./items/OPT-0041-test-seed-date-rot.md) | opt/test-seed-date-rot | 2026-07-06 | 闸门修复，最先合 |
 | [OPT-0002](./items/OPT-0002-browser-cache-pattern-doc.md) | opt/browser-cache-pattern-doc | 2026-07-06 | 与 0041 并行（docs-only） |
 | [OPT-0028](./items/OPT-0028-risk-monitor-aggregator-hardening.md) | opt/aggregator-hardening | 2026-07-06 | 等 0041 merge 后开工（依赖测试转绿） |
-| [OPT-0045](./items/OPT-0045-alert-events-user-id.md) | opt/alert-events-user-id | 2026-07-11 | 风控V2 前置，0046/0047 依赖它 |
 
 ## ✅ 待领取（Ready）
 

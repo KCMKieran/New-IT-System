@@ -10,6 +10,7 @@ Append-only 日志。最新的写在最上面。
 
 | 日期 | ID | Commit | 标题 |
 |------|----|--------|------|
+| 2026-07-11 | [OPT-0045](./items/OPT-0045-alert-events-user-id.md) | — | alert_events 补 user_id 列（风控V2 归集引擎硬前置）：统一 choke point（append_scan_and_events 前批量 enrichment，fail-open 写 NULL 不阻断告警）+ (user_id,scanned_at) 索引 + 回填脚本（dry-run 默认/短事务分块/兼夜间 NULL 补写）；真库副本实测 116k 行回填后 NULL 0.01%、案例 127582 十七账户归并同一 user_id；18 pytest 绿、41 failed 为 main 既有日期 fixture 炸弹（=OPT-0041 范围）；Stage 1 冷审 9 findings → F1/F7/F4/F5 当场修（8f0b4f7）+ F2 并入 [[OPT-0047]] + F3/F6/F8/F9 live with |
 | 2026-07-08 | [OPT-0043](./items/OPT-0043-alert-mail-center.md) | — | 风控告警邮件中心页面：/risk-alert-mail 三 tab（订阅/发送记录/设置）+ 源注册表（hedge_open 已注册，加模块=加一条 dict）+ 订阅 CRUD API + dispatcher 泛化 + digest 每日定时；闸门 tsc+vitest(115)+pytest 零新增失败，E2E 真实试发验证；Stage 1 冷审 13 条→4 当场修（游标快进/兜底fixture/域名白名单/==强转）+ 4 打包 [[OPT-0044]] hardening + 5 live-with |
 | 2026-07-08 | [OPT-0042](./items/OPT-0042-hedge-mail-alert.md) | — | 对冲刷佣邮件告警 v1：alert_events 之上的通知层内核（mail_subscriptions/outbox/cursor 三表 + seed 订阅 A∪B 条件含 .cent÷100）+ slow-tick dispatcher（digest/30min 冷却 via 游标 holdback/outbox 重试上限+死信/SMTP 30s 超时）+ test-send 端点；7 天回测精确命中 60011332/60011333 零噪音，真实邮件验证送达；workflow 内 review 7 条确认全修 |
 | 2026-06-29 | [OPT-0040](./items/OPT-0040-xauusd-position-snapshots.md) | — | XAUUSD 持仓分钟级快照（复用 risk_monitor.db）+ /position 顶部 Buy/Sell/Net 三线图（5/10min 桶降采样）+ 自定义范围流式 CSV 导出（60 天保留）；含 outsider-review 10 条 finding 当场全修 |

@@ -97,6 +97,60 @@ def get_account_info_map(
         return {}
 
 
+def get_user_id_map(
+    conn, alerts: List[Dict[str, Any]]
+) -> Dict[str, int]:
+    """Batch-lookup the CRM client id (``mt4_users.userId``) by loginsid.
+
+    OPT-0045: the risk-V2 case engine groups alerts by client, so every
+    ``alert_events`` row must carry ``user_id``. This resolves it for all
+    rule families in one roundtrip.
+
+    Args:
+        conn: pymysql connection (same slave that hosts MT4/MT5 DBs).
+        alerts: list of alert dicts, each having ``server`` and ``login`` keys.
+
+    Returns:
+        Dict keyed by ``{sid}-{login}`` → ``userId`` (int).
+
+    Missing loginsid → absent from the dict (caller writes NULL).
+    **Fail-open**: any MySQL error logs and returns ``{}`` — enrichment
+    failure must never block alert persistence (same contract as
+    :func:`get_account_info_map`).
+    """
+    loginsids: set[str] = set()
+    for a in alerts:
+        sid = SID_MAP.get(a.get("server"))
+        if sid is None:
+            continue
+        loginsids.add(f"{sid}-{a['login']}")
+
+    if not loginsids:
+        return {}
+
+    placeholders = ",".join(["%s"] * len(loginsids))
+    sql = f"""
+        SELECT loginsid, userId
+        FROM fxbackoffice.mt4_users
+        WHERE loginsid IN ({placeholders})
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, tuple(loginsids))
+            rows = cur.fetchall()
+        return {
+            r["loginsid"]: int(r["userId"])
+            for r in rows
+            if r.get("userId") is not None
+        }
+    except Exception:
+        logger.error(
+            "Failed to query userId from fxbackoffice.mt4_users",
+            exc_info=True,
+        )
+        return {}
+
+
 def get_net_deposit_hist_map(
     conn, alerts: List[Dict[str, Any]]
 ) -> Dict[str, float]:

@@ -169,6 +169,64 @@ def _build_quick_profit_prev_alerts(
         return prev
 
 
+def _backfill_alert_user_ids(settings: Any, alerts: list[dict[str, Any]]) -> None:
+    """Resolve ``alert["user_id"]`` (CRM client id) before persistence.
+
+    OPT-0045: the risk-V2 case engine groups alerts by client (userId), so
+    every alert_events row must carry ``user_id``. This is the single choke
+    point for all rule families — called right before each of the two
+    ``append_scan_and_events`` call sites:
+
+    - Gap rules already resolved the client id during detection: rule 71
+      carries the loser leg's ``l_userid``, rule 81 carries
+      ``client_userid`` — copied straight from the alert dict, no MySQL.
+    - Every other family (burst / quick_oc / quick_profit / hedge /
+      leverage / martingale) is resolved here with ONE batched
+      fxbackoffice.mt4_users lookup.
+
+    **Fail-open contract**: any failure (MySQL down, missing loginsid,
+    unexpected bug) leaves ``user_id`` as None → the row persists with
+    NULL and the scan continues. The backfill script
+    (``scripts/backfill_alert_events_user_id.py``) retries NULL rows later.
+    """
+    if not alerts:
+        return
+    try:
+        from ..core.sql_helpers import SID_MAP
+        from ..services.account_enrichment import get_user_id_map
+        from ..services.risk_monitor_service import _get_connection
+
+        pending: list[dict[str, Any]] = []
+        for alert in alerts:
+            rule_id = int(alert.get("rule_id") or 0)
+            if rule_id == 71:
+                alert["user_id"] = alert.get("l_userid")
+            elif rule_id == 81:
+                alert["user_id"] = alert.get("client_userid")
+            if alert.get("user_id") is None:
+                pending.append(alert)
+        if not pending:
+            return
+
+        conn = _get_connection(settings)
+        try:
+            user_id_map = get_user_id_map(conn, pending)
+        finally:
+            conn.close()
+
+        for alert in pending:
+            sid = SID_MAP.get(alert.get("server"))
+            if sid is None:
+                continue
+            alert["user_id"] = user_id_map.get(f"{sid}-{alert.get('login')}")
+    except Exception:
+        # Never block alert persistence on enrichment (fail-open → NULL).
+        logger.error(
+            "user_id enrichment failed (fail-open, alerts persist with NULL)",
+            exc_info=True,
+        )
+
+
 def _run_scan(*, tier: str = "all", dispatch_mail: bool = False) -> None:
     """Execute one scan cycle.
 
@@ -468,6 +526,10 @@ def _run_scan(*, tier: str = "all", dispatch_mail: bool = False) -> None:
             "tier": tier,
         }
 
+        # OPT-0045: resolve CRM client id for every alert about to be
+        # persisted (fail-open → NULL, never blocks the write below).
+        _backfill_alert_user_ids(settings, this_tick_alerts)
+
         # Persist the alerts EMITTED THIS TICK (not the merged snapshot —
         # the snapshot keeps stale alerts from the other tier visible in
         # cache, but they were already written by their own tick).
@@ -695,6 +757,10 @@ def _run_gap_trade_scan() -> None:
         scanned_at = (
             datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
         )
+        # OPT-0045: rule 71/81 alerts carry the client id in their detail
+        # fields (l_userid / client_userid) — copied into user_id here;
+        # MySQL is only hit for rows where the detail id is missing.
+        _backfill_alert_user_ids(settings, merged_alerts)
         append_scan_and_events(
             scanned_at=scanned_at,
             # We log the window-length-in-minutes here so the scan_history
