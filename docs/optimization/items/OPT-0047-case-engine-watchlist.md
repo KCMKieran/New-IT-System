@@ -70,8 +70,13 @@ related: [[OPT-0045]] [[OPT-0046]]
 
 ## 开放问题（claim 前需解决）
 
-- **云 PG 实例开通是硬前置**（选型/网络/凭据管理走 root .env 模式）——claim 前用户先备好
-  连接串；Python 侧驱动建议 psycopg（新增依赖需进 requirements.txt）。
+- **云 PG 不用新开实例（2026-07 排查结论）**：`kcm-analysis-etl.postgres.database.azure.com`
+  是在用的 Azure Flexible Server（PG 17.9，自带自动备份 + PITR 7-35 天，满足选 PG 的合规
+  理由）；后端已有 `POSTGRES_*` env + `settings.postgres_dsn()`（`core/config.py`）+
+  `psycopg2-binary`（requirements.txt）——零新增依赖、零网络打通。claim 前用户要做的降级为：
+  ① 该实例上 `CREATE DATABASE risk_cases`（**独立库**，勿混每天 bulk 重写的 MT5_ETL、
+  勿用废弃的 reporting_db）② 建最小权限专用账号（app 流量别复用管理员 kcmadmin）
+  ③ 连接信息进 .env。驱动沿用 psycopg2 即可（千级客户/天量级足够，先不加 psycopg3 依赖）。
 - 处置动作枚举值定稿（已ZIP/已调返佣/已转dealing/警告/其他？）。
 - 观察清单入册线 = OPT-0046 的触发阈值，还是更宽（触发进清单，更宽口径仅供检索）？
 - 案卷 Sheet 里是否需要跳回取证的明细视图（0046 未做独立 tab，可能需要一个轻量
