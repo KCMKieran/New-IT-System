@@ -1,7 +1,7 @@
 ---
 id: OPT-0045
 title: 风控V2 前置 —— alert_events 补 user_id 列 + 存量回填（归集引擎的硬前置）
-status: ready
+status: wip
 priority: P1
 area: db
 effort: S

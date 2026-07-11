@@ -13,6 +13,7 @@
 | [OPT-0041](./items/OPT-0041-test-seed-date-rot.md) | opt/test-seed-date-rot | 2026-07-06 | 闸门修复，最先合 |
 | [OPT-0002](./items/OPT-0002-browser-cache-pattern-doc.md) | opt/browser-cache-pattern-doc | 2026-07-06 | 与 0041 并行（docs-only） |
 | [OPT-0028](./items/OPT-0028-risk-monitor-aggregator-hardening.md) | opt/aggregator-hardening | 2026-07-06 | 等 0041 merge 后开工（依赖测试转绿） |
+| [OPT-0045](./items/OPT-0045-alert-events-user-id.md) | opt/alert-events-user-id | 2026-07-11 | 风控V2 前置，0046/0047 依赖它 |
 
 ## ✅ 待领取（Ready）
 
@@ -23,7 +24,6 @@
 | [OPT-0001](./items/OPT-0001-risk-monitor-tab-cache.md) | P2 | frontend | M | Risk-monitor 四个 tab 切换状态/缓存优化 |
 | [OPT-0003](./items/OPT-0003-risk-monitor-sqlite-perf.md) | P1 | db | L | Risk-monitor SQLite 数据增长后的性能方案 |
 | [OPT-0044](./items/OPT-0044-alert-mail-hardening.md) | P2 | backend | M | 告警邮件中心 hardening：发送移出扫描锁 / digest 渲染上限 / digest UNIQUE 认领 / 注册表 dataclass 化 |
-| [OPT-0045](./items/OPT-0045-alert-events-user-id.md) | P1 | db | S | 风控V2 前置：alert_events 补 user_id 列 + 存量回填（做 0046/0047 之前先做这个） |
 | [OPT-0046](./items/OPT-0046-rebate-arb-detection.md) | P1 | backend | M | 返佣套利检测 rule（band 121-130）+ detail 表 + 邮件源（依赖 0045） |
 | [OPT-0047](./items/OPT-0047-case-engine-watchlist.md) | P1 | mixed | L | 归集引擎最小版（云 PG 案卷 4 表）+ 观察清单页（依赖 0045/0046 + PG 实例开通） |
 
