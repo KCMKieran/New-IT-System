@@ -13,7 +13,6 @@
 | [OPT-0041](./items/OPT-0041-test-seed-date-rot.md) | opt/test-seed-date-rot | 2026-07-06 | 闸门修复，最先合 |
 | [OPT-0002](./items/OPT-0002-browser-cache-pattern-doc.md) | opt/browser-cache-pattern-doc | 2026-07-06 | 与 0041 并行（docs-only） |
 | [OPT-0028](./items/OPT-0028-risk-monitor-aggregator-hardening.md) | opt/aggregator-hardening | 2026-07-06 | 等 0041 merge 后开工（依赖测试转绿） |
-| [OPT-0047](./items/OPT-0047-case-engine-watchlist.md) | opt/case-engine-watchlist | 2026-07-12 | 风控V2 归集引擎+观察清单；范围变更：V2 无处置标记 UI（纯展示+filter）；隔离 worktree 实施 |
 ## ✅ 待领取（Ready）
 
 > AC 已经在 item 文件里定义好了。按 priority + effort + 你的当前心智状态挑一个。
@@ -23,6 +22,7 @@
 | [OPT-0001](./items/OPT-0001-risk-monitor-tab-cache.md) | P2 | frontend | M | Risk-monitor 四个 tab 切换状态/缓存优化 |
 | [OPT-0003](./items/OPT-0003-risk-monitor-sqlite-perf.md) | P1 | db | L | Risk-monitor SQLite 数据增长后的性能方案 |
 | [OPT-0044](./items/OPT-0044-alert-mail-hardening.md) | P2 | backend | M | 告警邮件中心 hardening：发送移出扫描锁 / digest 渲染上限 / digest UNIQUE 认领 / 注册表 dataclass 化 |
+| [OPT-0048](./items/OPT-0048-case-engine-hardening.md) | P1 | mixed | M | 风控V2 hardening 包：case sync 幂等化（冷审头号项）+ 0046-F3 去重 UNIQUE + 快照 catch-up + 前端 stale-guard/截断护栏（8 项，Phase B 接源前必做前 3） |
 
 ## 💡 想法（Ideas）—— 还不能直接 claim
 

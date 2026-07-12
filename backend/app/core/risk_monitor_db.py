@@ -512,6 +512,19 @@ CREATE TABLE IF NOT EXISTS alert_rebate_arb_detail (
 CREATE INDEX IF NOT EXISTS idx_rebate_arb_window
     ON alert_rebate_arb_detail(window_date, client_userid);
 
+-- OPT-0047 case-engine sync cursor (single row). Tracks the highest
+-- alert_events.id whose rule-121-130 signal has been upserted into the
+-- cloud-PG case layer. The cursor only advances after a SUCCESSFUL PG
+-- transaction — when PG is unreachable the alert still lands here (fail-
+-- open) and the next tick replays everything after the cursor. Living in
+-- SQLite (not PG) keeps "what still needs syncing" colocated with the
+-- alert rows it points into.
+CREATE TABLE IF NOT EXISTS case_sync_cursor (
+    id            INTEGER PRIMARY KEY CHECK (id = 1),
+    last_event_id INTEGER NOT NULL DEFAULT 0,
+    updated_at    TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+);
+
 -- Account Remarks (风控账户备注): one shared, server-persisted note per
 -- (server, login) account, surfaced as a remark column across the account-level
 -- risk-monitor tabs. Decoupled from alert data — the frontend pulls the full
@@ -3395,6 +3408,79 @@ def get_rebate_arb_alerted_userids(window_date: str) -> set[int]:
             (str(window_date),),
         ).fetchall()
     return {int(r[0]) for r in rows}
+
+
+# ── OPT-0047 case-engine sync cursor + event pull ──────────────────────────
+
+def get_case_sync_cursor() -> int:
+    """Highest alert_events.id already upserted into the PG case layer."""
+    with get_risk_monitor_db() as conn:
+        row = conn.execute(
+            "SELECT last_event_id FROM case_sync_cursor WHERE id = 1"
+        ).fetchone()
+    return int(row[0]) if row else 0
+
+
+def set_case_sync_cursor(event_id: int) -> None:
+    """Advance the sync cursor (forward-only — replays must never regress)."""
+    with get_risk_monitor_db() as conn:
+        conn.execute(
+            """
+            INSERT INTO case_sync_cursor (id, last_event_id, updated_at)
+            VALUES (1, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            ON CONFLICT (id) DO UPDATE SET
+                last_event_id = excluded.last_event_id,
+                updated_at    = excluded.updated_at
+            WHERE excluded.last_event_id > case_sync_cursor.last_event_id
+            """,
+            (int(event_id),),
+        )
+
+
+def fetch_rebate_arb_events_after(after_id: int, limit: int = 500) -> list[dict]:
+    """Rule 121-130 alert rows (with detail) newer than the sync cursor.
+
+    Ordered by id ASC so batched replays stay chronological. `user_id`
+    falls back to the detail table's client_userid (both are resolved at
+    detection time for this client-level rule; the COALESCE is a guard).
+    """
+    with get_risk_monitor_db() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT
+                ae.id, ae.scanned_at, ae.rule_id, ae.rule_label,
+                COALESCE(ae.user_id, ra.client_userid) AS user_id,
+                ra.client_userid, ra.client_name,
+                ra.rebate_30d, ra.total_pl_30d, ra.combined_30d,
+                ra.ratio_5m, ra.ratio_10m, ra.hold_geo_mean_sec,
+                ra.trading_net_deposit, ra.ib_withdrawal,
+                ra.wallet_login_sids, ra.contributing_login_sids,
+                ra.contributing_account_count, ra.window_date
+            FROM alert_events ae
+            JOIN alert_rebate_arb_detail ra ON ra.id = ae.id
+            WHERE ae.id > ?
+              AND ae.rule_id BETWEEN 121 AND 130
+            ORDER BY ae.id ASC
+            LIMIT ?
+            """,
+            (int(after_id), int(limit)),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def count_null_user_id_events(*, since_hours: int = 24) -> int:
+    """NULL user_id rows written recently (OPT-0047 deliverable 6 —
+    per-tick observability; a spike means MySQL enrichment fail-opened)."""
+    with get_risk_monitor_db() as conn:
+        row = conn.execute(
+            f"""
+            SELECT COUNT(*) FROM alert_events
+            WHERE user_id IS NULL
+              AND scanned_at >= datetime('now', '-{int(since_hours)} hours')
+            """
+        ).fetchone()
+    return int(row[0]) if row else 0
 
 
 # Mail-source fetchers (alert-mail-center registry contract). Same 4-function

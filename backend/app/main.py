@@ -48,6 +48,7 @@ from app.core.login_ip_scheduler import (
 from app.core.scheduler import start_scheduler, stop_scheduler
 from app.core.burst_open_scheduler import start_burst_scheduler, stop_burst_scheduler
 from app.core.fund_flow_monitor_db import init_fund_flow_monitor_db
+from app.core.risk_cases_pg import init_risk_cases_pg
 from app.core.view_profiles_db import init_view_profiles_db
 from app.core.fund_flow_scheduler import (
     start_fund_flow_scheduler,
@@ -108,6 +109,9 @@ async def lifespan(app: FastAPI):
     init_login_ip_db()
     init_fund_flow_monitor_db()
     init_view_profiles_db()
+    # OPT-0047 risk-V2 case layer (cloud PG). Fail-open: returns False when
+    # PG is down/unconfigured — the app must still serve everything else.
+    init_risk_cases_pg()
 
     # OPT-0035: an empty admin whitelist silently disables force-release — the
     # only escape hatch for a profile lock stuck on a lost/changed device-id.

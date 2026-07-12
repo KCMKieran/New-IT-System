@@ -19,6 +19,9 @@ logger = logging.getLogger(__name__)
 
 JOB_ID = "ib_financial_daily_report"
 DIGEST_JOB_ID = "alert_mail_digest_dispatch"
+# OPT-0047 risk-V2 case layer jobs
+CASE_BASELINE_JOB_ID = "risk_cases_daily_baseline"
+USER_ID_REPAIR_JOB_ID = "alert_events_user_id_repair"
 HKT = ZoneInfo("Asia/Hong_Kong")
 
 # Module-level singleton; initialised by start_scheduler()
@@ -71,6 +74,44 @@ def _dispatch_digest_mails_job() -> None:
         logger.error("Alert mail digest dispatch failed (non-fatal)", exc_info=True)
 
 
+def _case_baseline_job() -> None:
+    """Job function (OPT-0047): daily long-window metric snapshots.
+
+    Order inside one run matters:
+      1. case sync catch-up — enroll any signals the 10-min tick could not
+         push (PG outage backlog) so today's baseline covers them too;
+      2. daily baseline — one case_metrics_daily row per enrolled client
+         (idempotent upsert; Δ1 needs two consecutive days, Δ30 thirty);
+      3. NULL user_id observability count (repair itself runs earlier, see
+         _user_id_repair_job).
+    Fully fenced — a case-layer problem must never kill the scheduler.
+    """
+    try:
+        from ..services.case_engine_service import (
+            log_null_user_id_count,
+            sync_cases_from_alert_events,
+        )
+        from ..services.case_metrics_service import run_daily_baseline
+
+        sync_cases_from_alert_events()
+        result = run_daily_baseline()
+        logger.info("Case baseline job finished: %s", result)
+        log_null_user_id_count()
+    except Exception:
+        logger.error("Case baseline job failed (non-fatal)", exc_info=True)
+
+
+def _user_id_repair_job() -> None:
+    """Job function (OPT-0047 deliverable 6 / OPT-0045 F2): fix NULL
+    user_id alert rows daily so MySQL-outage alerts don't age out of the
+    30-day window invisible to GROUP BY user_id."""
+    try:
+        from ..services.alert_user_id_repair_service import repair_null_user_ids
+        repair_null_user_ids()
+    except Exception:
+        logger.error("user_id repair job failed (non-fatal)", exc_info=True)
+
+
 def start_scheduler() -> None:
     """Start the background scheduler using report_config from SQLite.
 
@@ -108,6 +149,34 @@ def start_scheduler() -> None:
         coalesce=True,
         misfire_grace_time=120,
     )
+    # OPT-0047 risk-V2 case layer. Same SCHEDULER_ENABLED guard as everything
+    # above (dev shares prod's SQLite → only one owner runs jobs). Opt-out env
+    # mirrors the other risk jobs. Timing: MT day rolls at 05:00 HKT; the
+    # repair runs first (06:50) so the baseline (07:10) and the day's case
+    # syncs see reconciled user_ids.
+    if os.getenv("CASE_ENGINE_JOBS_ENABLED", "true").lower() != "false":
+        _scheduler.add_job(
+            _user_id_repair_job,
+            CronTrigger(hour=6, minute=50, timezone=HKT),
+            id=USER_ID_REPAIR_JOB_ID,
+            replace_existing=True,
+            coalesce=True,
+            misfire_grace_time=600,
+            max_instances=1,
+        )
+        _scheduler.add_job(
+            _case_baseline_job,
+            CronTrigger(hour=7, minute=10, timezone=HKT),
+            id=CASE_BASELINE_JOB_ID,
+            replace_existing=True,
+            coalesce=True,
+            misfire_grace_time=600,
+            max_instances=1,
+        )
+        logger.info(
+            "Case-engine jobs scheduled: user_id repair 06:50 HKT, "
+            "daily baseline 07:10 HKT"
+        )
     _scheduler.start()
     logger.info(f"Scheduler started: daily report at {hour:02d}:{minute:02d} HKT")
 

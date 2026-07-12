@@ -1,7 +1,7 @@
 ---
 id: OPT-0047
 title: 归集引擎最小版（云 PostgreSQL 案卷 4 表）+ 观察清单页 —— 风控V2 Phase A 核心
-status: wip
+status: done
 priority: P1
 area: mixed
 effort: L
@@ -90,3 +90,21 @@ related: [[OPT-0045]] [[OPT-0046]]
   即可），UI 不验标记流。
 - 其余 AC 不变。今晚（无人值守）为契约先行分段交付：DDL/Pydantic/fixture 端点 →
   前端页 → case upsert/日基线，做到哪个完整节点算哪个，**不 merge 半成品**。
+
+## 结果（2026-07-13 closed）
+
+**交付**：5 commits（`39cc2e5` PG 层 → `27084f0` 契约+fixture → `90dce7b` case upsert →
+`399ba2c` 日基线+NULL修复 → `23a6599` 前端页），隔离 worktree 实施（主树被 Claude AI WIP
+占用）。PG 真库四表+11 索引已建，fixture 12 案卷已 seed（`seed_risk_cases_fixture.py
+--remove` 可清）。范围变更按 2026-07-12 拍板执行：纯展示+filter，无处置标记 UI。
+
+**AC**：1 ✅(fixture 17 账户归并 e2e；真 127582 待管道) 2 ✅ 3 ✅(DDL 预留+upsert 单测)
+4 ✅(断连重试集成测试) 5 ✅(同日重跑幂等；∆1 待连续 2 天快照) 6 ✅(50 新测/480 passed 基线
+一致/tsc/vitest 115/vite build)。冒烟：8011 真 PG 契约全过；唯一偏差 = bad sort_by 静默
+回落 combined_30d（路由文档化行为，非 500/注入面，保留还是改 422 待定）。
+
+**Stage 1 冷审**（workflow 21 agents，11 confirmed 全 yellow / 4 refuted）：全部打包
+[[OPT-0048]] hardening（头号 = case sync at-least-once 幂等化，Phase B 前必做前 3）。
+
+**Follow-up**：∆1/真信号归并两 AC 部署后补验；root .env 补 RISK_CASES_PG_*；
+bad-param 422 化拍板；merge 后用户恢复 Claude AI WIP 需解 stash 冲突。

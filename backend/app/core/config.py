@@ -36,6 +36,13 @@ class Settings:
     POSTGRES_DBNAME: str | None
     POSTGRES_PORT: int
 
+    # Risk-V2 case layer (OPT-0047): dedicated database + least-privilege
+    # account on the SAME Azure PG flexible server as the reporting DB
+    # (host/port reuse POSTGRES_HOST/POSTGRES_PORT).
+    RISK_CASES_PG_DBNAME: str | None
+    RISK_CASES_PG_USER: str | None
+    RISK_CASES_PG_PASSWORD: str | None
+
     # Paths (resolved relative to repo root by default)
     PARQUET_DIR: str | None
     PUBLIC_EXPORT_DIR: str | None
@@ -98,6 +105,11 @@ class Settings:
         self.POSTGRES_PASSWORD = os.environ.get("POSTGRES_PASSWORD")
         self.POSTGRES_DBNAME = os.environ.get("POSTGRES_DBNAME")
         self.POSTGRES_PORT = int(os.environ.get("POSTGRES_PORT", "5432"))
+
+        # Risk-V2 case layer (OPT-0047)
+        self.RISK_CASES_PG_DBNAME = os.environ.get("RISK_CASES_PG_DBNAME")
+        self.RISK_CASES_PG_USER = os.environ.get("RISK_CASES_PG_USER")
+        self.RISK_CASES_PG_PASSWORD = os.environ.get("RISK_CASES_PG_PASSWORD")
 
         self.PARQUET_DIR = os.environ.get("PARQUET_DIR")
         self.PUBLIC_EXPORT_DIR = os.environ.get("PUBLIC_EXPORT_DIR")
@@ -212,6 +224,29 @@ class Settings:
         db = self.POSTGRES_DBNAME or "reporting_db"
         user = self.POSTGRES_USER or "postgres"
         password = self.POSTGRES_PASSWORD or ""
+        return f"host={host} port={port} dbname={db} user={user} password={password}"
+
+    def risk_cases_pg_configured(self) -> bool:
+        """True when the OPT-0047 case-layer PG credentials are present."""
+        return bool(
+            self.POSTGRES_HOST
+            and self.RISK_CASES_PG_DBNAME
+            and self.RISK_CASES_PG_USER
+            and self.RISK_CASES_PG_PASSWORD
+        )
+
+    def risk_cases_pg_dsn(self) -> str:
+        """DSN for the risk-V2 case database (OPT-0047).
+
+        Host/port reuse the reporting-PG server (same Azure flexible server);
+        dbname/user/password are the dedicated least-privilege `risk_cases` /
+        `risk_app` pair created 2026-07-12.
+        """
+        host = self.POSTGRES_HOST or "localhost"
+        port = self.POSTGRES_PORT
+        db = self.RISK_CASES_PG_DBNAME or "risk_cases"
+        user = self.RISK_CASES_PG_USER or "risk_app"
+        password = self.RISK_CASES_PG_PASSWORD or ""
         return f"host={host} port={port} dbname={db} user={user} password={password}"
 
 

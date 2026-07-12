@@ -51,6 +51,7 @@ export const enUS = {
     fundFlowMonitor: "Frequent Fund Flow",
     ibTreeQuery: "IB Tree Lookup",
     riskAlertMail: "Alert Mail Center",
+    riskWatchlist: "Risk Watchlist",
     home: "Home",
   },
   
@@ -85,6 +86,7 @@ export const enUS = {
     ibFinancialMonitor: "IB Financial Monitor",
     ibTreeQuery: "IB Tree Lookup",
     riskAlertMail: "Alert Mail Center",
+    riskWatchlist: "Risk Watchlist",
   },
 
   ibidLotsPage: {
