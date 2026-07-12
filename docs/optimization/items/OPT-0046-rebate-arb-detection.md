@@ -1,7 +1,7 @@
 ---
 id: OPT-0046
 title: 返佣套利检测 rule（band 121-130）+ detail 表 + 邮件告警源 —— 风控V2 Phase A 检测腿
-status: ready
+status: wip
 priority: P1
 area: backend
 effort: M
@@ -59,10 +59,9 @@ V2 设计见 `.cursor/skills/risk-disposition/SKILL.md`。
 5. 10min tick 单轮耗时 < 5s（架构目标 ~1.5s）；30s 级日基线只跑每日一次。
 6. 全量 risk-monitor pytest 绿。
 
-## 开放问题（claim 前需用户拍板或执行时问）
+## 开放问题 → 已全部拍板（2026-07-12，用户逐项确认）
 
-- `min_rebate_usd` 默认阈值：参考 rebate≥$500 ∧ r10≥50% → 67 人 / rebate≥$1k → 38 人 /
-  combined≥$1k → 226 账户（skill §7）。建议先取 rebate≥$500 + combined>0（分层不硬触发）。
-- Phase 1 是否先做日更版（更快上线），10min tier 放后。
-- IB 兼交易者（如 110386，自返佣 97%）是否单独标记（用户已拍板不做自返佣维度，
-  但案卷 tag 是否区分待定）。
+1. **`min_rebate_usd` = $500**（触发 = rebate_30d ≥ $500 AND combined > 0，双条件缺一
+   不可；短线占比只做分层标记不硬触发）。阈值做成常量/env 可调，别写死在 SQL 里。
+2. **一步到位**：日基线 + 10min 盘中 tick 一次交付，不拆日更版 Phase 1。
+3. **不做自返佣单独标记**：detail 表已带「上级钱包」列，人工可判；案卷 tag 细分留 OPT-0047。
