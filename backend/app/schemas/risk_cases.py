@@ -1,0 +1,194 @@
+"""
+Pydantic schemas for the risk-V2 watchlist / case-card API (OPT-0047).
+
+Contract notes (frozen 2026-07-12):
+- The watchlist is display-only in V2 — no state-mutation schemas are
+  exposed here on purpose (disposition UI is V3; the DDL reservations
+  live in core/risk_cases_pg.py).
+- Metric columns come from the latest case_metrics_daily snapshot; the
+  Δ columns are None when the comparison snapshot does not exist yet
+  (frontend renders "—").
+- All money fields are USD (CEN accounts already normalized /100 upstream).
+- Timestamps are UTC ISO8601 strings (project convention).
+"""
+
+from __future__ import annotations
+
+from typing import Any, List, Optional
+
+from pydantic import BaseModel
+
+
+class WatchlistRow(BaseModel):
+    # Case identity (risk_cases)
+    user_id: int
+    state: str
+    tags: List[str] = []
+    signal_count: int = 0
+    first_signal_at: Optional[str] = None
+    last_signal_at: Optional[str] = None
+    user_name: Optional[str] = None
+    country: Optional[str] = None
+    ip_country: Optional[str] = None  # reserved — always None in V2
+
+    # V3 reservations, surfaced read-only (always None in V2)
+    action: Optional[str] = None
+    action_at: Optional[str] = None
+    review_after: Optional[str] = None
+
+    # Account roll-up (case_entities, family='')
+    accounts: Optional[str] = None  # comma-joined loginSids, e.g. "1-8522845,5-1024"
+    account_count: Optional[int] = None
+
+    # Latest metric snapshot (case_metrics_daily); None until the daily
+    # baseline job has produced a row for this client.
+    metric_date: Optional[str] = None
+    orders_7d: Optional[int] = None
+    orders_30d: Optional[int] = None
+    orders_90d: Optional[int] = None
+    orders_all: Optional[int] = None
+    lots_7d: Optional[float] = None
+    lots_30d: Optional[float] = None
+    lots_90d: Optional[float] = None
+    lots_all: Optional[float] = None
+    avg_hold_days_30d: Optional[float] = None  # "Now"
+    avg_hold_days_delta_1d: Optional[float] = None  # Now − snapshot(T-1)
+    avg_hold_days_delta_30d: Optional[float] = None  # Now − snapshot(T-30)
+    ratio_5m_30d: Optional[float] = None
+    ratio_10m_30d: Optional[float] = None
+    trading_net_deposit: Optional[float] = None
+    ib_withdrawal: Optional[float] = None
+    profit_7d: Optional[float] = None
+    profit_30d: Optional[float] = None
+    profit_all: Optional[float] = None
+    rebate_7d: Optional[float] = None
+    rebate_30d: Optional[float] = None
+    rebate_all: Optional[float] = None
+    combined_30d: Optional[float] = None  # default sort key (desc)
+    top_symbol_1: Optional[str] = None
+    top_symbol_1_ratio: Optional[float] = None
+    top_symbol_2: Optional[str] = None
+    top_symbol_2_ratio: Optional[float] = None
+    equity: Optional[float] = None
+
+
+class WatchlistStatistics(BaseModel):
+    from_cache: bool = False
+    query_time_ms: int = 0
+
+
+class WatchlistResponse(BaseModel):
+    """Project-standard list envelope (see CLAUDE.md API response shape)."""
+
+    data: List[WatchlistRow]
+    total: int
+    page: int = 1
+    page_size: int = 50
+    total_pages: int = 1
+    statistics: WatchlistStatistics = WatchlistStatistics()
+
+
+class CaseSignal(BaseModel):
+    """One condensed signal-timeline entry (cold storage on the case —
+    alert_events itself purges after 30 days)."""
+
+    event_id: Optional[int] = None
+    scanned_at: Optional[str] = None
+    rule_id: Optional[int] = None
+    rule_label: Optional[str] = None
+    window_date: Optional[str] = None
+    rebate_30d: Optional[float] = None
+    total_pl_30d: Optional[float] = None
+    combined_30d: Optional[float] = None
+    ratio_5m: Optional[float] = None
+    ratio_10m: Optional[float] = None
+    hold_geo_mean_sec: Optional[float] = None
+    trading_net_deposit: Optional[float] = None
+    ib_withdrawal: Optional[float] = None
+    contributing_login_sids: Optional[str] = None
+    contributing_account_count: Optional[int] = None
+    wallet_login_sids: Optional[str] = None
+
+
+class CaseEntity(BaseModel):
+    server: str = ""
+    login: int = 0
+    family: str = ""
+    login_sid: str = ""
+    first_seen_at: Optional[str] = None
+    last_seen_at: Optional[str] = None
+
+
+class CaseMetricsSnapshot(BaseModel):
+    metric_date: str
+    orders_7d: Optional[int] = None
+    orders_30d: Optional[int] = None
+    orders_90d: Optional[int] = None
+    orders_all: Optional[int] = None
+    lots_7d: Optional[float] = None
+    lots_30d: Optional[float] = None
+    lots_90d: Optional[float] = None
+    lots_all: Optional[float] = None
+    avg_hold_days_30d: Optional[float] = None
+    ratio_5m_30d: Optional[float] = None
+    ratio_10m_30d: Optional[float] = None
+    trading_net_deposit: Optional[float] = None
+    ib_withdrawal: Optional[float] = None
+    profit_7d: Optional[float] = None
+    profit_30d: Optional[float] = None
+    profit_all: Optional[float] = None
+    rebate_7d: Optional[float] = None
+    rebate_30d: Optional[float] = None
+    rebate_all: Optional[float] = None
+    combined_30d: Optional[float] = None
+    top_symbol_1: Optional[str] = None
+    top_symbol_1_ratio: Optional[float] = None
+    top_symbol_2: Optional[str] = None
+    top_symbol_2_ratio: Optional[float] = None
+    equity: Optional[float] = None
+    account_count: Optional[int] = None
+
+
+class CaseAction(BaseModel):
+    """Read-only disposition history entry (empty in V2 — no write UI)."""
+
+    action: str
+    old_state: Optional[str] = None
+    new_state: Optional[str] = None
+    note: Optional[str] = None
+    review_after: Optional[str] = None
+    actor: Optional[str] = None
+    created_at: Optional[str] = None
+
+
+class CaseDetailResponse(BaseModel):
+    user_id: int
+    state: str
+    tags: List[str] = []
+    signal_count: int = 0
+    first_signal_at: Optional[str] = None
+    last_signal_at: Optional[str] = None
+    user_name: Optional[str] = None
+    country: Optional[str] = None
+    ip_country: Optional[str] = None
+    ai_comment: Optional[str] = None
+    action: Optional[str] = None
+    action_at: Optional[str] = None
+    review_after: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    # Newest-first condensed signal timeline
+    signals: List[CaseSignal] = []
+    entities: List[CaseEntity] = []
+    # Recent snapshots (newest first, bounded) — powers the Δ context in
+    # the case sheet without a second request.
+    metrics_history: List[CaseMetricsSnapshot] = []
+    actions: List[CaseAction] = []
+    statistics: WatchlistStatistics = WatchlistStatistics()
+
+
+def as_str_list(value: Any) -> List[str]:
+    """Coerce a JSONB tags payload into a clean list[str] (defensive)."""
+    if isinstance(value, list):
+        return [str(v) for v in value]
+    return []
