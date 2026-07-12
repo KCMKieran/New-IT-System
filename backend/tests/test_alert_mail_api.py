@@ -122,9 +122,13 @@ def test_sources_registry(client):
     assert r.status_code == 200
     body = r.json()
     _assert_list_envelope(body)
-    assert body["total"] == 1
-    src = body["data"][0]
-    assert src["module"] == "hedge_open"
+    # hedge_open (OPT-0042/43) + rebate_arb (OPT-0046)
+    assert body["total"] == 2
+    assert {s["module"] for s in body["data"]} == {"hedge_open", "rebate_arb"}
+    ra = next(s for s in body["data"] if s["module"] == "rebate_arb")
+    assert ra["rule_id_range"] == [121, 130]
+    assert ra["rules"][0]["id"] == 121
+    src = next(s for s in body["data"] if s["module"] == "hedge_open")
     assert src["rule_id_range"] == [91, 100]
     fields = {f["field"] for f in src["filterable_fields"]}
     assert fields == {

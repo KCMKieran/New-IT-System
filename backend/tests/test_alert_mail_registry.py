@@ -138,8 +138,9 @@ def test_get_source_unknown_module_is_none():
 
 def test_list_source_descriptors_shape(temp_db):
     descriptors = registry.list_source_descriptors()
-    assert len(descriptors) == 1
-    d = descriptors[0]
+    # hedge_open (OPT-0042/43) + rebate_arb (OPT-0046)
+    assert {x["module"] for x in descriptors} == {"hedge_open", "rebate_arb"}
+    d = next(x for x in descriptors if x["module"] == "hedge_open")
     assert d["module"] == "hedge_open"
     assert d["rule_id_range"] == [91, 100]
     fields = {f["field"]: f for f in d["filterable_fields"]}
