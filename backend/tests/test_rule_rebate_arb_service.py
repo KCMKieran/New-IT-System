@@ -508,6 +508,135 @@ def test_test_send_uses_fallback_sample(temp_db, monkeypatch):
     assert "166818" in sent[0]["body"]
 
 
+# ── scan_rebate_arb orchestration (fake DB layer, real skeleton) ──────────
+# This lazy-baseline + tick skeleton is the template for the next 2-3 rules,
+# so the orchestration itself (window tiling, MT-day rollover rebuild,
+# dedup-fetcher fail-open) gets covered here with the module-level query
+# functions monkeypatched out.
+
+class _FakeConn:
+    def __init__(self):
+        self.closed = 0
+
+    def close(self):
+        self.closed += 1
+
+
+@pytest.fixture
+def fresh_baseline():
+    """The daily baseline is a module-level cache — isolate it per test."""
+    svc.reset_baseline_cache()
+    yield
+    svc.reset_baseline_cache()
+
+
+def _wire_scan_fakes(monkeypatch, mt_clock, trades_calls, rebate_calls):
+    """Monkeypatch the DB layer under scan_rebate_arb; record window params.
+
+    Trade leg: loginSid 1-100 (userid 7) appears in BOTH the baseline result
+    and the increment result — the merge must add them once each, never
+    double-count either leg. Rebate leg: same loginSid, $1,000 (>= $500 floor).
+    """
+    monkeypatch.setattr(svc, "_mt_now", lambda: mt_clock["now"])
+    monkeypatch.setattr(svc, "_get_connection", lambda settings: _FakeConn())
+
+    def fake_trades_agg(conn, *, date_from, date_to_exclusive):
+        trades_calls.append((date_from, date_to_exclusive))
+        if (date_to_exclusive - date_from).days == 2:
+            # Mutable two-day increment [T-1, T+1).
+            return {"1-100": _trade_row("1-100", 7, pnl=-100.0, lots=5.0, n=2)}
+        # Frozen baseline [T-30, T-2].
+        return {"1-100": _trade_row("1-100", 7, pnl=-500.0, lots=20.0, n=10)}
+
+    def fake_rebate_agg(conn, *, date_from):
+        rebate_calls.append(date_from)
+        return [_rebate_row("1-100", 7, 1000.0)]
+
+    monkeypatch.setattr(svc, "_query_trades_agg", fake_trades_agg)
+    monkeypatch.setattr(svc, "_query_rebate_agg", fake_rebate_agg)
+    monkeypatch.setattr(svc, "_query_net_deposit_split", lambda conn, u: {})
+    monkeypatch.setattr(svc, "_query_equity_by_userid", lambda conn, u: {})
+
+
+def test_scan_window_tiling_and_mt_day_rollover(monkeypatch, fresh_baseline):
+    """Two ticks in one MT day, then one after MT midnight.
+
+    Asserts: (a) the expensive baseline query runs once per MT day with the
+    post-fix window [T-30, T-2] (half-open < T-1); (b) every tick reads the
+    two-day increment [T-1, T+1); (c) a loginSid present on baseline +
+    increment + rebate legs yields ONE client with additively merged numbers;
+    (d) pushing _mt_now past MT midnight rebuilds the baseline on the new
+    trading day's windows.
+    """
+    day1 = datetime(2026, 7, 10, 12, 0, 0)  # naive MT-local, mid-session
+    t = day1.date()
+    mt_clock = {"now": day1}
+    trades_calls: list = []
+    rebate_calls: list = []
+    _wire_scan_fakes(monkeypatch, mt_clock, trades_calls, rebate_calls)
+
+    # Tick 1: cold start → baseline rebuild + increment.
+    r1 = svc.scan_rebate_arb(object())
+    assert r1["baseline_rebuilt"] is True
+    assert r1["window_date"] == t.isoformat()
+    assert trades_calls == [
+        (t - timedelta(days=30), t - timedelta(days=1)),   # baseline < T-1
+        (t - timedelta(days=1), t + timedelta(days=1)),    # increment [T-1, T+1)
+    ]
+    assert rebate_calls == [t - timedelta(days=30)]
+    # Baseline end == increment start: half-open ranges tile [T-30, T+1)
+    # with no gap and no overlap.
+    assert trades_calls[0][1] == trades_calls[1][0]
+    # Same loginSid on all legs → one client, legs summed exactly once.
+    assert len(r1["alerts"]) == 1
+    a = r1["alerts"][0]
+    assert a["client_userid"] == 7
+    assert a["total_pl_30d"] == pytest.approx(-600.0)   # -500 + -100
+    assert a["rebate_30d"] == pytest.approx(1000.0)     # rebate leg once
+    assert a["combined_30d"] == pytest.approx(400.0)
+    assert a["order_count"] == 12
+
+    # Tick 2, same MT day: baseline query must NOT rerun.
+    mt_clock["now"] = day1 + timedelta(minutes=10)
+    r2 = svc.scan_rebate_arb(object())
+    assert r2["baseline_rebuilt"] is False
+    assert trades_calls[2:] == [(t - timedelta(days=1), t + timedelta(days=1))]
+    assert len(trades_calls) == 3
+    assert len(rebate_calls) == 2  # rebate is a full re-read every tick
+
+    # Tick 3, past MT midnight: new trading day → baseline rebuilt on T+1.
+    mt_clock["now"] = day1 + timedelta(days=1)
+    t2 = t + timedelta(days=1)
+    r3 = svc.scan_rebate_arb(object())
+    assert r3["baseline_rebuilt"] is True
+    assert r3["window_date"] == t2.isoformat()
+    assert trades_calls[3:] == [
+        (t2 - timedelta(days=30), t2 - timedelta(days=1)),
+        (t2 - timedelta(days=1), t2 + timedelta(days=1)),
+    ]
+    assert rebate_calls[2] == t2 - timedelta(days=30)
+
+
+def test_scan_dedup_fetcher_failure_fails_open(monkeypatch, fresh_baseline):
+    """alerted_userids_fetcher raising must NOT drop alerts (documented
+    fail-open: duplicates are the lesser evil for a risk feed)."""
+    mt_clock = {"now": datetime(2026, 7, 10, 12, 0, 0)}
+    _wire_scan_fakes(monkeypatch, mt_clock, [], [])
+
+    def boom(window_date: str):
+        raise RuntimeError("sqlite locked")
+
+    result = svc.scan_rebate_arb(object(), alerted_userids_fetcher=boom)
+    assert len(result["alerts"]) == 1
+    assert result["alerts"][0]["client_userid"] == 7
+
+    # Control: a WORKING fetcher that already knows the client suppresses it.
+    result2 = svc.scan_rebate_arb(
+        object(), alerted_userids_fetcher=lambda wd: {7}
+    )
+    assert result2["alerts"] == []
+
+
 # ── Scheduler wiring invariants ────────────────────────────────────────────
 
 def test_band_121_130_owned_by_slow_tier_partition():

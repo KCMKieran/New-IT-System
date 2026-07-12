@@ -28,15 +28,20 @@ Data legs (all verified in .cursor/skills/rebate-arbitrage/SKILL.md):
   is the generated PROFIT+SWAPS+COMMISSION column. CEN accounts /100
   (currency authority = ``mt4_users.CURRENCY``).
 
-Scheduling architecture (measured: trades 30d full aggregate ~30s, today-only
-~0.2s, rebate 30d full ~1.1s):
-- DAILY BASELINE: per-loginSid additive aggregates over [T-30, T-1] closeDate
-  (MT trading days), rebuilt lazily once per MT day inside the 10-min tick
-  (module-level cache, guarded by ``_baseline_lock``).
-- 10-MIN TICK: today's trades only (cheap) stacked onto the baseline, plus a
-  FULL 30-day rebate re-read every tick — the CRM commission engine's 18h
-  sliding window rewrites yesterday's rows, so incremental rebate caching
-  WOULD silently miss corrections. Target per-tick cost ~1.5s.
+Scheduling architecture (measured: trades 30d full aggregate ~30s, one-day
+increment ~0.2s / two-day ~0.4s, rebate 30d full ~1.1s):
+- DAILY BASELINE: per-loginSid additive aggregates over [T-30, T-2] closeDate
+  (MT trading days, half-open ``< T-1``), rebuilt lazily once per MT day
+  inside the 10-min tick (module-level cache, guarded by ``_baseline_lock``).
+- 10-MIN TICK: the last two MT days' trades (``closeDate >= T-1``, half-open
+  ``< T+1``, cheap ~0.4s) stacked onto the baseline. T-1 stays in the mutable
+  increment because mt4_trades is a sync replica — late-arriving T-1 rows and
+  isDeleted flips after the baseline was built must still land in the numbers
+  (a frozen T-1 baseline could never absorb them). Plus a FULL 30-day rebate
+  re-read every tick — the CRM commission engine's 18h sliding window
+  rewrites yesterday's rows, so incremental rebate caching WOULD silently
+  miss corrections; keeping both legs' mutable tails re-read keeps the trade
+  and rebate legs symmetric. Target per-tick cost ~1.5s.
 
 Dedup: at most ONE alert per client per MT trading day (a 30-day rolling
 metric stays over the line for days once crossed). Durable dedup is the
@@ -276,7 +281,11 @@ def _query_net_deposit_split(
     The legacy single-number net_deposit_hist formula (= sum of BOTH) is
     seriously misleading for IB-cum-traders (case 110386: shows -$1.34M net
     deposit, but -$1.22M of that is commission withdrawals — as a trader he
-    is net LOSING). CEN /100 keyed on the account's mu.CURRENCY.
+    is net LOSING). CEN /100 keyed on the transaction row's own st.currency
+    (stats_transactions convention — same as account_enrichment.
+    get_net_deposit_hist_map and rule_gap_trade_gap_service.
+    _query_net_deposit_by_userid); mt4_users is joined for the sid/demo
+    compliance filter only.
     """
     if not userids:
         return {}
@@ -284,10 +293,10 @@ def _query_net_deposit_split(
     sql = f"""
         SELECT st.userId AS userid,
             SUM(CASE WHEN st.type IN ('deposit', 'withdrawal')
-                 THEN IF(mu.CURRENCY = 'CEN', st.amount / 100.0, st.amount)
+                 THEN IF(st.currency = 'CEN', st.amount / 100.0, st.amount)
                  ELSE 0 END) AS trading_net_deposit,
             SUM(CASE WHEN st.type = 'ib withdrawal'
-                 THEN IF(mu.CURRENCY = 'CEN', st.amount / 100.0, st.amount)
+                 THEN IF(st.currency = 'CEN', st.amount / 100.0, st.amount)
                  ELSE 0 END) AS ib_withdrawal
         FROM fxbackoffice.stats_transactions st
         INNER JOIN fxbackoffice.mt4_users mu ON st.loginSid = mu.loginSid
@@ -614,7 +623,8 @@ def scan_rebate_arb(
     alerted_userids_fetcher: Optional[Callable[[str], Set[int]]] = None,
     force_baseline_rebuild: bool = False,
 ) -> Dict[str, Any]:
-    """One 10-min tick: baseline (lazy daily) + today increment + full rebate.
+    """One 10-min tick: baseline (lazy daily, closeDate < T-1) + two-day
+    increment (closeDate >= T-1) + full rebate re-read.
 
     ``alerted_userids_fetcher(window_date)`` supplies the durable per-day
     dedup set (scheduler passes ``risk_monitor_db.get_rebate_arb_alerted_userids``);
@@ -636,9 +646,12 @@ def scan_rebate_arb(
     conn = _get_connection(settings)
     baseline_rebuilt = False
     try:
-        # 1) Daily baseline [T-30, T-1] — rebuilt once per MT trading day.
-        #    The ~30s full-window aggregate is the accepted daily cost; every
-        #    other tick reuses the cached per-loginSid numerators.
+        # 1) Daily baseline [T-30, T-2] (half-open < T-1) — rebuilt once per
+        #    MT trading day. The ~30s full-window aggregate is the accepted
+        #    daily cost; every other tick reuses the cached per-loginSid
+        #    numerators. T-1 is deliberately EXCLUDED: it is still mutable
+        #    (replica late arrivals / isDeleted flips) and lives in the
+        #    per-tick increment below.
         with _baseline_lock:
             if (
                 force_baseline_rebuild
@@ -647,7 +660,9 @@ def scan_rebate_arb(
             ):
                 b0 = time.perf_counter()
                 rows = _query_trades_agg(
-                    conn, date_from=window_from, date_to_exclusive=trade_day
+                    conn,
+                    date_from=window_from,
+                    date_to_exclusive=trade_day - timedelta(days=1),
                 )
                 _baseline = {
                     "trade_day": trade_day,
@@ -661,10 +676,12 @@ def scan_rebate_arb(
                 )
             baseline_rows = _baseline["rows"]
 
-        # 2) Today's increment (closeDate = trade_day) — cheap (~0.2s).
+        # 2) Two-day increment (closeDate in [T-1, T+1), i.e. T-1 and T) —
+        #    cheap (~0.4s). Together with the < T-1 baseline this tiles the
+        #    [T-30, T+1) window exactly once (no gap, no double-count).
         today_rows = _query_trades_agg(
             conn,
-            date_from=trade_day,
+            date_from=trade_day - timedelta(days=1),
             date_to_exclusive=trade_day + timedelta(days=1),
         )
 
