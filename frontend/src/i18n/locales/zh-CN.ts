@@ -51,6 +51,7 @@ export const zhCN = {
     fundFlowMonitor: "频繁出入金监控",
     ibTreeQuery: "IB Tree查询",
     riskAlertMail: "告警邮件中心",
+    riskWatchlist: "风控观察清单",
     home: "首页",
   },
 
@@ -85,6 +86,7 @@ export const zhCN = {
     ibFinancialMonitor: "IB 资金监控",
     ibTreeQuery: "IB Tree查询",
     riskAlertMail: "告警邮件中心",
+    riskWatchlist: "风控观察清单",
   },
 
   ibidLotsPage: {
