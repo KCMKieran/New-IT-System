@@ -1,7 +1,7 @@
 ---
 id: OPT-0047
 title: 归集引擎最小版（云 PostgreSQL 案卷 4 表）+ 观察清单页 —— 风控V2 Phase A 核心
-status: ready
+status: wip
 priority: P1
 area: mixed
 effort: L
@@ -68,16 +68,25 @@ related: [[OPT-0045]] [[OPT-0046]]
 5. 日基线任务幂等（重跑同日不重复行），快照连续 2 天后 ∆1 出数。
 6. tsc + vitest + 相关 pytest 全绿；verify.sh 过闸。
 
-## 开放问题（claim 前需解决）
+## 开放问题 → 拍板结果（2026-07-12，用户离开前确认）
 
-- **云 PG 不用新开实例（2026-07 排查结论）**：`kcm-analysis-etl.postgres.database.azure.com`
-  是在用的 Azure Flexible Server（PG 17.9，自带自动备份 + PITR 7-35 天，满足选 PG 的合规
-  理由）；后端已有 `POSTGRES_*` env + `settings.postgres_dsn()`（`core/config.py`）+
-  `psycopg2-binary`（requirements.txt）——零新增依赖、零网络打通。claim 前用户要做的降级为：
-  ① 该实例上 `CREATE DATABASE risk_cases`（**独立库**，勿混每天 bulk 重写的 MT5_ETL、
-  勿用废弃的 reporting_db）② 建最小权限专用账号（app 流量别复用管理员 kcmadmin）
-  ③ 连接信息进 .env。驱动沿用 psycopg2 即可（千级客户/天量级足够，先不加 psycopg3 依赖）。
-- 处置动作枚举值定稿（已ZIP/已调返佣/已转dealing/警告/其他？）。
-- 观察清单入册线 = OPT-0046 的触发阈值，还是更宽（触发进清单，更宽口径仅供检索）？
-- 案卷 Sheet 里是否需要跳回取证的明细视图（0046 未做独立 tab，可能需要一个轻量
-  per-alert 明细弹层）。
+- ~~云 PG 前置~~ → **已完成 2026-07-12**：`risk_cases` 库 + `risk_app` 最小权限账号建好并
+  冒烟验证（连接/建表/增删 OK）；`backend/.env` 已有 `RISK_CASES_PG_DBNAME/USER/PASSWORD`，
+  host/port 复用 `POSTGRES_*`。root `.env` 尚未同步（上 prod 前补）。
+- **处置动作/行内标记功能：V2 不做（范围变更，用户原话「先不需要这个部分的动作，不需要
+  开发这个功能，先展示出来，带有 filter 的功能，由人工先观察，后续我们讨论再决定」）**。
+  即：观察清单 = 纯展示 + 全列筛选/排序；无标记下拉框、无状态变更 UI、无 case_actions
+  写入口。DDL 中 state / action / review_after / case_actions 表**照建作预留**（schema
+  已定稿，避免后续迁移），只是 V2 UI 不提供写入口。动作枚举值随后续讨论定。
+- 案卷 Sheet per-alert 取证明细弹层：**不做**——时间线行内展示关键 detail 字段即可。
+- 观察清单入册线：**未拍板**，实施用保守默认 = OPT-0046 触发即入册（与 rule 同口径），
+  更宽口径留讨论。
+
+### 范围变更对交付内容/AC 的影响（2026-07-12）
+
+- 交付 4 中「行内标记处置（动作枚举 + 日期，写 case_actions）」**移出本 OPT**；
+  状态列/状态筛选保留（V2 全部行恒为「观察中」，筛选器为 Phase B/V3 预铺）。
+- AC3 改为：**DDL 四表建成且 case_actions/state 写路径预留可用**（后端单测覆盖 upsert
+  即可），UI 不验标记流。
+- 其余 AC 不变。今晚（无人值守）为契约先行分段交付：DDL/Pydantic/fixture 端点 →
+  前端页 → case upsert/日基线，做到哪个完整节点算哪个，**不 merge 半成品**。
