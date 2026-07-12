@@ -966,27 +966,37 @@ def _run_rebate_arb_scan() -> None:
             alerted_userids_fetcher=get_rebate_arb_alerted_userids,
         )
         alerts = result["alerts"]
-        if not alerts:
-            return
-        # OPT-0045 choke point: user_id is already resolved during detection
-        # (client-level rule), so this is a no-op pass kept for uniformity.
-        _backfill_alert_user_ids(settings, alerts)
-        scanned_at = (
-            alerts[0].get("scanned_at")
-            or datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-        )
-        append_scan_and_events(
-            scanned_at=scanned_at,
-            scan_interval_min=REBATE_ARB_INTERVAL_MIN,
-            accounts_scanned=int(result.get("clients_evaluated") or 0),
-            suspicious_count=len(alerts),
-            scan_time_ms=int(result.get("scan_time_ms") or 0),
-            alerts=alerts,
-        )
-        logger.info(
-            "Rebate-arb scan persisted %d alert(s) for window %s",
-            len(alerts), result.get("window_date"),
-        )
+        if alerts:
+            # OPT-0045 choke point: user_id is already resolved during
+            # detection (client-level rule), so this is a no-op pass kept
+            # for uniformity.
+            _backfill_alert_user_ids(settings, alerts)
+            scanned_at = (
+                alerts[0].get("scanned_at")
+                or datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+            )
+            append_scan_and_events(
+                scanned_at=scanned_at,
+                scan_interval_min=REBATE_ARB_INTERVAL_MIN,
+                accounts_scanned=int(result.get("clients_evaluated") or 0),
+                suspicious_count=len(alerts),
+                scan_time_ms=int(result.get("scan_time_ms") or 0),
+                alerts=alerts,
+            )
+            logger.info(
+                "Rebate-arb scan persisted %d alert(s) for window %s",
+                len(alerts), result.get("window_date"),
+            )
+        # OPT-0047 case engine: condense un-synced rule 121-130 signals into
+        # the cloud-PG case layer. Runs EVERY tick (even alert-less ones) so
+        # a backlog left by a PG outage is retried on the next tick, not the
+        # next alert. Own try/except: a case-layer bug must never mark the
+        # scan tick failed.
+        try:
+            from ..services.case_engine_service import sync_cases_from_alert_events
+            sync_cases_from_alert_events(settings)
+        except Exception:
+            logger.error("Rebate-arb case sync failed (fail-open)", exc_info=True)
     except Exception:
         logger.error("Rebate-arb scan failed", exc_info=True)
 
