@@ -39,6 +39,12 @@ GAP_TRADE_INTRADAY_JOB_ID = "gap_trade_intraday_scan"
 # into an all-day loop.
 GAP_TRADE_INTRADAY_START_HKT = (5, 55)
 GAP_TRADE_INTRADAY_END_HKT = (7, 5)
+# OPT-0046: Rebate Arbitrage (rule 121-130) — 10-min interval job. The rule's
+# daily 30-day trades baseline is rebuilt lazily INSIDE the tick when the MT
+# trading day rolls over (rule_rebate_arb_service module cache), so one job
+# covers both the "daily baseline" and the "10-min tick" tiers.
+REBATE_ARB_JOB_ID = "rebate_arb_scan"
+REBATE_ARB_INTERVAL_MIN = 10
 
 _scheduler: BackgroundScheduler | None = None
 _latest_result: dict[str, Any] | None = None
@@ -72,6 +78,10 @@ _gap_trade_lock = threading.Lock()
 # giving up with an ERROR (worst observed scan ≈ minutes; MySQL read_timeout
 # is 600s, so 300s covers everything but a truly hung query).
 _GAP_TRADE_FINAL_LOCK_TIMEOUT_SEC = 300
+# OPT-0046: independent lock — a slow rebate-arb baseline rebuild (~30s once
+# per day) must never block the 60s fast tick or the gap-trade jobs. Writes
+# go to the same alert_events table but a disjoint rule_id band (121-130).
+_rebate_arb_lock = threading.Lock()
 
 
 def _fast_tier_enabled() -> bool:
@@ -92,9 +102,13 @@ def _fast_tier_enabled() -> bool:
 # allocated range is [1, _MAX_ALLOCATED_RULE_ID]; bump that too. The invariant
 # test `test_tier_ownership_partitions_all_bands` fails until all three agree.
 _FAST_TIER_RULE_BANDS: tuple[tuple[int, int], ...] = ((1, 50), (101, 120))
-_SLOW_TIER_RULE_BANDS: tuple[tuple[int, int], ...] = ((51, 100),)
-# Highest rule_id any band currently reaches (martingale tops out at 120).
-_MAX_ALLOCATED_RULE_ID = 120
+# Rebate Arbitrage (121-130, OPT-0046) never enters the _latest_result cache —
+# its 10-min job writes straight to alert_events like Gap Trade (71-90). It is
+# classified on the slow side so the tier-partition invariant holds; the
+# classification is a no-op in practice (same as gap trade).
+_SLOW_TIER_RULE_BANDS: tuple[tuple[int, int], ...] = ((51, 100), (121, 130))
+# Highest rule_id any band currently reaches (rebate-arb tops out at 130).
+_MAX_ALLOCATED_RULE_ID = 130
 
 
 def _is_fast_tier_rule_id(rule_id: Any) -> bool:
@@ -929,6 +943,76 @@ def _locked_gap_trade_intraday_scan() -> None:
         _gap_trade_lock.release()
 
 
+def _run_rebate_arb_scan() -> None:
+    """One Rebate Arbitrage tick (OPT-0046, rule 121).
+
+    The service handles the two-tier architecture internally (lazy daily
+    baseline + today-only increment + full 30d rebate re-read) and the
+    per-client-per-trading-day dedup via the fetcher we pass in. Alerts are
+    written straight to alert_events (never the _latest_result cache — same
+    write path as Gap Trade).
+    """
+    from ..core.config import get_settings
+    from ..core.risk_monitor_db import (
+        append_scan_and_events,
+        get_rebate_arb_alerted_userids,
+    )
+    from ..services.rule_rebate_arb_service import scan_rebate_arb
+
+    try:
+        settings = get_settings()
+        result = scan_rebate_arb(
+            settings,
+            alerted_userids_fetcher=get_rebate_arb_alerted_userids,
+        )
+        alerts = result["alerts"]
+        if not alerts:
+            return
+        # OPT-0045 choke point: user_id is already resolved during detection
+        # (client-level rule), so this is a no-op pass kept for uniformity.
+        _backfill_alert_user_ids(settings, alerts)
+        scanned_at = (
+            alerts[0].get("scanned_at")
+            or datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+        )
+        append_scan_and_events(
+            scanned_at=scanned_at,
+            scan_interval_min=REBATE_ARB_INTERVAL_MIN,
+            accounts_scanned=int(result.get("clients_evaluated") or 0),
+            suspicious_count=len(alerts),
+            scan_time_ms=int(result.get("scan_time_ms") or 0),
+            alerts=alerts,
+        )
+        logger.info(
+            "Rebate-arb scan persisted %d alert(s) for window %s",
+            len(alerts), result.get("window_date"),
+        )
+    except Exception:
+        logger.error("Rebate-arb scan failed", exc_info=True)
+
+
+def _locked_rebate_arb_scan() -> None:
+    """Rebate-arb tick with non-blocking skip (10-min cadence self-heals)."""
+    acquired = _rebate_arb_lock.acquire(blocking=False)
+    if not acquired:
+        logger.info("Rebate-arb: previous tick still running, skipping")
+        return
+    try:
+        _run_rebate_arb_scan()
+    finally:
+        _rebate_arb_lock.release()
+
+
+def trigger_rebate_arb_scan_now() -> None:
+    """Fire one deterministic rebate-arb scan (debug shell / dev validation).
+
+    Blocking acquire — mirrors trigger_gap_trade_scan_now. Results land in
+    alert_events (rule 121), not in a cached snapshot.
+    """
+    with _rebate_arb_lock:
+        _run_rebate_arb_scan()
+
+
 def start_burst_scheduler() -> None:
     """Start the background scheduler. Runs first scan immediately on startup."""
     global _scheduler
@@ -1027,6 +1111,26 @@ def start_burst_scheduler() -> None:
                 "gated by GAP_TRADE_CRM_WRITE_ENABLED + crm_tag.write_enabled)",
                 *GAP_TRADE_INTRADAY_START_HKT, *GAP_TRADE_INTRADAY_END_HKT,
             )
+    # OPT-0046 Rebate Arbitrage: 10-min interval job (rule 121). Opt-out env
+    # gate mirrors GAP_TRADE_SCAN_ENABLED (dev containers disable the whole
+    # scheduler via BURST_SCAN_ENABLED=false anyway, so only one backend ever
+    # writes the shared SQLite). First tick of each MT day pays the ~30s
+    # trades-baseline rebuild inside the service; every other tick is ~1.5s.
+    if os.getenv("REBATE_ARB_SCAN_ENABLED", "true").lower() != "false":
+        _scheduler.add_job(
+            _locked_rebate_arb_scan,
+            IntervalTrigger(minutes=REBATE_ARB_INTERVAL_MIN),
+            id=REBATE_ARB_JOB_ID,
+            replace_existing=True,
+            misfire_grace_time=120,
+            coalesce=True,
+            max_instances=1,
+        )
+        logger.info(
+            "Rebate Arbitrage scanner started: every %d minutes "
+            "(daily baseline rebuilt lazily on MT-day rollover)",
+            REBATE_ARB_INTERVAL_MIN,
+        )
     _scheduler.start()
     logger.info("Burst scanner started: every %d minutes", interval_min)
 

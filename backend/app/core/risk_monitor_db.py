@@ -49,6 +49,9 @@ SORTABLE_ALERT_COLS: frozenset[str] = frozenset({
     "window_start", "window_end",
     # Leverage Abuse columns (rule 101-110)
     "margin_level", "margin_used", "free_margin", "streak_count",
+    # Rebate Arbitrage columns (rule 121-130, OPT-0046)
+    "rebate_30d", "total_pl_30d", "combined_30d", "ratio_5m", "ratio_10m",
+    "hold_geo_mean_sec", "trading_net_deposit", "ib_withdrawal",
     # Frontend alias for the `account_group` DB column. We map it in
     # `_resolve_alert_order` so the API stays consistent with the
     # field name the React component already uses.
@@ -102,13 +105,15 @@ _SORT_COL_DB_NAME: dict[str, str] = {
     "open_diff_sec":   "gso.open_diff_sec",
     "lot_ratio":       "gso.lot_ratio",
     "shared_ip_count": "gso.shared_ip_count",
-    # Gap Trade gap-profit detail (rule 81)
-    "client_userid":              "gp.client_userid",
-    "contributing_account_count": "gp.contributing_account_count",
+    # Gap Trade gap-profit detail (rule 81) — client_userid /
+    # contributing_account_count are shared with the rebate-arb detail table
+    # (a row only ever writes one of them, so COALESCE is exact).
+    "client_userid":              "COALESCE(gp.client_userid, ra.client_userid)",
+    "contributing_account_count": "COALESCE(gp.contributing_account_count, ra.contributing_account_count)",
     "profit_ratio":               "gp.profit_ratio",
     "triggered_by":               "gp.triggered_by",
-    # window_date lives on both gap detail tables (one row only writes one)
-    "window_date": "COALESCE(gso.window_date, gp.window_date)",
+    # window_date lives on three detail tables (one row only writes one)
+    "window_date": "COALESCE(gso.window_date, gp.window_date, ra.window_date)",
     # Hedge Open detail (rule 91-100)
     "buy_count":    "ho.buy_count",
     "sell_count":   "ho.sell_count",
@@ -128,6 +133,15 @@ _SORT_COL_DB_NAME: dict[str, str] = {
     "lot_ratio_mg": "mg.lot_ratio_mg",
     "floating_pnl": "mg.floating_pnl",
     "add_count":    "mg.add_count",
+    # Rebate Arbitrage detail (rule 121-130, OPT-0046)
+    "rebate_30d":          "ra.rebate_30d",
+    "total_pl_30d":        "ra.total_pl_30d",
+    "combined_30d":        "ra.combined_30d",
+    "ratio_5m":            "ra.ratio_5m",
+    "ratio_10m":           "ra.ratio_10m",
+    "hold_geo_mean_sec":   "ra.hold_geo_mean_sec",
+    "trading_net_deposit": "ra.trading_net_deposit",
+    "ib_withdrawal":       "ra.ib_withdrawal",
 }
 
 _DB_PATH = Path(__file__).resolve().parents[2] / "data" / "risk_monitor.db"
@@ -473,6 +487,30 @@ CREATE TABLE IF NOT EXISTS alert_martingale_detail (
     floating_pnl   REAL,
     add_count      INTEGER
 );
+
+-- Detail table for Rebate Arbitrage (rule_id 121-130, OPT-0046). One row per
+-- flagged CLIENT (userId aggregation across accounts) per MT trading day.
+-- All money columns are USD (CEN already /100 at detection time).
+CREATE TABLE IF NOT EXISTS alert_rebate_arb_detail (
+    id                         INTEGER PRIMARY KEY,   -- = alert_events.id (1:1)
+    client_userid              INTEGER,
+    client_name                TEXT,
+    rebate_30d                 REAL,    -- 30d upline rebate produced by the client
+    total_pl_30d               REAL,    -- 30d realized P&L (PROFIT+SWAPS+COMMISSION)
+    combined_30d               REAL,    -- total_pl_30d + rebate_30d (company cost when > 0)
+    ratio_5m                   REAL,    -- lots held < 5min / total lots (0..1)
+    ratio_10m                  REAL,    -- lots held < 10min / total lots (0..1)
+    hold_geo_mean_sec          REAL,    -- lots-weighted geometric mean hold seconds
+    trading_net_deposit        REAL,    -- lifetime deposit+withdrawal (NO ib withdrawal)
+    ib_withdrawal              REAL,    -- lifetime 'ib withdrawal' rows only
+    wallet_login_sids          TEXT,    -- top receiving wallets "sid-login:usd,..."
+    contributing_login_sids    TEXT,    -- all producing accounts, comma-separated
+    contributing_account_count INTEGER,
+    window_date                TEXT     -- "YYYY-MM-DD" MT trading day (dedup key)
+);
+-- Per-day client dedup lookup ("one alert per client per trading day").
+CREATE INDEX IF NOT EXISTS idx_rebate_arb_window
+    ON alert_rebate_arb_detail(window_date, client_userid);
 
 -- Account Remarks (风控账户备注): one shared, server-persisted note per
 -- (server, login) account, surfaced as a remark column across the account-level
@@ -1914,6 +1952,11 @@ def append_scan_and_events(
                     _MARTINGALE_INSERT_SQL,
                     (event_id, *(alert.get(c) for c in _MARTINGALE_DETAIL_COLS)),
                 )
+            elif 121 <= rule_id <= 130:
+                conn.execute(
+                    _REBATE_ARB_INSERT_SQL,
+                    (event_id, *(alert.get(c) for c in _REBATE_ARB_DETAIL_COLS)),
+                )
 
         # Retention purge. Detail tables get cleaned via ON DELETE-style
         # cascade in spirit: we delete from alert_events and from each
@@ -1929,6 +1972,7 @@ def append_scan_and_events(
             "alert_hedge_open_detail",
             "alert_leverage_abuse_detail",
             "alert_martingale_detail",
+            "alert_rebate_arb_detail",
         ):
             conn.execute(
                 f"DELETE FROM {detail_table} "
@@ -2137,7 +2181,7 @@ def _escape_like(text: str) -> str:
 # `'2026-05-12' < '2026-05-12T00:00Z'` true.
 _ALERT_TIME_FIELDS: dict[str, str] = {
     "scanned_at":  "ae.scanned_at",
-    "window_date": "COALESCE(gso.window_date, gp.window_date)",
+    "window_date": "COALESCE(gso.window_date, gp.window_date, ra.window_date)",
 }
 
 
@@ -2274,6 +2318,14 @@ _MARTINGALE_DETAIL_COLS: tuple[str, ...] = (
     "floating_pnl", "add_count",
 )
 
+_REBATE_ARB_DETAIL_COLS: tuple[str, ...] = (
+    "client_userid", "client_name",
+    "rebate_30d", "total_pl_30d", "combined_30d",
+    "ratio_5m", "ratio_10m", "hold_geo_mean_sec",
+    "trading_net_deposit", "ib_withdrawal", "wallet_login_sids",
+    "contributing_login_sids", "contributing_account_count", "window_date",
+)
+
 
 def _build_detail_insert_sql(table: str, cols: tuple[str, ...]) -> str:
     """Compose `INSERT INTO <table> (id, <cols>) VALUES (?, ...)`."""
@@ -2290,6 +2342,7 @@ _GAP_PROFIT_INSERT_SQL = _build_detail_insert_sql("alert_gap_profit_detail", _GA
 _HEDGE_OPEN_INSERT_SQL = _build_detail_insert_sql("alert_hedge_open_detail", _HEDGE_OPEN_DETAIL_COLS)
 _LEVERAGE_ABUSE_INSERT_SQL = _build_detail_insert_sql("alert_leverage_abuse_detail", _LEVERAGE_ABUSE_DETAIL_COLS)
 _MARTINGALE_INSERT_SQL = _build_detail_insert_sql("alert_martingale_detail", _MARTINGALE_DETAIL_COLS)
+_REBATE_ARB_INSERT_SQL = _build_detail_insert_sql("alert_rebate_arb_detail", _REBATE_ARB_DETAIL_COLS)
 
 
 # Unified SELECT with 4 LEFT JOINs — used by every reader so the API-facing
@@ -2318,8 +2371,16 @@ _ALERT_SELECT_SQL = """
     gso.so_comment, gso.shared_ips, gso.shared_ip_count,
     gso.l_ip_count, gso.c_ip_count, gso.scan_days,
 
-    gp.client_userid, gp.client_name, gp.client_groupsid,
-    gp.contributing_login_sids, gp.contributing_account_count,
+    -- client_userid / client_name / contributing_* are shared between the
+    -- gap-profit (gp) and rebate-arb (ra) detail tables; a row only ever has
+    -- one of the two, so COALESCE resolves exactly (same as window_date).
+    COALESCE(gp.client_userid, ra.client_userid) AS client_userid,
+    COALESCE(gp.client_name, ra.client_name) AS client_name,
+    gp.client_groupsid,
+    COALESCE(gp.contributing_login_sids, ra.contributing_login_sids)
+        AS contributing_login_sids,
+    COALESCE(gp.contributing_account_count, ra.contributing_account_count)
+        AS contributing_account_count,
     gp.symbols, gp.symbol_count,
     gp.profit_ratio, gp.triggered_by,
 
@@ -2331,7 +2392,11 @@ _ALERT_SELECT_SQL = """
     mg.direction, mg.anchor_lots, mg.new_lots, mg.lot_ratio_mg,
     mg.floating_pnl, mg.add_count,
 
-    COALESCE(gso.window_date, gp.window_date) AS window_date
+    ra.rebate_30d, ra.total_pl_30d, ra.combined_30d,
+    ra.ratio_5m, ra.ratio_10m, ra.hold_geo_mean_sec,
+    ra.trading_net_deposit, ra.ib_withdrawal, ra.wallet_login_sids,
+
+    COALESCE(gso.window_date, gp.window_date, ra.window_date) AS window_date
 """
 
 _ALERT_FROM_CLAUSE = """
@@ -2343,6 +2408,7 @@ LEFT JOIN alert_gap_profit_detail    gp  ON gp.id  = ae.id
 LEFT JOIN alert_hedge_open_detail    ho  ON ho.id  = ae.id
 LEFT JOIN alert_leverage_abuse_detail la ON la.id  = ae.id
 LEFT JOIN alert_martingale_detail    mg  ON mg.id  = ae.id
+LEFT JOIN alert_rebate_arb_detail    ra  ON ra.id  = ae.id
 """
 
 
@@ -3305,6 +3371,123 @@ def fetch_recent_hedge_alerts(limit: int = 500) -> list[dict[str, Any]]:
             (int(limit),),
         ).fetchall()
     return _hedge_mail_rows_to_dicts(rows)
+
+
+# ── Rebate Arbitrage (rule 121-130, OPT-0046) helpers ───────
+
+def get_rebate_arb_alerted_userids(window_date: str) -> set[int]:
+    """Client ids already alerted for one MT trading day (per-day dedup).
+
+    A 30-day rolling metric stays over the line for days once crossed, so the
+    scheduler emits at most ONE alert per client per trading day — this set is
+    the durable half of that dedup (survives restarts; the detail table is the
+    source of truth, same pattern as the gap-trade CRM-tag audit dedup).
+    """
+    with get_risk_monitor_db() as conn:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT ra.client_userid
+            FROM alert_rebate_arb_detail ra
+            JOIN alert_events ae ON ae.id = ra.id
+            WHERE ra.window_date = ? AND ae.rule_id BETWEEN 121 AND 130
+              AND ra.client_userid IS NOT NULL
+            """,
+            (str(window_date),),
+        ).fetchall()
+    return {int(r[0]) for r in rows}
+
+
+# Mail-source fetchers (alert-mail-center registry contract). Same 4-function
+# family as hedge_open: cursor pull / by-ids / same-day siblings / recent.
+_REBATE_ARB_MAIL_SELECT_SQL = """
+    ae.id, ae.scanned_at, ae.rule_id, ae.rule_label, ae.server, ae.login,
+    ae.order_count, ae.total_lots, ae.equity, ae.account_group, ae.currency,
+    ae.net_deposit_hist, ae.total_profit_usd, ae.user_id,
+    ra.client_userid, ra.client_name,
+    ra.rebate_30d, ra.total_pl_30d, ra.combined_30d,
+    ra.ratio_5m, ra.ratio_10m, ra.hold_geo_mean_sec,
+    ra.trading_net_deposit, ra.ib_withdrawal, ra.wallet_login_sids,
+    ra.contributing_login_sids, ra.contributing_account_count, ra.window_date
+"""
+_REBATE_ARB_MAIL_FROM_CLAUSE = """
+FROM alert_events ae
+JOIN alert_rebate_arb_detail ra ON ra.id = ae.id
+"""
+
+
+def _rebate_arb_mail_rows_to_dicts(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        d = dict(r)
+        d["group"] = d.pop("account_group", None)
+        out.append(d)
+    return out
+
+
+def fetch_rebate_arb_alerts_after(
+    last_alert_id: int, limit: int = 500
+) -> list[dict[str, Any]]:
+    """Rebate-arb alerts (rule 121-130) with id strictly above the cursor, asc."""
+    with get_risk_monitor_db() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT {_REBATE_ARB_MAIL_SELECT_SQL}
+            {_REBATE_ARB_MAIL_FROM_CLAUSE}
+            WHERE ae.id > ? AND ae.rule_id BETWEEN 121 AND 130
+            ORDER BY ae.id
+            LIMIT ?
+            """,
+            (int(last_alert_id), int(limit)),
+        ).fetchall()
+    return _rebate_arb_mail_rows_to_dicts(rows)
+
+
+def fetch_rebate_arb_alerts_by_ids(ids: list[int]) -> list[dict[str, Any]]:
+    """Rebate-arb alerts by primary key (detail JOINed). Empty in → empty out."""
+    if not ids:
+        return []
+    placeholders = ",".join(["?"] * len(ids))
+    with get_risk_monitor_db() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT {_REBATE_ARB_MAIL_SELECT_SQL}
+            {_REBATE_ARB_MAIL_FROM_CLAUSE}
+            WHERE ae.id IN ({placeholders})
+            """,
+            [int(i) for i in ids],
+        ).fetchall()
+    return _rebate_arb_mail_rows_to_dicts(rows)
+
+
+def fetch_rebate_arb_alerts_for_day(day: str) -> list[dict[str, Any]]:
+    """All rebate-arb alerts for one MT trading day (sibling lookup)."""
+    with get_risk_monitor_db() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT {_REBATE_ARB_MAIL_SELECT_SQL}
+            {_REBATE_ARB_MAIL_FROM_CLAUSE}
+            WHERE ae.rule_id BETWEEN 121 AND 130 AND ra.window_date = ?
+            ORDER BY ae.id
+            """,
+            (str(day),),
+        ).fetchall()
+    return _rebate_arb_mail_rows_to_dicts(rows)
+
+
+def fetch_recent_rebate_arb_alerts(limit: int = 500) -> list[dict[str, Any]]:
+    """Most recent rebate-arb alerts, newest first (test-send candidate scan)."""
+    with get_risk_monitor_db() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT {_REBATE_ARB_MAIL_SELECT_SQL}
+            {_REBATE_ARB_MAIL_FROM_CLAUSE}
+            WHERE ae.rule_id BETWEEN 121 AND 130
+            ORDER BY ae.id DESC
+            LIMIT ?
+            """,
+            (int(limit),),
+        ).fetchall()
+    return _rebate_arb_mail_rows_to_dicts(rows)
 
 
 # ── Mail center CRUD helpers (OPT-0043, /api/v1/alert-mail) ─

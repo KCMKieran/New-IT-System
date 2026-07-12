@@ -41,8 +41,9 @@ Registry entry contract (every key required unless noted):
                     id: the 30-day retention purge would delete a pinned
                     row and break test-send forever
 
-v2 registers only `hedge_open`; the structure is ready for the other 5
-risk-monitor tabs + fund-flow (one entry each, follow-up).
+v2 registered only `hedge_open`; OPT-0046 added `rebate_arb` (rule 121-130).
+The structure is ready for the remaining risk-monitor tabs + fund-flow (one
+entry each, follow-up).
 """
 
 from __future__ import annotations
@@ -70,6 +71,11 @@ from ..alert_mail_dispatcher import (
     build_hedge_digest_email,
     matched_lots_std,
 )
+
+# OPT-0046: rebate-arbitrage source pieces live in their own module (this
+# file stays the registry, not a template dump). Safe import order: the
+# module only pulls from core.risk_monitor_db + rule_rebate_arb_service.
+from .rebate_arb import SOURCE as _REBATE_ARB_SOURCE
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +169,8 @@ MAIL_SOURCES: Dict[str, Dict[str, Any]] = {
         "template_builder": build_hedge_digest_email,
         "fallback_sample": TEST_SEND_SAMPLE_ALERT,
     },
+    # OPT-0046: 返佣套利 rule band 121-130 (see services/alert_mail/rebate_arb.py)
+    "rebate_arb": _REBATE_ARB_SOURCE,
 }
 
 

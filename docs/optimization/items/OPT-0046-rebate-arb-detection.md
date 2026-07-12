@@ -1,7 +1,7 @@
 ---
 id: OPT-0046
 title: 返佣套利检测 rule（band 121-130）+ detail 表 + 邮件告警源 —— 风控V2 Phase A 检测腿
-status: wip
+status: done
 priority: P1
 area: backend
 effort: M
@@ -65,3 +65,36 @@ V2 设计见 `.cursor/skills/risk-disposition/SKILL.md`。
    不可；短线占比只做分层标记不硬触发）。阈值做成常量/env 可调，别写死在 SQL 里。
 2. **一步到位**：日基线 + 10min 盘中 tick 一次交付，不拆日更版 Phase 1。
 3. **不做自返佣单独标记**：detail 表已带「上级钱包」列，人工可判；案卷 tag 细分留 OPT-0047。
+
+## 结果（2026-07-12 closed，无人值守 session）
+
+**交付 vs AC**：全部达成。rule 121（band 121-130 预留，`_MAX_ALLOCATED_RULE_ID` 120→130）+
+`alert_rebate_arb_detail`（含净入金/ib_withdrawal 拆分、上级钱包、账户列表、window_date）+
+现有 scheduler 10min job（独立锁、`REBATE_ARB_SCAN_ENABLED` 默认开）+ MAIL_SOURCES 注册
+`rebate_arb`（7 过滤字段，UI 零改动带出）+ 26 单测。架构 = 懒重建日基线 [T-30,T-2] +
+tick 增量 [T-1,T+1) + rebate 每轮 30d 全量重读（18h 引擎回写，增量缓存会漏——三处文档化）。
+- AC1 ✅ 真库：166818 (1-8614411) 进名单（窗口滚动后 combined +$19.7k 仍双条件命中）；
+  rebate $36k-53k 但 combined<0 的控制组 3 户全部不进；149 条告警逐条双条件验证
+- AC2 ✅ per-day 去重（检测级+scheduler round-trip 单测；持久化在 detail 表，重启不丢）
+- AC3 ✅ $0 floor 1,047 客户/$595k vs CSV 基准 980/$497k（窗口滚 2 天，同数量级）
+- AC4 ✅ 源注册+test-send stub e2e；未真发。**订阅未 seed**（要收邮件需 UI 建一条 rebate_arb 订阅）
+- AC5 ✅ tick 实测 1.3s；日基线 31-33s 每 MT 日一次
+- AC6 ✅ 463 passed；41 failed 与 clean HEAD 逐条 diff 一致（= OPT-0041 范围）
+
+**Stage 1 冷审**（workflow 16 agents：4 视角 reviewer + 逐条对抗验证；18 findings →
+4 confirmed / 8 refuted）：
+- F1 净入金 CEN÷100 误按 mu.CURRENCY → 改 st.currency（行币种，与 get_net_deposit_hist_map/
+  gap-trade 同构）——当场修 `d1d509e`
+- F2 交易腿基线冻结 [T-30,T-1] vs rebate 腿每轮重读不对称 → 基线收到 <T-1、增量扩到 ≥T-1，
+  半开区间无缝无重——当场修 `d1d509e`
+- F4 基线+tick 编排层零测试（未来 rule 模板）→ 补窗口平铺/MT 日翻转/fail-open 2 测——当场修 `d1d509e`
+- F3 per-day 去重 check-then-insert 无 UNIQUE 约束 → **live with 待拍板**：对抗验证确认正常
+  部署路径不触发（compose up 先停旧后起新），残余路径 = debug-shell 手动 trigger / dev 配错 /
+  fetcher fail-open；修复需动 8 rule 共用 append 路径，建议并入 [[OPT-0044]] hardening 或
+  0047 前置（UNIQUE index 新名 + INSERT OR IGNORE + 孤儿 alert_events 清理）
+
+**Follow-up**：
+- 邮件订阅 seed（用户在 /risk-alert-mail UI 建，或补 seed 脚本）
+- F3 去重 UNIQUE 化（上述）
+- 发现：`stats_ib_commissions_by_login_sid` 金额已是 USD（37,835 行 currency 全量 'USD'），
+  CEN÷100 只适用交易腿——应回写进 rebate-arbitrage skill §2（.cursor 本地资产，随下次编辑补）
