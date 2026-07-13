@@ -1,8 +1,11 @@
 """
 Login IP Monitor — log analyzer service.
 
-Takes one day's raw .log files (one per MT server) and produces the 3 JSON
+Takes one day's raw .log files (one per MT server) and produces the JSON
 analysis artifacts + writes monitored-account login rows into login_ip.db.
+Since 2026-07 the same single pass also extracts, per trading account, the
+LAST client trade event of the day that carried a client IPv4 — persisted to
+the `last_trade_ip` table and `analysis_last_trade_ip.json` (90-day retention).
 
 Called by
 ---------
@@ -37,6 +40,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
@@ -50,6 +54,57 @@ logger = logging.getLogger(__name__)
 IP_MAPPING_FILE = "analysis_ip_to_accounts.json"
 ACCOUNT_LOGINS_FILE = "analysis_account_logins.json"
 RAW_LOGINS_FILE = "analysis_raw_logins.json"
+# Daily per-account "last trade order IP" snapshot (2026-07 requirement).
+LAST_TRADE_IP_FILE = "analysis_last_trade_ip.json"
+
+# --- last-trade-IP extraction rules ------------------------------------------
+# Business definition (decided 2026-07-13): for every trading account, keep
+# the LAST client-initiated trade event of the MT day that carries a valid
+# client IPv4. Server-initiated lines (StopOut.*, dealer routing, SL/TP
+# activation) have a module name or an empty IP column and never match.
+#
+# Demo / manager filtering happens HERE (at parse time, per business decision):
+#   - MT5:            demo logins all start with '3' (verified against the
+#                     `Group demo\\*` audit lines in the live journal; real
+#                     client groups KCM*/KCMC* use '6'/'7' prefixes)
+#   - MT4/MT4_Live2:  demo/test logins start with '7' (house convention,
+#                     same as open_positions_service `LOGIN NOT LIKE '7%'`)
+#   - all servers:    manager/dealer accounts are short numbers ('25', '114')
+#                     → require at least 5 digits
+_DEMO_PREFIX_BY_SERVER = {"MT5": "3", "MT4": "7", "MT4_Live2": "7"}
+_MIN_CLIENT_LOGIN_LEN = 5
+
+# Trade-event verbs, prefix-matched against the message after "'<acc>': ".
+# Enumerated from real journal samples (20260710); anything not listed —
+# login/logout, 'request from'/'confirm' dealer flows, 'not enough money'
+# rejections, password/user admin lines — is intentionally NOT a trade event.
+_MT4_TRADE_VERBS = (
+    "market ",   # market buy/sell request
+    "order ",    # pending placed + 'order #N, ...' confirmations
+    "modify ",   # modify order #N
+    "close ",    # close order #N
+    "delete ",   # delete order #N
+    "instant ",  # legacy instant-execution requests
+)
+_MT5_TRADE_VERBS = (
+    "deal performed",
+    "order performed",
+    "order placed",
+    "order canceled",
+    "cancel order",
+    "order modified",
+    "modify order",
+    "position modified",
+    "modify #",
+    "market buy",
+    "market sell",
+    "buy stop",
+    "sell stop",
+    "buy limit",
+    "sell limit",
+)
+
+_ORDER_REF_RE = re.compile(r"#(\d+)")
 
 # Per-account cap on captured raw log lines. Keeping this small keeps the JSON
 # small enough to ship inside email attachments and render quickly in the UI.
@@ -70,11 +125,14 @@ def _parse_one_log(
     log_path: Path,
     server_name: str,
     monitored_ids: set[str],
-) -> tuple[dict[str, set[int]], dict[str, Counter], dict[str, list[str]]]:
+) -> tuple[dict[str, set[int]], dict[str, Counter], dict[str, list[str]], dict[str, dict]]:
     """Parse a single-day .log for one server.
 
-    Returns `(ip_to_accounts, account_ip_logins, raw_login_logs)`. Every key
-    is a str so JSON serialization doesn't need any custom converters later.
+    Returns `(ip_to_accounts, account_ip_logins, raw_login_logs, last_trade)`.
+    Every key is a str so JSON serialization doesn't need any custom
+    converters later. `last_trade` maps account_id → the LAST client trade
+    event of the day that carried a valid IPv4 (see module constants for the
+    verb whitelist and the demo/manager filter).
 
     See module docstring for the two-pass logic. `monitored_ids` is the set of
     monitored account-id STRINGS for this specific server — passing it in
@@ -84,24 +142,72 @@ def _parse_one_log(
     if server_name == "MT5":
         encoding = "utf-16-le"
         ip_idx, acc_idx = 4, 5
+        time_idx = 3
+        trade_verbs = _MT5_TRADE_VERBS
     else:
         encoding = "utf-8"
         ip_idx, acc_idx = 2, 3
+        time_idx = 1
+        trade_verbs = _MT4_TRADE_VERBS
+
+    demo_prefix = _DEMO_PREFIX_BY_SERVER.get(server_name)
 
     ip_to_accounts: dict[str, set[int]] = defaultdict(set)
     account_ip_logins: dict[str, Counter] = defaultdict(Counter)
     raw_login_logs: dict[str, list[str]] = defaultdict(list)
+    # Journal lines are chronological, so "last trade event" is simply the
+    # latest matching line — overwrite wins, memory stays O(#accounts).
+    last_trade: dict[str, dict] = {}
 
     lines_scanned = 0
     logins_matched = 0
+    trade_lines_matched = 0
 
     # ----- Pass 1 ---------------------------------------------------------
     with open(log_path, "r", encoding=encoding, errors="ignore") as fp:
         for line in fp:
             lines_scanned += 1
-            if "login" not in line:
-                continue
-            if "': login" not in line and ":\tlogin" not in line:
+            is_login = "login" in line and (
+                "': login" in line or ":\tlogin" in line
+            )
+            if not is_login:
+                # --- last-trade-IP branch (cheap gate first) ---------------
+                if "': " not in line:
+                    continue
+                parts = line.split("\t")
+                if len(parts) <= max(ip_idx, acc_idx, time_idx):
+                    continue
+                ip_str = parts[ip_idx].strip()
+                # Client IPv4 gate: rejects empty (server-initiated) and
+                # module names like 'StopOut.All' / 'DealerLogic 776'.
+                if ip_str.count(".") != 3 or not ip_str[:1].isdigit():
+                    continue
+                acc_part = parts[acc_idx].strip()
+                if not acc_part.startswith("'") or "': " not in acc_part:
+                    continue
+                acc_id_str, _, msg = acc_part[1:].partition("': ")
+                if not acc_id_str.isdigit():
+                    continue
+                # Demo / manager filter (business decision 2026-07-13).
+                if len(acc_id_str) < _MIN_CLIENT_LOGIN_LEN:
+                    continue
+                if demo_prefix and acc_id_str.startswith(demo_prefix):
+                    continue
+                for verb in trade_verbs:
+                    if msg.startswith(verb):
+                        # MT4 rejections keep the verb ('market buy ... [no
+                        # money]') — a refused request is not a trade order.
+                        if "no money" in msg:
+                            break
+                        ref_match = _ORDER_REF_RE.search(msg)
+                        last_trade[acc_id_str] = {
+                            "ip": ip_str,
+                            "event_time_mt": parts[time_idx].strip(),
+                            "event_kind": verb.strip(),
+                            "order_ref": f"#{ref_match.group(1)}" if ref_match else None,
+                        }
+                        trade_lines_matched += 1
+                        break
                 continue
 
             parts = line.split("\t")
@@ -169,15 +275,18 @@ def _parse_one_log(
         raw_login_logs[acc_id_str] = raw_login_logs[acc_id_str][-MAX_RAW_LOGS_PER_ACCOUNT:]
 
     logger.info(
-        "[%s] parsed: %d lines scanned, %d login events, %d unique IPs, %d unique accounts, %d raw-log accounts captured",
+        "[%s] parsed: %d lines scanned, %d login events, %d unique IPs, %d unique accounts, "
+        "%d raw-log accounts captured, %d trade lines → %d last-trade-IP accounts",
         server_name,
         lines_scanned,
         logins_matched,
         len(ip_to_accounts),
         len(account_ip_logins),
         len(raw_login_logs),
+        trade_lines_matched,
+        len(last_trade),
     )
-    return ip_to_accounts, account_ip_logins, raw_login_logs
+    return ip_to_accounts, account_ip_logins, raw_login_logs, last_trade
 
 
 # ---------------------------------------------------------------------------
@@ -275,6 +384,7 @@ def analyze_date(
         "date": target_date,
         "servers": {},
         "login_history_inserted": 0,
+        "last_trade_ip_upserted": 0,
         "status": "empty",
     }
 
@@ -300,6 +410,7 @@ def analyze_date(
     ip_all: dict[str, dict] = {}
     acc_all: dict[str, dict] = {}
     raw_all: dict[str, dict] = {}
+    trade_all: dict[str, dict] = {}
 
     # ----- Parse each server's log ---------------------------------------
     for log_path in log_files:
@@ -314,7 +425,9 @@ def analyze_date(
         monitored_ids = monitored_ids_per_server.get(server_name, set())
 
         try:
-            ip_map, acc_map, raw_map = _parse_one_log(log_path, server_name, monitored_ids)
+            ip_map, acc_map, raw_map, trade_map = _parse_one_log(
+                log_path, server_name, monitored_ids
+            )
         except Exception as exc:
             logger.exception("[%s] parse FAILED: %s", server_name, exc)
             continue
@@ -323,6 +436,8 @@ def analyze_date(
         acc_all[server_name] = acc_map
         if raw_map:
             raw_all[server_name] = raw_map
+        if trade_map:
+            trade_all[server_name] = trade_map
 
         # Per-server stats for the caller.
         monitored_login_count = sum(
@@ -338,16 +453,37 @@ def analyze_date(
             "monitored_logins": monitored_login_count,
             "correlated_accounts": sum(1 for aid in raw_map if aid not in monitored_ids),
             "raw_logs_captured_accounts": len(raw_map),
+            "last_trade_ip_accounts": len(trade_map),
         }
 
     if not acc_all:
         logger.warning("analyze_date: all server parses failed for %s", target_date)
         return summary
 
-    # ----- Save JSONs (always 3 files, even if one server is missing) -----
+    # ----- Save JSONs (always written, even if one server is missing) -----
     _save_json(ip_all, out_day_dir / IP_MAPPING_FILE)
     _save_json(acc_all, out_day_dir / ACCOUNT_LOGINS_FILE)
     _save_json(raw_all, out_day_dir / RAW_LOGINS_FILE)
+    _save_json(trade_all, out_day_dir / LAST_TRADE_IP_FILE)
+
+    # ----- Write per-account last-trade-IP rows ----------------------------
+    if write_to_db and trade_all:
+        trade_records = [
+            (
+                target_date,
+                server_name,
+                int(acc_id_str),
+                info["ip"],
+                info["event_time_mt"],
+                info["event_kind"],
+                info["order_ref"],
+            )
+            for server_name, trades in trade_all.items()
+            for acc_id_str, info in trades.items()
+        ]
+        summary["last_trade_ip_upserted"] = login_ip_db.upsert_last_trade_ips(
+            trade_records
+        )
 
     # ----- Write monitored-account login_history rows ---------------------
     if write_to_db and all_monitored_ids:

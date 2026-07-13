@@ -293,11 +293,13 @@ def _daily_housekeeping() -> None:
         removed_history = login_ip_db.cleanup_old_login_history()
         removed_runs = login_ip_db.cleanup_old_scheduler_runs()
         reaped = login_ip_db.reap_stuck_running_runs()
+        removed_trade_ips = login_ip_db.cleanup_old_last_trade_ip()
         logger.info(
-            "[housekeeping] history_removed=%d runs_removed=%d runs_reaped=%d",
+            "[housekeeping] history_removed=%d runs_removed=%d runs_reaped=%d trade_ips_removed=%d",
             removed_history,
             removed_runs,
             reaped,
+            removed_trade_ips,
         )
     except Exception:
         logger.exception("[housekeeping] failed (swallowed; non-fatal)")

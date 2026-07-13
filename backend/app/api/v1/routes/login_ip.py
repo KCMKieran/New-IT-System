@@ -25,6 +25,8 @@ from ....schemas.login_ip import (
     ExportTaskCreateRequest,
     ExportTaskCreateResponse,
     ExportTaskStatusResponse,
+    LastTradeIpOut,
+    LastTradeIpResponse,
     MailRecipientCreate,
     MailRecipientOut,
     MonitoredAccountBatchCreate,
@@ -86,6 +88,31 @@ async def get_report(date: str):
     except FileNotFoundError as exc:
         raise HTTPException(404, str(exc)) from exc
     return data
+
+
+@router.get("/last-trade-ip", response_model=LastTradeIpResponse)
+async def get_last_trade_ips(
+    date: str | None = None,
+    account_id: int | None = None,
+    ip_address: str | None = None,
+    limit: int = 500,
+):
+    """Per-account "last trade order IP" rows (90-day window).
+
+    All filters optional and ANDed. Without any filter this returns the most
+    recent rows across all days, capped at `limit`.
+    """
+    if date is not None and (len(date) != 8 or not date.isdigit()):
+        raise HTTPException(400, "date must be YYYYMMDD")
+    rows = login_ip_db.search_last_trade_ips(
+        trade_date=date,
+        account_id=account_id,
+        ip_address=ip_address,
+        limit=limit,
+    )
+    return LastTradeIpResponse(
+        rows=[LastTradeIpOut(**r) for r in rows], total=len(rows)
+    )
 
 
 # ---------------------------------------------------------------------------

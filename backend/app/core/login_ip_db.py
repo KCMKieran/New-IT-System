@@ -58,6 +58,10 @@ DEFAULT_SCHEDULER_RUN_RETENTION_DAYS = 90
 # real jobs complete in minutes; 6 h is well outside any legitimate runtime.
 DEFAULT_STUCK_RUN_HOURS = 6
 
+# Retention for the per-account "last trade order IP" daily snapshot.
+# 90 days per business decision 2026-07-13 (aligned with scheduler-run audit).
+DEFAULT_LAST_TRADE_IP_RETENTION_DAYS = 90
+
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS monitored_accounts (
@@ -142,6 +146,31 @@ CREATE TABLE IF NOT EXISTS login_ip_export_tasks (
 
 CREATE INDEX IF NOT EXISTS idx_login_ip_export_status      ON login_ip_export_tasks(status);
 CREATE INDEX IF NOT EXISTS idx_login_ip_export_expires_at  ON login_ip_export_tasks(expires_at);
+
+-- Per-account "last trade order IP" — one row per (MT day, server, account):
+-- the LAST client-initiated trade event of that day that carried a valid
+-- client IPv4. Server-initiated events (StopOut, SL/TP routing, dealer) have
+-- no client IP and never land here. Demo / manager accounts are filtered at
+-- parse time (see login_ip_analyzer_service).
+--
+-- event_time_mt is the MT-server local wall clock (HH:MM:SS.mmm) exactly as
+-- it appears in the journal — kept as-is, same convention as the rest of the
+-- module (login_history is also keyed on the MT day).
+CREATE TABLE IF NOT EXISTS last_trade_ip (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    trade_date     TEXT    NOT NULL,   -- YYYYMMDD (MT day)
+    server_name    TEXT    NOT NULL,   -- MT4 | MT5 | MT4_Live2
+    account_id     INTEGER NOT NULL,
+    ip_address     TEXT    NOT NULL,
+    event_time_mt  TEXT    NOT NULL,   -- HH:MM:SS.mmm, MT server local time
+    event_kind     TEXT    NOT NULL,   -- e.g. 'deal performed', 'market buy'
+    order_ref      TEXT,               -- '#NNNNN' if present in the line
+    UNIQUE (trade_date, server_name, account_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_last_trade_ip_date ON last_trade_ip(trade_date);
+CREATE INDEX IF NOT EXISTS idx_last_trade_ip_acc  ON last_trade_ip(account_id);
+CREATE INDEX IF NOT EXISTS idx_last_trade_ip_ip   ON last_trade_ip(ip_address);
 """
 
 
@@ -344,6 +373,91 @@ def cleanup_old_login_history(days: int = DEFAULT_HISTORY_RETENTION_DAYS) -> int
 
     if deleted:
         logger.info("cleanup_old_login_history: removed %d rows older than %s", deleted, cutoff)
+    return deleted
+
+
+# ---------------------------------------------------------------------------
+# last_trade_ip CRUD
+# ---------------------------------------------------------------------------
+
+
+def upsert_last_trade_ips(
+    records: Iterable[tuple[str, str, int, str, str, str, str | None]],
+) -> int:
+    """Batch-upsert last-trade-IP rows.
+
+    Each tuple: (trade_date, server_name, account_id, ip_address,
+                 event_time_mt, event_kind, order_ref).
+
+    INSERT OR REPLACE (not IGNORE): re-running the same day must WIN over the
+    stored row — a re-parse can legitimately produce a different "last" event
+    (e.g. the first run read a partially-downloaded log). Returns row count.
+    """
+    records = list(records)
+    if not records:
+        return 0
+    with get_connection() as conn:
+        conn.executemany(
+            "INSERT OR REPLACE INTO last_trade_ip "
+            "(trade_date, server_name, account_id, ip_address, "
+            " event_time_mt, event_kind, order_ref) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            records,
+        )
+        conn.commit()
+    logger.info("last_trade_ip: upserted %d rows", len(records))
+    return len(records)
+
+
+def search_last_trade_ips(
+    trade_date: str | None = None,
+    account_id: int | None = None,
+    ip_address: str | None = None,
+    limit: int = 500,
+) -> list[dict]:
+    """Query last-trade-IP rows. All filters optional (ANDed); newest day first.
+
+    `limit` is capped defensively — a full 90-day window is ~180k rows and the
+    API layer should never ship that in one response.
+    """
+    sql = (
+        "SELECT trade_date, server_name, account_id, ip_address, "
+        "       event_time_mt, event_kind, order_ref "
+        "FROM last_trade_ip WHERE 1=1"
+    )
+    params: list = []
+    if trade_date:
+        sql += " AND trade_date = ?"
+        params.append(trade_date)
+    if account_id is not None:
+        sql += " AND account_id = ?"
+        params.append(account_id)
+    if ip_address:
+        sql += " AND ip_address = ?"
+        params.append(ip_address)
+    sql += " ORDER BY trade_date DESC, server_name, account_id LIMIT ?"
+    params.append(max(1, min(limit, 5000)))
+
+    with get_connection() as conn:
+        rows = conn.execute(sql, params).fetchall()
+    return [dict(r) for r in rows]
+
+
+def cleanup_old_last_trade_ip(
+    days: int = DEFAULT_LAST_TRADE_IP_RETENTION_DAYS,
+) -> int:
+    """Delete last_trade_ip rows older than `days`. Returns count deleted."""
+    cutoff = (_dt.datetime.now() - _dt.timedelta(days=days)).strftime("%Y%m%d")
+
+    with get_connection() as conn:
+        cursor = conn.execute(
+            "DELETE FROM last_trade_ip WHERE trade_date < ?", (cutoff,)
+        )
+        deleted = cursor.rowcount
+        conn.commit()
+
+    if deleted:
+        logger.info("cleanup_old_last_trade_ip: removed %d rows older than %s", deleted, cutoff)
     return deleted
 
 

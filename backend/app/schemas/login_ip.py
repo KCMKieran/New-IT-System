@@ -200,6 +200,26 @@ class SchedulerRunNowRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Last trade order IP (daily per-account snapshot, 90-day retention)
+# ---------------------------------------------------------------------------
+
+
+class LastTradeIpOut(BaseModel):
+    trade_date: str        # YYYYMMDD (MT day)
+    server_name: str       # MT4 | MT5 | MT4_Live2
+    account_id: int
+    ip_address: str
+    event_time_mt: str     # HH:MM:SS.mmm, MT server local time
+    event_kind: str        # e.g. 'deal performed', 'market'
+    order_ref: Optional[str] = None  # '#NNNNN' when the line carried one
+
+
+class LastTradeIpResponse(BaseModel):
+    rows: List[LastTradeIpOut]
+    total: int
+
+
+# ---------------------------------------------------------------------------
 # CSV export (Tab 3 search results)
 # ---------------------------------------------------------------------------
 
