@@ -210,7 +210,7 @@ class LastTradeIpOut(BaseModel):
     account_id: int
     ip_address: str
     event_time_mt: str     # HH:MM:SS.mmm, MT server local time
-    event_kind: str        # e.g. 'deal performed', 'market'
+    event_kind: str        # always 'close' since 2026-07-13 (close-only semantics)
     order_ref: Optional[str] = None  # '#NNNNN' when the line carried one
 
 

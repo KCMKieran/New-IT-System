@@ -147,11 +147,12 @@ CREATE TABLE IF NOT EXISTS login_ip_export_tasks (
 CREATE INDEX IF NOT EXISTS idx_login_ip_export_status      ON login_ip_export_tasks(status);
 CREATE INDEX IF NOT EXISTS idx_login_ip_export_expires_at  ON login_ip_export_tasks(expires_at);
 
--- Per-account "last trade order IP" — one row per (MT day, server, account):
--- the LAST client-initiated trade event of that day that carried a valid
--- client IPv4. Server-initiated events (StopOut, SL/TP routing, dealer) have
--- no client IP and never land here. Demo / manager accounts are filtered at
--- parse time (see login_ip_analyzer_service).
+-- Per-account "last close order IP" — one row per (MT day, server, account):
+-- the LAST client-initiated CLOSE order of that day that carried a valid
+-- client IPv4 (narrowed from "any trade event" on 2026-07-13; opens/modifies/
+-- deletes no longer count). Server-initiated events (StopOut, SL/TP routing,
+-- dealer) have no client IP and never land here. Demo / manager accounts are
+-- filtered at parse time (see login_ip_analyzer_service).
 --
 -- event_time_mt is the MT-server local wall clock (HH:MM:SS.mmm) exactly as
 -- it appears in the journal — kept as-is, same convention as the rest of the
@@ -163,7 +164,7 @@ CREATE TABLE IF NOT EXISTS last_trade_ip (
     account_id     INTEGER NOT NULL,
     ip_address     TEXT    NOT NULL,
     event_time_mt  TEXT    NOT NULL,   -- HH:MM:SS.mmm, MT server local time
-    event_kind     TEXT    NOT NULL,   -- e.g. 'deal performed', 'market buy'
+    event_kind     TEXT    NOT NULL,   -- always 'close' since 2026-07-13 (close-only semantics)
     order_ref      TEXT,               -- '#NNNNN' if present in the line
     UNIQUE (trade_date, server_name, account_id)
 );

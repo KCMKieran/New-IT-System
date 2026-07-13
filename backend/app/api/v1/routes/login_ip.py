@@ -97,7 +97,7 @@ async def get_last_trade_ips(
     ip_address: str | None = None,
     limit: int = 500,
 ):
-    """Per-account "last trade order IP" rows (90-day window).
+    """Per-account "last close order IP" rows (90-day window).
 
     All filters optional and ANDed. Without any filter this returns the most
     recent rows across all days, capped at `limit`.

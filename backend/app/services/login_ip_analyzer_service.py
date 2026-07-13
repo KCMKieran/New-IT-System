@@ -4,8 +4,10 @@ Login IP Monitor — log analyzer service.
 Takes one day's raw .log files (one per MT server) and produces the JSON
 analysis artifacts + writes monitored-account login rows into login_ip.db.
 Since 2026-07 the same single pass also extracts, per trading account, the
-LAST client trade event of the day that carried a client IPv4 — persisted to
-the `last_trade_ip` table and `analysis_last_trade_ip.json` (90-day retention).
+LAST client-initiated CLOSE order of the day that carried a client IPv4 —
+persisted to the `last_trade_ip` table and `analysis_last_trade_ip.json`
+(90-day retention). Non-close trade events (open/modify/delete/pending) are
+intentionally ignored per the 2026-07-13 business decision.
 
 Called by
 ---------
@@ -58,10 +60,11 @@ RAW_LOGINS_FILE = "analysis_raw_logins.json"
 LAST_TRADE_IP_FILE = "analysis_last_trade_ip.json"
 
 # --- last-trade-IP extraction rules ------------------------------------------
-# Business definition (decided 2026-07-13): for every trading account, keep
-# the LAST client-initiated trade event of the MT day that carries a valid
-# client IPv4. Server-initiated lines (StopOut.*, dealer routing, SL/TP
-# activation) have a module name or an empty IP column and never match.
+# Business definition (decided 2026-07-13, narrowed same day): for every
+# trading account, keep the LAST client-initiated CLOSE order of the MT day
+# that carries a valid client IPv4. Opens / pending orders / modifies /
+# deletes do NOT count. Server-initiated lines (StopOut.*, dealer routing,
+# SL/TP activation) have a module name or an empty IP column and never match.
 #
 # Demo / manager filtering happens HERE (at parse time, per business decision):
 #   - MT5:            demo logins all start with '3' (verified against the
@@ -74,35 +77,34 @@ LAST_TRADE_IP_FILE = "analysis_last_trade_ip.json"
 _DEMO_PREFIX_BY_SERVER = {"MT5": "3", "MT4": "7", "MT4_Live2": "7"}
 _MIN_CLIENT_LOGIN_LEN = 5
 
-# Trade-event verbs, prefix-matched against the message after "'<acc>': ".
-# Enumerated from real journal samples (20260710); anything not listed —
-# login/logout, 'request from'/'confirm' dealer flows, 'not enough money'
-# rejections, password/user admin lines — is intentionally NOT a trade event.
-_MT4_TRADE_VERBS = (
-    "market ",   # market buy/sell request
-    "order ",    # pending placed + 'order #N, ...' confirmations
-    "modify ",   # modify order #N
-    "close ",    # close order #N
-    "delete ",   # delete order #N
-    "instant ",  # legacy instant-execution requests
-)
-_MT5_TRADE_VERBS = (
-    "deal performed",
-    "order performed",
-    "order placed",
-    "order canceled",
-    "cancel order",
-    "order modified",
-    "modify order",
-    "position modified",
-    "modify #",
-    "market buy",
-    "market sell",
-    "buy stop",
-    "sell stop",
-    "buy limit",
-    "sell limit",
-)
+# Close-order detection, matched against the message after "'<acc>': ".
+# Enumerated from real journal samples (20260710) — the two server families
+# log client closes in completely different shapes:
+#
+#   MT4/MT4_Live2:  'close market order #N (...)'   close request
+#                   'close order #N (...) completed' execution confirmation
+#     Both start with 'close '. The only other 'close ' shape, 'close all
+#     orders due stop out', is server-initiated (empty IP column) and is
+#     already rejected by the IPv4 gate below.
+#
+#   MT5:            'market sell 0.02 X, close #N buy ...'  market close
+#                   'close position #N ... by position #M'  close-by (hedge)
+#     Server-side variants ('close stop-out position', StopOut.All module
+#     lines, empty-IP SL/TP 'market ..., close #N' activations) never carry
+#     a client IPv4 and fall to the same gate.
+
+
+def _is_mt4_close(msg: str) -> bool:
+    return msg.startswith("close ")
+
+
+_MT5_MARKET_PREFIXES = ("market buy", "market sell")
+
+
+def _is_mt5_close(msg: str) -> bool:
+    if msg.startswith("close position #"):
+        return True
+    return msg.startswith(_MT5_MARKET_PREFIXES) and ", close #" in msg
 
 _ORDER_REF_RE = re.compile(r"#(\d+)")
 
@@ -130,9 +132,9 @@ def _parse_one_log(
 
     Returns `(ip_to_accounts, account_ip_logins, raw_login_logs, last_trade)`.
     Every key is a str so JSON serialization doesn't need any custom
-    converters later. `last_trade` maps account_id → the LAST client trade
-    event of the day that carried a valid IPv4 (see module constants for the
-    verb whitelist and the demo/manager filter).
+    converters later. `last_trade` maps account_id → the LAST client close
+    order of the day that carried a valid IPv4 (see `_is_mt4_close` /
+    `_is_mt5_close` and the demo/manager filter above).
 
     See module docstring for the two-pass logic. `monitored_ids` is the set of
     monitored account-id STRINGS for this specific server — passing it in
@@ -143,25 +145,25 @@ def _parse_one_log(
         encoding = "utf-16-le"
         ip_idx, acc_idx = 4, 5
         time_idx = 3
-        trade_verbs = _MT5_TRADE_VERBS
+        is_close = _is_mt5_close
     else:
         encoding = "utf-8"
         ip_idx, acc_idx = 2, 3
         time_idx = 1
-        trade_verbs = _MT4_TRADE_VERBS
+        is_close = _is_mt4_close
 
     demo_prefix = _DEMO_PREFIX_BY_SERVER.get(server_name)
 
     ip_to_accounts: dict[str, set[int]] = defaultdict(set)
     account_ip_logins: dict[str, Counter] = defaultdict(Counter)
     raw_login_logs: dict[str, list[str]] = defaultdict(list)
-    # Journal lines are chronological, so "last trade event" is simply the
+    # Journal lines are chronological, so "last close order" is simply the
     # latest matching line — overwrite wins, memory stays O(#accounts).
     last_trade: dict[str, dict] = {}
 
     lines_scanned = 0
     logins_matched = 0
-    trade_lines_matched = 0
+    close_lines_matched = 0
 
     # ----- Pass 1 ---------------------------------------------------------
     with open(log_path, "r", encoding=encoding, errors="ignore") as fp:
@@ -193,21 +195,19 @@ def _parse_one_log(
                     continue
                 if demo_prefix and acc_id_str.startswith(demo_prefix):
                     continue
-                for verb in trade_verbs:
-                    if msg.startswith(verb):
-                        # MT4 rejections keep the verb ('market buy ... [no
-                        # money]') — a refused request is not a trade order.
-                        if "no money" in msg:
-                            break
-                        ref_match = _ORDER_REF_RE.search(msg)
-                        last_trade[acc_id_str] = {
-                            "ip": ip_str,
-                            "event_time_mt": parts[time_idx].strip(),
-                            "event_kind": verb.strip(),
-                            "order_ref": f"#{ref_match.group(1)}" if ref_match else None,
-                        }
-                        trade_lines_matched += 1
-                        break
+                # MT4 rejections keep the verb ('... [no money]') — a
+                # refused request is not a close order.
+                if is_close(msg) and "no money" not in msg:
+                    # First '#N' in the message is the order/position being
+                    # closed, for both MT4 shapes and both MT5 shapes.
+                    ref_match = _ORDER_REF_RE.search(msg)
+                    last_trade[acc_id_str] = {
+                        "ip": ip_str,
+                        "event_time_mt": parts[time_idx].strip(),
+                        "event_kind": "close",
+                        "order_ref": f"#{ref_match.group(1)}" if ref_match else None,
+                    }
+                    close_lines_matched += 1
                 continue
 
             parts = line.split("\t")
@@ -276,14 +276,14 @@ def _parse_one_log(
 
     logger.info(
         "[%s] parsed: %d lines scanned, %d login events, %d unique IPs, %d unique accounts, "
-        "%d raw-log accounts captured, %d trade lines → %d last-trade-IP accounts",
+        "%d raw-log accounts captured, %d close lines → %d last-trade-IP accounts",
         server_name,
         lines_scanned,
         logins_matched,
         len(ip_to_accounts),
         len(account_ip_logins),
         len(raw_login_logs),
-        trade_lines_matched,
+        close_lines_matched,
         len(last_trade),
     )
     return ip_to_accounts, account_ip_logins, raw_login_logs, last_trade
