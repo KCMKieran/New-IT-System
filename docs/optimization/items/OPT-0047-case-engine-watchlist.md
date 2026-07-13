@@ -108,3 +108,8 @@ related: [[OPT-0045]] [[OPT-0046]]
 
 **Follow-up**：∆1/真信号归并两 AC 部署后补验；root .env 补 RISK_CASES_PG_*；
 bad-param 422 化拍板；merge 后用户恢复 Claude AI WIP 需解 stash 冲突。
+
+**部署后补验（2026-07-13 10:01 prod）**：root .env 已补；首个 tick 后 case sync
+295 事件 → **160 真案卷**；**AC1 ✅ 真信号验证——127582 十七账户归并一行**（另
+164813/6 账户、170523/5 账户）；旗舰案例 166818 在册（watching, rebate_arb tag）。
+仅剩 ∆1 待明后天快照（07-14 07:10 首份、07-15 出数）。
