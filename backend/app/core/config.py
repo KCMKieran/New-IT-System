@@ -191,7 +191,7 @@ class Settings:
             d.strip().lower().lstrip("@")
             for d in (
                 os.environ.get("ALERT_MAIL_ALLOWED_DOMAINS")
-                or "kohleservices.com,kcmtrade.com"
+                or "kohleservices.com,kcmtrade.com,th.kohlecapital.com"
             ).split(",")
             if d.strip()
         }
