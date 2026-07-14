@@ -109,11 +109,11 @@ def _insert(alert: dict, scanned_at: datetime | None = None) -> int:
 
 SEED_CONDITIONS = {
     "any": [
-        {"type": "min_matched_lots_std", "min_matched_lots_std": 10.0},
+        {"type": "min_matched_lots_std", "min_matched_lots_std": 3.0},
         {
             "type": "paired_orders",
-            "min_orders_per_side": 5,
-            "min_matched_lots_std": 1.0,
+            "min_orders_per_side": 3,
+            "min_matched_lots_std": 0.5,
         },
     ]
 }
@@ -138,21 +138,21 @@ class MailCapture:
 # ── Condition evaluation ───────────────────────────────────
 
 def test_condition_a_hits_at_exact_boundary():
-    alert = _hedge_alert(buy_lots=10.0, sell_lots=10.0, buy_count=1, sell_count=1)
+    alert = _hedge_alert(buy_lots=3.0, sell_lots=3.0, buy_count=1, sell_count=1)
     match = amd.evaluate_conditions(alert, SEED_CONDITIONS)
     assert match is not None
-    assert match["matched_lots_std"] == pytest.approx(10.0)
+    assert match["matched_lots_std"] == pytest.approx(3.0)
     assert any(l.startswith("A") for l in match["labels"])
 
 
 def test_condition_a_below_boundary_no_hit():
-    alert = _hedge_alert(buy_lots=9.99, sell_lots=9.99, buy_count=1, sell_count=1)
+    alert = _hedge_alert(buy_lots=2.99, sell_lots=2.99, buy_count=1, sell_count=1)
     assert amd.evaluate_conditions(alert, SEED_CONDITIONS) is None
 
 
 def test_condition_a_uses_min_side():
-    # Asymmetric sides: matched volume = min(buy, sell) = 9 → no hit.
-    alert = _hedge_alert(buy_lots=9.0, sell_lots=500.0, buy_count=1, sell_count=1)
+    # Asymmetric sides: matched volume = min(buy, sell) = 2.9 → no hit.
+    alert = _hedge_alert(buy_lots=2.9, sell_lots=500.0, buy_count=1, sell_count=1)
     assert amd.evaluate_conditions(alert, SEED_CONDITIONS) is None
 
 
@@ -166,14 +166,14 @@ def test_cent_symbol_divided_by_100():
 
 
 def test_cent_symbol_boundary_hits():
-    # 1000 cent-lots = exactly 10 std → A hits.
+    # 300 cent-lots = exactly 3 std → A hits.
     alert = _hedge_alert(
-        symbol="XAUUSD.cent", buy_lots=1000.0, sell_lots=1000.0,
+        symbol="XAUUSD.cent", buy_lots=300.0, sell_lots=300.0,
         buy_count=1, sell_count=1,
     )
     match = amd.evaluate_conditions(alert, SEED_CONDITIONS)
     assert match is not None
-    assert match["matched_lots_std"] == pytest.approx(10.0)
+    assert match["matched_lots_std"] == pytest.approx(3.0)
 
 
 def test_cent_suffix_case_insensitive():
@@ -187,8 +187,8 @@ def test_cent_suffix_case_insensitive():
 
 
 def test_condition_b_paired_orders():
-    # 5+5 orders, 1 std matched → B hits even though A (10 lots) doesn't.
-    alert = _hedge_alert(buy_lots=1.0, sell_lots=1.0, buy_count=5, sell_count=5)
+    # 3+3 orders, 0.5 std matched → B hits even though A (3 lots) doesn't.
+    alert = _hedge_alert(buy_lots=0.5, sell_lots=0.5, buy_count=3, sell_count=3)
     match = amd.evaluate_conditions(alert, SEED_CONDITIONS)
     assert match is not None
     assert any(l.startswith("B") for l in match["labels"])
@@ -196,21 +196,21 @@ def test_condition_b_paired_orders():
 
 
 def test_condition_b_below_order_count_no_hit():
-    alert = _hedge_alert(buy_lots=1.0, sell_lots=1.0, buy_count=4, sell_count=5)
+    alert = _hedge_alert(buy_lots=0.5, sell_lots=0.5, buy_count=2, sell_count=3)
     assert amd.evaluate_conditions(alert, SEED_CONDITIONS) is None
 
 
 def test_condition_b_lot_floor_uses_cent_conversion():
-    # 5+5 orders but only 50 cent-lots = 0.5 std < 1 → no hit.
+    # 3+3 orders but only 25 cent-lots = 0.25 std < 0.5 → no hit.
     alert = _hedge_alert(
-        symbol="EURUSD.cent", buy_lots=50.0, sell_lots=50.0,
-        buy_count=5, sell_count=5,
+        symbol="EURUSD.cent", buy_lots=25.0, sell_lots=25.0,
+        buy_count=3, sell_count=3,
     )
     assert amd.evaluate_conditions(alert, SEED_CONDITIONS) is None
-    # 100 cent-lots = 1.0 std → hits.
+    # 50 cent-lots = 0.5 std → hits.
     alert = _hedge_alert(
-        symbol="EURUSD.cent", buy_lots=100.0, sell_lots=100.0,
-        buy_count=5, sell_count=5,
+        symbol="EURUSD.cent", buy_lots=50.0, sell_lots=50.0,
+        buy_count=3, sell_count=3,
     )
     assert amd.evaluate_conditions(alert, SEED_CONDITIONS) is not None
 
@@ -296,6 +296,44 @@ def test_non_matching_alert_advances_cursor_silently(temp_db):
     assert mail.sent == []
     sub_id = rm_db.load_mail_subscriptions(module="hedge_open")[0]["id"]
     assert rm_db.get_mail_dispatch_cursor(sub_id) == aid
+
+
+def test_body_states_trigger_conditions(temp_db):
+    # The digest must spell out the subscription's current thresholds so
+    # recipients can judge the alert without opening the UI.
+    _insert(_hedge_alert())
+    mail = MailCapture()
+    amd.dispatch_alert_mails(now=NOW, send_fn=mail)
+    body = mail.sent[0]["body"]
+    assert "Trigger conditions (any one triggers):" in body
+    assert "A - large hedge volume: matched lots &gt;= 3 std" in body
+    assert (
+        "B - scripted paired opens: &gt;= 3 orders each side "
+        "and matched lots &gt;= 0.5 std"
+    ) in body
+
+
+def test_describe_conditions_shapes():
+    # Legacy v1 tree → OR note + one line per condition.
+    note, lines = amd.describe_conditions(SEED_CONDITIONS)
+    assert note == "any one triggers"
+    assert lines == [
+        "A - large hedge volume: matched lots >= 3 std",
+        "B - scripted paired opens: >= 3 orders each side "
+        "and matched lots >= 0.5 std",
+    ]
+    # Generic tree → logic note + field/op/value lines.
+    note, lines = amd.describe_conditions(
+        {"logic": "and", "conditions": [
+            {"field": "matched_lots_std", "op": ">=", "value": 2},
+        ]}
+    )
+    assert note == "all must hold"
+    assert lines == ["A - matched_lots_std >= 2"]
+    # Empty tree → mail-everything wording, no join note.
+    note, lines = amd.describe_conditions({})
+    assert note == ""
+    assert lines == ["(no conditions - every alert of this module is mailed)"]
 
 
 def test_negative_equity_highlighted_in_body(temp_db):

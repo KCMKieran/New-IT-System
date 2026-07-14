@@ -366,6 +366,51 @@ def evaluate_subscription_conditions(
     return evaluate_generic_conditions(alert, conditions, source)
 
 
+def describe_conditions(conditions: Dict[str, Any]) -> Tuple[str, List[str]]:
+    """English one-liners describing a subscription's condition tree.
+
+    Rendered into the digest so recipients see the current thresholds
+    without opening the UI. Returns (join_note, lines); join_note says how
+    the lines combine ("any one triggers" for OR, "all must hold" for AND).
+    Wording mirrors the evaluators' match labels; an unrecognized leaf
+    renders as a visible placeholder instead of being silently dropped.
+    """
+    if not conditions:
+        return "", ["(no conditions - every alert of this module is mailed)"]
+
+    lines: List[str] = []
+    if "any" in conditions:  # legacy v1 tree, OR semantics
+        for idx, cond in enumerate(conditions.get("any") or []):
+            tag = chr(ord("A") + idx) if idx < 26 else f"#{idx + 1}"
+            ctype = str(cond.get("type") or "")
+            if ctype == "min_matched_lots_std":
+                floor = float(cond.get("min_matched_lots_std", 0.0))
+                lines.append(
+                    f"{tag} - large hedge volume: matched lots >= {floor:g} std"
+                )
+            elif ctype == "paired_orders":
+                min_side = int(cond.get("min_orders_per_side", 0))
+                floor = float(cond.get("min_matched_lots_std", 0.0))
+                lines.append(
+                    f"{tag} - scripted paired opens: >= {min_side} orders each "
+                    f"side and matched lots >= {floor:g} std"
+                )
+            else:
+                lines.append(f"{tag} - (unrecognized condition type: {ctype})")
+        return "any one triggers", lines
+
+    conds = list(conditions.get("conditions") or [])
+    if not conds:
+        return "", ["(no conditions - every alert of this module is mailed)"]
+    for idx, cond in enumerate(conds):
+        tag = chr(ord("A") + idx) if idx < 26 else f"#{idx + 1}"
+        lines.append(
+            f"{tag} - {cond.get('field')} {cond.get('op')} {cond.get('value')}"
+        )
+    logic = str(conditions.get("logic") or "and").lower()
+    return ("any one triggers" if logic == "or" else "all must hold"), lines
+
+
 # ── Formatting helpers ─────────────────────────────────────
 
 def _parse_utc(value: Any) -> Optional[datetime]:
@@ -559,12 +604,26 @@ def build_hedge_digest_email(
         _account_section(i + 1, alert, match, sibling_map.get(int(alert["id"]), []))
         for i, (alert, match) in enumerate(hits)
     )
+    join_note, cond_lines = describe_conditions(subscription.get("conditions") or {})
+    cond_title = "Trigger conditions"
+    if join_note:
+        cond_title += f" ({join_note})"
+    conditions_html = (
+        f"<div style=\"margin:12px 0 0;\">"
+        f"<div style=\"font-weight:bold;\">{html.escape(cond_title)}:</div>"
+        + "".join(
+            f"<div style=\"padding:1px 0;\">{html.escape(line)}</div>"
+            for line in cond_lines
+        )
+        + "</div>"
+    )
     updated_at = subscription.get("updated_at") or "-"
     body = f"""<meta name="viewport" content="width=device-width,initial-scale=1">
 <div style="max-width:600px;font-family:Arial,Helvetica,sans-serif;color:#1a1a1a;font-size:13px;">
 <p>Dear IT Team,</p>
 <p>{n} hedge-open alert(s) matched the wash-commission mail conditions
 (subscription: {html.escape(str(subscription.get('name') or ''))}).</p>
+{conditions_html}
 {sections}
 <p style="margin-top:20px;">Review on the Risk Monitor page:
 <a href="{_RISK_MONITOR_PAGE_URL}" style="color:#2563eb;">{_RISK_MONITOR_PAGE_URL}</a></p>

@@ -692,9 +692,11 @@ VALUES ('默认马丁检测', 1, 0.0, 1.0, 1, 0);
 """
 
 # OPT-0042 seed subscription: hedge-open wash-commission mail alert.
-# Conditions (A OR B, backtested on 7 days of real alerts, zero noise):
-#   A  min(buy_lots, sell_lots) in STANDARD lots >= 10  (.cent symbols /100)
-#   B  min(buy_count, sell_count) >= 5 AND matched standard lots >= 1
+# Conditions (A OR B; thresholds lowered 2026-07-14 after a 21-day backtest
+# showed the original 10/5+1 tier only fired on the 2026-07-03 whale event —
+# this tier adds ~1-2 more digests per month, still zero cent-noise):
+#   A  min(buy_lots, sell_lots) in STANDARD lots >= 3  (.cent symbols /100)
+#   B  min(buy_count, sell_count) >= 3 AND matched standard lots >= 0.5
 # mail_to is Kieran only during the pilot phase (user decision 2026-07-08);
 # real business recipients are added later by editing this row.
 _SEED_MAIL_SUBSCRIPTION_SQL = """
@@ -705,7 +707,7 @@ VALUES (
     '批量对冲刷佣',
     'hedge_open',
     NULL,
-    '{"any": [{"type": "min_matched_lots_std", "min_matched_lots_std": 10.0}, {"type": "paired_orders", "min_orders_per_side": 5, "min_matched_lots_std": 1.0}]}',
+    '{"any": [{"type": "min_matched_lots_std", "min_matched_lots_std": 3.0}, {"type": "paired_orders", "min_orders_per_side": 3, "min_matched_lots_std": 0.5}]}',
     'kieran.xiang@kohleservices.com',
     NULL,
     'realtime',
