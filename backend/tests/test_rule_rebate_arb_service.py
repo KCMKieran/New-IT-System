@@ -1,4 +1,7 @@
-"""Tests for OPT-0046 Rebate Arbitrage detection (rule 121, band 121-130).
+"""Tests for OPT-0046 Rebate Arbitrage detection (rule 121, band 121-130)
+and the wide-net Rebate Watch roster rule (rule 122, same band): rebate-only
+trigger (no combined condition), lower env-tunable floor, 121-wins-same-tick
+exclusion, band-scoped daily dedup, per-rule_id labels, kill-switch env flag.
 
 Covers (fixture data only — no MySQL):
 - Client-level aggregation: multi-account fold, CEN /100 on the trades leg
@@ -246,6 +249,73 @@ def test_env_threshold_override(monkeypatch):
     assert svc.get_min_rebate_usd() == svc.DEFAULT_MIN_REBATE_USD
 
 
+# ── rule 122 (wide-net Rebate Watch) trigger ───────────────────────────────
+
+def _detect_122(clients, **kw):
+    kw.setdefault("min_rebate_usd", svc.DEFAULT_RULE2_MIN_REBATE_USD)
+    kw.setdefault("min_combined_usd", None)  # rebate-only trigger
+    kw.setdefault("rule_id", svc.REBATE_ARB_RULE2_ID)
+    return svc.rule_rebate_arb_detect(clients, **kw)
+
+
+def test_rule2_fires_on_negative_combined():
+    # The key difference vs 121: a net-LOSING high-rebate client (combined
+    # deeply negative) still enters the watch roster.
+    trades = {"1-1": _trade_row("1-1", 20, pnl=-5000.0)}
+    rebates = [_rebate_row("1-1", 20, 300.0)]
+    hits = _detect_122(svc.aggregate_clients(trades, rebates))
+    assert [h["userid"] for h in hits] == [20]
+    assert hits[0]["rule_id"] == svc.REBATE_ARB_RULE2_ID == 122
+    assert hits[0]["combined_usd"] < 0
+
+
+def test_rule2_below_floor_does_not_fire_and_boundary_fires():
+    trades = {"1-1": _trade_row("1-1", 21, pnl=-100.0)}
+    assert _detect_122(svc.aggregate_clients(
+        trades, [_rebate_row("1-1", 21, 199.99)])) == []
+    # Boundary: rebate exactly at the floor → >= triggers.
+    assert [h["userid"] for h in _detect_122(svc.aggregate_clients(
+        trades, [_rebate_row("1-1", 21, 200.0)]))] == [21]
+
+
+def test_rule2_respects_already_alerted_set():
+    clients = svc.aggregate_clients(
+        {"1-1": _trade_row("1-1", 22, pnl=-100.0)},
+        [_rebate_row("1-1", 22, 900.0)],
+    )
+    assert _detect_122(clients, already_alerted_userids={22}) == []
+    assert len(_detect_122(clients, already_alerted_userids={23})) == 1
+
+
+def test_rule2_id_in_band_passes_unclamped_and_out_of_band_clamps():
+    clients = svc.aggregate_clients(
+        {"1-1": _trade_row("1-1", 24, pnl=-100.0)},
+        [_rebate_row("1-1", 24, 900.0)],
+    )
+    assert _detect_122(clients)[0]["rule_id"] == 122  # in band: no clamp
+    hits = _detect_122(clients, rule_id=131)          # out of band: clamped
+    assert hits[0]["rule_id"] == svc.REBATE_ARB_RULE_ID_BASE
+
+
+def test_rule2_env_threshold_override(monkeypatch):
+    assert svc.get_rule2_min_rebate_usd() == 200.0
+    monkeypatch.setenv("REBATE_ARB_RULE2_MIN_REBATE_USD", "350")
+    assert svc.get_rule2_min_rebate_usd() == 350.0
+    monkeypatch.setenv("REBATE_ARB_RULE2_MIN_REBATE_USD", "garbage")
+    assert svc.get_rule2_min_rebate_usd() == svc.DEFAULT_RULE2_MIN_REBATE_USD
+
+
+def test_rule2_enabled_flag_parsing(monkeypatch):
+    monkeypatch.delenv("REBATE_ARB_RULE2_ENABLED", raising=False)
+    assert svc.get_rule2_enabled() is True          # default on
+    for raw in ("false", "FALSE", " False "):
+        monkeypatch.setenv("REBATE_ARB_RULE2_ENABLED", raw)
+        assert svc.get_rule2_enabled() is False
+    for raw in ("true", "1", "0", "garbage", ""):   # only literal "false" disables
+        monkeypatch.setenv("REBATE_ARB_RULE2_ENABLED", raw)
+        assert svc.get_rule2_enabled() is True
+
+
 # ── baseline + today merge ─────────────────────────────────────────────────
 
 def test_merge_trade_legs_is_additive_and_refreshes_identity():
@@ -317,6 +387,27 @@ def test_build_alerts_field_mapping():
     assert a["contributing_account_count"] == 2
     assert a["wallet_login_sids"].startswith("2-12109:14470.00")
     assert a["window_date"] == TODAY
+
+
+def test_build_alerts_label_follows_rule_id():
+    clients = svc.aggregate_clients(
+        {
+            "1-1": _trade_row("1-1", 31, pnl=-100.0),    # 121: combined +900
+            "1-2": _trade_row("1-2", 32, pnl=-5000.0),   # 122: combined -4700
+        },
+        [_rebate_row("1-1", 31, 1000.0), _rebate_row("1-2", 32, 300.0)],
+    )
+    hits_121 = _detect(clients)
+    hits_122 = _detect_122(clients, already_alerted_userids={31})
+    alerts = svc.build_alerts(
+        hits_121 + hits_122, window_date=TODAY, scanned_at=_iso(NOW),
+        net_deposit_map={}, equity_map={},
+    )
+    by_rule = {a["rule_id"]: a for a in alerts}
+    assert by_rule[121]["rule_label"] == svc.REBATE_ARB_RULE_LABEL
+    assert by_rule[122]["rule_label"] == svc.REBATE_ARB_RULE2_LABEL
+    assert by_rule[121]["client_userid"] == 31
+    assert by_rule[122]["client_userid"] == 32
 
 
 def test_build_alerts_missing_enrichment_is_none():
@@ -479,10 +570,21 @@ def test_digest_template_follows_alert_email_style():
 
 def test_rules_loader_reflects_env_thresholds(monkeypatch):
     monkeypatch.setenv("REBATE_ARB_MIN_REBATE_USD", "750")
+    monkeypatch.setenv("REBATE_ARB_RULE2_MIN_REBATE_USD", "250")
     rules = SOURCE["rules_loader"]()
-    assert len(rules) == 1
+    assert len(rules) == 2
     assert rules[0]["id"] == 121
     assert rules[0]["params"]["min_rebate_usd"] == 750.0
+    assert rules[1]["id"] == 122
+    assert rules[1]["params"]["min_rebate_usd"] == 250.0
+    assert "min_combined_usd" not in rules[1]["params"]  # 122 = rebate-only
+
+
+def test_rules_loader_rule2_disabled_flag(monkeypatch):
+    monkeypatch.setenv("REBATE_ARB_RULE2_ENABLED", "false")
+    rules = SOURCE["rules_loader"]()
+    assert [r["id"] for r in rules] == [121, 122]
+    assert rules[1]["enabled"] is False
 
 
 def test_test_send_uses_fallback_sample(temp_db, monkeypatch):
@@ -635,6 +737,87 @@ def test_scan_dedup_fetcher_failure_fails_open(monkeypatch, fresh_baseline):
         object(), alerted_userids_fetcher=lambda wd: {7}
     )
     assert result2["alerts"] == []
+
+
+# ── rule 122 inside scan_rebate_arb (same fake DB layer) ───────────────────
+
+def _wire_scan_fakes_two_clients(monkeypatch, mt_clock, enrich_calls=None):
+    """Client 7: rebate $1,000, combined +$900 → 121. Client 8: rebate $300,
+    combined -$4,700 → 122 only (fails 121 on both floor and combined)."""
+    monkeypatch.setattr(svc, "_mt_now", lambda: mt_clock["now"])
+    monkeypatch.setattr(svc, "_get_connection", lambda settings: _FakeConn())
+
+    def fake_trades_agg(conn, *, date_from, date_to_exclusive):
+        if (date_to_exclusive - date_from).days == 2:
+            return {}  # increment empty; all history in the baseline
+        return {
+            "1-100": _trade_row("1-100", 7, pnl=-100.0),
+            "1-200": _trade_row("1-200", 8, pnl=-5000.0),
+        }
+
+    monkeypatch.setattr(svc, "_query_trades_agg", fake_trades_agg)
+    monkeypatch.setattr(svc, "_query_rebate_agg", lambda conn, *, date_from: [
+        _rebate_row("1-100", 7, 1000.0),
+        _rebate_row("1-200", 8, 300.0),
+    ])
+
+    def fake_nd(conn, userids):
+        if enrich_calls is not None:
+            enrich_calls.append(sorted(userids))
+        return {}
+
+    monkeypatch.setattr(svc, "_query_net_deposit_split", fake_nd)
+    monkeypatch.setattr(svc, "_query_equity_by_userid", lambda conn, u: {})
+
+
+def test_scan_121_wins_over_122_same_tick(monkeypatch, fresh_baseline):
+    """Client 7 clears BOTH triggers (rebate 1000 >= 200 too) but must emit
+    only the stronger 121; client 8 gets 122. Enrichment covers the union."""
+    enrich_calls: list = []
+    _wire_scan_fakes_two_clients(
+        monkeypatch, {"now": datetime(2026, 7, 10, 12, 0, 0)}, enrich_calls
+    )
+    result = svc.scan_rebate_arb(object())
+    by_client = {a["client_userid"]: a for a in result["alerts"]}
+    assert len(result["alerts"]) == 2  # one alert per client, no 121+122 double
+    assert by_client[7]["rule_id"] == 121
+    assert by_client[7]["rule_label"] == svc.REBATE_ARB_RULE_LABEL
+    assert by_client[8]["rule_id"] == 122
+    assert by_client[8]["rule_label"] == svc.REBATE_ARB_RULE2_LABEL
+    assert by_client[8]["combined_30d"] == pytest.approx(-4700.0)
+    assert enrich_calls == [[7, 8]]  # net-deposit split queried for the union
+
+
+def test_scan_already_alerted_suppresses_122(monkeypatch, fresh_baseline):
+    """The band-scoped dedup set gates 122 too — client 8 already alerted
+    today (by whichever band rule) must not re-emit."""
+    _wire_scan_fakes_two_clients(
+        monkeypatch, {"now": datetime(2026, 7, 10, 12, 0, 0)}
+    )
+    result = svc.scan_rebate_arb(
+        object(), alerted_userids_fetcher=lambda wd: {8}
+    )
+    assert [a["client_userid"] for a in result["alerts"]] == [7]
+    assert result["alerts"][0]["rule_id"] == 121
+
+
+def test_scan_disabled_flag_suppresses_122(monkeypatch, fresh_baseline):
+    _wire_scan_fakes_two_clients(
+        monkeypatch, {"now": datetime(2026, 7, 10, 12, 0, 0)}
+    )
+    monkeypatch.setenv("REBATE_ARB_RULE2_ENABLED", "false")
+    result = svc.scan_rebate_arb(object())
+    assert [a["rule_id"] for a in result["alerts"]] == [121]
+
+
+def test_scan_rule2_env_threshold_applies(monkeypatch, fresh_baseline):
+    """Raising the 122 floor above client 8's $300 rebate drops the hit."""
+    _wire_scan_fakes_two_clients(
+        monkeypatch, {"now": datetime(2026, 7, 10, 12, 0, 0)}
+    )
+    monkeypatch.setenv("REBATE_ARB_RULE2_MIN_REBATE_USD", "301")
+    result = svc.scan_rebate_arb(object())
+    assert [a["rule_id"] for a in result["alerts"]] == [121]
 
 
 # ── Scheduler wiring invariants ────────────────────────────────────────────

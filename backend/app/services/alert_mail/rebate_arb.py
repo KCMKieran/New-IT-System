@@ -28,8 +28,12 @@ from ..rule_rebate_arb_service import (
     REBATE_ARB_RULE_ID_BASE,
     REBATE_ARB_RULE_ID_MAX,
     REBATE_ARB_RULE_LABEL,
+    REBATE_ARB_RULE2_ID,
+    REBATE_ARB_RULE2_LABEL,
     get_min_combined_usd,
     get_min_rebate_usd,
+    get_rule2_enabled,
+    get_rule2_min_rebate_usd,
 )
 
 logger = logging.getLogger(__name__)
@@ -99,18 +103,30 @@ EMPTY_CONTEXT: Dict[str, Any] = {"rebate_30d": 0.0, "combined_30d": 0.0}
 
 
 def rules_loader() -> List[Dict[str, Any]]:
-    """Single fixed detection rule (121). Thresholds are env-driven, so the
-    params shown in the subscription UI reflect the live effective values."""
-    return [{
-        "id": REBATE_ARB_RULE_ID,
-        "name": REBATE_ARB_RULE_LABEL,
-        "enabled": True,
-        "params": {
-            "min_rebate_usd": get_min_rebate_usd(),
-            "min_combined_usd": get_min_combined_usd(),
-            "window_days": 30,
+    """Fixed detection rules (121 strong signal + 122 wide-net rebate watch).
+    Thresholds are env-driven, so the params shown in the subscription UI
+    reflect the live effective values."""
+    return [
+        {
+            "id": REBATE_ARB_RULE_ID,
+            "name": REBATE_ARB_RULE_LABEL,
+            "enabled": True,
+            "params": {
+                "min_rebate_usd": get_min_rebate_usd(),
+                "min_combined_usd": get_min_combined_usd(),
+                "window_days": 30,
+            },
         },
-    }]
+        {
+            "id": REBATE_ARB_RULE2_ID,
+            "name": REBATE_ARB_RULE2_LABEL,
+            "enabled": get_rule2_enabled(),
+            "params": {
+                "min_rebate_usd": get_rule2_min_rebate_usd(),
+                "window_days": 30,
+            },
+        },
+    ]
 
 
 # ── Digest template ──────────────────────────────────────────────────────────

@@ -38,7 +38,11 @@ export const GRID_STORAGE_KEYS = {
     "RISK_MONITOR_GAP_TRADE_GAP_GRID_STATE_V1",
   CLIENT_RETURN_RATE: "CLIENT_RETURN_RATE_GRID_STATE_V1",
   ALERT_MAIL_OUTBOX: "ALERT_MAIL_OUTBOX_GRID_STATE_V1",
-  RISK_WATCHLIST: "RISK_WATCHLIST_GRID_STATE_V1",
+  // V3 (2026-07-14): window-variant children (History/30d/7d/90d/All) are now
+  // collapse-managed by their column group, NOT hide-managed — a browser that
+  // saved the short-lived V2 state (children hide:true) would stamp them
+  // invisible even when the group expands, so force a one-time reset.
+  RISK_WATCHLIST: "RISK_WATCHLIST_GRID_STATE_V3",
 } as const;
 
 export type GridStorageKey =

@@ -9,7 +9,8 @@
  *
  * Column layout follows the per-column sign-off in the risk-disposition
  * skill §4: window sub-columns are AG-Grid column groups (columnGroupShow
- * 'open', collapsed shows the 30d main column), Δ1/Δ30 hold-time trend
+ * 'open', collapsed shows the group's main column — 30d for activity
+ * groups, History for the money groups), Δ1/Δ30 hold-time trend
  * columns show "—" until enough daily snapshots exist.
  *
  * Data: GET /api/v1/risk-cases/watchlist (one big page — roster is
@@ -206,6 +207,21 @@ function profitColor(v: number | null | undefined): string {
     : "text-red-600 dark:text-red-400";
 }
 
+/** Sum two nullable legs: null only when BOTH are null (no snapshot);
+ *  a single null leg is treated as 0. */
+function sumNullable(
+  a: number | null | undefined,
+  b: number | null | undefined,
+): number | null {
+  if (a == null && b == null) return null;
+  return (a ?? 0) + (b ?? 0);
+}
+
+/** PL+Rebate columns: > 0 = net company outflow → red highlight. */
+function combinedCellClass(v: number | null | undefined): string {
+  return v != null && v > 0 ? "font-medium text-red-600 dark:text-red-400" : "";
+}
+
 const STATE_LABELS: Record<string, string> = {
   watching: "观察中",
   disposed: "已处置",
@@ -350,11 +366,17 @@ export default function RiskWatchlist() {
             </a>
           ),
         },
+        // Default view (2026-07-13 rule-122 wide-net relayout): only the
+        // money-trail columns are visible — userId / 交易净入金 / Total PL /
+        // 总反佣 / 已平仓 PL+Rebate / 净值 / 净值−(PL+Rebate). Everything
+        // else ships hide:true and is re-enabled per user via the
+        // ColumnVisibilityMenu (persisted by useGridColumnPersist).
         {
           colId: "state",
           field: "state",
           headerName: "状态",
           width: 104,
+          hide: true,
           cellRenderer: (p: { value: string }) => <StateBadge state={p.value} />,
         },
         {
@@ -362,6 +384,7 @@ export default function RiskWatchlist() {
           field: "user_name",
           headerName: "客户姓名",
           width: 140,
+          hide: true,
           valueFormatter: (p) => p.value ?? EMDASH,
         },
         {
@@ -369,6 +392,7 @@ export default function RiskWatchlist() {
           field: "country",
           headerName: "Country",
           width: 100,
+          hide: true,
           valueFormatter: (p) => p.value ?? EMDASH,
         },
         {
@@ -376,6 +400,7 @@ export default function RiskWatchlist() {
           field: "account_count",
           headerName: "账户数",
           width: 92,
+          hide: true,
           valueFormatter: (p) => fmtInt(p.value),
         },
         {
@@ -383,6 +408,7 @@ export default function RiskWatchlist() {
           field: "accounts",
           headerName: "账户列表",
           width: 170,
+          hide: true,
           tooltipField: "accounts",
           valueFormatter: (p) => p.value ?? EMDASH,
         },
@@ -476,6 +502,7 @@ export default function RiskWatchlist() {
                   "快照不足时显示 —",
               },
               width: 108,
+              hide: true,
               valueFormatter: (p) => fmtDays(p.value),
             },
             {
@@ -488,6 +515,7 @@ export default function RiskWatchlist() {
                   "Now − 1 天前快照。处置后收敛判断主力列；\n需要连续 2 天日基线快照才有值",
               },
               width: 96,
+              hide: true,
               columnGroupShow: "open",
               valueFormatter: (p) => fmtDelta(p.value),
             },
@@ -500,6 +528,7 @@ export default function RiskWatchlist() {
                 tooltip: "Now − 30 天前快照；需要 30 天快照历史才有值",
               },
               width: 96,
+              hide: true,
               columnGroupShow: "open",
               valueFormatter: (p) => fmtDelta(p.value),
             },
@@ -514,6 +543,7 @@ export default function RiskWatchlist() {
               field: "ratio_5m_30d",
               headerName: "<5min",
               width: 100,
+              hide: true,
               valueFormatter: (p) => fmtPct(p.value),
             },
             {
@@ -521,6 +551,7 @@ export default function RiskWatchlist() {
               field: "ratio_10m_30d",
               headerName: "<10min",
               width: 100,
+              hide: true,
               columnGroupShow: "open",
               valueFormatter: (p) => fmtPct(p.value),
             },
@@ -549,6 +580,7 @@ export default function RiskWatchlist() {
               field: "ib_withdrawal",
               headerName: "IB佣金提现",
               width: 130,
+              hide: true,
               columnGroupShow: "open",
               valueFormatter: (p) => fmtMoney(p.value),
               cellClass: (p) => profitColor(p.value),
@@ -556,14 +588,33 @@ export default function RiskWatchlist() {
           ],
         },
         {
+          // Main column = History (lifetime closed PL): it is the PL leg of
+          // the default-visible 已平仓 PL+Rebate (History) column, so the
+          // banner formula can be eyeballed across the visible columns.
+          // Window variants collapse behind columnGroupShow like elsewhere.
           headerName: "Total Profit",
           groupId: "grp_profit",
           children: [
+            {
+              colId: "profit_all",
+              field: "profit_all",
+              headerName: "History",
+              headerComponent: InfoHeader,
+              headerComponentParams: {
+                tooltip:
+                  "已平仓 Total Profit，生涯累计（History），不含浮动。\n" +
+                  "PL+Rebate 的 PL 腿。展开列组可见 30d / 7d 窗口。",
+              },
+              width: 116,
+              valueFormatter: (p) => fmtMoney(p.value),
+              cellClass: (p) => profitColor(p.value),
+            },
             {
               colId: "profit_30d",
               field: "profit_30d",
               headerName: "30d",
               width: 116,
+              columnGroupShow: "open",
               valueFormatter: (p) => fmtMoney(p.value),
               cellClass: (p) => profitColor(p.value),
             },
@@ -576,26 +627,33 @@ export default function RiskWatchlist() {
               valueFormatter: (p) => fmtMoney(p.value),
               cellClass: (p) => profitColor(p.value),
             },
-            {
-              colId: "profit_all",
-              field: "profit_all",
-              headerName: "All",
-              width: 116,
-              columnGroupShow: "open",
-              valueFormatter: (p) => fmtMoney(p.value),
-              cellClass: (p) => profitColor(p.value),
-            },
           ],
         },
         {
+          // Main column = History (lifetime full-chain rebate): the Rebate
+          // leg of 已平仓 PL+Rebate (History). Same rationale as grp_profit.
           headerName: "总反佣",
           groupId: "grp_rebate",
           children: [
+            {
+              colId: "rebate_all",
+              field: "rebate_all",
+              headerName: "History",
+              headerComponent: InfoHeader,
+              headerComponentParams: {
+                tooltip:
+                  "全链返佣（含多级 wallet），生涯累计（History）。\n" +
+                  "PL+Rebate 的 Rebate 腿；与 CRM 单 IB 报表差异属预期口径。",
+              },
+              width: 116,
+              valueFormatter: (p) => fmtMoney(p.value),
+            },
             {
               colId: "rebate_30d",
               field: "rebate_30d",
               headerName: "30d",
               width: 116,
+              columnGroupShow: "open",
               valueFormatter: (p) => fmtMoney(p.value),
             },
             {
@@ -606,55 +664,51 @@ export default function RiskWatchlist() {
               columnGroupShow: "open",
               valueFormatter: (p) => fmtMoney(p.value),
             },
-            {
-              colId: "rebate_all",
-              field: "rebate_all",
-              headerName: "All",
-              width: 116,
-              columnGroupShow: "open",
-              valueFormatter: (p) => fmtMoney(p.value),
-            },
           ],
         },
         {
-          colId: "combined_30d",
-          field: "combined_30d",
-          headerName: "PL+Rebate (30d)",
-          headerComponent: InfoHeader,
-          headerComponentParams: {
-            tooltip:
-              "Total Profit 30d + 总反佣 30d，> 0 = 公司净流出。\n默认按此列降序（公司成本定优先级）",
-          },
-          width: 148,
-          sort: "desc", // default ranking; user overrides persist via hook
-          valueFormatter: (p) => fmtMoney(p.value),
-          cellClass: (p) =>
-            p.value != null && p.value > 0
-              ? "font-medium text-red-600 dark:text-red-400"
-              : "",
-        },
-        {
-          headerName: "主要交易产品(30d)",
-          groupId: "grp_symbols",
+          headerName: "已平仓 PL+Rebate",
+          groupId: "grp_combined",
           children: [
             {
-              colId: "top_symbol_1",
-              headerName: "Top1",
-              width: 130,
+              colId: "combined_all",
+              headerName: "History",
+              headerComponent: InfoHeader,
+              headerComponentParams: {
+                tooltip:
+                  "已平仓 Total Profit (History) + 全链返佣 (History)，生涯累计。\n" +
+                  "> 0 = 公司净流出。默认按此列降序（公司成本定优先级）。\n" +
+                  "仅含已平仓盈亏，不含浮动。",
+              },
+              width: 140,
+              sort: "desc", // default ranking; user overrides persist via hook
+              // valueGetter columns can't infer a cell data type — declare
+              // the number filter explicitly or it falls back to text.
+              filter: "agNumberColumnFilter",
               valueGetter: (p) =>
-                p.data?.top_symbol_1
-                  ? `${p.data.top_symbol_1} (${fmtPct(p.data.top_symbol_1_ratio)})`
-                  : EMDASH,
+                sumNullable(p.data?.profit_all, p.data?.rebate_all),
+              valueFormatter: (p) => fmtMoney(p.value),
+              cellClass: (p) => combinedCellClass(p.value),
             },
             {
-              colId: "top_symbol_2",
-              headerName: "Top2",
-              width: 130,
+              colId: "combined_30d",
+              field: "combined_30d",
+              headerName: "30d",
+              width: 116,
               columnGroupShow: "open",
+              valueFormatter: (p) => fmtMoney(p.value),
+              cellClass: (p) => combinedCellClass(p.value),
+            },
+            {
+              colId: "combined_7d",
+              headerName: "7d",
+              width: 110,
+              columnGroupShow: "open",
+              filter: "agNumberColumnFilter",
               valueGetter: (p) =>
-                p.data?.top_symbol_2
-                  ? `${p.data.top_symbol_2} (${fmtPct(p.data.top_symbol_2_ratio)})`
-                  : EMDASH,
+                sumNullable(p.data?.profit_7d, p.data?.rebate_7d),
+              valueFormatter: (p) => fmtMoney(p.value),
+              cellClass: (p) => combinedCellClass(p.value),
             },
           ],
         },
@@ -666,10 +720,59 @@ export default function RiskWatchlist() {
           valueFormatter: (p) => fmtMoney(p.value),
         },
         {
+          colId: "equity_minus_combined",
+          headerName: "净值−(PL+Rebate)",
+          headerComponent: InfoHeader,
+          headerComponentParams: {
+            tooltip:
+              "净值 − 已平仓PL+Rebate (History)。\n" +
+              "> 0 偏公司净赚（客户整体输钱），< 0 偏客户+代理链净拿走。\n" +
+              "仅已平仓口径，不含浮动盈亏。",
+          },
+          width: 150,
+          filter: "agNumberColumnFilter",
+          valueGetter: (p) => {
+            if (p.data?.equity == null) return null;
+            const combined = sumNullable(p.data.profit_all, p.data.rebate_all);
+            if (combined == null) return null;
+            return p.data.equity - combined;
+          },
+          valueFormatter: (p) => fmtMoney(p.value),
+          cellClass: (p) => profitColor(p.value),
+        },
+        {
+          headerName: "主要交易产品(30d)",
+          groupId: "grp_symbols",
+          children: [
+            {
+              colId: "top_symbol_1",
+              headerName: "Top1",
+              width: 130,
+              hide: true,
+              valueGetter: (p) =>
+                p.data?.top_symbol_1
+                  ? `${p.data.top_symbol_1} (${fmtPct(p.data.top_symbol_1_ratio)})`
+                  : EMDASH,
+            },
+            {
+              colId: "top_symbol_2",
+              headerName: "Top2",
+              width: 130,
+              hide: true,
+              columnGroupShow: "open",
+              valueGetter: (p) =>
+                p.data?.top_symbol_2
+                  ? `${p.data.top_symbol_2} (${fmtPct(p.data.top_symbol_2_ratio)})`
+                  : EMDASH,
+            },
+          ],
+        },
+        {
           colId: "signal_count",
           field: "signal_count",
           headerName: "信号数",
           width: 96,
+          hide: true,
           valueFormatter: (p) => fmtInt(p.value),
         },
         {
@@ -677,6 +780,7 @@ export default function RiskWatchlist() {
           field: "last_signal_at",
           headerName: "最近信号 (HK)",
           width: 165,
+          hide: true,
           valueFormatter: (p) => fmtHkTime(p.value),
         },
         {
@@ -696,6 +800,7 @@ export default function RiskWatchlist() {
             tooltip: "V2 预留字段，取数逻辑未接（将来 = 最近 30d 登录频次最高国家）",
           },
           width: 100,
+          hide: true,
           valueFormatter: (p) => p.value ?? EMDASH,
         },
         {
@@ -703,6 +808,7 @@ export default function RiskWatchlist() {
           field: "action",
           headerName: "处置动作",
           width: 110,
+          hide: true,
           valueFormatter: (p) => p.value ?? EMDASH,
         },
         {
@@ -710,6 +816,7 @@ export default function RiskWatchlist() {
           field: "action_at",
           headerName: "处置日期",
           width: 120,
+          hide: true,
           valueFormatter: (p) => (p.value ? fmtHkTime(p.value) : EMDASH),
         },
         {
@@ -725,11 +832,23 @@ export default function RiskWatchlist() {
     );
 
   // ColumnVisibilityMenu only understands flat leaf defs — flatten groups.
+  // While flattening, prefix each child's label with its group headerName so
+  // the menu doesn't render five identical "30d" entries (e.g. "订单数 ·
+  // 30d", "已平仓 PL+Rebate · History"). Display-only copies for the menu —
+  // the grid receives the original, untouched columnDefs.
   const leafColumnDefs = useMemo(
     () =>
-      columnDefs.flatMap((d) =>
-        "children" in d ? (d.children as ColDef<WatchlistRow>[]) : [d],
-      ),
+      columnDefs.flatMap((d) => {
+        if (!("children" in d)) return [d];
+        const groupName = d.headerName;
+        return (d.children as ColDef<WatchlistRow>[]).map((c) => ({
+          ...c,
+          headerName:
+            groupName && c.headerName
+              ? `${groupName} · ${c.headerName}`
+              : c.headerName,
+        }));
+      }),
     [columnDefs],
   );
 
@@ -756,6 +875,33 @@ export default function RiskWatchlist() {
 
   return (
     <div className="flex h-full w-full flex-col gap-2 p-1 sm:p-4">
+      {/* Column-logic explainer: how the derived money columns relate.
+          Kept dense on purpose so it never pushes the grid below the fold.
+          (Rule badges removed 2026-07-14 per user — trigger conditions live
+          in docs/features/risk-watchlist.md §2.) */}
+      <div className="rounded-xl border bg-card px-4 py-3 md:px-6">
+        <div className="flex flex-col gap-1.5 text-xs text-muted-foreground">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+            <span className="font-medium text-foreground/80">
+              PL+Rebate = Total PL(已平仓) + 总反佣(全链)
+            </span>
+            <span className="text-muted-foreground/50">·</span>
+            <span className="font-medium text-foreground/80">
+              净值−(PL+Rebate) = 净值 − PL+Rebate
+            </span>
+            <span className="text-muted-foreground/50">·</span>
+            <span className="font-medium text-foreground/80">
+              交易净入金 = 入金+出金(不含 IB 佣金提现)
+            </span>
+          </div>
+          <div>
+            解读：PL+Rebate &gt; 0 = 公司净流出（
+            <span className="font-medium text-red-600 dark:text-red-400">红色</span>
+            ）；净值−(PL+Rebate) &lt; 0 偏客户+代理链净拿走。
+          </div>
+        </div>
+      </div>
+
       {/* Filter bar (no title → light wrapper, not a Card) */}
       <div className="rounded-xl border bg-card px-4 py-4 md:px-6">
         <div className="flex flex-wrap items-center gap-4">

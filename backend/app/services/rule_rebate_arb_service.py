@@ -1,5 +1,6 @@
 """
-Rebate Arbitrage detection (返佣套利, rule_id = 121, band 121-130). OPT-0046.
+Rebate Arbitrage detection (返佣套利, rule_id = 121, band 121-130) plus the
+wide-net Rebate Watch roster rule (rule_id = 122, same band). OPT-0046.
 
 Business goal (boss requirement, verified in the rebate-arbitrage skill):
 B-book revenue must be netted against campaign rebate cost. Some clients
@@ -16,6 +17,16 @@ BOTH conditions are required (user decision 2026-07-12): combined-only mixes
 in pure winners (B-book direction risk, not a campaign problem); rebate-only
 catches big losers (company net-positive — don't touch their slippage).
 Trigger uses REALIZED P&L only; floating is display-only elsewhere.
+
+Rule 122 — Rebate Watch (wide net, 高返佣入册): rebate_30d >= min (default
+$200, env ``REBATE_ARB_RULE2_MIN_REBATE_USD``) with NO combined condition —
+a lower-severity roster entry for every high-rebate client regardless of
+their P&L. Evaluated AFTER rule 121 over the same client aggregates: a
+client already alerted today (band-scoped dedup) or hit by 121 in the same
+tick is excluded, so the band emits at most ONE alert per client per MT
+trading day and the stronger 121 signal wins. Kill switch:
+``REBATE_ARB_RULE2_ENABLED`` (default on; only the literal "false",
+case-insensitive, disables it).
 
 Data legs (all verified in .cursor/skills/rebate-arbitrage/SKILL.md):
 - Rebate: ``stats_ib_commissions_by_login_sid`` (fromLoginSid = producing
@@ -72,17 +83,26 @@ from ..core.config import Settings
 logger = logging.getLogger(__name__)
 
 # Rule band 121-130 (next free 10-slot band after martingale 111-120).
-# Only 121 is used today; the rest of the band is reserved.
+# 121 = Rebate Arbitrage, 122 = Rebate Watch; 123-130 reserved.
 REBATE_ARB_RULE_ID_BASE = 121
 REBATE_ARB_RULE_ID_MAX = 130
 REBATE_ARB_RULE_ID = REBATE_ARB_RULE_ID_BASE
 REBATE_ARB_RULE_LABEL = "Rebate Arbitrage · 返佣套利"
+REBATE_ARB_RULE2_ID = 122
+REBATE_ARB_RULE2_LABEL = "Rebate Watch · 高返佣入册"
+
+_RULE_LABELS: Dict[int, str] = {
+    REBATE_ARB_RULE_ID: REBATE_ARB_RULE_LABEL,
+    REBATE_ARB_RULE2_ID: REBATE_ARB_RULE2_LABEL,
+}
 
 # Default thresholds. min_rebate_usd = $500 was decided by the user on
 # 2026-07-12 (rebate >= $500 AND combined > $0, both required). Both knobs
 # are env-tunable so the SQL/Python never hardcodes the numbers.
 DEFAULT_MIN_REBATE_USD = 500.0
 DEFAULT_MIN_COMBINED_USD = 0.0
+# Rule 122 wide-net floor — deliberately lower than the 121 floor.
+DEFAULT_RULE2_MIN_REBATE_USD = 200.0
 
 # Short-hold buckets (seconds) for the lots-weighted ratio labels.
 SHORT_HOLD_5M_SEC = 300
@@ -105,6 +125,20 @@ def get_min_rebate_usd() -> float:
 def get_min_combined_usd() -> float:
     """Strict lower bound on combined (PL + rebate). Trigger is combined > this."""
     return _env_float("REBATE_ARB_MIN_COMBINED_USD", DEFAULT_MIN_COMBINED_USD)
+
+
+def get_rule2_min_rebate_usd() -> float:
+    """Rule 122 $ floor on 30-day rebate. Env-tunable, read per scan."""
+    return _env_float("REBATE_ARB_RULE2_MIN_REBATE_USD", DEFAULT_RULE2_MIN_REBATE_USD)
+
+
+def get_rule2_enabled() -> bool:
+    """Rule 122 kill switch — default ON; only the literal "false"
+    (case-insensitive) disables it. Read per scan (no restart)."""
+    raw = os.getenv("REBATE_ARB_RULE2_ENABLED")
+    if raw is None:
+        return True
+    return str(raw).strip().lower() != "false"
 
 
 def _env_float(name: str, default: float) -> float:
@@ -468,14 +502,16 @@ def rule_rebate_arb_detect(
     clients: Dict[int, Dict[str, Any]],
     *,
     min_rebate_usd: float,
-    min_combined_usd: float,
+    min_combined_usd: Optional[float],
     already_alerted_userids: Optional[Set[int]] = None,
     rule_id: int = REBATE_ARB_RULE_ID,
 ) -> List[Dict[str, Any]]:
-    """Apply the two-condition trigger + per-day dedup; return triggered slots.
+    """Apply the trigger + per-day dedup; return triggered slots.
 
-    Both conditions are required (user decision 2026-07-12):
+    Rule 121 requires both conditions (user decision 2026-07-12):
         rebate_usd >= min_rebate_usd  AND  combined_usd > min_combined_usd
+    ``min_combined_usd=None`` drops the combined condition entirely —
+    rebate-only trigger (rule 122 wide-net Rebate Watch).
     ``already_alerted_userids`` = clients that already have an alert for the
     current MT trading day (durable dedup from SQLite) — skipped here so a
     30-day rolling metric that stays over the line emits at most one alert
@@ -493,7 +529,7 @@ def rule_rebate_arb_detect(
             continue
         if s["rebate_usd"] < min_rebate_usd:
             continue
-        if s["combined_usd"] <= min_combined_usd:
+        if min_combined_usd is not None and s["combined_usd"] <= min_combined_usd:
             continue
         s = dict(s)
         s["rule_id"] = rule_id
@@ -558,11 +594,12 @@ def build_alerts(
             else None
         )
         sorted_login_sids = sorted(s["login_sids"])
+        rule_id = int(s.get("rule_id") or REBATE_ARB_RULE_ID)
         alerts.append({
             # Common alert_events fields (client-level rule: symbol empty,
             # server/login point at the top-rebate producing account).
-            "rule_id": int(s.get("rule_id") or REBATE_ARB_RULE_ID),
-            "rule_label": REBATE_ARB_RULE_LABEL,
+            "rule_id": rule_id,
+            "rule_label": _RULE_LABELS.get(rule_id, REBATE_ARB_RULE_LABEL),
             "server": server,
             "login": login_int,
             "symbol": "",
@@ -709,6 +746,21 @@ def scan_rebate_arb(
             min_combined_usd=min_combined,
             already_alerted_userids=alerted,
         )
+
+        # 4b) Rule 122 wide-net Rebate Watch over the SAME aggregates.
+        #     Excludes today's alerted set AND this tick's 121 hits — the
+        #     band emits at most one alert per client per MT trading day,
+        #     and the stronger 121 signal wins.
+        if get_rule2_enabled():
+            hits += rule_rebate_arb_detect(
+                clients,
+                min_rebate_usd=get_rule2_min_rebate_usd(),
+                min_combined_usd=None,
+                already_alerted_userids=(
+                    alerted | {int(h["userid"]) for h in hits}
+                ),
+                rule_id=REBATE_ARB_RULE2_ID,
+            )
 
         # 5) Enrichment for TRIGGERED clients only (net-deposit split, equity).
         userids = [int(h["userid"]) for h in hits]
