@@ -70,6 +70,7 @@ from ..core.risk_monitor_db import (
     update_mail_dispatch_cursor,
 )
 from ..core.sql_helpers import SID_MAP
+from .alert_mail.subject import build_subject
 
 logger = logging.getLogger(__name__)
 
@@ -598,9 +599,7 @@ def build_hedge_digest_email(
     UTC day (the 60011332/60011333 pairing signal).
     """
     n = len(hits)
-    subject = f"[Risk Alert] Hedge Open - {n} account(s) flagged for wash commission"
-    if test:
-        subject = "[TEST] " + subject
+    subject = build_subject("对冲刷单 Hedge Open", f"{n} 个账户涉嫌刷佣", test)
 
     sections = "".join(
         _account_section(i + 1, alert, match, sibling_map.get(int(alert["id"]), []))
