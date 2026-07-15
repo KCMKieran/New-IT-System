@@ -161,25 +161,28 @@ SendFn = Callable[..., None]
 
 # ── Condition evaluation ───────────────────────────────────
 
-def std_lots(lots: Any, symbol: Any) -> float:
-    """Standard-lot equivalent: `.cent` suffix symbols carry cent-lots /100.
-
-    Without this a cent account's 15 lots (really 0.15 std) would fake-hit
-    the volume condition — confirmed against real alert_events data.
-    """
-    value = float(lots or 0.0)
-    if str(symbol or "").lower().endswith(".cent"):
-        return value / 100.0
-    return value
-
-
 def matched_lots_std(alert: Dict[str, Any]) -> Optional[float]:
-    """min(buy_lots, sell_lots) in standard lots; None when detail missing."""
+    """min(buy_lots, sell_lots) in standard lots; None when detail missing.
+
+    Lots arrive ALREADY in standard-lot equivalents: rule_hedge_open_detect
+    divides CEN accounts' raw lots by 100 before the alert is persisted, so
+    alert_events.buy_lots/sell_lots are std for every account. Do NOT scale
+    again here — a second /100 would put every cent-account hedge ~10000x
+    below the volume thresholds and silence the mail path entirely.
+
+    This used to key off a `.cent` symbol suffix instead. Two defects: the
+    cent-ness is an ACCOUNT property (fxbackoffice.mt4_users.CURRENCY), not
+    a symbol-name property, so `.kcmc` — a second cent suffix carrying ~10%
+    of CEN volume — escaped the scaling and overstated matched lots 100x
+    (alert 209958: 30 raw lots read as 30 std, truly 0.30); and once
+    detection normalises, a suffix check here double-divides. Normalising
+    once, upstream, by the currency authority fixes both.
+    """
     buy = alert.get("buy_lots")
     sell = alert.get("sell_lots")
     if buy is None or sell is None:
         return None
-    return std_lots(min(float(buy), float(sell)), alert.get("symbol"))
+    return min(float(buy), float(sell))
 
 
 def allowed_rule_ids(sub: Dict[str, Any]) -> Optional[Set[int]]:
@@ -516,10 +519,9 @@ def _account_section(
     if per_order is not None:
         orders_txt += f", ~{per_order:,.2f} lots each"
 
-    matched_raw = min(float(alert.get("buy_lots") or 0), float(alert.get("sell_lots") or 0))
-    matched_txt = f"{_fmt_lots(matched_raw)}"
-    if abs(matched_std - matched_raw) > 1e-9:
-        matched_txt += f" ({_fmt_lots(matched_std)} std, .cent /100)"
+    # Already standard-lot equivalents (CEN scaled at detection) — no
+    # raw-vs-std split left to annotate.
+    matched_txt = _fmt_lots(matched_std)
 
     equity = alert.get("equity")
     equity_txt = _fmt_money(equity)

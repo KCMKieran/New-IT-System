@@ -297,13 +297,17 @@ def test_generic_none_field_value_never_matches():
     assert amd.evaluate_generic_conditions(alert, tree, HEDGE) is None
 
 
-def test_generic_cent_conversion_applies():
-    # 1500 cent-lots = 15 std -> >= 10 hits; raw 1500 would also hit, so
-    # assert the boundary the other way: 900 cent-lots = 9 std -> no hit.
+def test_generic_matched_lots_uses_detection_units():
+    """The generic path reads std lots straight from the alert.
+
+    Lots are normalised once, at detection (CEN ÷100 keyed on the account's
+    currency), so no symbol-suffix scaling happens here — 9 std misses a
+    >= 10 threshold and 15 std clears it, whatever the suffix says.
+    """
     tree = _tree("and", {"field": "matched_lots_std", "op": ">=", "value": 10})
-    alert = _hedge_alert(symbol="XAUUSD.cent", buy_lots=900.0, sell_lots=900.0)
+    alert = _hedge_alert(symbol="XAUUSD.cent", buy_lots=9.0, sell_lots=9.0)
     assert amd.evaluate_generic_conditions(alert, tree, HEDGE) is None
-    alert2 = _hedge_alert(symbol="XAUUSD.cent", buy_lots=1500.0, sell_lots=1500.0)
+    alert2 = _hedge_alert(symbol="XAUUSD.cent", buy_lots=15.0, sell_lots=15.0)
     assert amd.evaluate_generic_conditions(alert2, tree, HEDGE) is not None
 
 
