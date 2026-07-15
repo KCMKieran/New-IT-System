@@ -27,7 +27,12 @@ from ..core.sql_helpers import (
     broker_time_to_utc_iso,
     demo_test_filter_sql,
 )
-from .account_enrichment import get_account_info_map, get_net_deposit_hist_map
+from .account_enrichment import (
+    apply_client_net_gain,
+    get_account_info_map,
+    get_client_net_gain_map,
+    get_net_deposit_hist_map,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -403,6 +408,8 @@ def scan_quick_open_close(
         if alerts:
             info_map = get_account_info_map(conn, alerts)
             net_deposit_hist_map = get_net_deposit_hist_map(conn, alerts)
+            # Client-level operands of the derived 淨賺 column (already USD).
+            client_net_gain_map = get_client_net_gain_map(conn, alerts)
             for alert in alerts:
                 sid = SID_MAP.get(str(alert["server"]))
                 lid = int(alert["login"])
@@ -417,6 +424,7 @@ def scan_quick_open_close(
                 alert["net_deposit_hist"] = (
                     net_deposit_hist_map.get(loginsid) if loginsid else None
                 )
+                apply_client_net_gain(alert, loginsid, client_net_gain_map)
                 if currency == "CEN":
                     # Keep comparison in USD for configurable threshold.
                     alert["total_profit_usd"] = round(float(alert.get("total_profit_usd") or 0) / 100.0, 2)

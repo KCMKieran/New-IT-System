@@ -70,6 +70,10 @@ class WatchlistRow(BaseModel):
     top_symbol_2: Optional[str] = None
     top_symbol_2_ratio: Optional[float] = None
     equity: Optional[float] = None
+    # Unrealized P&L on open positions at snapshot time (EQUITY-BALANCE-CREDIT).
+    # Third leg of the 净赚 column, which the frontend derives as
+    # profit_all + floating_pl + rebate_all.
+    floating_pl: Optional[float] = None
 
 
 class WatchlistStatistics(BaseModel):
@@ -146,6 +150,7 @@ class CaseMetricsSnapshot(BaseModel):
     top_symbol_2: Optional[str] = None
     top_symbol_2_ratio: Optional[float] = None
     equity: Optional[float] = None
+    floating_pl: Optional[float] = None
     account_count: Optional[int] = None
 
 

@@ -1,11 +1,14 @@
 """Tests for balance + equity enrichment added to account_enrichment.
 
 Covers the scan-time balance/equity snapshots wired into get_account_info_map
-and the CEN ÷100 normalisation in apply_cen_conversion. balance is displayed
-as a column across the risk-monitor tabs (burst / quick-open-close /
-quick-profit / hedge-open / leverage-abuse); equity feeds the computed 淨賺
-column (equity − net_deposit_hist) on the quick-open-close / quick-profit /
-hedge-open tabs (burst + leverage-abuse fill equity via their own queries).
+and the CEN ÷100 normalisation in apply_cen_conversion. balance and equity are
+displayed as columns across the risk-monitor tabs (burst / quick-open-close /
+quick-profit / hedge-open / leverage-abuse). Both are ACCOUNT-level.
+
+NOTE: equity here no longer feeds the computed 淨賺 column — the 2026-07 audit
+found that pairing this account-level equity with a client-level net deposit
+was a level mismatch. 淨賺 now reads the client-level operands from
+get_client_net_gain_map (see test_client_net_gain.py).
 """
 
 from app.services.account_enrichment import (

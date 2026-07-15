@@ -82,26 +82,53 @@ def test_build_metric_row_hold_days_and_combined():
     row = cms._build_metric_row(
         7, date(2026, 7, 12), trades, {"rebate_30d": 500.0},
         {"trading_net_deposit": -1000.0, "ib_withdrawal": -50.0},
-        123.456, ("XAUUSD", 0.5, None, None), 3,
+        123.456, -45.678, ("XAUUSD", 0.5, None, None), 3,
     )
     assert row["avg_hold_days_30d"] == 1.0
     assert row["ratio_5m_30d"] == 0.4
     assert row["ratio_10m_30d"] == 0.6
     assert row["combined_30d"] == 300.0  # -200 + 500
     assert row["equity"] == 123.46
+    assert row["floating_pl"] == -45.68
     assert row["account_count"] == 3
 
 
 def test_build_metric_row_no_lots_means_null_derived_cols():
     """Zero 30d lots → hold/ratio columns are None (frontend '—'), not 0."""
     row = cms._build_metric_row(
-        7, date(2026, 7, 12), {}, {}, {}, None, None, 0
+        7, date(2026, 7, 12), {}, {}, {}, None, None, None, 0
     )
     assert row["avg_hold_days_30d"] is None
     assert row["ratio_5m_30d"] is None
     assert row["ratio_10m_30d"] is None
     assert row["equity"] is None
     assert row["combined_30d"] == 0.0
+
+
+def test_build_metric_row_floating_pl_null_stays_null():
+    """No floating snapshot → NULL, never 0. The frontend 净赚 column keys off
+    this to render '—'; a 0 would silently degrade it into combined_all."""
+    row = cms._build_metric_row(
+        7, date(2026, 7, 12), {}, {}, {}, 100.0, None, None, 1
+    )
+    assert row["floating_pl"] is None
+
+
+def test_floating_pl_is_persisted():
+    """floating_pl is a point-in-time snapshot — unrecomputable later, so it
+    MUST be in the insert column list (and therefore the upsert)."""
+    assert "floating_pl" in cms._METRIC_INSERT_COLS
+    assert "floating_pl = EXCLUDED.floating_pl" in cms._METRIC_UPSERT_SQL
+
+
+def test_metric_legs_share_one_account_filter():
+    """净赚 sums the profit / floating / rebate legs, so their account scope
+    must match equity's (sid IN (1,2,5,6) + no demo). Guards the 2026-07-15
+    alignment: profit_* previously had no sid filter and rebate_* had none at
+    all, which mixed demo/sid-3 rebate into sums against live equity."""
+    for sql in (cms._TRADES_WINDOWS_SQL, cms._REBATE_WINDOWS_SQL):
+        assert "mu.sid IN (1, 2, 5, 6)" in sql
+        assert "mu.`GROUP` NOT LIKE '%%demo%%'" in sql
 
 
 def test_metric_upsert_sql_is_idempotent_by_constraint():

@@ -155,10 +155,25 @@ DDL_STATEMENTS: tuple[str, ...] = (
         top_symbol_2        TEXT,
         top_symbol_2_ratio  DOUBLE PRECISION,
         equity              DOUBLE PRECISION,
+        -- Unrealized P&L on still-open positions at snapshot time, USD.
+        -- Derived as EQUITY - BALANCE - CREDIT (mt4_users has no PROFIT
+        -- column; the CREDIT term is required — verified 2026-07-15 against
+        -- SUM(open mt4_trades.totalProfit), e.g. account 1-8006234 where
+        -- EQUITY-BALANCE is off by exactly its $7,380.57 CREDIT).
+        -- A point-in-time snapshot: it CANNOT be recomputed after the fact,
+        -- which is why it is stored rather than derived on read.
+        floating_pl         DOUBLE PRECISION,
         account_count       INTEGER,
         created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
         CONSTRAINT uq_case_metrics_daily UNIQUE (user_id, metric_date)
     )
+    """,
+    # Additive migration for databases created before floating_pl existed
+    # (2026-07-15). ADD COLUMN IF NOT EXISTS is idempotent, so this keeps the
+    # "run every DDL statement on startup" contract above — no new framework.
+    """
+    ALTER TABLE case_metrics_daily
+        ADD COLUMN IF NOT EXISTS floating_pl DOUBLE PRECISION
     """,
     """
     CREATE INDEX IF NOT EXISTS idx_case_metrics_user_date

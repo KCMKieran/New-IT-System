@@ -95,6 +95,7 @@ interface WatchlistRow {
   top_symbol_2: string | null;
   top_symbol_2_ratio: number | null;
   equity: number | null;
+  floating_pl: number | null;
 }
 
 interface CaseSignal {
@@ -220,6 +221,26 @@ function sumNullable(
 /** PL+Rebate columns: > 0 = net company outflow → red highlight. */
 function combinedCellClass(v: number | null | undefined): string {
   return v != null && v > 0 ? "font-medium text-red-600 dark:text-red-400" : "";
+}
+
+/** 净赚 = closed PL + floating PL + full-chain rebate.
+ *
+ *  STRICT null handling, unlike `sumNullable`: every leg must be present or
+ *  the whole column renders "—". `floating_pl` is NULL on every snapshot
+ *  written before it existed (2026-07-15) and on clients with no compliant
+ *  account, and coercing it to 0 there would silently degrade 净赚 back into
+ *  `combined_all` while still labelling it "final win/loss" — a wrong number
+ *  that reads as a real one. `profit_all` / `rebate_all` are always numeric
+ *  when a snapshot row exists (the daily job coalesces them to 0), so in
+ *  practice this gates on floating_pl.
+ */
+function netGain(row: WatchlistRow | undefined): number | null {
+  if (!row) return null;
+  const { profit_all, floating_pl, rebate_all } = row;
+  if (profit_all == null || floating_pl == null || rebate_all == null) {
+    return null;
+  }
+  return profit_all + floating_pl + rebate_all;
 }
 
 const STATE_LABELS: Record<string, string> = {
@@ -681,7 +702,6 @@ export default function RiskWatchlist() {
                   "仅含已平仓盈亏，不含浮动。",
               },
               width: 140,
-              sort: "desc", // default ranking; user overrides persist via hook
               // valueGetter columns can't infer a cell data type — declare
               // the number filter explicitly or it falls back to text.
               filter: "agNumberColumnFilter",
@@ -713,6 +733,52 @@ export default function RiskWatchlist() {
           ],
         },
         {
+          colId: "net_gain",
+          headerName: "净赚",
+          headerComponent: InfoHeader,
+          headerComponentParams: {
+            tooltip:
+              "净赚 = 已平仓PL + 浮动PL + 全链返佣（均为生涯累计/客户级）。\n" +
+              "客户+代理链最终从公司赢走多少：> 0 客户赢、公司亏（红色）；" +
+              "< 0 客户输、公司赚。\n" +
+              "这是本页唯一回答“公司最终赢输”的列，默认按此降序。\n" +
+              "\n" +
+              "与「净值−(PL+Rebate)」的区别：那列衡量“客户还有多少钱压在场内”" +
+              "（可追回性），不是赢输。\n" +
+              "与 risk-monitor 页「淨賺」的区别：那列 = 净值−交易净入金，" +
+              "口径同为客户级、同样剔除 ib withdrawal，但**不含返佣腿**；" +
+              "本列直接构造三条腿，且完全绕开净入金口径（案例 110386）。\n" +
+              "\n" +
+              "浮动PL = EQUITY−BALANCE−CREDIT 的每日快照（mt4_users 无 PROFIT 列）。\n" +
+              "已知误差：IB 把佣金从钱包转入自己交易账户会同时抬高浮动/余额，" +
+              "该笔又已计入返佣 → 轻微高估净赚（对返佣套利场景偏保守）。\n" +
+              "无当日 floating 快照的客户显示 — （不假设为 0）。",
+          },
+          width: 140,
+          sort: "desc", // default ranking; user overrides persist via hook
+          filter: "agNumberColumnFilter",
+          valueGetter: (p) => netGain(p.data),
+          valueFormatter: (p) => fmtMoney(p.value),
+          cellClass: (p) => combinedCellClass(p.value),
+        },
+        {
+          colId: "floating_pl",
+          field: "floating_pl",
+          headerName: "浮动PL",
+          headerComponent: InfoHeader,
+          headerComponentParams: {
+            tooltip:
+              "未平仓持仓的浮动盈亏，每日快照（客户级，含全部合规账户）。\n" +
+              "口径：EQUITY − BALANCE − CREDIT（mt4_users 无 PROFIT 列；" +
+              "减 CREDIT 是必须的，否则赠金会被算成浮动盈利）。\n" +
+              "净赚的第三条腿；时点快照，事后无法重算。",
+          },
+          width: 120,
+          hide: true,
+          valueFormatter: (p) => fmtMoney(p.value),
+          cellClass: (p) => profitColor(p.value),
+        },
+        {
           colId: "equity",
           field: "equity",
           headerName: "净值",
@@ -725,9 +791,15 @@ export default function RiskWatchlist() {
           headerComponent: InfoHeader,
           headerComponentParams: {
             tooltip:
-              "净值 − 已平仓PL+Rebate (History)。\n" +
-              "> 0 偏公司净赚（客户整体输钱），< 0 偏客户+代理链净拿走。\n" +
-              "仅已平仓口径，不含浮动盈亏。",
+              "净值 − (已平仓PL + 全链返佣)，生涯累计。\n" +
+              "\n" +
+              "⚠ 这不是盈亏指标，不要按“公司赚/亏”解读。展开后约等于：\n" +
+              "  净入金(全部类型，含 IB 佣金提现) + 浮动PL + 信用额 − 全链返佣\n" +
+              "即“客户账上还剩多少钱”（可追回性）掺入返佣项，方向性含义不干净：\n" +
+              "大额入金但没输没赢的客户该值也 > 0；IB 一提佣金就被推低，" +
+              "即便交易本金原封不动（案例 110386）。\n" +
+              "\n" +
+              "要看公司最终赢输，请用「净赚」列。",
           },
           width: 150,
           filter: "agNumberColumnFilter",
@@ -883,11 +955,11 @@ export default function RiskWatchlist() {
         <div className="flex flex-col gap-1.5 text-xs text-muted-foreground">
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
             <span className="font-medium text-foreground/80">
-              PL+Rebate = Total PL(已平仓) + 总反佣(全链)
+              净赚 = Total PL(已平仓) + 浮动PL + 总反佣(全链)
             </span>
             <span className="text-muted-foreground/50">·</span>
             <span className="font-medium text-foreground/80">
-              净值−(PL+Rebate) = 净值 − PL+Rebate
+              PL+Rebate = Total PL(已平仓) + 总反佣(全链)
             </span>
             <span className="text-muted-foreground/50">·</span>
             <span className="font-medium text-foreground/80">
@@ -895,9 +967,13 @@ export default function RiskWatchlist() {
             </span>
           </div>
           <div>
-            解读：PL+Rebate &gt; 0 = 公司净流出（
+            解读：净赚 &gt; 0 = 客户+代理链最终赢走的钱、公司亏（
             <span className="font-medium text-red-600 dark:text-red-400">红色</span>
-            ）；净值−(PL+Rebate) &lt; 0 偏客户+代理链净拿走。
+            ），默认按此降序；PL+Rebate 同向但不含浮动。
+          </div>
+          <div>
+            「净值−(PL+Rebate)」衡量客户还有多少钱压在场内（可追回性），
+            <span className="font-medium">不是</span>盈亏指标 —— 判断公司赢输请看「净赚」。
           </div>
         </div>
       </div>

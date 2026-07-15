@@ -33,9 +33,10 @@ SORTABLE_ALERT_COLS: frozenset[str] = frozenset({
     "equity_per_lot", "total_open_lots", "leverage",
     "currency", "zipcode", "first_open", "last_open", "hold_duration_sec", "total_profit_usd",
     "net_deposit_hist",
-    # Derived "淨賺" column (equity − net_deposit_hist). Both operands are
-    # plain ae.* columns, so the derived expression is server-sortable even
-    # though the frontend renders it via a valueGetter (OPT-0039).
+    # Derived "淨賺" column (client_equity − client_trading_net_deposit).
+    # Both operands are plain ae.* columns, so the derived expression is
+    # server-sortable even though the frontend renders it via a valueGetter
+    # (OPT-0039).
     "net_profit",
     # Quick Profit columns
     "realized_profit", "floating_profit_snapshot", "position_status",
@@ -86,9 +87,16 @@ _SORT_COL_DB_NAME: dict[str, str] = {
     # Derived 淨賺. SQLite treats the result as NULL when either operand is
     # NULL, and orders NULL as the lowest value — matching the frontend
     # comparator's `null → -1` (nulls sort first in ASC, last in DESC).
-    # equity / net_deposit_hist are already stored in USD (not cents), so no
-    # CEN division is applied here.
-    "net_profit":       "(ae.equity - ae.net_deposit_hist)",
+    # Both operands are already stored in USD (not cents), so no CEN division
+    # is applied here.
+    #
+    # 2026-07 audit fix: this used to be `(ae.equity - ae.net_deposit_hist)`,
+    # which mixed aggregation levels (ONE account's equity minus the whole
+    # CLIENT's net deposit) and counted 'ib withdrawal' as withdrawn capital.
+    # Both operands are now client-level and IB-excluded, matching the
+    # frontend valueGetter exactly. Alerts scanned before the migration have
+    # NULL in both → they sort as NULL (lowest) and render "—".
+    "net_profit":       "(ae.client_equity - ae.client_trading_net_deposit)",
     "group":            "ae.account_group",  # frontend alias
     # Quick OC detail
     "hold_duration_sec": "qoc.hold_duration_sec",
@@ -271,9 +279,15 @@ CREATE TABLE IF NOT EXISTS alert_events (
     orders_json       TEXT,
     currency          TEXT,                -- "USD" or "CEN" (for display; equity/balance already USD)
     zipcode           TEXT,                -- client zipcode from fxbackoffice.mt4_users
-    net_deposit_hist  REAL,                -- historical net deposit (client-return-rate formula)
+    net_deposit_hist  REAL,                -- historical net deposit (client-return-rate formula; INCLUDES 'ib withdrawal')
     total_profit_usd  REAL,                -- written by Quick OC / Quick Profit / Gap Profit; NULL for Burst & Gap SO
-    user_id           INTEGER              -- CRM client id (fxbackoffice.mt4_users.userId); NULL when enrichment failed (OPT-0045)
+    user_id           INTEGER,             -- CRM client id (fxbackoffice.mt4_users.userId); NULL when enrichment failed (OPT-0045)
+    -- The two CLIENT-LEVEL operands of the derived 淨賺 column (2026-07 audit
+    -- fix). Kept separate from equity / net_deposit_hist above, which stay at
+    -- their original (account-level equity / ib-inclusive net deposit)
+    -- semantics because alert thresholds and mail templates depend on them.
+    client_equity              REAL,       -- SUM(equity) over the client's compliant accounts, CEN /100
+    client_trading_net_deposit REAL        -- client lifetime deposit+withdrawal, EXCLUDING 'ib withdrawal'
 );
 
 -- Detail table for Quick Open-Close (rule_id 51-60).
@@ -925,6 +939,19 @@ def _migrate_alert_events_columns(conn: sqlite3.Connection) -> None:
         # case engine groups alerts by client, so every alert row carries it.
         _alter_ignore_duplicate_column(
             conn, "ALTER TABLE alert_events ADD COLUMN user_id INTEGER"
+        )
+    # 2026-07 audit fix for the 淨賺 column: client-level equity + IB-excluded
+    # net deposit. Rows written before this migration keep NULL in both, so
+    # 淨賺 renders "—" for them rather than a wrong number — the values are
+    # scan-time snapshots and cannot be backfilled after the fact.
+    if "client_equity" not in cols:
+        _alter_ignore_duplicate_column(
+            conn, "ALTER TABLE alert_events ADD COLUMN client_equity REAL"
+        )
+    if "client_trading_net_deposit" not in cols:
+        _alter_ignore_duplicate_column(
+            conn,
+            "ALTER TABLE alert_events ADD COLUMN client_trading_net_deposit REAL",
         )
     # OPT-0045: this index lives HERE (not in _SCHEMA_SQL) on purpose — on
     # pre-existing installs the schema script runs BEFORE the ADD COLUMN
@@ -1925,6 +1952,8 @@ def append_scan_and_events(
                 alert.get("net_deposit_hist"),
                 alert.get("total_profit_usd"),
                 alert.get("user_id"),
+                alert.get("client_equity"),
+                alert.get("client_trading_net_deposit"),
             )
             event_cursor = conn.execute(common_insert_sql, common_values)
             event_id = event_cursor.lastrowid or 0
@@ -2292,6 +2321,7 @@ _COMMON_INSERT_COLS: tuple[str, ...] = (
     "equity", "balance", "equity_per_lot", "total_open_lots",
     "leverage", "account_group", "orders_json", "currency", "zipcode",
     "net_deposit_hist", "total_profit_usd", "user_id",
+    "client_equity", "client_trading_net_deposit",
 )
 
 # Detail table columns. Each list excludes `id` (filled from
@@ -2371,6 +2401,7 @@ _ALERT_SELECT_SQL = """
     ae.equity, ae.balance, ae.equity_per_lot, ae.total_open_lots,
     ae.leverage, ae.account_group, ae.orders_json, ae.currency, ae.zipcode,
     ae.net_deposit_hist, ae.total_profit_usd,
+    ae.client_equity, ae.client_trading_net_deposit,
 
     qoc.hold_duration_sec,
 

@@ -331,6 +331,15 @@ class AlertEvent(BaseModel):
     currency: Optional[str] = None
     zipcode: Optional[str] = None
     net_deposit_hist: Optional[float] = None
+    # ── Derived 淨賺 column operands (2026-07 audit fix) ──
+    # BOTH are client-level (aggregated over the client's compliant accounts)
+    # so their difference is level-consistent, unlike the old
+    # `equity − net_deposit_hist` which subtracted a CLIENT total from ONE
+    # account's equity. client_trading_net_deposit also EXCLUDES
+    # 'ib withdrawal' (IB commission cash-outs are not withdrawn capital).
+    # Null on alerts scanned before the migration → frontend renders "—".
+    client_equity: Optional[float] = None
+    client_trading_net_deposit: Optional[float] = None
     # Quick Profit specific fields. Realized + floating sum to total_profit_usd
     # at scan time; the floating snapshot can drift later (refreshed via
     # /quick-profit/floating-refresh on the frontend).

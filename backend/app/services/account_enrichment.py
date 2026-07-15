@@ -24,6 +24,41 @@ def round_or_none(val: Any, ndigits: int = 2) -> float | None:
     return round(float(val), ndigits)
 
 
+# 1 CEN (cent-account) lot controls 1/100 of the notional a standard-account
+# lot does, so CEN lot counts must be divided by 100 to express them in
+# standard-lot equivalents. (The 2026-07 independent review overturned the
+# earlier "contract size is identical for USD and CEN" assumption — comparing
+# raw CEN lots against standard-lot thresholds was the #1 noise source in
+# burst-open.)
+CENT_LOT_DIVISOR = 100.0
+
+
+def lots_divisor(currency: Any) -> float:
+    """Divisor that converts raw broker lots into standard-lot equivalents.
+
+    Returns ``100.0`` for CEN accounts, ``1.0`` otherwise (including unknown
+    currency — fail-open to the legacy no-conversion behaviour so a missed
+    CRM lookup can never divide a standard account's lots).
+
+    The currency authority is ``fxbackoffice.mt4_users.CURRENCY`` via
+    :func:`get_account_info_map` — the same discriminator the enrichment
+    layer uses for the equity/balance CEN→USD conversion.
+    """
+    return CENT_LOT_DIVISOR if str(currency or "").upper() == "CEN" else 1.0
+
+
+def build_currency_map(conn, rows: List[Dict[str, Any]]) -> Dict[str, str]:
+    """Batch-resolve ``{loginsid: currency}`` for detection-input rows.
+
+    Thin wrapper over :func:`get_account_info_map` used by rules that need
+    the CEN discriminator BEFORE detection (e.g. lots normalisation in
+    burst-open / hedge-open). Fail-open: a lookup failure returns ``{}`` so
+    detection proceeds with divisor 1.0 (legacy behaviour).
+    """
+    info_map = get_account_info_map(conn, rows)
+    return {k: (v.get("currency") or "USD") for k, v in info_map.items()}
+
+
 def get_account_info_map(
     conn, alerts: List[Dict[str, Any]]
 ) -> Dict[str, Dict[str, Any]]:
@@ -46,8 +81,9 @@ def get_account_info_map(
     ``balance`` / ``equity`` are the **raw** broker-side values (still in
     cents on CEN accounts) — callers must run :func:`apply_cen_conversion`
     after assigning them so CEN amounts are divided by 100. Both are
-    scan-time snapshots, not live re-queries. ``equity`` feeds the computed
-    淨賺 column (equity − net_deposit_hist) on the frontend.
+    scan-time snapshots, not live re-queries, and both are **account-level**
+    (THIS loginsid only). The computed 淨賺 column does NOT use them — it
+    needs client-level operands, see :func:`get_client_net_gain_map`.
     """
     loginsids: set[str] = set()
     for a in alerts:
@@ -252,13 +288,234 @@ def get_net_deposit_hist_map(
         return {}
 
 
+def query_net_deposit_split(
+    conn, userids: List[int]
+) -> Dict[int, Dict[str, float]]:
+    """Client-level LIFETIME net deposit, split in two (rebate-arbitrage
+    skill §2.2 "净赚标准定义" requirement):
+
+    - ``trading_net_deposit`` = deposits + withdrawals (trading money only)
+    - ``ib_withdrawal``       = 'ib withdrawal' rows (commission cash-outs)
+
+    The legacy single-number net_deposit_hist formula (= sum of BOTH, see
+    :func:`get_net_deposit_hist_map`) is seriously misleading for
+    IB-cum-traders (case 110386: shows -$1.34M net deposit, but -$1.22M of
+    that is commission withdrawals — as a trader he is net LOSING). CEN /100
+    keyed on the transaction row's own st.currency (stats_transactions
+    convention — same as get_net_deposit_hist_map and
+    rule_gap_trade_gap_service._query_net_deposit_by_userid); mt4_users is
+    joined for the sid/demo compliance filter only.
+
+    Canonical implementation — originally private to rule_rebate_arb_service
+    (which still re-exports it under its old ``_query_net_deposit_split``
+    name), promoted here in 2026-07 so the risk-monitor 淨賺 column can share
+    the one correct definition instead of forking a third copy.
+    """
+    if not userids:
+        return {}
+    placeholders = ",".join(["%s"] * len(userids))
+    sql = f"""
+        SELECT st.userId AS userid,
+            SUM(CASE WHEN st.type IN ('deposit', 'withdrawal')
+                 THEN IF(st.currency = 'CEN', st.amount / 100.0, st.amount)
+                 ELSE 0 END) AS trading_net_deposit,
+            SUM(CASE WHEN st.type = 'ib withdrawal'
+                 THEN IF(st.currency = 'CEN', st.amount / 100.0, st.amount)
+                 ELSE 0 END) AS ib_withdrawal
+        FROM fxbackoffice.stats_transactions st
+        INNER JOIN fxbackoffice.mt4_users mu ON st.loginSid = mu.loginSid
+        WHERE st.userId IN ({placeholders})
+          AND st.type IN ('deposit', 'withdrawal', 'ib withdrawal')
+          AND mu.sid IN (1, 2, 5, 6)
+          AND mu.`GROUP` NOT LIKE '%%demo%%'
+        GROUP BY st.userId
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, tuple(userids))
+            rows = cur.fetchall()
+        return {
+            int(r["userid"]): {
+                "trading_net_deposit": float(r["trading_net_deposit"] or 0.0),
+                "ib_withdrawal": float(r["ib_withdrawal"] or 0.0),
+            }
+            for r in rows
+        }
+    except Exception:
+        # Display-only enrichment — never blocks the alert emission.
+        logger.error("Net-deposit split lookup failed", exc_info=True)
+        return {}
+
+
+def query_equity_by_userid(conn, userids: List[int]) -> Dict[int, float]:
+    """Client-level current equity (sum across compliant accounts, CEN /100).
+
+    Canonical implementation — see :func:`query_net_deposit_split` for the
+    promotion note. Unlike :func:`get_account_info_map`'s ``equity`` (which is
+    ONE account's raw EQUITY), this sums every compliant account the client
+    owns, so it is the right operand to pair with a client-level net deposit.
+    """
+    if not userids:
+        return {}
+    placeholders = ",".join(["%s"] * len(userids))
+    sql = f"""
+        SELECT userId AS userid,
+               SUM(IF(CURRENCY = 'CEN', EQUITY / 100.0, EQUITY)) AS equity
+        FROM fxbackoffice.mt4_users
+        WHERE userId IN ({placeholders})
+          AND sid IN (1, 2, 5, 6)
+          AND `GROUP` NOT LIKE '%%demo%%'
+        GROUP BY userId
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, tuple(userids))
+            rows = cur.fetchall()
+        return {int(r["userid"]): float(r["equity"] or 0.0) for r in rows}
+    except Exception:
+        logger.error("Client equity lookup failed", exc_info=True)
+        return {}
+
+
+def query_floating_pl_by_userid(conn, userids: List[int]) -> Dict[int, float]:
+    """Client-level unrealized P&L on still-open positions (CEN /100).
+
+    ``mt4_users`` has NO ``PROFIT`` column — verified against the live schema
+    2026-07-15; it carries only BALANCE / CREDIT / EQUITY / MARGIN /
+    MARGIN_LEVEL / MARGIN_FREE. Floating P&L is therefore reconstructed from
+    the MT accounting identity::
+
+        EQUITY = BALANCE + CREDIT + FLOATING
+
+    Subtracting CREDIT is **not** optional. On the ~1% of live accounts
+    carrying credit (1,002 of 97,439; $3.41M total) using the naive
+    ``EQUITY - BALANCE`` overstates floating by the whole bonus. Spot-checked
+    against ``SUM(totalProfit)`` over open trades (``CLOSE_TIME <=
+    '1971-01-01'``): account 1-8006234 shows ``EQUITY-BALANCE = -288,998.32``
+    vs ``EQUITY-BALANCE-CREDIT = -296,378.89`` against an open-trade P&L of
+    ``-296,377.89`` — the CREDIT-corrected form matches, the naive one is off
+    by exactly its $7,380.57 credit. (Residual ~$1 is snapshot skew between
+    mt4_users and mt4_trades, not a systematic bias.)
+
+    ``extraEquityAmount`` is uniformly 0 across live accounts → ignored.
+
+    The filter MUST stay byte-identical to :func:`query_equity_by_userid`:
+    these two legs are summed with the profit/rebate legs in the watchlist
+    净赚 column, and any filter drift silently mixes populations.
+
+    **Fail-open**: lookup failure → ``{}`` → callers write NULL → "—".
+    """
+    if not userids:
+        return {}
+    placeholders = ",".join(["%s"] * len(userids))
+    sql = f"""
+        SELECT userId AS userid,
+               SUM(IF(CURRENCY = 'CEN',
+                      (EQUITY - BALANCE - CREDIT) / 100.0,
+                      (EQUITY - BALANCE - CREDIT))) AS floating_pl
+        FROM fxbackoffice.mt4_users
+        WHERE userId IN ({placeholders})
+          AND sid IN (1, 2, 5, 6)
+          AND `GROUP` NOT LIKE '%%demo%%'
+        GROUP BY userId
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, tuple(userids))
+            rows = cur.fetchall()
+        return {int(r["userid"]): float(r["floating_pl"] or 0.0) for r in rows}
+    except Exception:
+        logger.error("Client floating-P&L lookup failed", exc_info=True)
+        return {}
+
+
+def get_client_net_gain_map(
+    conn, alerts: List[Dict[str, Any]]
+) -> Dict[str, Dict[str, float]]:
+    """Batch-resolve the two **client-level** operands of the 淨賺 column.
+
+    Returns ``{loginsid: {"client_equity": float,
+    "client_trading_net_deposit": float}}``.
+
+    Why this exists (2026-07 audit, finding #1 — the 淨賺 column's triple bias):
+    the frontend used to compute ``ae.equity − ae.net_deposit_hist``, mixing
+    aggregation levels — ``equity`` is ONE account's snapshot, while
+    ``net_deposit_hist`` is the whole CLIENT's lifetime total. For a client
+    with several accounts, EVERY row subtracted the client's full net deposit
+    from a single account's equity, so the column read systematically low
+    (often wildly negative). It also folded ``'ib withdrawal'`` into the
+    deposit leg, inflating 淨賺 for IB-cum-traders (case 110386).
+
+    This map fixes both: equity is summed client-wide
+    (:func:`query_equity_by_userid`) and the deposit leg excludes IB
+    commission cash-outs (:func:`query_net_deposit_split` →
+    ``trading_net_deposit``). Both operands are therefore client-level and
+    consistent, so two loginsids of the same client legitimately show the
+    same 淨賺 — exactly as they already do for the Net Deposit column.
+
+    Deliberately a SEPARATE function from :func:`get_net_deposit_hist_map`:
+    that one's return value feeds alert thresholds / e-mail templates across
+    rule 81, hedge, gap and the dispatcher, so its semantics must not move.
+    This is additive.
+
+    **Fail-open**: any lookup failure returns ``{}`` → callers write NULL →
+    the column renders "—" rather than a fabricated 0. Loginsids whose client
+    can't be resolved (demo / non-compliant / enrichment miss) are absent from
+    the dict for the same reason.
+    """
+    userid_map = get_user_id_map(conn, alerts)
+    if not userid_map:
+        return {}
+
+    userids = sorted(set(userid_map.values()))
+    nd_split = query_net_deposit_split(conn, userids)
+    equity_map = query_equity_by_userid(conn, userids)
+
+    result: Dict[str, Dict[str, float]] = {}
+    for loginsid, userid in userid_map.items():
+        equity = equity_map.get(userid)
+        split = nd_split.get(userid)
+        # Both operands must be present — a half-known difference is worse
+        # than "—" because it silently reads as a real number.
+        if equity is None or split is None:
+            continue
+        result[loginsid] = {
+            "client_equity": round(equity, 2),
+            "client_trading_net_deposit": round(split["trading_net_deposit"], 2),
+        }
+    return result
+
+
+def apply_client_net_gain(
+    alert: Dict[str, Any],
+    loginsid: str | None,
+    gain_map: Dict[str, Dict[str, float]],
+) -> None:
+    """Write the two client-level 淨賺 operands onto ``alert`` in place.
+
+    Both values are ALREADY in USD (:func:`get_client_net_gain_map` applies
+    the CEN /100 inside SQL), so they must NOT be passed through
+    :func:`apply_cen_conversion` — that function only rewrites the
+    ``equity`` / ``balance`` keys, so there is no collision.
+
+    Unknown loginsid → both keys written as ``None`` (renders "—"). Written
+    explicitly rather than left absent so the DB writer's positional
+    ``alert.get(...)`` always finds the key.
+    """
+    gain = gain_map.get(loginsid) if loginsid else None
+    alert["client_equity"] = gain.get("client_equity") if gain else None
+    alert["client_trading_net_deposit"] = (
+        gain.get("client_trading_net_deposit") if gain else None
+    )
+
+
 def apply_cen_conversion(alert: Dict[str, Any], currency: str) -> None:
     """Divide equity and balance by 100 for CEN accounts.
 
     CEN (cent) accounts store monetary values in US cents on the MT server.
     This function normalises them to USD so the frontend always receives
-    dollar amounts.  Lot-based fields are NOT adjusted — contract sizes
-    are identical for USD and CEN.
+    dollar amounts.  Lot-based fields are handled separately via
+    :func:`lots_divisor` (CEN lots ÷100 to standard-lot equivalents).
 
     Args:
         alert: alert dict with optional ``equity`` and ``balance`` keys.

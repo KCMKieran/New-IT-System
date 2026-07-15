@@ -43,8 +43,12 @@ from ..core.risk_monitor_db import get_scan_cursor, update_scan_cursor
 from ..core.sql_helpers import SID_MAP, is_force_included
 from .account_enrichment import (
     apply_cen_conversion,
+    apply_client_net_gain,
+    build_currency_map,
     get_account_info_map,
+    get_client_net_gain_map,
     get_net_deposit_hist_map,
+    lots_divisor,
     round_or_none,
 )
 from .risk_monitor_service import (
@@ -68,6 +72,9 @@ _BOUNDARY_BUFFER_SEC = 30
 # Hard-coded floating-point tolerance for the "exact 1:1" buy/sell match.
 # 0.01 is one MT4 lot step below the minimum trade size, so anything inside
 # this band is rounding noise rather than a meaningful directional bias.
+# Denominated in RAW broker lots — when CEN lots are normalised (÷100) in
+# rule_hedge_open_detect the compare uses _LOTS_EPS / divisor so the raw-lot
+# semantics are preserved.
 _LOTS_EPS = 0.01
 
 
@@ -103,6 +110,7 @@ def _parse_iso_dt(value: Any) -> Optional[datetime]:
 def rule_hedge_open_detect(
     rows: List[Dict[str, Any]],
     rules: List[Dict[str, Any]],
+    currency_map: Optional[Dict[str, str]] = None,
 ) -> List[Dict[str, Any]]:
     """Find balanced hedge clusters per (server, login, symbol) per rule.
 
@@ -112,6 +120,14 @@ def rule_hedge_open_detect(
     >= min_total_lots matched size) emits one alert and the scan jumps past
     that window's end. This produces at most one alert per cluster per scan
     even when the cluster contains hundreds of orders (the 5-67038515 case).
+
+    ``currency_map`` ({loginsid: "USD"/"CEN"}) drives CEN lots
+    normalisation: CEN accounts' raw lots are ÷100 into standard-lot
+    equivalents BEFORE the min_total_lots compare, and the emitted alert
+    carries normalised lots (buy/sell/total/orders). The "perfect 1:1"
+    tolerance is scaled by the same divisor (raw diff < 0.01 CEN lot for
+    CEN accounts) so the balance semantics are unchanged — only the unit
+    of the size floor is. Missing map/entry → divisor 1.0 (legacy).
     """
     alerts: List[Dict[str, Any]] = []
 
@@ -121,6 +137,23 @@ def rule_hedge_open_detect(
     for key, grp in groupby(rows_sorted, key=key_fn):
         server, login, symbol = key
         bucket = list(grp)
+
+        # CEN lots normalisation — once per (server, login, symbol) group;
+        # groupby yields each row exactly once so no double division.
+        divisor = 1.0
+        if currency_map:
+            sid = SID_MAP.get(server)
+            divisor = lots_divisor(
+                currency_map.get(f"{sid}-{login}") if sid is not None else None
+            )
+            if divisor != 1.0:
+                for r in bucket:
+                    r["lots"] = float(r.get("lots") or 0) / divisor
+        # Keep the balance tolerance in RAW broker-lot units: after ÷100 the
+        # normalised sums differ by (raw diff / divisor), so comparing against
+        # _LOTS_EPS / divisor is exactly the pre-normalisation semantics.
+        eps = _LOTS_EPS / divisor
+
         # Parse open_time once per row so the sliding window can compare
         # datetimes directly. Drop rows we couldn't parse — they can't
         # participate in a time-bounded cluster.
@@ -169,7 +202,7 @@ def rule_hedge_open_detect(
                     sell_lots = sum(float(o.get("lots") or 0) for o in sells)
                     matched   = min(buy_lots, sell_lots)
                     if (
-                        abs(buy_lots - sell_lots) < _LOTS_EPS
+                        abs(buy_lots - sell_lots) < eps
                         and matched >= min_total_lots
                     ):
                         first_open = window[0]["_open_dt"]
@@ -320,7 +353,14 @@ def scan_hedge_open(
                     "Hedge open query failed for %s", srv["label"], exc_info=True
                 )
 
-        alerts = rule_hedge_open_detect(all_opens, norm_rules)
+        # Resolve account currency for the scanned universe BEFORE detection
+        # so CEN lots are compared as standard-lot equivalents (÷100).
+        # Fail-open: lookup failure → empty map → divisor 1.0 for everyone.
+        currency_map: Dict[str, str] = (
+            build_currency_map(conn, all_opens) if all_opens else {}
+        )
+
+        alerts = rule_hedge_open_detect(all_opens, norm_rules, currency_map=currency_map)
 
         # Cross-scan dedup keyed on (rule_id, server, login, symbol,
         # window_first_open). In cursor mode this is a defensive no-op
@@ -405,8 +445,10 @@ def _enrich_account_info(conn, alerts: List[Dict[str, Any]]) -> None:
     net_deposit_hist.
 
     ``balance`` / ``equity`` are scan-time broker snapshots from
-    ``get_account_info_map`` (CEN ÷100 via ``apply_cen_conversion``); equity
-    feeds the computed 淨賺 column (equity − net_deposit_hist).
+    ``get_account_info_map`` (CEN ÷100 via ``apply_cen_conversion``) — both
+    ACCOUNT-level. The computed 淨賺 column does NOT use them: it reads the
+    separate client-level ``client_equity`` / ``client_trading_net_deposit``
+    pair filled by ``apply_client_net_gain`` below.
     Broker-side leverage/total_open_lots are still intentionally NOT
     populated in v1 — they aren't needed to fire the rule and aren't
     load-bearing for analyst triage of a wash-trade alert (the buy/sell
@@ -419,6 +461,8 @@ def _enrich_account_info(conn, alerts: List[Dict[str, Any]]) -> None:
 
     info_map = get_account_info_map(conn, alerts)
     net_deposit_map = get_net_deposit_hist_map(conn, alerts)
+    # Client-level operands of the derived 淨賺 column (already USD).
+    client_net_gain_map = get_client_net_gain_map(conn, alerts)
 
     for alert in alerts:
         sid = SID_MAP.get(str(alert["server"]))
@@ -434,6 +478,7 @@ def _enrich_account_info(conn, alerts: List[Dict[str, Any]]) -> None:
         alert["net_deposit_hist"] = (
             net_deposit_map.get(loginsid) if loginsid else None
         )
+        apply_client_net_gain(alert, loginsid, client_net_gain_map)
         if currency == "CEN":
             apply_cen_conversion(alert, currency)
 

@@ -53,6 +53,7 @@ _SORT_COL_SQL: Dict[str, str] = {
     "rebate_all": "m.rebate_all",
     "combined_30d": "m.combined_30d",
     "equity": "m.equity",
+    "floating_pl": "m.floating_pl",
 }
 SORTABLE_WATCHLIST_COLS: frozenset = frozenset(_SORT_COL_SQL)
 DEFAULT_SORT_BY = "combined_30d"
@@ -67,7 +68,7 @@ _METRIC_COLS: Tuple[str, ...] = (
     "rebate_7d", "rebate_30d", "rebate_all",
     "combined_30d",
     "top_symbol_1", "top_symbol_1_ratio", "top_symbol_2", "top_symbol_2_ratio",
-    "equity",
+    "equity", "floating_pl",
 )
 
 

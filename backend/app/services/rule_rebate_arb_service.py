@@ -79,8 +79,21 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 import pymysql
 
 from ..core.config import Settings
+from .account_enrichment import (
+    query_equity_by_userid,
+    query_net_deposit_split,
+)
 
 logger = logging.getLogger(__name__)
+
+# These two client-level queries were born here but are now shared with the
+# risk-monitor 淨賺 column, so the canonical implementations live in
+# account_enrichment. Re-exported under their original private names because
+# case_metrics_service imports them and the unit tests monkeypatch them on
+# THIS module — both keep working through the alias (call sites below resolve
+# the module global at call time).
+_query_net_deposit_split = query_net_deposit_split
+_query_equity_by_userid = query_equity_by_userid
 
 # Rule band 121-130 (next free 10-slot band after martingale 111-120).
 # 121 = Rebate Arbitrage, 122 = Rebate Watch; 123-130 reserved.
@@ -302,83 +315,6 @@ def _query_rebate_agg(conn, *, date_from: date) -> List[Dict[str, Any]]:
         }
         for r in rows
     ]
-
-
-def _query_net_deposit_split(
-    conn, userids: List[int]
-) -> Dict[int, Dict[str, float]]:
-    """Client-level LIFETIME net deposit, split in two (skill §2 requirement):
-
-    - ``trading_net_deposit`` = deposits + withdrawals (trading money only)
-    - ``ib_withdrawal``       = 'ib withdrawal' rows (commission cash-outs)
-
-    The legacy single-number net_deposit_hist formula (= sum of BOTH) is
-    seriously misleading for IB-cum-traders (case 110386: shows -$1.34M net
-    deposit, but -$1.22M of that is commission withdrawals — as a trader he
-    is net LOSING). CEN /100 keyed on the transaction row's own st.currency
-    (stats_transactions convention — same as account_enrichment.
-    get_net_deposit_hist_map and rule_gap_trade_gap_service.
-    _query_net_deposit_by_userid); mt4_users is joined for the sid/demo
-    compliance filter only.
-    """
-    if not userids:
-        return {}
-    placeholders = ",".join(["%s"] * len(userids))
-    sql = f"""
-        SELECT st.userId AS userid,
-            SUM(CASE WHEN st.type IN ('deposit', 'withdrawal')
-                 THEN IF(st.currency = 'CEN', st.amount / 100.0, st.amount)
-                 ELSE 0 END) AS trading_net_deposit,
-            SUM(CASE WHEN st.type = 'ib withdrawal'
-                 THEN IF(st.currency = 'CEN', st.amount / 100.0, st.amount)
-                 ELSE 0 END) AS ib_withdrawal
-        FROM fxbackoffice.stats_transactions st
-        INNER JOIN fxbackoffice.mt4_users mu ON st.loginSid = mu.loginSid
-        WHERE st.userId IN ({placeholders})
-          AND st.type IN ('deposit', 'withdrawal', 'ib withdrawal')
-          AND mu.sid IN (1, 2, 5, 6)
-          AND mu.`GROUP` NOT LIKE '%%demo%%'
-        GROUP BY st.userId
-    """
-    try:
-        with conn.cursor() as cur:
-            cur.execute(sql, tuple(userids))
-            rows = cur.fetchall()
-        return {
-            int(r["userid"]): {
-                "trading_net_deposit": float(r["trading_net_deposit"] or 0.0),
-                "ib_withdrawal": float(r["ib_withdrawal"] or 0.0),
-            }
-            for r in rows
-        }
-    except Exception:
-        # Display-only enrichment — never blocks the alert emission.
-        logger.error("Rebate-arb net-deposit split lookup failed", exc_info=True)
-        return {}
-
-
-def _query_equity_by_userid(conn, userids: List[int]) -> Dict[int, float]:
-    """Client-level current equity (sum across compliant accounts, CEN /100)."""
-    if not userids:
-        return {}
-    placeholders = ",".join(["%s"] * len(userids))
-    sql = f"""
-        SELECT userId AS userid,
-               SUM(IF(CURRENCY = 'CEN', EQUITY / 100.0, EQUITY)) AS equity
-        FROM fxbackoffice.mt4_users
-        WHERE userId IN ({placeholders})
-          AND sid IN (1, 2, 5, 6)
-          AND `GROUP` NOT LIKE '%%demo%%'
-        GROUP BY userId
-    """
-    try:
-        with conn.cursor() as cur:
-            cur.execute(sql, tuple(userids))
-            rows = cur.fetchall()
-        return {int(r["userid"]): float(r["equity"] or 0.0) for r in rows}
-    except Exception:
-        logger.error("Rebate-arb equity lookup failed", exc_info=True)
-        return {}
 
 
 # ── Pure aggregation + trigger logic (unit-testable, no DB) ────────────────
