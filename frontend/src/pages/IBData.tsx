@@ -19,7 +19,13 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+import { Info } from "lucide-react";
 import { type DateRange } from "react-day-picker";
 
 // default combos nudge fresh grads to surface typical batch queries
@@ -83,6 +89,37 @@ const currencyFormatter = new Intl.NumberFormat("en-US", {
 
 const formatCurrency = (value: number | null | undefined) =>
   currencyFormatter.format(value ?? 0);
+
+/**
+ * Table header cell with an info tooltip icon.
+ *
+ * NOTE: `@/components/ui/info-header`'s `InfoHeader` is an AG-Grid custom
+ * header (it takes `CustomHeaderProps` and calls `showColumnMenu`/`showFilter`),
+ * so it cannot be used here — this page renders plain shadcn `<Table>`. This
+ * mirrors its affordance (ℹ icon + shadcn Tooltip) for a `<TableHead>`.
+ */
+const HeadWithInfo = ({
+  label,
+  tooltip,
+}: {
+  label: string;
+  tooltip: React.ReactNode;
+}) => (
+  <span className="inline-flex items-center gap-1">
+    {label}
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Info className="h-3.5 w-3.5 shrink-0 cursor-help opacity-70 hover:opacity-100" />
+      </TooltipTrigger>
+      <TooltipContent
+        side="bottom"
+        className="max-w-xs whitespace-pre-line text-left text-xs leading-relaxed"
+      >
+        {tooltip}
+      </TooltipContent>
+    </Tooltip>
+  </span>
+);
 
 const formatLastRun = (value: string | null | undefined) => {
   if (!value) return "暂无记录";
@@ -551,10 +588,25 @@ export default function IBDataPage() {
                       IB Withdrawal (USD)
                     </TableHead>
                     <TableHead className="text-white dark:text-slate-100 font-bold text-base">
-                      IB Wallet Balance (USD)
+                      <HeadWithInfo
+                        label="IB Wallet Balance (USD)"
+                        tooltip={
+                          "IB 钱包账户 (GROUP LIKE 'IB-WALLET%') 的【当前余额】。\n\n" +
+                          "存量指标，不受上方查询时间区间约束 —— 无论查一天还是查一年，显示的都是此刻的余额（数据源 mt4_users 只有实时余额快照，无每日历史）。\n\n" +
+                          "因此它不参与 Net Deposit 的计算，两列请分开判读。"
+                        }
+                      />
                     </TableHead>
                     <TableHead className="text-white dark:text-slate-100 font-bold text-base">
-                      Net Deposit (USD)
+                      <HeadWithInfo
+                        label="Net Deposit (USD)"
+                        tooltip={
+                          "Net Deposit = Deposit + Withdrawal + IB Withdrawal（算术和；出金类金额在库中为负数）。\n\n" +
+                          "【含 IB 佣金提现】('ib withdrawal')：IB 从钱包提走的佣金会压低此值。如需只看客户交易本金的净入金，请另行拆分。\n\n" +
+                          "口径与 IB Report 页一致；统计 IB 旗下全部客户（含 IB 自己），仅统计查询区间内的流水。\n\n" +
+                          "不再减去 IB Wallet Balance（该列是当前存量，与区间流量不同量纲）。"
+                        }
+                      />
                     </TableHead>
                   </TableRow>
                 </TableHeader>
@@ -628,8 +680,16 @@ export default function IBDataPage() {
             </div>
 
             <p className="text-xs text-muted-foreground">
-              SQL 计算方式：总提现 = Withdrawal + IB Withdrawal，Net Deposit =
-              Deposit + 总提现 - IB Wallet Balance。
+              SQL 计算方式：总提现 = Withdrawal + IB Withdrawal（出金类金额为负
+              数），Net Deposit = Deposit + Withdrawal + IB Withdrawal
+              <strong>（含 IB 佣金提现 'ib withdrawal'）</strong>，口径与 IB
+              Report 页一致。
+              <br />
+              统计范围：该 IB 旗下全部客户（含 IB 自己），仅计入查询区间内的流水。
+              <br />
+              <strong>IB Wallet Balance 是当前余额（存量）</strong>
+              ，不受查询区间约束，<strong>不参与 Net Deposit 计算</strong>，请单
+              独判读。
             </p>
           </div>
         </CardContent>
@@ -839,8 +899,9 @@ export default function IBDataPage() {
             </div>
 
             <p className="text-xs text-muted-foreground">
-              SQL 计算方式：总出金 = Withdrawal + IB Withdrawal，净入金 = Deposit
-              - 总出金。
+              SQL 计算方式：总出金 = |Withdrawal| + |IB Withdrawal|，净入金 =
+              Deposit - 总出金<strong>（含 IB 佣金提现 'ib withdrawal'）</strong>
+              ，与上方 IB 表口径一致。
               <br />
               地区判断：cid = 0 为 CN，cid = 1 为 Global。
             </p>
