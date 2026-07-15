@@ -6,6 +6,8 @@ Defines request/response models. Key business rules:
   - adj_xxx columns are mutually exclusive (one per client, by deposit bucket)
   - return_non_adjusted only populated when net_deposit > 0
   - return_neg_adjusted only populated when net_deposit ≤ 0 and A > 0
+  - net_deposit_* is TRADING net deposit and EXCLUDES 'ib withdrawal'; the
+    commission leg is reported separately as ib_withdrawal_*
 """
 
 from typing import Optional, List, Any, Dict, Literal
@@ -19,8 +21,13 @@ class ClientReturnRateRow(BaseModel):
     based on their deposit bucket.
     """
     client_id: int = Field(..., description="Client unique identifier")
-    net_deposit_hist: float = Field(0, description="Historical net deposit (deposit - withdrawal)")
-    net_deposit_month: float = Field(0, description="Current month net deposit")
+    # TRADING net deposit: type IN ('deposit','withdrawal'), EXCLUDING 'ib withdrawal'.
+    # Paired with `equity` (Excl. IB Wallet) so the return-rate numerator and
+    # denominator cover the same money. See client_return_service module docstring.
+    net_deposit_hist: float = Field(0, description="Historical trading net deposit (deposit + withdrawal; EXCLUDES 'ib withdrawal')")
+    net_deposit_month: float = Field(0, description="Trading net deposit within the selected range (EXCLUDES 'ib withdrawal')")
+    ib_withdrawal_hist: float = Field(0, description="Historical IB commission cash-outs ('ib withdrawal', negative). Legacy all-in net deposit = net_deposit_hist + ib_withdrawal_hist")
+    ib_withdrawal_month: float = Field(0, description="IB commission cash-outs within the selected range (negative)")
     equity: float = Field(0, description="Current account balance/equity")
     profit_hist: float = Field(0, description="Historical realized trade profit from stats_trading_running_totals (excludes IB commissions, bonuses)")
     month_trade_profit: float = Field(0, description="Current month trading profit")

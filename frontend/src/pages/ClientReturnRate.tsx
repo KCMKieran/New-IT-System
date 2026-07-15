@@ -6,8 +6,13 @@
  *
  * Key columns:
  *   - 区间交易利润: trading profit within selected date range
- *   - 区间净入金: net deposits within selected date range
+ *   - 区间交易净入金: net deposits within selected date range (excl. 'ib withdrawal')
  *   - 负净入金回报率: (equity - A) / A, where A = MAX(deposits_90d, |net_deposit_hist|)
+ *
+ * Net deposit口径 (2026-07-15): net_deposit_* is TRADING net deposit and EXCLUDES
+ * 'ib withdrawal'; IB commission cash-outs are their own columns (ib_withdrawal_*).
+ * This keeps the return-rate denominator symmetric with the numerator `equity`,
+ * which is Excl. IB Wallet. See client_return_service.py docstring for the why.
  *   - 长期收益率 ROACE (return_on_avg_equity): profit_hist / avg_daily_equity × 100%
  *     - avg_daily_equity: mean daily ending equity on "active" days (stats_balances JOIN
  *       stats_trading), sid 1/5/6, no demo, no IB Wallet, endingEquity > 0, CEN ÷100
@@ -57,8 +62,12 @@ import { ColumnVisibilityMenu } from "@/components/ColumnVisibilityMenu";
 
 interface ClientReturnRateRow {
   client_id: number;
+  /** TRADING net deposit — excludes 'ib withdrawal' (IB commission cash-outs). */
   net_deposit_hist: number;
   net_deposit_month: number;
+  /** IB commission cash-outs (negative). Legacy all-in net deposit = net_deposit_hist + ib_withdrawal_hist. */
+  ib_withdrawal_hist: number;
+  ib_withdrawal_month: number;
   equity: number;
   profit_hist: number;
   month_trade_profit: number;
@@ -574,15 +583,61 @@ export default function ClientReturnRate() {
       },
       {
         field: "net_deposit_hist",
-        headerName: "历史净入金",
-        width: 140,
+        headerName: "历史交易净入金",
+        headerComponent: InfoHeader,
+        headerComponentParams: {
+          tooltip:
+            "口径: 交易净入金 = SUM(deposit) + SUM(withdrawal)，**不含** IB 佣金提现('ib withdrawal')\n" +
+            "范围: 全历史，客户级(按 userId 汇总)，sid 1/2/5/6，排除 demo；CEN ÷100\n" +
+            "IB 佣金提现单独看右侧「IB 佣金提现」列；旧口径「历史净入金」= 本列 + IB 佣金提现\n\n" +
+            "为什么不含 IB 佣金提现: 佣金提现只发生在 IB 钱包(sid=2)，从不是交易本金；\n" +
+            "把它算进出金会压低收益率分母，而钱包余额又不在分子「现时账户余额(Excl. IB Wallet)」里\n\n" +
+            "Trading net deposit — EXCLUDES 'ib withdrawal' (IB commission cash-outs)",
+        },
+        width: 150,
         valueFormatter: (p) => formatCurrency(p.value),
         cellClass: (p) => getProfitColor(p.value),
       },
       {
         field: "net_deposit_month",
-        headerName: "区间净入金",
-        width: 130,
+        headerName: "区间交易净入金",
+        headerComponent: InfoHeader,
+        headerComponentParams: {
+          tooltip:
+            "口径同「历史交易净入金」，但只统计所选时间范围内的 deposit / withdrawal\n" +
+            "**不含** IB 佣金提现('ib withdrawal')\n\n" +
+            "Trading net deposit within the selected range — EXCLUDES 'ib withdrawal'",
+        },
+        width: 140,
+        valueFormatter: (p) => formatCurrency(p.value),
+        cellClass: (p) => getProfitColor(p.value),
+      },
+      {
+        field: "ib_withdrawal_hist",
+        headerName: "IB 佣金提现(历史)",
+        headerComponent: InfoHeader,
+        headerComponentParams: {
+          tooltip:
+            "口径: SUM(type = 'ib withdrawal')，负数表示提出\n" +
+            "客户作为 IB 从佣金钱包(sid=2)提走的返佣，**不是**交易本金——因此不计入交易净入金、\n" +
+            "也不参与收益率分母\n\n" +
+            "旧口径「历史净入金」= 历史交易净入金 + 本列\n\n" +
+            "IB commission cash-outs (negative). Not trading capital.",
+        },
+        width: 150,
+        valueFormatter: (p) => formatCurrency(p.value),
+        cellClass: (p) => getProfitColor(p.value),
+      },
+      {
+        field: "ib_withdrawal_month",
+        headerName: "IB 佣金提现(区间)",
+        headerComponent: InfoHeader,
+        headerComponentParams: {
+          tooltip:
+            "口径同「IB 佣金提现(历史)」，但只统计所选时间范围内的 'ib withdrawal'\n\n" +
+            "IB commission cash-outs within the selected range (negative)",
+        },
+        width: 150,
         valueFormatter: (p) => formatCurrency(p.value),
         cellClass: (p) => getProfitColor(p.value),
       },
@@ -673,7 +728,17 @@ export default function ClientReturnRate() {
         headerComponent: InfoHeader,
         headerComponentParams: {
           tooltip:
-            "公式: (净值 − 历史净入金) / 历史净入金 × 100%\nFormula: (Equity − Net Deposit) / Net Deposit × 100%\n\n仅净入金 > 0 的客户显示此列",
+            "公式: (净值 − 历史交易净入金) / 历史交易净入金 × 100%\n" +
+            "Formula: (Equity − Trading Net Deposit) / Trading Net Deposit × 100%\n\n" +
+            "口径 (分子/分母对称):\n" +
+            "· 分子 净值 = mt4_users.EQUITY 汇总，sid 1/5/6 — **不含** IB 钱包(sid=2)余额，含浮动盈亏\n" +
+            "· 分母 历史交易净入金 = deposit + withdrawal，**不含** IB 佣金提现('ib withdrawal')\n" +
+            "· 两边都不含 IB 钱包侧的钱 → 衡量的是「交易本金的回报」\n\n" +
+            "⚠ 2026-07-15 修正: 旧口径分母含 IB 佣金提现，导致 IB 兼交易客户收益率系统性虚高\n" +
+            "(实例 123261: 旧 +60.3% → 新 −32.1%)。仅影响有 IB 佣金提现的客户。\n\n" +
+            "已知偏差: 客户把佣金从钱包转入交易账户('ib transfer to account')会抬高净值\n" +
+            "但不计入净入金 → 该类客户收益率仍偏乐观\n\n" +
+            "仅交易净入金 > 0 的客户显示此列",
         },
         width: 160,
         valueFormatter: (p) => formatPercent(p.value),
@@ -691,7 +756,10 @@ export default function ClientReturnRate() {
         headerComponent: InfoHeader,
         headerComponentParams: {
           tooltip:
-            "公式: (净值 − A) / A × 100%\n其中 A = MAX(最近90天入金, |历史净入金|)\n\nFormula: (Equity − A) / A × 100%\nwhere A = MAX(Deposits_90d, |Net Deposit|)\n\n仅净入金 ≤ 0 的客户显示此列",
+            "公式: (净值 − A) / A × 100%\n其中 A = MAX(最近90天入金, |历史交易净入金|)\n\n" +
+            "Formula: (Equity − A) / A × 100%\nwhere A = MAX(Deposits_90d, |Trading Net Deposit|)\n\n" +
+            "口径: 净值 sid 1/5/6 不含 IB 钱包；交易净入金 **不含** IB 佣金提现('ib withdrawal')\n\n" +
+            "仅交易净入金 ≤ 0 的客户显示此列",
         },
         width: 170,
         valueFormatter: (p) => formatPercent(p.value),
