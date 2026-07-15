@@ -46,8 +46,12 @@ _CSV_FIELDS = [
     "zipcode",
     "is_akcm",
     "has_usdt_tag",
+    # net_deposit_* excludes 'ib withdrawal'; the commission leg follows as its
+    # own column so the legacy all-in figure stays reconstructible in the CSV.
     "net_deposit_hist",
     "net_deposit_month",
+    "ib_withdrawal_hist",
+    "ib_withdrawal_month",
     "equity",
     "profit_hist",
     "month_trade_profit",

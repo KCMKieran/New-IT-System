@@ -12,6 +12,27 @@ Two-phase MySQL query against fxbackoffice (via MYSQL_HOST_PRIMARY):
              txm:   stats_transactions deposits/withdrawals in selected range
              dep90: stats_transactions deposits in last 90 days
 
+Net deposit convention (2026-07-15 — numerator/denominator symmetry fix):
+  `net_deposit_hist` / `net_deposit_month` are TRADING net deposit — type IN
+  ('deposit','withdrawal') only, **excluding 'ib withdrawal'**. IB commission
+  cash-outs are reported separately as `ib_withdrawal_hist` / `ib_withdrawal_month`,
+  so the legacy all-in number is still reconstructible (legacy = net_deposit + ib_withdrawal).
+
+  Why: `equity` is Excl. IB Wallet (sid 1/5/6), so a denominator that subtracts
+  IB commission withdrawals (which only ever land on the sid=2 wallet, never on a
+  trading account) was asymmetric — it shrank the denominator with money that was
+  never trading capital while the wallet balance stayed out of the numerator. For
+  IB-cum-traders that inflated `return_non_adjusted` systematically (case 123261:
+  +60.3% reported vs -32.1% actual). Matches the rebate-arbitrage SSOT
+  `trading_net_deposit` (rule_rebate_arb_service._query_net_deposit_split, skill §2.2)
+  and the case-110386 lesson.
+
+  sid stays IN (1,2,5,6): a plain 'deposit'/'withdrawal' booked on a wallet account
+  is still real client money in/out of KCM and belongs in the denominator. Only the
+  'ib withdrawal' TYPE is commission, not capital. (Known residual, accepted in
+  skill §2.2: 'ib transfer to account' wallet→trading moves lift equity without
+  lifting net deposit, so return is still mildly optimistic for IB-cum-traders.)
+
 Return rate columns:
   - profit_hist:          realized trade P&L from stats_trading_running_totals (excludes IB commissions, bonuses)
   - adj_xxx:              equity / bucket_base × 100 (when net_deposit ≤ 0, by deposit bucket)
@@ -168,8 +189,13 @@ def _build_phase2_sql(id_list_str: str, month_start: str, month_end: str, includ
     return f"""
 SELECT
     tm.id AS client_id,
+    -- Trading net deposit: 'ib withdrawal' deliberately NOT summed in here (see
+    -- module docstring). The commission leg is exposed as its own column so the
+    -- legacy all-in figure stays reconstructible: legacy = net_deposit + ib_withdrawal.
     ROUND(COALESCE(th.deposits_hist, 0) + COALESCE(th.withdrawals_hist, 0), 2) AS net_deposit_hist,
     ROUND(COALESCE(txm.deposits_month, 0) + COALESCE(txm.withdrawals_month, 0), 2) AS net_deposit_month,
+    ROUND(COALESCE(th.ib_withdrawal_hist, 0), 2) AS ib_withdrawal_hist,
+    ROUND(COALESCE(txm.ib_withdrawal_month, 0), 2) AS ib_withdrawal_month,
     ROUND(COALESCE(eq.equity, 0), 2) AS equity,
     ROUND(COALESCE(rt.profit_hist_trades, 0), 2) AS profit_hist,
     COALESCE(uc.country, 'Unknown') AS country,
@@ -241,10 +267,15 @@ LEFT JOIN (
     GROUP BY userId
 ) AS eq ON tm.id = eq.client_id
 
+-- Trading deposits/withdrawals and the IB commission leg are aggregated in the
+-- same pass but kept in SEPARATE columns. `withdrawals_hist` is 'withdrawal' only;
+-- 'ib withdrawal' goes to `ib_withdrawal_hist` and never enters net_deposit_hist.
+-- Amounts on withdrawal rows are already negative, so net = deposits + withdrawals.
 LEFT JOIN (
     SELECT st.userId AS client_id,
            SUM(CASE WHEN st.type = 'deposit' THEN IF(st.currency='CEN', st.amount/100.0, st.amount) ELSE 0 END) AS deposits_hist,
-           SUM(CASE WHEN st.type IN ('withdrawal','ib withdrawal') THEN IF(st.currency='CEN', st.amount/100.0, st.amount) ELSE 0 END) AS withdrawals_hist,
+           SUM(CASE WHEN st.type = 'withdrawal' THEN IF(st.currency='CEN', st.amount/100.0, st.amount) ELSE 0 END) AS withdrawals_hist,
+           SUM(CASE WHEN st.type = 'ib withdrawal' THEN IF(st.currency='CEN', st.amount/100.0, st.amount) ELSE 0 END) AS ib_withdrawal_hist,
            SUM(CASE WHEN st.type = 'deposit' THEN st.countTransactions ELSE 0 END) AS deposit_count
     FROM stats_transactions st
     INNER JOIN mt4_users mu ON st.loginSid = mu.loginSid
@@ -258,7 +289,8 @@ LEFT JOIN (
 LEFT JOIN (
     SELECT st.userId AS client_id,
            SUM(CASE WHEN st.type = 'deposit' THEN IF(st.currency='CEN', st.amount/100.0, st.amount) ELSE 0 END) AS deposits_month,
-           SUM(CASE WHEN st.type IN ('withdrawal','ib withdrawal') THEN IF(st.currency='CEN', st.amount/100.0, st.amount) ELSE 0 END) AS withdrawals_month
+           SUM(CASE WHEN st.type = 'withdrawal' THEN IF(st.currency='CEN', st.amount/100.0, st.amount) ELSE 0 END) AS withdrawals_month,
+           SUM(CASE WHEN st.type = 'ib withdrawal' THEN IF(st.currency='CEN', st.amount/100.0, st.amount) ELSE 0 END) AS ib_withdrawal_month
     FROM stats_transactions st
     INNER JOIN mt4_users mu ON st.loginSid = mu.loginSid
     WHERE st.type IN ('deposit', 'withdrawal', 'ib withdrawal')
@@ -399,6 +431,7 @@ def get_client_return_rate_data(
 
     allowed_sort_columns = {
         "client_id", "net_deposit_hist", "net_deposit_month", "equity",
+        "ib_withdrawal_hist", "ib_withdrawal_month",
         "profit_hist", "month_trade_profit", "deposit_avg", "deposit_bucket",
         "return_non_adjusted", "return_adjusted",
         "adj_0_2000", "adj_2000_5000", "adj_5000_50000", "adj_50000_plus",
@@ -422,9 +455,14 @@ def get_client_return_rate_data(
         except ValueError:
             logger.warning(f"Invalid close_time_start format: {close_time_start}")
 
-    # Redis cache
+    # Redis cache.
+    # v6 (2026-07-15): net_deposit_* switched to trading net deposit (excl.
+    # 'ib withdrawal') + new ib_withdrawal_* columns. Bumping the version prefix
+    # changes every cache key, so v5 blobs holding the old formula become
+    # unreachable and age out on their own TTL — no manual flush needed and no
+    # window where a cached v5 row and a fresh v6 row are shown side by side.
     cache_params = (
-        "client_return_v5_usdt_"
+        "client_return_v6_trading_nd_"
         f"{month_start}_{month_end}_{search}_{deposit_bucket}_{sort_by}_{sort_order}_"
         f"{page}_{page_size}_{close_time_start}_{include_avg_equity}_"
         f"{country_filter}_{akcm_filter}_{usdt_filter}_{return_all}"

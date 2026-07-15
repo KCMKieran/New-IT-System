@@ -15,6 +15,11 @@ import { useIsMobile } from "@/hooks/use-mobile";
 
 interface ClientReturnRateRow {
   client_id: number;
+  /**
+   * TRADING net deposit — excludes 'ib withdrawal' (IB commission cash-outs),
+   * keeping it symmetric with `equity` (Excl. IB Wallet, sid 1/5/6). The
+   * ib_withdrawal_* breakdown lives on the full /client-return-rate page.
+   */
   net_deposit_hist: number;
   equity: number;
   profit_hist: number;
@@ -103,7 +108,16 @@ export default function ReturnRateSummary() {
       },
       {
         field: "net_deposit_hist",
-        headerName: "历史净入金",
+        headerName: "历史交易净入金",
+        headerComponent: InfoHeader,
+        headerComponentParams: {
+          tooltip:
+            "口径: 交易净入金 = SUM(deposit) + SUM(withdrawal)，**不含** IB 佣金提现('ib withdrawal')\n" +
+            "范围: 全历史，客户级(按 userId 汇总)，sid 1/2/5/6，排除 demo；CEN ÷100\n" +
+            "IB 佣金提现只发生在 IB 钱包(sid=2)，不是交易本金，故不计入\n\n" +
+            "完整列(含 IB 佣金提现明细)见「客户回报率查询」页\n\n" +
+            "Trading net deposit — EXCLUDES 'ib withdrawal' (IB commission cash-outs)",
+        },
         minWidth: 110,
         flex: 1,
         valueFormatter: (p) => formatCurrency(p.value),
@@ -131,7 +145,13 @@ export default function ReturnRateSummary() {
         headerComponent: InfoHeader,
         headerComponentParams: {
           tooltip:
-            "公式: (净值 − 历史净入金) / 历史净入金 × 100%\nFormula: (Equity − Net Deposit) / Net Deposit × 100%\n\n仅净入金 > 0 的客户显示此列",
+            "公式: (净值 − 历史交易净入金) / 历史交易净入金 × 100%\n" +
+            "Formula: (Equity − Trading Net Deposit) / Trading Net Deposit × 100%\n\n" +
+            "口径 (分子/分母对称):\n" +
+            "· 分子 净值 sid 1/5/6 — **不含** IB 钱包(sid=2)余额\n" +
+            "· 分母 交易净入金 — **不含** IB 佣金提现('ib withdrawal')\n\n" +
+            "⚠ 2026-07-15 修正: 旧口径分母含 IB 佣金提现，IB 兼交易客户收益率系统性虚高\n\n" +
+            "仅交易净入金 > 0 的客户显示此列",
         },
         minWidth: 100,
         flex: 0.9,
@@ -144,7 +164,10 @@ export default function ReturnRateSummary() {
         headerComponent: InfoHeader,
         headerComponentParams: {
           tooltip:
-            "公式: (净值 − A) / A × 100%\n其中 A = MAX(最近90天入金, |历史净入金|)\n\nFormula: (Equity − A) / A × 100%\nwhere A = MAX(Deposits_90d, |Net Deposit|)\n\n仅净入金 ≤ 0 的客户显示此列",
+            "公式: (净值 − A) / A × 100%\n其中 A = MAX(最近90天入金, |历史交易净入金|)\n\n" +
+            "Formula: (Equity − A) / A × 100%\nwhere A = MAX(Deposits_90d, |Trading Net Deposit|)\n\n" +
+            "口径: 交易净入金 **不含** IB 佣金提现('ib withdrawal')\n\n" +
+            "仅交易净入金 ≤ 0 的客户显示此列",
         },
         minWidth: 130,
         flex: 1.1,

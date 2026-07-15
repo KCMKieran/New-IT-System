@@ -38,8 +38,12 @@ from ..core.sql_helpers import (
 )
 from .account_enrichment import (
     apply_cen_conversion,
+    apply_client_net_gain,
+    build_currency_map,
     get_account_info_map,
+    get_client_net_gain_map,
     get_net_deposit_hist_map,
+    lots_divisor,
     round_or_none,
 )
 
@@ -262,12 +266,20 @@ def _get_mt4_account_total_lots(
 def rule_burst_open_detect(
     recent_opens: List[Dict[str, Any]],
     rules: List[Dict[str, Any]],
+    currency_map: Optional[Dict[str, str]] = None,
 ) -> List[Dict[str, Any]]:
     """Detect burst-open events using a sliding window per (server, login, symbol).
 
     For each rule, scans for clusters of orders within burst_window_sec
     where every order has lots >= min_lots_per_order and the cluster
     contains >= min_order_count orders.
+
+    ``currency_map`` ({loginsid: "USD"/"CEN"}) drives CEN lots
+    normalisation: CEN accounts' raw lots are ÷100 into standard-lot
+    equivalents BEFORE the min_lots_per_order compare, so the threshold
+    is always denominated in standard lots. The normalised lots are what
+    the emitted alert carries (orders / total_lots). Missing map or
+    missing entry → divisor 1.0 (legacy behaviour).
 
     Returns list of matched bursts, each tagged with the rule_id.
     """
@@ -279,6 +291,17 @@ def rule_burst_open_detect(
     for key, group_iter in groupby(sorted_opens, key=key_fn):
         orders = list(group_iter)
         server, login, symbol = key
+
+        # CEN lots normalisation — once per (server, login, symbol) group;
+        # groupby yields each row exactly once so no double division.
+        if currency_map:
+            sid = SID_MAP.get(server)
+            divisor = lots_divisor(
+                currency_map.get(f"{sid}-{login}") if sid is not None else None
+            )
+            if divisor != 1.0:
+                for o in orders:
+                    o["lots"] = float(o.get("lots") or 0) / divisor
 
         # Sort by open_time within the group
         orders.sort(key=lambda o: o["open_time"])
@@ -484,8 +507,15 @@ def scan_burst_open(
                     "Failed to query %s recent opens", srv["label"], exc_info=True
                 )
 
+        # Resolve account currency for the scanned universe BEFORE detection
+        # so CEN lots are compared as standard-lot equivalents (÷100).
+        # Fail-open: lookup failure → empty map → divisor 1.0 for everyone.
+        currency_map: Dict[str, str] = (
+            build_currency_map(conn, all_opens) if all_opens else {}
+        )
+
         # Run burst detection
-        alerts = rule_burst_open_detect(all_opens, rules)
+        alerts = rule_burst_open_detect(all_opens, rules, currency_map=currency_map)
 
         # Dedup against previous scan to avoid re-reporting the same burst
         if previous_alerts:
@@ -548,7 +578,9 @@ def _enrich_account_info(
 
     For CEN accounts, raw equity/balance stored on the MT server are in
     cents — we divide by 100 here so the frontend always receives USD.
-    Lots are NOT adjusted (contract size is the same for USD and CEN).
+    total_open_lots is likewise ÷100 for CEN accounts (1 CEN lot = 0.01
+    standard lot — 2026-07 review overturned the earlier "contract size
+    is identical" assumption), so equity_per_lot is USD per standard lot.
 
     zipcode comes from fxbackoffice.mt4_users and is used by the
     frontend zipcode column + toolbar LIKE filter to spot same-address
@@ -587,6 +619,10 @@ def _enrich_account_info(
     # CRM-side enrichment: currency + zipcode, plus historical net deposit.
     account_info_map = get_account_info_map(conn, alerts)
     net_deposit_hist_map = get_net_deposit_hist_map(conn, alerts)
+    # Client-level operands of the derived 淨賺 column — deliberately separate
+    # from net_deposit_hist above, whose (account-level equity / ib-inclusive)
+    # semantics feed alert thresholds and mail templates and must not move.
+    client_net_gain_map = get_client_net_gain_map(conn, alerts)
 
     for alert in alerts:
         srv = alert["server"]
@@ -625,8 +661,18 @@ def _enrich_account_info(
         alert["net_deposit_hist"] = (
             net_deposit_hist_map.get(loginsid) if loginsid else None
         )
+        apply_client_net_gain(alert, loginsid, client_net_gain_map)
 
         apply_cen_conversion(alert, currency)
+
+        # CEN lots normalisation: total_open_lots (ALL open positions) is a
+        # raw broker lot count → ÷100 for CEN so equity_per_lot below is
+        # USD per STANDARD lot, matching the already-converted equity.
+        divisor = lots_divisor(currency)
+        if divisor != 1.0 and alert.get("total_open_lots") is not None:
+            alert["total_open_lots"] = round(
+                float(alert["total_open_lots"]) / divisor, 2
+            )
 
         total_lots = alert.get("total_open_lots")
         equity = alert.get("equity")

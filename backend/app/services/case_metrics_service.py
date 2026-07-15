@@ -17,6 +17,27 @@ Money conventions: CEN accounts /100 keyed on the ROW's own currency
 (mt4_users.CURRENCY for trades/equity, stats rows' currency for
 rebate/transactions); everything stored in USD. Time windows use
 `closeDate` (broker-date column, indexed) per project convention.
+
+Account scope — ALIGNED 2026-07-15 (was a real inconsistency, measured on
+the live 940-client roster):
+
+    leg          before                          after
+    equity       sid IN (1,2,5,6) + no demo      (unchanged — was correct)
+    profit_*     no sid filter, no demo          sid IN (1,2,5,6) + no demo
+    rebate_*     NO filter at all                sid IN (1,2,5,6) + no demo
+
+The legs are summed against each other (`combined_*`, and the 净赚 column =
+profit_all + floating_pl + rebate_all), so mixing populations made the sums
+incoherent: the roster held 293 sid-3 and 35 sid-4 accounts whose trades fed
+`profit_*` but never `equity`, and demo/sid-3 rebate fed `rebate_*` alone
+(9 clients, $57,415 of $17.9M lifetime rebate — 0.32%).
+
+This job's numbers are DISPLAY-ONLY. Rules 121/122 compute their own
+aggregates from `_TRADES_AGG_SQL` / `_REBATE_AGG_SQL` in
+rule_rebate_arb_service, so alert thresholds are untouched by this change.
+Historical `case_metrics_daily` rows keep their old (unaligned) values —
+snapshots are never back-filled — so the Δ1/Δ30 trend columns will show a
+one-off step on the first run after this ships for the ~9 affected clients.
 """
 
 from __future__ import annotations
@@ -28,6 +49,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from ..core.config import Settings, get_settings
 from ..core.risk_cases_pg import RiskCasesUnavailable, risk_cases_conn
+from .account_enrichment import query_floating_pl_by_userid
 from .rule_rebate_arb_service import (
     SHORT_HOLD_5M_SEC,
     SHORT_HOLD_10M_SEC,
@@ -84,6 +106,7 @@ _TRADES_WINDOWS_SQL = f"""
       AND t.CLOSE_TIME > '1971-01-01'
       AND t.CMD IN (0, 1)
       AND COALESCE(t.isDeleted, 0) = 0
+      AND mu.sid IN (1, 2, 5, 6)
       AND mu.`GROUP` NOT LIKE '%%demo%%'
     GROUP BY t.loginSid
 """
@@ -113,6 +136,8 @@ _REBATE_WINDOWS_SQL = """
     FROM fxbackoffice.stats_ib_commissions_by_login_sid s
     JOIN fxbackoffice.mt4_users mu ON mu.loginSid = s.fromLoginSid
     WHERE mu.userId IN ({ids})
+      AND mu.sid IN (1, 2, 5, 6)
+      AND mu.`GROUP` NOT LIKE '%%demo%%'
     GROUP BY mu.userId
 """
 
@@ -198,6 +223,7 @@ def _build_metric_row(
     rebate: Dict[str, Any],
     nd: Dict[str, float],
     equity: Optional[float],
+    floating_pl: Optional[float],
     symbols: Tuple,
     account_count: int,
 ) -> Dict[str, Any]:
@@ -248,6 +274,8 @@ def _build_metric_row(
         "top_symbol_2": s2,
         "top_symbol_2_ratio": r2,
         "equity": round(equity, 2) if equity is not None else None,
+        # Point-in-time snapshot — unrecomputable after the fact, hence stored.
+        "floating_pl": round(floating_pl, 2) if floating_pl is not None else None,
         "account_count": account_count,
     }
 
@@ -262,7 +290,7 @@ _METRIC_INSERT_COLS: Tuple[str, ...] = (
     "rebate_7d", "rebate_30d", "rebate_all",
     "combined_30d",
     "top_symbol_1", "top_symbol_1_ratio", "top_symbol_2", "top_symbol_2_ratio",
-    "equity", "account_count",
+    "equity", "floating_pl", "account_count",
 )
 
 _METRIC_UPSERT_SQL = (
@@ -318,6 +346,7 @@ def run_daily_baseline(
     d90 = metric_date - timedelta(days=90)
     nd_map: Dict[int, Dict[str, float]] = {}
     equity_map: Dict[int, float] = {}
+    floating_map: Dict[int, float] = {}
 
     try:
         conn = _get_connection(settings)
@@ -344,6 +373,7 @@ def run_daily_baseline(
             for chunk in _chunks(roster, _CHUNK):
                 nd_map.update(_query_net_deposit_split(conn, chunk))
                 equity_map.update(_query_equity_by_userid(conn, chunk))
+                floating_map.update(query_floating_pl_by_userid(conn, chunk))
         finally:
             conn.close()
     except Exception:
@@ -365,6 +395,7 @@ def run_daily_baseline(
                         rebates.get(uid, {}),
                         nd_map.get(uid, {}),
                         equity_map.get(uid),
+                        floating_map.get(uid),
                         symbols.get(uid),
                         accounts.get(uid, 0),
                     )

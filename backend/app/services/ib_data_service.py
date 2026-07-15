@@ -54,6 +54,12 @@ wallet_referrals AS (
     JOIN params p ON p.target_ib = it.ibid
 ),
 wallet_total AS (
+    -- STOCK, not flow: the CURRENT balance sitting in the IB wallet accounts.
+    -- Deliberately NOT constrained by the start/end window (mt4_users only
+    -- holds a live balance snapshot, there is no per-day wallet history here),
+    -- so this value is a lifetime-to-date figure and must never be mixed into
+    -- the windowed net_deposit_usd arithmetic below. It is surfaced as its own
+    -- column for the UI to render alongside the flow columns.
     SELECT IFNULL(SUM(mu.balance), 0) AS ib_wallet_balance
     FROM fxbackoffice.mt4_users mu
     WHERE mu.`GROUP` LIKE 'IB-WALLET%%'
@@ -65,9 +71,16 @@ SELECT
     IFNULL(tx.withdrawal_usd, 0) + IFNULL(tx.ib_withdrawal_usd, 0) AS total_withdrawal_usd,
     IFNULL(tx.ib_withdrawal_usd, 0) AS ib_withdrawal_usd,
     IFNULL(wt.ib_wallet_balance, 0) AS ib_wallet_balance,
+    -- Net Deposit = deposit + withdrawal + 'ib withdrawal', an arithmetic sum:
+    -- withdrawal / 'ib withdrawal' amounts are stored NEGATIVE in
+    -- stats_transactions, so adding them subtracts the money that went out.
+    -- INCLUDES 'ib withdrawal' (IB commission withdrawals), matching the
+    -- business-confirmed formula in docs/features/ib-net-deposit-reform.md and
+    -- the IB Report (clickhouse_service.py net_deposit_range/month).
+    -- The IB wallet balance is NOT subtracted here: it is a lifetime stock and
+    -- these three legs are window-filtered flows (see wallet_total above).
     IFNULL(tx.deposit_usd, 0)
-        + (IFNULL(tx.withdrawal_usd, 0) + IFNULL(tx.ib_withdrawal_usd, 0))
-        - IFNULL(wt.ib_wallet_balance, 0) AS net_deposit_usd
+        + (IFNULL(tx.withdrawal_usd, 0) + IFNULL(tx.ib_withdrawal_usd, 0)) AS net_deposit_usd
 FROM params p
 LEFT JOIN tx_totals tx ON 1=1
 LEFT JOIN wallet_total wt ON 1=1

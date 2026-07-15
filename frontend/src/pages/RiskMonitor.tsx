@@ -210,8 +210,24 @@ interface AlertEvent {
   currency: string | null;
   /** Client zipcode from fxbackoffice.mt4_users; null when CRM has no value. Backend supports LIKE substring filter. */
   zipcode: string | null;
-  /** Historical net deposit (same formula as client-return-rate "历史净入金"). */
+  /**
+   * Historical net deposit (same formula as client-return-rate "历史净入金").
+   * CLIENT-level, and INCLUDES 'ib withdrawal'. Not an operand of 淨賺 — see
+   * client_trading_net_deposit below.
+   */
   net_deposit_hist?: number | null;
+  /**
+   * Client-level equity: SUM of equity across the client's compliant accounts
+   * (USD). Differs from `equity` above, which is THIS account only. Operand of
+   * the derived 淨賺 column. Null on alerts scanned before the 2026-07 fix.
+   */
+  client_equity?: number | null;
+  /**
+   * Client-level lifetime deposit + withdrawal, EXCLUDING 'ib withdrawal'
+   * (USD). The other 淨賺 operand — pairs with client_equity at the same
+   * aggregation level. Null on alerts scanned before the 2026-07 fix.
+   */
+  client_trading_net_deposit?: number | null;
   // Quick Profit-only fields. NULL on burst-open / quick-open-close rows.
   /** Realized P&L portion within the rule's lookback window (USD, CEN-normalised). */
   realized_profit?: number | null;
@@ -313,9 +329,12 @@ const SORTABLE_COL_IDS = new Set<string>([
   "login",
   "currency",
   "net_deposit_hist",
-  // Derived 淨賺 column (equity − net_deposit_hist). Server-sortable via the
-  // backend ORDER BY expression; see SORTABLE_ALERT_COLS / _SORT_COL_DB_NAME
-  // (OPT-0039). Shared by all account-level detail tabs that render this col.
+  // Derived 淨賺 column (client_equity − client_trading_net_deposit).
+  // Server-sortable via the backend ORDER BY expression; see
+  // SORTABLE_ALERT_COLS / _SORT_COL_DB_NAME (OPT-0039). The SQL expression
+  // must stay in lockstep with netProfitColDef's valueGetter, or the
+  // current-page order disagrees with the cross-page order.
+  // Shared by all account-level detail tabs that render this col.
   "net_profit",
   "symbol",
   "order_count",
@@ -944,6 +963,12 @@ function netDepositColorClass(v: number | null | undefined): string {
  * Colour lens for 淨賺 (net profit) — INVERTED vs net deposit. From the B-book
  * company's view a client who is net-UP (淨賺 > 0) is the risk (red); a client
  * who is net-DOWN (淨賺 < 0) is favourable (green). Exactly 0 / null → neutral.
+ *
+ * Caveat the colour cannot express: 淨賺 is an APPROXIMATION that omits the
+ * rebate leg (see netProfitColDef). A client shown green (net-down on their
+ * trading) can still be a net LOSS to the company once their upline rebate is
+ * netted off — the rebate-arbitrage module (rule 121/122) is what catches
+ * those. So green here means "not a direction risk", NOT "profitable client".
  */
 function netProfitColorClass(v: number | null | undefined): string {
   if (v === null || v === undefined || v === 0) return "";
@@ -1054,12 +1079,32 @@ const WRAP_CELL_STYLE = {
 
 /**
  * `net_profit` (淨賺) AG-Grid column factory — a COMPUTED column:
- *   淨賺 = 净值 (equity) − 历史净入金 (net_deposit_hist)
- * i.e. how much the client has net-made off the company. Positive ⇒ client is
- * up on us (B-book risk); negative ⇒ client is net-down. valueGetter-only (no
- * backing field), so it MUST carry a stable explicit `colId` or column
- * persistence misaligns (see grid-column-persist.md). `null` when either input
- * is missing (legacy / unenriched row) → "—". Tinted background (violet) like
+ *   淨賺 ≈ 客户级净值 (client_equity) − 客户级交易净入金 (client_trading_net_deposit)
+ *
+ * Both operands are CLIENT-level (summed over the client's compliant
+ * accounts), so a client holding several accounts shows the SAME 淨賺 on each
+ * of their rows — the same behaviour the Net Deposit column already has. This
+ * repetition is intentional: it is the honest reading, because the metric is
+ * owned by the client, not the account.
+ *
+ * It is an APPROXIMATION, not the full "net gain" definition — it omits the
+ * rebate leg, so a high-rebate client's true cost to the company is worse than
+ * this column shows. See the tooltip and the `rebate-arbitrage` skill §2.2 for
+ * the standard definition (closed PL + floating PL + rebate).
+ *
+ * History (2026-07 audit): this used to compute `equity − net_deposit_hist`,
+ * which subtracted the CLIENT's whole lifetime net deposit from ONE account's
+ * equity (systematically too low for multi-account clients) and treated IB
+ * commission cash-outs as withdrawn capital (inflating 淨賺 for
+ * IB-cum-traders). Both operands were replaced with the client-level,
+ * IB-excluded pair; `equity` / `net_deposit_hist` keep their old meanings
+ * because alert thresholds and mail templates depend on them.
+ *
+ * valueGetter-only (no backing field), so it MUST carry a stable explicit
+ * `colId` or column persistence misaligns (see grid-column-persist.md).
+ * `null` when either input is missing — including every alert scanned before
+ * the fix, since the operands are scan-time snapshots that cannot be
+ * backfilled → "—" (never a fabricated 0). Tinted background (violet) like
  * balanceColDef so it reads as a derived money column distinct from the raw
  * 余额 / 净入金 columns; the InfoHeader ℹ icon documents the formula inline
  * (same affordance as 保证金使用率). Value is colour-coded like net deposit but
@@ -1067,7 +1112,10 @@ const WRAP_CELL_STYLE = {
  * via netProfitColorClass.
  */
 function netProfitColDef<
-  TRow extends { equity?: number | null; net_deposit_hist?: number | null },
+  TRow extends {
+    client_equity?: number | null;
+    client_trading_net_deposit?: number | null;
+  },
 >(
   opts: {
     headerName?: string;
@@ -1103,11 +1151,16 @@ function netProfitColDef<
     headerComponent: InfoHeader,
     headerComponentParams: {
       tooltip:
-        "淨賺 = 净值 (Equity) − 历史净入金 (Net Deposit)。客户从公司净赚多少：正数 = 客户盈利（对 B-book 公司不利），负数 = 客户净亏。任一项缺值显示 —。",
+        "淨賺（近似）= 客户级净值 − 客户级交易净入金（不含 IB 佣金提现）。" +
+        "两项都是「客户级」合计（该客户名下所有合规账户求和），因此同一客户的多个账户行会显示相同数值。" +
+        "⚠ 不含返佣：高返佣客户对公司的实际成本比此列更差，完整口径（已平仓盈亏 + 浮动盈亏 + 返佣）见返佣套利模块。" +
+        "⚠ 净值为扫描时快照，非实时。任一项缺值（含本次修复前的历史告警）显示 —。",
     },
     valueGetter: (p) => {
-      const eq = p.data?.equity;
-      const nd = p.data?.net_deposit_hist;
+      // Both operands are client-level and IB-excluded — see the factory
+      // docstring. Missing either → null → "—" (never a fabricated 0).
+      const eq = p.data?.client_equity;
+      const nd = p.data?.client_trading_net_deposit;
       if (eq === null || eq === undefined || nd === null || nd === undefined)
         return null;
       return eq - nd;

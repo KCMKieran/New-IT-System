@@ -57,7 +57,11 @@ import pymysql
 
 from ..core.config import Settings
 from ..core.sql_helpers import SID_MAP, broker_time_to_utc_iso, is_force_included
-from .account_enrichment import get_net_deposit_hist_map
+from .account_enrichment import (
+    apply_client_net_gain,
+    get_client_net_gain_map,
+    get_net_deposit_hist_map,
+)
 from .risk_monitor_service import (
     _query_mt4_recent_opens,
     _query_mt5_recent_opens,
@@ -444,10 +448,15 @@ def _empty_result(start: float) -> Dict[str, Any]:
 
 def _enrich_net_deposit(conn, alerts: List[Dict[str, Any]]) -> None:
     """Fill client-level net_deposit_hist (currency/group/zipcode/equity already
-    came from the mt4_users snapshot)."""
+    came from the mt4_users snapshot), plus the client-level
+    ``client_equity`` / ``client_trading_net_deposit`` pair behind the derived
+    淨賺 column. The two are deliberately independent: net_deposit_hist keeps
+    its ib-inclusive semantics for thresholds/mail, the 淨賺 pair excludes
+    'ib withdrawal' and sums equity client-wide."""
     if not alerts:
         return
     net_deposit_map = get_net_deposit_hist_map(conn, alerts)
+    client_net_gain_map = get_client_net_gain_map(conn, alerts)
     for alert in alerts:
         sid = SID_MAP.get(str(alert["server"]))
         lid = int(alert["login"])
@@ -455,3 +464,4 @@ def _enrich_net_deposit(conn, alerts: List[Dict[str, Any]]) -> None:
         alert["net_deposit_hist"] = (
             net_deposit_map.get(loginsid) if loginsid else None
         )
+        apply_client_net_gain(alert, loginsid, client_net_gain_map)
