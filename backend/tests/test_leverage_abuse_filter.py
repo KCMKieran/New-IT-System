@@ -3,13 +3,36 @@
 Verifies the `leverage` query param threads through _build_alert_filters →
 query_alert_events / alert_events_stats / the /leverage-abuse/* endpoints, so
 the toolbar "杠杆" dropdown narrows the table + cards to one leverage tier.
+
+⚠ Seed timestamps are ALWAYS relative to `NOW` (OPT-0041 date-rot lesson):
+`append_scan_and_events` purges `alert_events` rows whose `scanned_at` is
+older than the 30-day retention window, so hardcoded dates silently delete
+the fixtures the moment the file ages past that window — every assertion
+then reads an empty table. This suite rotted exactly that way: seeded at
+2026-05-28, it went red around 2026-06-27 (3/3 failing on empty results)
+and stayed red until the 2026-07-15 fix. Keep every timestamp derived from
+`NOW`; never reintroduce a literal date here.
 """
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+
+
+def _iso(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).isoformat(timespec="seconds").replace(
+        "+00:00", "Z"
+    )
+
+
+# Anchor for every fixture timestamp. Fixed at import so a single test run
+# compares against a stable clock.
+NOW = datetime.now(timezone.utc).replace(microsecond=0)
+_SINCE, _UNTIL = _iso(NOW - timedelta(days=7)), _iso(NOW + timedelta(days=1))
 
 
 @pytest.fixture
@@ -34,8 +57,8 @@ def _lev_alert(*, login: int, leverage: int, rule_id: int = 101) -> dict:
         "symbol": "",
         "order_count": 1,
         "total_lots": 0.5,
-        "first_open": "2026-05-28T07:00:00Z",
-        "last_open": "2026-05-28T07:00:00Z",
+        "first_open": _iso(NOW - timedelta(minutes=1)),
+        "last_open": _iso(NOW - timedelta(minutes=1)),
         "orders": [],
         "equity": 1000.0,
         "balance": 1000.0,
@@ -53,7 +76,7 @@ def _lev_alert(*, login: int, leverage: int, rule_id: int = 101) -> dict:
 
 def _seed(rmdb):
     rmdb.append_scan_and_events(
-        scanned_at="2026-05-28T07:01:00Z",
+        scanned_at=_iso(NOW),
         scan_interval_min=5,
         accounts_scanned=2,
         suspicious_count=2,
@@ -68,7 +91,7 @@ def _seed(rmdb):
 def test_query_alert_events_filters_by_leverage(rmdb_client):
     rmdb, _ = rmdb_client
     _seed(rmdb)
-    since, until = "2026-05-28T00:00:00Z", "2026-05-29T00:00:00Z"
+    since, until = _SINCE, _UNTIL
 
     all_rows, all_total = rmdb.query_alert_events(
         since, until, rule_id_min=101, rule_id_max=110,
@@ -99,7 +122,7 @@ def test_endpoint_filters_by_leverage(rmdb_client):
     rmdb, client = rmdb_client
     _seed(rmdb)
     base = "/api/v1/risk-monitor/leverage-abuse/alerts"
-    qs = "since=2026-05-28T00:00:00Z&until=2026-05-29T00:00:00Z"
+    qs = f"since={_SINCE}&until={_UNTIL}"
 
     r_all = client.get(f"{base}?{qs}")
     assert r_all.status_code == 200
@@ -121,7 +144,7 @@ def test_stats_filters_by_leverage(rmdb_client):
     rmdb, client = rmdb_client
     _seed(rmdb)
     base = "/api/v1/risk-monitor/leverage-abuse/alerts/stats"
-    qs = "since=2026-05-28T00:00:00Z&until=2026-05-29T00:00:00Z"
+    qs = f"since={_SINCE}&until={_UNTIL}"
 
     assert client.get(f"{base}?{qs}").json()["event_count"] == 2
     assert client.get(f"{base}?{qs}&leverage=1000").json()["event_count"] == 1
