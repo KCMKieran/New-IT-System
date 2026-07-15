@@ -22,6 +22,12 @@ Locked behaviors:
 - quick-profit: min_profit_usd re-applied AFTER CEN ÷100 normalisation
   (pre-existing scan-level behavior; pinned here with fakes).
 - lots_divisor: CEN → 100.0, anything else (USD / None / unknown) → 1.0.
+- alert-mail: matched_lots_std passes detection's units through unchanged.
+  It used to re-scale on a `.cent` symbol suffix — which both missed the
+  `.kcmc` cent class (~10% of CEN volume, overstated 100x) and would
+  double-divide once detection normalises. Normalisation happens ONCE, at
+  detection, keyed on the currency authority. These two layers must move
+  together: scaling in exactly one of them is the only correct state.
 """
 
 from __future__ import annotations
@@ -31,6 +37,7 @@ from typing import Any
 
 import app.services.rule_quick_profit_service as qp_svc
 from app.services.account_enrichment import lots_divisor
+from app.services.alert_mail_dispatcher import matched_lots_std
 from app.services.risk_monitor_service import rule_burst_open_detect
 from app.services.rule_hedge_open_service import rule_hedge_open_detect
 from app.services.rule_leverage_abuse_service import (
@@ -199,6 +206,50 @@ def test_hedge_cen_eps_stays_in_raw_units():
     assert rule_hedge_open_detect(
         rows, [_hedge_rule(min_total_lots=0.01)], currency_map=_CEN_MAP
     ) == []
+
+
+# ── mail layer: consumes detection's units, must NOT re-scale ──────────
+
+def test_mail_matched_lots_std_does_not_rescale_detection_output():
+    """End-to-end unit contract between detection and the mail dispatcher.
+
+    Detection emits standard-lot equivalents; matched_lots_std must pass
+    them through. A second ÷100 here (the old `.cent` suffix hack) would
+    read this 1.0-std hedge as 0.01 and silence every cent-account alert.
+    Pins the two layers together — reverting either side fails this.
+    """
+    rows = [
+        _open_row(direction="Buy", lots=100.0, offset_sec=0, ticket=1),
+        _open_row(direction="Sell", lots=100.0, offset_sec=1, ticket=2),
+    ]
+    alert = rule_hedge_open_detect(
+        rows, [_hedge_rule(min_total_lots=0.5)], currency_map=_CEN_MAP
+    )[0]
+    # 100 raw CEN lots each side = 1.0 standard matched, already normalised.
+    assert alert["buy_lots"] == 1.0
+    assert matched_lots_std(alert) == 1.0
+
+
+def test_mail_matched_lots_std_ignores_symbol_suffix():
+    """Cent-ness is an ACCOUNT property, not a symbol-name property.
+
+    `.cent` and `.kcmc` are both CEN-only symbol classes; the mail layer
+    must treat identical normalised lots identically regardless of suffix.
+    The old suffix check divided `.cent` but not `.kcmc`, overstating the
+    latter 100x (real alert 209958).
+    """
+    base = {"buy_lots": 2.0, "sell_lots": 2.0}
+    for symbol in ("XAUUSD.cent", "XAUUSD.kcmc", "XAUUSD.kcm", "XAUUSD"):
+        assert matched_lots_std({**base, "symbol": symbol}) == 2.0
+
+
+def test_mail_matched_lots_std_uses_smaller_side_and_needs_detail():
+    """min(buy, sell) is the hedged size; a missing detail row never matches."""
+    assert matched_lots_std(
+        {"symbol": "XAUUSD.cent", "buy_lots": 3.0, "sell_lots": 1.5}
+    ) == 1.5
+    assert matched_lots_std({"symbol": "XAUUSD.cent", "buy_lots": None,
+                             "sell_lots": 1.0}) is None
 
 
 # ── leverage-abuse: min_equity_usd vs CEN equity (÷100 pinned e2e) ─────

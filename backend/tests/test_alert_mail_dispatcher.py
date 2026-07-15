@@ -1,8 +1,11 @@
 """Tests for OPT-0042 hedge-open mail alert dispatcher.
 
 Covers:
-- Condition evaluation (A large-volume / B paired-orders) including the
-  `.cent` /100 standard-lot conversion boundaries
+- Condition evaluation (A large-volume / B paired-orders) and their
+  standard-lot boundaries. Lots arrive ALREADY normalised (detection scales
+  CEN accounts ÷100, keyed on the currency authority); this layer must not
+  re-scale off the symbol name. Cent normalisation itself is pinned in
+  test_cen_lots_normalization.py.
 - One digest per tick merging multiple accounts
 - Per-login 30-min cooldown: defer, then merge into the next digest
 - Outbox at-least-once: failed send is retried on the next tick, without
@@ -156,19 +159,20 @@ def test_condition_a_uses_min_side():
     assert amd.evaluate_conditions(alert, SEED_CONDITIONS) is None
 
 
-def test_cent_symbol_divided_by_100():
-    # 15 cent-lots = 0.15 std — the classic false positive; must NOT hit.
+def test_cent_account_dust_below_condition_a():
+    # A cent account's 15 raw lots reach us already normalised to 0.15 std
+    # (detection ÷100) — the classic false positive stays dead here.
     alert = _hedge_alert(
-        symbol="XAUUSD.cent", buy_lots=15.0, sell_lots=15.0,
+        symbol="XAUUSD.cent", buy_lots=0.15, sell_lots=0.15,
         buy_count=1, sell_count=1,
     )
     assert amd.evaluate_conditions(alert, SEED_CONDITIONS) is None
 
 
-def test_cent_symbol_boundary_hits():
-    # 300 cent-lots = exactly 3 std → A hits.
+def test_condition_a_boundary_hits():
+    # Exactly 3 std matched (a cent account's raw 300) → A hits.
     alert = _hedge_alert(
-        symbol="XAUUSD.cent", buy_lots=300.0, sell_lots=300.0,
+        symbol="XAUUSD.cent", buy_lots=3.0, sell_lots=3.0,
         buy_count=1, sell_count=1,
     )
     match = amd.evaluate_conditions(alert, SEED_CONDITIONS)
@@ -176,14 +180,23 @@ def test_cent_symbol_boundary_hits():
     assert match["matched_lots_std"] == pytest.approx(3.0)
 
 
-def test_cent_suffix_case_insensitive():
-    alert = _hedge_alert(
-        symbol="XAUUSD.CENT", buy_lots=1500.0, sell_lots=1500.0,
-        buy_count=1, sell_count=1,
-    )
-    match = amd.evaluate_conditions(alert, SEED_CONDITIONS)
-    assert match is not None
-    assert match["matched_lots_std"] == pytest.approx(15.0)
+def test_symbol_suffix_does_not_affect_evaluation():
+    """Cent-ness is an account property and is already applied upstream.
+
+    The mail layer must not re-derive it from the symbol name — that hack
+    both missed `.kcmc` (a second cent class) and double-divided `.cent`
+    once detection started normalising. Identical std lots, identical verdict.
+    """
+    matches = [
+        amd.evaluate_conditions(
+            _hedge_alert(symbol=s, buy_lots=15.0, sell_lots=15.0,
+                         buy_count=1, sell_count=1),
+            SEED_CONDITIONS,
+        )
+        for s in ("XAUUSD.cent", "XAUUSD.CENT", "XAUUSD.kcmc", "XAUUSD")
+    ]
+    assert all(m is not None for m in matches)
+    assert all(m["matched_lots_std"] == pytest.approx(15.0) for m in matches)
 
 
 def test_condition_b_paired_orders():
@@ -200,16 +213,16 @@ def test_condition_b_below_order_count_no_hit():
     assert amd.evaluate_conditions(alert, SEED_CONDITIONS) is None
 
 
-def test_condition_b_lot_floor_uses_cent_conversion():
-    # 3+3 orders but only 25 cent-lots = 0.25 std < 0.5 → no hit.
+def test_condition_b_lot_floor_boundary():
+    # 3+3 orders but 0.25 std matched (a cent account's raw 25) < 0.5 → no hit.
     alert = _hedge_alert(
-        symbol="EURUSD.cent", buy_lots=25.0, sell_lots=25.0,
+        symbol="EURUSD.cent", buy_lots=0.25, sell_lots=0.25,
         buy_count=3, sell_count=3,
     )
     assert amd.evaluate_conditions(alert, SEED_CONDITIONS) is None
-    # 50 cent-lots = 0.5 std → hits.
+    # 0.5 std matched (raw 50) → hits.
     alert = _hedge_alert(
-        symbol="EURUSD.cent", buy_lots=50.0, sell_lots=50.0,
+        symbol="EURUSD.cent", buy_lots=0.5, sell_lots=0.5,
         buy_count=3, sell_count=3,
     )
     assert amd.evaluate_conditions(alert, SEED_CONDITIONS) is not None
