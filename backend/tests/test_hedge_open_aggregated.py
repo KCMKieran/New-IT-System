@@ -5,13 +5,35 @@ Integration tests for the hedge-open aggregated view:
 Verifies the per-(server, login) fold: counts and lots are summed, the
 enrichment snapshot is the most recent one for each loginsid, and that
 the filter contract matches `/hedge-open/alerts`.
+
+⚠ Seed timestamps are ALWAYS relative to `NOW` (OPT-0041 date-rot lesson):
+`append_scan_and_events` purges `alert_events` rows whose `scanned_at` is
+older than the 30-day retention window, so hardcoded dates silently delete
+the fixtures the moment the file ages past that window — every assertion
+then reads an empty table. This suite rotted exactly that way: seeded at
+2026-05-19, it went red around 2026-06-18 (14/16 failing on `total == 0`)
+and stayed red until the 2026-07-15 fix. Keep every timestamp derived from
+`NOW`; never reintroduce a literal date here.
 """
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+
+
+def _iso(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).isoformat(timespec="seconds").replace(
+        "+00:00", "Z"
+    )
+
+
+# Anchor for every fixture timestamp. Fixed at import so a single test run
+# compares against a stable clock.
+NOW = datetime.now(timezone.utc).replace(microsecond=0)
 
 
 @pytest.fixture
@@ -42,8 +64,8 @@ def _make_alert(
     currency: str = "USD",
     zipcode: str = "100000",
     net_deposit_hist: float = 12345.67,
-    window_start: str = "2026-05-18T19:28:22Z",
-    window_end: str = "2026-05-18T19:28:25Z",
+    window_start: str = _iso(NOW - timedelta(minutes=5)),
+    window_end: str = _iso(NOW - timedelta(minutes=5) + timedelta(seconds=3)),
 ) -> dict:
     """Minimal hedge-open alert dict for the writer."""
     return {
@@ -77,7 +99,7 @@ def _make_alert(
     }
 
 
-def _seed(monkeypatch, alerts: list[dict], scanned_at: str = "2026-05-19T03:00:00Z") -> int:
+def _seed(monkeypatch, alerts: list[dict], scanned_at: str = _iso(NOW)) -> int:
     """Insert one scan batch with the given alerts. Returns batch_id."""
     from app.core import risk_monitor_db as rmdb
     return rmdb.append_scan_and_events(
@@ -91,8 +113,12 @@ def _seed(monkeypatch, alerts: list[dict], scanned_at: str = "2026-05-19T03:00:0
 
 
 # Wide range covering every fixture timestamp so /alerts/aggregated's
-# default "last 4 hours" filter doesn't drop seeded rows.
-_RANGE = {"since": "2026-05-18T00:00:00Z", "until": "2026-05-20T00:00:00Z"}
+# default "last 4 hours" filter doesn't drop seeded rows. Must stay inside
+# the 30-day retention window — see the module docstring.
+_RANGE = {
+    "since": _iso(NOW - timedelta(days=7)),
+    "until": _iso(NOW + timedelta(days=1)),
+}
 
 
 def _get_agg(client: TestClient, **extra) -> dict:
@@ -183,11 +209,11 @@ def test_enrichment_uses_most_recent_alert(client: TestClient, monkeypatch):
     _seed(monkeypatch, [
         _make_alert(group="OLD_GROUP", currency="CEN", zipcode="000",
                     net_deposit_hist=1.0),
-    ], scanned_at="2026-05-19T01:00:00Z")
+    ], scanned_at=_iso(NOW - timedelta(hours=4)))
     _seed(monkeypatch, [
         _make_alert(group="NEW_GROUP", currency="USD", zipcode="999",
                     net_deposit_hist=999.0),
-    ], scanned_at="2026-05-19T05:00:00Z")
+    ], scanned_at=_iso(NOW))
     row = _get_agg(client)["entries"][0]
     assert row["group"] == "NEW_GROUP"
     assert row["currency"] == "USD"
@@ -198,11 +224,12 @@ def test_enrichment_uses_most_recent_alert(client: TestClient, monkeypatch):
 
 
 def test_first_and_last_alert_at_span(client: TestClient, monkeypatch):
-    _seed(monkeypatch, [_make_alert()], scanned_at="2026-05-19T01:00:00Z")
-    _seed(monkeypatch, [_make_alert()], scanned_at="2026-05-19T05:00:00Z")
+    first, last = NOW - timedelta(hours=4), NOW
+    _seed(monkeypatch, [_make_alert()], scanned_at=_iso(first))
+    _seed(monkeypatch, [_make_alert()], scanned_at=_iso(last))
     row = _get_agg(client)["entries"][0]
-    assert row["first_alert_at"] == "2026-05-19T01:00:00Z"
-    assert row["last_alert_at"] == "2026-05-19T05:00:00Z"
+    assert row["first_alert_at"] == _iso(first)
+    assert row["last_alert_at"] == _iso(last)
 
 
 # ── Filter propagation ────────────────────────────────────
@@ -229,14 +256,16 @@ def test_login_filter_propagates(client: TestClient, monkeypatch):
 
 
 def test_time_range_excludes_old_alerts(client: TestClient, monkeypatch):
-    _seed(monkeypatch, [_make_alert()], scanned_at="2026-05-18T05:00:00Z")
-    _seed(monkeypatch, [_make_alert()], scanned_at="2026-05-19T05:00:00Z")
+    # Both scans stay inside the 30-day retention window; only the range
+    # under test separates them.
+    _seed(monkeypatch, [_make_alert()], scanned_at=_iso(NOW - timedelta(days=2)))
+    _seed(monkeypatch, [_make_alert()], scanned_at=_iso(NOW))
     # Window covering only the SECOND scan (override the wide default range).
     r = client.get(
         "/api/v1/risk-monitor/hedge-open/alerts/aggregated",
         params={
-            "since": "2026-05-19T00:00:00Z",
-            "until": "2026-05-20T00:00:00Z",
+            "since": _iso(NOW - timedelta(hours=1)),
+            "until": _iso(NOW + timedelta(days=1)),
         },
     )
     assert r.status_code == 200, r.text
