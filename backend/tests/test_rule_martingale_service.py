@@ -37,7 +37,20 @@ from app.services.rule_martingale_service import (
     rule_martingale_detect,
 )
 
-BASE = datetime(2026, 6, 2, 12, 0, tzinfo=timezone.utc)
+# Anchor for every seeded timestamp in this file. Relative to now on purpose
+# (OPT-0041): risk_monitor_db purges scanned_at older than _RETENTION_DAYS=30
+# on every write, so a hardcoded date silently starts deleting its own seed the
+# moment it ages past the window — the DB round-trip test below then reads 0
+# rows and fails for reasons that have nothing to do with martingale logic.
+# This file only ever uses BASE as a relative origin (BASE ± timedelta) and
+# asserts no absolute timestamps, so pinning it to "yesterday" is behaviour-
+# preserving and cannot rot again.
+#
+# microsecond=0 is load-bearing, not tidiness: the code under test round-trips
+# these through _iso(timespec="seconds"), so a BASE carrying microseconds comes
+# back truncated and `latest_open_dt == BASE + timedelta(seconds=60)` fails.
+# The old hardcoded datetime(2026, 6, 2, 12, 0) had whole seconds for free.
+BASE = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(days=1)
 
 
 # ── builders ───────────────────────────────────────────────────────────
