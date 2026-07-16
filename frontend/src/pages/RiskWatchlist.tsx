@@ -389,7 +389,7 @@ export default function RiskWatchlist() {
         },
         // Default view (2026-07-13 rule-122 wide-net relayout): only the
         // money-trail columns are visible — userId / 交易净入金 / Total PL /
-        // 总反佣 / 已平仓 PL+Rebate / 净值 / 净值−(PL+Rebate). Everything
+        // 总反佣 / 已平仓 PL+Rebate / 净值 / 净赚. Everything
         // else ships hide:true and is re-enabled per user via the
         // ColumnVisibilityMenu (persisted by useGridColumnPersist).
         {
@@ -743,8 +743,6 @@ export default function RiskWatchlist() {
               "< 0 客户输、公司赚。\n" +
               "这是本页唯一回答“公司最终赢输”的列，默认按此降序。\n" +
               "\n" +
-              "与「净值−(PL+Rebate)」的区别：那列衡量“客户还有多少钱压在场内”" +
-              "（可追回性），不是赢输。\n" +
               "与 risk-monitor 页「淨賺」的区别：那列 = 净值−交易净入金，" +
               "口径同为客户级、同样剔除 ib withdrawal，但**不含返佣腿**；" +
               "本列直接构造三条腿，且完全绕开净入金口径（案例 110386）。\n" +
@@ -784,33 +782,6 @@ export default function RiskWatchlist() {
           headerName: "净值",
           width: 116,
           valueFormatter: (p) => fmtMoney(p.value),
-        },
-        {
-          colId: "equity_minus_combined",
-          headerName: "净值−(PL+Rebate)",
-          headerComponent: InfoHeader,
-          headerComponentParams: {
-            tooltip:
-              "净值 − (已平仓PL + 全链返佣)，生涯累计。\n" +
-              "\n" +
-              "⚠ 这不是盈亏指标，不要按“公司赚/亏”解读。展开后约等于：\n" +
-              "  净入金(全部类型，含 IB 佣金提现) + 浮动PL + 信用额 − 全链返佣\n" +
-              "即“客户账上还剩多少钱”（可追回性）掺入返佣项，方向性含义不干净：\n" +
-              "大额入金但没输没赢的客户该值也 > 0；IB 一提佣金就被推低，" +
-              "即便交易本金原封不动（案例 110386）。\n" +
-              "\n" +
-              "要看公司最终赢输，请用「净赚」列。",
-          },
-          width: 150,
-          filter: "agNumberColumnFilter",
-          valueGetter: (p) => {
-            if (p.data?.equity == null) return null;
-            const combined = sumNullable(p.data.profit_all, p.data.rebate_all);
-            if (combined == null) return null;
-            return p.data.equity - combined;
-          },
-          valueFormatter: (p) => fmtMoney(p.value),
-          cellClass: (p) => profitColor(p.value),
         },
         {
           headerName: "主要交易产品(30d)",
@@ -972,8 +943,16 @@ export default function RiskWatchlist() {
             ），默认按此降序；PL+Rebate 同向但不含浮动。
           </div>
           <div>
-            「净值−(PL+Rebate)」衡量客户还有多少钱压在场内（可追回性），
-            <span className="font-medium">不是</span>盈亏指标 —— 判断公司赢输请看「净赚」。
+            更新频率：本页所有指标列是
+            <span className="font-medium text-foreground/80">每天 07:10 (HK) 的每日快照</span>
+            ，当天盘中不再变化。每 10 分钟跑的只是
+            <span className="font-medium text-foreground/80">入册检测</span>
+            （近 30 天返佣 ≥ $500 且 PL+返佣 &gt; 0 → 返佣套利；或返佣 ≥ $200 → 高返佣入册），
+            它只负责把新客户
+            <span className="font-medium">加进名单</span>
+            、不算指标 —— 所以盘中新入册的客户
+            <span className="font-medium">要等次日 07:10 才有指标数据</span>
+            。
           </div>
         </div>
       </div>
