@@ -24,6 +24,27 @@ from app.core.risk_cases_pg import RiskCasesUnavailable
 from app.services import risk_cases_service as svc
 
 
+def _all_watchlist_rows(**kw) -> list[dict]:
+    """Every watchlist row, paged.
+
+    The end-to-end test seeds fixtures into the REAL risk_cases PG and then has
+    to find them again. It used to just read page 1 (page_size=100) and assume
+    the fixtures were on it — which quietly stopped being true once the table
+    grew past a page of genuine cases (952 at the time this broke). Nothing
+    about that is a fixture problem, so page through instead of betting on a
+    page size. The service sorts globally before paginating, so concatenated
+    pages stay in sort order and the ordering assertions still hold.
+    """
+    rows: list[dict] = []
+    page = 1
+    while True:
+        chunk, total = svc.query_watchlist(page=page, page_size=200, **kw)
+        rows.extend(chunk)
+        if not chunk or len(rows) >= total:
+            return rows
+        page += 1
+
+
 @pytest.fixture()
 def client() -> TestClient:
     app = FastAPI()
@@ -172,7 +193,7 @@ def test_watchlist_end_to_end_with_fixtures():
     try:
         seed.apply_plan(plan)
 
-        rows, total = svc.query_watchlist(page=1, page_size=100, state="all")
+        rows = _all_watchlist_rows(state="all")
         fixture_rows = [r for r in rows if "fixture" in (r["tags"] or [])]
         assert len(fixture_rows) >= len(plan)
 
