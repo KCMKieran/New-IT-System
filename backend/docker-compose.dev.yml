@@ -45,6 +45,10 @@ services:
       # entries override env_file).
       - GAP_TRADE_INTRADAY_ENABLED=false
       - GAP_TRADE_CRM_WRITE_ENABLED=false
+      # Same reason — dev and prod share backend/.env, so once prod flips the
+      # last-close-IP gate to true this override is the only thing stopping dev
+      # from pushing the same clients a second time.
+      - LAST_CLOSE_IP_CRM_WRITE_ENABLED=false
       # OPT-0011/0013 — dev preview of cursor scan + SSE push.
       # Cursor mode is no-op when BURST_SCAN_ENABLED=false (no scheduler reads cursors),
       # but harmless to enable. SSE endpoint becomes reachable so the

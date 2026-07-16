@@ -180,6 +180,7 @@ def _download_job(target_date: str | None = None) -> dict[str, Any]:
     Returns the run summary (also persisted to login_ip_scheduler_runs).
     """
     from ..core import login_ip_db
+    from ..services.last_close_ip_crm_push_service import push_last_close_ips_to_crm
     from ..services.login_ip_analyzer_service import analyze_date
     from ..services.login_ip_ftp_service import (
         cleanup_old_log_dirs,
@@ -213,6 +214,22 @@ def _download_job(target_date: str | None = None) -> dict[str, Any]:
         analysis = analyze_date(target_date, log_dir=TMP_ROOT, out_dir=DATA_DIR)
         summary["parsed"] = analysis.get("servers") or {}
         summary["login_history_inserted"] = analysis.get("login_history_inserted", 0)
+
+        # --- 2.5 Push each client's last close IP to their CRM profile -----
+        # Hangs here rather than inside analyze_date deliberately: analyze_date
+        # is a pure parser that shouldn't do network IO, and scripts/backfill_
+        # login_ip.py calls it too — pushing from there would fire CRM writes
+        # during a backfill. Sitting in the download job also inherits this
+        # job's re-entrancy lock, audit row, and failure-alert envelope.
+        #
+        # push_last_close_ips_to_crm never raises; it reports through its own
+        # digest email. Wrapped anyway so a genuinely unexpected error can't
+        # discard the last_trade_ip rows steps 1-2 just landed.
+        try:
+            summary["crm_push"] = push_last_close_ips_to_crm(target_date)
+        except Exception:
+            logger.exception("[download_job] %s: CRM push failed (swallowed)", target_date)
+            summary["crm_push"] = {"error": "see logs"}
 
         # --- 3. Cleanup stale tmp dirs (> 7 days) --------------------------
         # We do NOT wipe TODAY's tmp dir here — the analyze_date call above
@@ -278,7 +295,7 @@ def _daily_housekeeping() -> None:
     audit row of the main job — we'd rather keep stale data than lose the
     run record.
 
-    Three sweeps:
+    Five sweeps:
       1. `cleanup_old_login_history`       — drop rows outside the 7-day
          correlation window; this function was defined in `login_ip_db`
          since the migration but had no caller, so history grew forever.
@@ -286,6 +303,12 @@ def _daily_housekeeping() -> None:
          the retention window (default 90 days).
       3. `reap_stuck_running_runs`         — force-close zombie rows left
          in `status='running'` by a crashed process.
+      4. `cleanup_old_last_trade_ip`       — drop last-close-IP snapshot
+         rows older than 90 days.
+      5. `cleanup_old_crm_push_log`        — same window for the CRM push
+         audit trail. Note this table is also the push's diff baseline, so
+         pruning it costs a redundant (harmless) re-push for any client who
+         hasn't traded in 90 days — see login_ip_db for why that's accepted.
     """
     from ..core import login_ip_db
 
@@ -294,12 +317,15 @@ def _daily_housekeeping() -> None:
         removed_runs = login_ip_db.cleanup_old_scheduler_runs()
         reaped = login_ip_db.reap_stuck_running_runs()
         removed_trade_ips = login_ip_db.cleanup_old_last_trade_ip()
+        removed_push_log = login_ip_db.cleanup_old_crm_push_log()
         logger.info(
-            "[housekeeping] history_removed=%d runs_removed=%d runs_reaped=%d trade_ips_removed=%d",
+            "[housekeeping] history_removed=%d runs_removed=%d runs_reaped=%d "
+            "trade_ips_removed=%d crm_push_log_removed=%d",
             removed_history,
             removed_runs,
             reaped,
             removed_trade_ips,
+            removed_push_log,
         )
     except Exception:
         logger.exception("[housekeeping] failed (swallowed; non-fatal)")

@@ -62,6 +62,16 @@ DEFAULT_STUCK_RUN_HOURS = 6
 # 90 days per business decision 2026-07-13 (aligned with scheduler-run audit).
 DEFAULT_LAST_TRADE_IP_RETENTION_DAYS = 90
 
+# Retention for the CRM push audit trail. Matches last_trade_ip: the log is
+# only useful while the snapshot it was derived from still exists.
+#
+# Note the interaction with the push diff: `get_known_crm_ips()` derives "what
+# CRM already holds" from this table, so pruning a client's last row makes the
+# next run re-push a value CRM already has. That costs one redundant write for
+# a client who hasn't closed a position in 90 days — harmless (the value is
+# identical), and preferable to keeping the table forever.
+DEFAULT_CRM_PUSH_LOG_RETENTION_DAYS = 90
+
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS monitored_accounts (
@@ -172,6 +182,55 @@ CREATE TABLE IF NOT EXISTS last_trade_ip (
 CREATE INDEX IF NOT EXISTS idx_last_trade_ip_date ON last_trade_ip(trade_date);
 CREATE INDEX IF NOT EXISTS idx_last_trade_ip_acc  ON last_trade_ip(account_id);
 CREATE INDEX IF NOT EXISTS idx_last_trade_ip_ip   ON last_trade_ip(ip_address);
+
+-- Audit trail for the last_trade_ip -> CRM custom-field push: one row per
+-- (MT day, CRM client), recording which account's close won and what we did.
+--
+-- This table is not just an audit log, it is the push's STATE. Two jobs:
+--
+--   1. Diff source. Deciding who to push by reading CRM would cost ~1200
+--      extra requests per run; instead `get_known_crm_ips()` reads the most
+--      recent pushed/unchanged row per client as "what CRM already holds"
+--      and only clients whose IP actually changed get a write.
+--   2. Rollback. This writes four-digit client counts to the production CRM,
+--      so every write records `value_before` — without it a bad run is
+--      irreversible (the CRM keeps no history of custom-field values).
+--
+-- `result` values:
+--   pushed        wrote a new value, read-back verified
+--   unchanged     CRM already holds this IP (local diff, or pre-write read) —
+--                 no write issued
+--   failed        HTTP error / network / CRM unreachable
+--   verify_failed HTTP 200 but the read-back did not show the value. This is
+--                 the CRM's documented failure mode for a mistyped field key:
+--                 it answers 200 and silently writes nothing.
+--   dry_run       LAST_CLOSE_IP_CRM_WRITE_ENABLED=false — resolved and
+--                 diffed, no request sent
+--
+-- contenders / distinct_ips record the "latest close wins" tie-break: how many
+-- of this client's accounts closed that day and how many distinct IPs they
+-- disagreed on. distinct_ips > 1 is the risk-relevant signal (one client
+-- trading from several IPs the same day) and is listed in the digest email.
+CREATE TABLE IF NOT EXISTS crm_last_close_ip_push_log (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    trade_date     TEXT    NOT NULL,   -- YYYYMMDD (MT day)
+    client_id      INTEGER NOT NULL,   -- CRM userId (= mt4_users.userId)
+    ip_address     TEXT    NOT NULL,   -- the pushed value (winning close's IP)
+    server_name    TEXT    NOT NULL,   -- which account won ...
+    account_id     INTEGER NOT NULL,   -- ... so the value is traceable to a close
+    event_time_mt  TEXT    NOT NULL,   -- HH:MM:SS.mmm, MT server local time
+    contenders     INTEGER NOT NULL DEFAULT 1,
+    distinct_ips   INTEGER NOT NULL DEFAULT 1,
+    value_before   TEXT,               -- CRM's value pre-write; NULL = was empty
+    result         TEXT    NOT NULL,
+    http_status    INTEGER,
+    detail         TEXT,
+    pushed_at      TEXT    NOT NULL,   -- UTC ISO8601
+    UNIQUE (trade_date, client_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_crm_push_log_date   ON crm_last_close_ip_push_log(trade_date);
+CREATE INDEX IF NOT EXISTS idx_crm_push_log_client ON crm_last_close_ip_push_log(client_id);
 """
 
 
@@ -444,6 +503,26 @@ def search_last_trade_ips(
     return [dict(r) for r in rows]
 
 
+def get_last_trade_ips_for_date(trade_date: str) -> list[dict]:
+    """Every last_trade_ip row for one MT day — no limit.
+
+    Separate from `search_last_trade_ips` on purpose: that one serves the UI,
+    where capping at 5,000 rows is a sensible guard against a runaway query.
+    The CRM push needs the *complete* day (a truncated read would silently stop
+    pushing some clients, and the cap sits only ~3x above the 1,400-1,600/day
+    baseline), so it must not borrow a limit meant for a paginated view.
+    """
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT trade_date, server_name, account_id, ip_address, "
+            "event_time_mt, event_kind, order_ref "
+            "FROM last_trade_ip WHERE trade_date = ? "
+            "ORDER BY server_name, account_id",
+            (trade_date,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def cleanup_old_last_trade_ip(
     days: int = DEFAULT_LAST_TRADE_IP_RETENTION_DAYS,
 ) -> int:
@@ -459,6 +538,105 @@ def cleanup_old_last_trade_ip(
 
     if deleted:
         logger.info("cleanup_old_last_trade_ip: removed %d rows older than %s", deleted, cutoff)
+    return deleted
+
+
+# ---------------------------------------------------------------------------
+# crm_last_close_ip_push_log CRUD
+# ---------------------------------------------------------------------------
+
+# Results that mean "CRM holds this value now". Both feed the diff: `pushed`
+# because we put it there, `unchanged` because we confirmed it was already
+# there. `failed` / `verify_failed` / `dry_run` deliberately do NOT — after any
+# of those, CRM's value is unknown or stale, so the next run must retry rather
+# than assume the write landed.
+CRM_PUSH_SETTLED_RESULTS = ("pushed", "unchanged")
+
+
+def get_known_crm_ips() -> dict[int, str]:
+    """Return ``{client_id: ip}`` — the last value we know CRM holds per client.
+
+    This is the diff baseline: a client whose winning IP equals this value
+    needs no write. "Last" is by MT day, not by row id, so a backfill of an
+    older date can never override a newer day's push.
+    """
+    sql = """
+        SELECT p.client_id, p.ip_address
+        FROM crm_last_close_ip_push_log p
+        WHERE p.result IN (?, ?)
+          AND p.trade_date = (
+              SELECT MAX(p2.trade_date)
+              FROM crm_last_close_ip_push_log p2
+              WHERE p2.client_id = p.client_id
+                AND p2.result IN (?, ?)
+          )
+    """
+    with get_connection() as conn:
+        rows = conn.execute(sql, CRM_PUSH_SETTLED_RESULTS * 2).fetchall()
+    return {int(r["client_id"]): r["ip_address"] for r in rows}
+
+
+def upsert_crm_push_log(records: Iterable[dict]) -> int:
+    """INSERT OR REPLACE push-log rows. Returns the number written.
+
+    REPLACE (not IGNORE) so re-running a day overwrites its own rows: a retry
+    after a `failed` run must be able to record the eventual success.
+    """
+    rows = [
+        (
+            r["trade_date"], int(r["client_id"]), r["ip_address"],
+            r["server_name"], int(r["account_id"]), r["event_time_mt"],
+            int(r.get("contenders", 1)), int(r.get("distinct_ips", 1)),
+            r.get("value_before"), r["result"],
+            r.get("http_status"), r.get("detail"), r["pushed_at"],
+        )
+        for r in records
+    ]
+    if not rows:
+        return 0
+
+    with get_connection() as conn:
+        conn.executemany(
+            "INSERT OR REPLACE INTO crm_last_close_ip_push_log "
+            "(trade_date, client_id, ip_address, server_name, account_id, "
+            " event_time_mt, contenders, distinct_ips, value_before, result, "
+            " http_status, detail, pushed_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            rows,
+        )
+        conn.commit()
+    logger.info("crm_last_close_ip_push_log: upserted %d rows", len(rows))
+    return len(rows)
+
+
+def get_crm_push_log(trade_date: str) -> list[dict]:
+    """All push-log rows for one MT day (digest email + ops inspection)."""
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT * FROM crm_last_close_ip_push_log WHERE trade_date = ? "
+            "ORDER BY client_id",
+            (trade_date,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def cleanup_old_crm_push_log(
+    days: int = DEFAULT_CRM_PUSH_LOG_RETENTION_DAYS,
+) -> int:
+    """Delete push-log rows older than `days`. Returns count deleted."""
+    cutoff = (_dt.datetime.now() - _dt.timedelta(days=days)).strftime("%Y%m%d")
+
+    with get_connection() as conn:
+        cursor = conn.execute(
+            "DELETE FROM crm_last_close_ip_push_log WHERE trade_date < ?", (cutoff,)
+        )
+        deleted = cursor.rowcount
+        conn.commit()
+
+    if deleted:
+        logger.info(
+            "cleanup_old_crm_push_log: removed %d rows older than %s", deleted, cutoff
+        )
     return deleted
 
 
