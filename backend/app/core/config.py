@@ -171,6 +171,51 @@ class Settings:
             if a.strip()
         )
 
+        # Login IP → CRM last close position IP. Dedicated credentials,
+        # isolated from CRM_RISK_API_* so either integration can be revoked
+        # without breaking the other.
+        self.CRM_LAST_CLOSE_IP_API_URL = (
+            os.environ.get("CRM_LAST_CLOSE_IP_API_URL") or ""
+        ).strip()
+        self.CRM_LAST_CLOSE_IP_API_TOKEN = (
+            os.environ.get("CRM_LAST_CLOSE_IP_API_TOKEN") or ""
+        ).strip()
+        # Master gate for live writes. false = resolve + diff + log only.
+        self.LAST_CLOSE_IP_CRM_WRITE_ENABLED = (
+            os.environ.get("LAST_CLOSE_IP_CRM_WRITE_ENABLED", "false").strip().lower()
+            == "true"
+        )
+        # Absolute volume ceiling: a run wanting more writes than this aborts
+        # having written nothing.
+        #
+        # Be clear about what this does and does NOT catch (measured 2026-07-15).
+        # Daily volume is ~800 writes / ~1,200 clients, and the snapshot itself
+        # caps the plausible maximum near 1,300 — so this does NOT fire for any
+        # normal-shaped failure, including a totally broken diff re-pushing every
+        # client (1,206 < 5,000), nor for the genuinely dangerous case of pushing
+        # WRONG values to the right clients. Those are covered elsewhere:
+        #   - re-pushing correct values is harmless: write_field reads first and
+        #     no-ops when CRM already agrees, so a broken diff costs reads, not writes
+        #   - wrong values are caught by nothing automatic — that is the price of
+        #     skipping the canary; value_before is the rollback and the first
+        #     round's digest is the human check
+        # What it IS: a ceiling on an upstream explosion (e.g. someone reverts the
+        # analyzer's demo filter or close-only narrowing and the snapshot jumps from
+        # 1,488 to five figures). Set well above any plausible day so it never
+        # false-trips; it only ever fires on something absurd.
+        self.LAST_CLOSE_IP_CRM_MAX_WRITES_PER_RUN = int(
+            os.environ.get("LAST_CLOSE_IP_CRM_MAX_WRITES_PER_RUN", "5000")
+        )
+        # Digest recipient. Every run emails here — including aborts, since a
+        # push that silently stops looks identical to one with nothing to do.
+        # .strip() is load-bearing: backend/.env is CRLF, so a value read through
+        # compose's env_file can arrive with a trailing \r that would otherwise
+        # ride into the SMTP envelope.
+        self.LAST_CLOSE_IP_CRM_MAIL_TO = (
+            os.environ.get("LAST_CLOSE_IP_CRM_MAIL_TO")
+            or "it.support@kohleservices.com"
+        ).strip()
+
         # View profiles (OPT-0035): comma-separated device-ids allowed to
         # force-release a claim stuck on a lost device-id. The device-id is shown
         # (and copyable) on the Settings page. Empty = nobody can force-release.
