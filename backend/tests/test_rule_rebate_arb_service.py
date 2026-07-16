@@ -557,7 +557,7 @@ def test_digest_template_follows_alert_email_style():
         sibling_map={},
         test=True,
     )
-    assert subject.startswith("[TEST][风控告警] 返佣套利 Rebate Arbitrage")
+    assert subject.startswith("[TEST] [风控告警] 返佣套利 Rebate Arbitrage")
     # No emojis anywhere (alert-email-style hard rule #1).
     assert all(ord(ch) < 0x2600 or 0x4E00 <= ord(ch) <= 0x9FFF for ch in subject + body)
     assert "返佣套利" in body                      # bilingual section title
