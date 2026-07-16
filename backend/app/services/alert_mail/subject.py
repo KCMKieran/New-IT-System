@@ -26,7 +26,10 @@ def build_subject(label: str, tail: str, test: bool = False) -> str:
 
     `label` is the bilingual module label ("对冲刷单 Hedge Open"), `tail` the
     per-source hit summary ("3 个账户涉嫌刷佣"). Test-sends get a leading
-    [TEST] so they never read as a live alert.
+    "[TEST] " so they never read as a live alert.
+
+    The space after [TEST] is deliberate — "[TEST][风控告警] …" reads as one
+    run-on token at a glance, which is the opposite of what the marker is for.
     """
     subject = f"{SUBJECT_PREFIX} {label} — {tail}"
-    return f"{TEST_PREFIX}{subject}" if test else subject
+    return f"{TEST_PREFIX} {subject}" if test else subject

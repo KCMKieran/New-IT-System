@@ -689,7 +689,7 @@ def test_send_test_email_uses_most_recent_match(temp_db):
     assert result["alert_id"] == aid
     assert result["used_fallback"] is False
     assert result["recipient"] == "kieran.xiang@kohleservices.com"
-    assert mail.sent[0]["subject"].startswith("[TEST][风控告警]")
+    assert mail.sent[0]["subject"].startswith("[TEST] [风控告警]")
     assert "60011332" in mail.sent[0]["body"]
 
 
@@ -701,7 +701,7 @@ def test_send_test_email_falls_back_to_sample_fixture(temp_db):
     assert result["used_fallback"] is True
     assert result["alert_id"] == amd.TEST_SEND_SAMPLE_ALERT["id"]
     assert len(mail.sent) == 1
-    assert mail.sent[0]["subject"].startswith("[TEST][风控告警]")
+    assert mail.sent[0]["subject"].startswith("[TEST] [风控告警]")
     body = mail.sent[0]["body"]
     assert "60011332" in body and "NZDJPY" in body
 
@@ -724,7 +724,7 @@ def test_send_test_email_empty_table_uses_sample_fixture(temp_db):
     assert result["used_fallback"] is True
     assert result["alert_id"] == amd.TEST_SEND_SAMPLE_ALERT["id"]
     assert len(mail.sent) == 1
-    assert mail.sent[0]["subject"].startswith("[TEST][风控告警]")
+    assert mail.sent[0]["subject"].startswith("[TEST] [风控告警]")
     # The sample mirrors the real 2026-07-03 case (62 buy + 62 sell NZDJPY).
     body = mail.sent[0]["body"]
     assert "62 buy + 62 sell" in body
