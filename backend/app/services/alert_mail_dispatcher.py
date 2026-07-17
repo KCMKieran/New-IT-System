@@ -76,6 +76,12 @@ logger = logging.getLogger(__name__)
 
 HEDGE_MODULE = "hedge_open"
 
+# Own subject tag instead of the shared "[风控告警]": that tag is on every risk
+# digest, so it separates risk mail from the other automated reports but not
+# the risk sources from each other. This one is per-source, not per-rule — all
+# of rule band 91-100 shares it, so mailbox filters survive new rules.
+HEDGE_SUBJECT_PREFIX = "[对冲刷单]"
+
 HKT = ZoneInfo("Asia/Hong_Kong")
 
 # How long after digest_time a digest-mode subscription is still considered
@@ -599,7 +605,12 @@ def build_hedge_digest_email(
     UTC day (the 60011332/60011333 pairing signal).
     """
     n = len(hits)
-    subject = build_subject("对冲刷单 Hedge Open", f"{n} 个账户涉嫌刷佣", test)
+    subject = build_subject(
+        "Hedge Open",
+        f"{n} account{'s' if n != 1 else ''} suspected",
+        test,
+        prefix=HEDGE_SUBJECT_PREFIX,
+    )
 
     sections = "".join(
         _account_section(i + 1, alert, match, sibling_map.get(int(alert["id"]), []))
