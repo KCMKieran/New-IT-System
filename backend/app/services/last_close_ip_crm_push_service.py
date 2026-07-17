@@ -50,7 +50,9 @@ import pymysql.cursors
 
 from ..core import login_ip_db
 from ..core.config import Settings, get_settings
+from . import login_ip_geo_service
 from .crm_last_close_ip_client import CrmError, CrmLastCloseIpClient
+from .login_ip_geo_service import GeoUnusableError
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +70,13 @@ SERVER_SID: Dict[str, int] = {"MT4": 1, "MT5": 5, "MT4_Live2": 6}
 # identically, so bailing early turns 1,200 identical failures into 3 plus one
 # loud email.
 _CONSECUTIVE_FAILURE_ABORT = 3
+
+# Minimum distinct IPs before the systemic-geo-failure ratio is trusted. Below
+# this the ratio is noise: a 3-IP day (near-empty) turns one transient blip into
+# 33% and would abort a healthy run. A normal day sees ~1,190 distinct IPs and a
+# weekend (MT5 only) ~30, so this floor never suppresses the real signal it
+# exists to catch.
+_GEO_GATE_MIN_IPS = 20
 
 # MySQL IN-clause chunk. Matches login_ip_enrichment_service.
 _IN_CLAUSE_CHUNK = 1000
@@ -182,18 +191,70 @@ def pick_winners(
     return winners, unresolved
 
 
+def _pick_conflicts(
+    winners: Dict[int, Dict[str, Any]], geo_failed: Optional[List[Dict[str, Any]]] = None
+) -> List[Tuple[int, Dict[str, Any]]]:
+    """Clients whose accounts closed from more than one IP today, sorted.
+
+    Geo-failed clients are included: "closed from several IPs" is a fact about
+    the snapshot and a risk signal in its own right, so a MaxMind hiccup must not
+    quietly shrink the list. They just carry no push_value.
+    """
+    merged: Dict[int, Dict[str, Any]] = dict(winners)
+    for row in geo_failed or []:
+        merged.setdefault(row["client_id"], row)
+    return [(cid, w) for cid, w in sorted(merged.items()) if w["distinct_ips"] > 1]
+
+
+def attach_push_values(
+    winners: Dict[int, Dict[str, Any]], countries: Dict[str, Optional[str]]
+) -> Tuple[Dict[int, Dict[str, Any]], List[Dict[str, Any]]]:
+    """Set ``w["push_value"]`` from the geo answers; drop clients we can't resolve.
+
+    Returns ``(resolvable_winners, geo_failed_rows)``.
+
+    Dropping happens HERE, before the diff, and that placement is the whole
+    point. A client whose geo failed has push_value=None; if such a client also
+    has no prior push row, `known.get(cid)` is None too, and ``None == None``
+    would read as "unchanged" — writing a settled log row that asserts CRM holds
+    a value nobody ever sent, and permanently excluding them from future pushes.
+    Filtering before the diff makes that state unrepresentable.
+
+    ``ip_address`` deliberately stays bare: it is snapshot data, and the
+    conflict CSV's other_ips filter compares against it.
+    """
+    resolvable: Dict[int, Dict[str, Any]] = {}
+    geo_failed: List[Dict[str, Any]] = []
+    for client_id, w in winners.items():
+        country = countries.get(w["ip_address"])
+        if country is None:
+            geo_failed.append({**w, "client_id": client_id})
+            continue
+        resolvable[client_id] = {
+            **w,
+            "country": country,
+            "push_value": login_ip_geo_service.format_push_value(w["ip_address"], country),
+        }
+    return resolvable, geo_failed
+
+
 def diff_winners(
-    winners: Dict[int, Dict[str, Any]], known: Dict[int, str]
+    winners: Dict[int, Dict[str, Any]], known: Dict[int, Optional[str]]
 ) -> Tuple[Dict[int, Dict[str, Any]], Dict[int, Dict[str, Any]]]:
     """Split winners into ``(to_push, already_current)`` against the push log.
 
+    Compares the full push value ("1.2.3.4 (CN)"), not the bare IP — `known`
+    holds what CRM was last given, and that is what must match byte for byte.
+
     A client absent from `known` has never been pushed (or their row aged out
-    of retention) and is treated as needing a write.
+    of retention) and is treated as needing a write. So is one whose stored
+    value is None: that means a row written before the 2026-07-17 geo change,
+    i.e. CRM holds a bare IP that must be re-pushed once in the new format.
     """
     to_push: Dict[int, Dict[str, Any]] = {}
     current: Dict[int, Dict[str, Any]] = {}
     for client_id, w in winners.items():
-        if known.get(client_id) == w["ip_address"]:
+        if known.get(client_id) is not None and known[client_id] == w["push_value"]:
             current[client_id] = w
         else:
             to_push[client_id] = w
@@ -204,10 +265,20 @@ def _log_row(client_id: int, w: Dict[str, Any], trade_date: str, *,
              result: str, value_before: Optional[str] = None,
              http_status: Optional[int] = None,
              detail: Optional[str] = None) -> Dict[str, Any]:
+    # A settled row with no pushed_value would poison the next diff (it becomes
+    # the baseline for "what CRM holds"). Nothing should reach here without one;
+    # if it does, fail loudly rather than persist a lie.
+    push_value = w.get("push_value")
+    if not push_value:
+        raise ValueError(
+            f"_log_row called for client {client_id} with no push_value "
+            f"(result={result!r}) — geo-failed clients must be filtered before the diff"
+        )
     return {
         "trade_date": trade_date,
         "client_id": client_id,
-        "ip_address": w["ip_address"],
+        "ip_address": w["ip_address"],   # snapshot: bare IP
+        "pushed_value": push_value,      # push: exact string sent to CRM
         "server_name": w["server_name"],
         "account_id": w["account_id"],
         "event_time_mt": w["event_time_mt"],
@@ -288,6 +359,13 @@ def _push_impl(
         "failed": 0,
         "verify_failed": 0,
         "dry_run": 0,
+        # Geo (2026-07-17). geo_failed = clients skipped because their IP could
+        # not be resolved this run; they keep whatever CRM already holds and are
+        # retried tomorrow. api_calls / cache_hits are the credit-burn canary —
+        # a cache regression is invisible until the balance runs out otherwise.
+        "geo_failed": 0,
+        "geo_api_calls": 0,
+        "geo_cache_hits": 0,
         # Clients updated this run, keyed by the server the winning close came
         # from — the user's first named email requirement. In dry-run mode it
         # holds what WOULD be updated, so the two modes stay comparable.
@@ -319,14 +397,15 @@ def _push_impl(
         return summary
 
     winners, unresolved = pick_winners(rows, id_map)
+    # Counted before the geo filter below, so "clients" stays comparable with the
+    # ~1,206 baseline regardless of how many the geo step had to skip. Clients
+    # skipped for geo are reported separately as geo_failed.
     summary["clients"] = len(winners)
     summary["unresolved_accounts"] = len(unresolved)
     summary["multi_account_clients"] = sum(
         1 for w in winners.values() if w["contenders"] > 1
     )
-    conflicts = [
-        (cid, w) for cid, w in sorted(winners.items()) if w["distinct_ips"] > 1
-    ]
+    conflicts = _pick_conflicts(winners)
     summary["ip_conflict_clients"] = len(conflicts)
 
     # Baseline is ~97/day, all MT4/100001xxx (confirmed not real users). We
@@ -338,6 +417,75 @@ def _push_impl(
             "first few: %s",
             target_date, len(unresolved),
             [f"{u['server_name']}/{u['account_id']}" for u in unresolved[:5]],
+        )
+
+    # --- geo: resolve the country that goes in "1.2.3.4 (CN)" ---------------
+    #
+    # This sits before the diff because the diff compares push values, and it
+    # therefore also sits before the blast-radius cap. That ordering is not free
+    # (a run that later cap-aborts has already called MaxMind) but it is cheap:
+    # every answer is cached, so the credit is banked for the next run, not
+    # burnt. Don't "optimize" this by diffing on the bare IP first — that means
+    # parsing the country back out of the stored value, and it goes blind to
+    # MaxMind reclassifying an IP.
+    #
+    # Dry runs resolve too — see resolve_countries' docstring for why cache-only
+    # dry runs are a trap rather than a saving.
+    distinct_ips = {w["ip_address"] for w in winners.values()}
+    try:
+        geo = login_ip_geo_service.resolve_countries(distinct_ips)
+    except GeoUnusableError as exc:
+        # Account-level failure: every IP would fail identically, so this is not
+        # ~1,200 individual problems. Push nothing.
+        summary["aborted"] = f"geo lookup unusable: {exc}"
+        summary["elapsed_sec"] = (datetime.now(timezone.utc) - started).total_seconds()
+        logger.error("[crm_push] %s: ABORT — %s", target_date, summary["aborted"])
+        if send_email:
+            _send_digest(settings, summary, conflicts, target_date)
+        return summary
+
+    summary["geo_cache_hits"] = geo.cache_hits
+    summary["geo_api_calls"] = geo.api_calls
+
+    winners, geo_failed = attach_push_values(winners, geo.countries)
+    summary["geo_failed"] = len(geo_failed)
+    # Rebuild: attach_push_values returns new dicts, so the pre-geo `conflicts`
+    # references stale ones with no push_value. Count is unchanged (geo-failed
+    # clients stay in), so summary["ip_conflict_clients"] still holds.
+    conflicts = _pick_conflicts(winners, geo_failed)
+    # Clients per country, over every resolvable client — not just the conflict
+    # subset. Rendered top-N in the digest.
+    country_counts: Dict[str, int] = defaultdict(int)
+    for w in winners.values():
+        country_counts[w["country"]] += 1
+    summary["countries"] = dict(country_counts)
+
+    # Systemic-failure gate. A handful of IPs failing transiently is normal and
+    # they simply retry tomorrow; a large fraction failing means MaxMind is
+    # degraded, and pushing the remainder would quietly look like a normal night
+    # in the digest. Abort loudly instead.
+    #
+    # The floor matters: a ratio over a tiny sample is noise, not a signal. A
+    # normal day has ~1,190 distinct IPs, but weekends (MT5 only) drop to ~30,
+    # and a near-empty day to single digits — where one blip is 33% and would
+    # abort a run that had nothing wrong with it.
+    fail_ratio = len(geo.failed_ips) / len(distinct_ips) if distinct_ips else 0.0
+    ratio_cap = float(settings.LAST_CLOSE_IP_GEO_FAIL_ABORT_RATIO)
+    if len(distinct_ips) >= _GEO_GATE_MIN_IPS and fail_ratio > ratio_cap:
+        summary["aborted"] = (
+            f"geo failed for {len(geo.failed_ips)}/{len(distinct_ips)} distinct IPs "
+            f"({fail_ratio:.0%} > {ratio_cap:.0%}); wrote nothing"
+        )
+        summary["elapsed_sec"] = (datetime.now(timezone.utc) - started).total_seconds()
+        logger.error("[crm_push] %s: ABORT — %s", target_date, summary["aborted"])
+        if send_email:
+            _send_digest(settings, summary, conflicts, target_date)
+        return summary
+
+    if geo_failed:
+        logger.warning(
+            "[crm_push] %s: %d clients skipped, geo unresolved this run (retry tomorrow)",
+            target_date, len(geo_failed),
         )
 
     known = login_ip_db.get_known_crm_ips()
@@ -406,7 +554,7 @@ def _push_impl(
     consecutive_failures = 0
     for cid, w in sorted(to_push.items()):
         try:
-            res = client.write_field(cid, w["ip_address"])
+            res = client.write_field(cid, w["push_value"])
         except CrmError as exc:
             # write_field swallows read failures into a result; only the write
             # POST exhausting its network retries reaches here.
@@ -480,6 +628,12 @@ def _mail_to(settings: Settings) -> str:
 _CSV_COLUMNS = [
     "client_id",
     "pushed_ip",
+    # The exact string given to CRM ("1.2.3.4 (CN)"). Appended rather than folded
+    # into pushed_ip, which stays a bare IP so existing filters keep working.
+    # Empty when the client was skipped this run (geo unresolved) — they still
+    # belong in this list, since multi-IP is a risk signal about the snapshot,
+    # not about whether the push happened.
+    "pushed_value",
     "other_ips",
     "winning_server",
     "winning_account",
@@ -509,10 +663,14 @@ def _write_conflicts_csv(
         writer = csv.writer(f)
         writer.writerow(_CSV_COLUMNS)
         for cid, w in conflicts:
+            # Filters on the bare ip_address, which is exactly why the country
+            # never gets folded into it: "1.2.3.4 (CN)" would match nothing in
+            # all_ips and the winner would wrongly list itself under other_ips.
             others = [ip for ip in w["all_ips"] if ip != w["ip_address"]]
             writer.writerow([
                 cid,
                 w["ip_address"],
+                w.get("push_value", ""),
                 ";".join(others),
                 w["server_name"],
                 w["account_id"],
@@ -553,6 +711,25 @@ def _title(text: str) -> str:
         f'<div style="font-size:16px;font-weight:bold;margin:20px 0 6px;">'
         f'{html.escape(text)}</div>'
     )
+
+
+# How many countries the digest names before collapsing the tail into "Other".
+# Bounded on purpose: ~1,190 IPs can span ~100 countries, and a row each would
+# add ~18 KB to a body that must stay well under Gmail's ~102 KB silent-clip
+# threshold (a test pins it below 20 KB).
+_DIGEST_TOP_COUNTRIES = 10
+
+
+def _top_countries(counts: Dict[str, int]) -> List[Tuple[str, int]]:
+    """Top N countries by client count, with the tail summed into "Other"."""
+    if not counts:
+        return []
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    head = ranked[:_DIGEST_TOP_COUNTRIES]
+    tail = ranked[_DIGEST_TOP_COUNTRIES:]
+    if tail:
+        head.append((f"Other ({len(tail)} countries)", sum(c for _, c in tail)))
+    return head
 
 
 def _build_digest_html(
@@ -618,8 +795,30 @@ def _build_digest_html(
     ))
     parts.append(_row("Clients with >1 closing account:",
                       str(summary.get("multi_account_clients", 0))))
+    if summary.get("geo_failed"):
+        parts.append(_row(
+            "Clients skipped (country unresolved):",
+            f'{summary["geo_failed"]} <span style="color:#666;">'
+            f'(kept their existing CRM value; retried next run)</span>',
+        ))
     parts.append(_row("Elapsed:", f'{summary.get("elapsed_sec", 0):.1f}s'))
     parts.append("</table>")
+
+    # 2b. Geo lookups. This block earns its space by being the only place a
+    # cache regression shows up before the MaxMind balance runs out: cache hits
+    # should dominate, with roughly ~600 new IPs billed per day.
+    parts.append(_title("Country Lookups / 国家查询"))
+    parts.append(_TABLE_OPEN)
+    parts.append(_row("Served from cache:", str(summary.get("geo_cache_hits", 0))))
+    parts.append(_row("MaxMind API calls:", str(summary.get("geo_api_calls", 0))))
+    parts.append("</table>")
+
+    countries = _top_countries(summary.get("countries") or {})
+    if countries:
+        parts.append(_TABLE_OPEN)
+        for name, count in countries:
+            parts.append(_row(f"{name}:", str(count)))
+        parts.append("</table>")
 
     # 3. The IP-conflict clients. Counts only — the records live in the CSV.
     n_conf = summary.get("ip_conflict_clients", 0)

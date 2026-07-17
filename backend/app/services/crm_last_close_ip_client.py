@@ -75,7 +75,11 @@ class IpWriteResult:
     """Outcome of one field write, shaped for the push-log row."""
     ok: bool
     client_id: int
-    ip_address: str
+    # `value`, not `ip_address`: since 2026-07-17 the field holds "1.2.3.4 (CN)".
+    # This client is deliberately value-agnostic — it compares and verifies
+    # opaque strings, and the CRM field is type=text. Don't reintroduce IP
+    # parsing or validation here; the format is owned by login_ip_geo_service.
+    value: str
     value_before: Optional[str]
     value_after: Optional[str]
     http_status: Optional[int]
@@ -163,8 +167,8 @@ class CrmLastCloseIpClient:
 
     # ── Write ────────────────────────────────────────────────────
 
-    def write_field(self, client_id: int, ip_address: str) -> IpWriteResult:
-        """Set the client's field to ``ip_address``, verifying the read-back.
+    def write_field(self, client_id: int, value: str) -> IpWriteResult:
+        """Set the client's field to ``value``, verifying the read-back.
 
         Reads first — not to avoid a race (nothing else writes this field) but
         because `value_before` is the only rollback path this job has, and the
@@ -174,19 +178,19 @@ class CrmLastCloseIpClient:
             before = self.read_field(client_id)
         except CrmError as ex:
             return IpWriteResult(
-                ok=False, client_id=client_id, ip_address=ip_address,
+                ok=False, client_id=client_id, value=value,
                 value_before=None, value_after=None,
                 http_status=ex.http_status,
                 detail=f"pre-write read failed: {ex}",
             )
 
-        if before == ip_address:
+        if before == value:
             # The local diff thought this needed a write but CRM already
             # agrees — e.g. the push-log row was pruned by retention, or a
             # previous run's write landed after its read-back failed. Recording
             # it settles the diff so the next run skips it outright.
             return IpWriteResult(
-                ok=True, client_id=client_id, ip_address=ip_address,
+                ok=True, client_id=client_id, value=value,
                 value_before=before, value_after=before,
                 http_status=None, detail="CRM already holds this value",
                 no_op=True,
@@ -194,7 +198,7 @@ class CrmLastCloseIpClient:
 
         resp = self._post({
             "user": int(client_id),
-            "customFields": {FIELD_KEY: ip_address},
+            "customFields": {FIELD_KEY: value},
         })
         if resp.status_code != 200:
             logger.error(
@@ -202,7 +206,7 @@ class CrmLastCloseIpClient:
                 client_id, resp.status_code, resp.text[:500],
             )
             return IpWriteResult(
-                ok=False, client_id=client_id, ip_address=ip_address,
+                ok=False, client_id=client_id, value=value,
                 value_before=before, value_after=before,
                 http_status=resp.status_code,
                 detail=f"HTTP {resp.status_code}: {resp.text[:500]}",
@@ -216,26 +220,26 @@ class CrmLastCloseIpClient:
                 "CRM last-close-IP read-back failed: client=%s: %s", client_id, ex
             )
             return IpWriteResult(
-                ok=False, client_id=client_id, ip_address=ip_address,
+                ok=False, client_id=client_id, value=value,
                 value_before=before, value_after=None,
                 http_status=resp.status_code,
                 detail=f"write 200 but read-back failed: {ex}",
             )
-        if after != ip_address:
+        if after != value:
             logger.error(
                 "CRM last-close-IP verify FAILED: client=%s wanted=%s got=%r "
                 "(200 but silent no-op — check the field key %r)",
-                client_id, ip_address, after, FIELD_KEY,
+                client_id, value, after, FIELD_KEY,
             )
             return IpWriteResult(
-                ok=False, client_id=client_id, ip_address=ip_address,
+                ok=False, client_id=client_id, value=value,
                 value_before=before, value_after=after,
                 http_status=resp.status_code,
-                detail=f"verify failed: wrote {ip_address!r}, read back {after!r}",
+                detail=f"verify failed: wrote {value!r}, read back {after!r}",
                 verify_failed=True,
             )
         return IpWriteResult(
-            ok=True, client_id=client_id, ip_address=ip_address,
+            ok=True, client_id=client_id, value=value,
             value_before=before, value_after=after,
             http_status=resp.status_code,
         )

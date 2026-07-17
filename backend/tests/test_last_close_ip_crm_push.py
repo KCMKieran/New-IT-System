@@ -26,11 +26,13 @@ import pytest
 
 from app.services import crm_last_close_ip_client as crm_client
 from app.services import last_close_ip_crm_push_service as svc
+from app.services import login_ip_geo_service as geo_svc
 from app.services.crm_last_close_ip_client import (
     FIELD_KEY,
     CrmLastCloseIpClient,
     extract_field,
 )
+from app.services.login_ip_geo_service import GeoResolution, GeoUnusableError
 
 
 # ── Fakes ─────────────────────────────────────────────────────
@@ -109,9 +111,35 @@ def _settings(**over):
         LAST_CLOSE_IP_CRM_MAIL_TO="test@example.com",
         CRM_LAST_CLOSE_IP_API_URL="https://crm.test/rest/users/update",
         CRM_LAST_CLOSE_IP_API_TOKEN="tok",
+        LAST_CLOSE_IP_GEO_FAIL_ABORT_RATIO=0.2,
+        LAST_CLOSE_IP_GEO_CACHE_TTL_DAYS=30,
+        LAST_CLOSE_IP_GEO_WORKERS=4,
+        MAXMIND_ACCOUNT_ID="123456",
+        MAXMIND_LICENSE_KEY="k" * 40,
+        MAXMIND_HOST="geoip.maxmind.com",
+        MAXMIND_TIMEOUT=10.0,
     )
     base.update(over)
     return SimpleNamespace(**base)
+
+
+def _stub_geo(monkeypatch, mapping=None, *, default="XX", calls=None):
+    """Patch the geo resolver so no test touches MaxMind.
+
+    `mapping` overrides specific IPs (use None to simulate a transient failure
+    that skips the client); everything else resolves to `default`. `calls` is an
+    optional list that records each batch, so tests can assert zero lookups.
+    """
+    mapping = mapping or {}
+
+    def fake(ips):
+        ips = list(ips)
+        if calls is not None:
+            calls.append({"ips": sorted(ips)})
+        countries = {ip: mapping.get(ip, default) for ip in ips}
+        return GeoResolution(countries, cache_hits=0, api_calls=len(ips))
+
+    monkeypatch.setattr(geo_svc, "resolve_countries", fake)
 
 
 # ── pick_winners: latest close wins ───────────────────────────
@@ -211,19 +239,126 @@ def test_unknown_server_and_unmapped_loginsid_are_unresolved_not_crashes():
     assert "not in mt4_users" in reasons and "unknown server_name" in reasons
 
 
+# ── schema migration ──────────────────────────────────────────
+
+# The 14-column table exactly as it stood before pushed_value was added
+# (prod, MT day 20260716). Frozen here on purpose: this is the shape the
+# migration has to cope with on a real install.
+_LEGACY_PUSH_LOG_SQL = """
+CREATE TABLE crm_last_close_ip_push_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, trade_date TEXT NOT NULL,
+    client_id INTEGER NOT NULL, ip_address TEXT NOT NULL, server_name TEXT NOT NULL,
+    account_id INTEGER NOT NULL, event_time_mt TEXT NOT NULL,
+    contenders INTEGER NOT NULL DEFAULT 1, distinct_ips INTEGER NOT NULL DEFAULT 1,
+    value_before TEXT, result TEXT NOT NULL, http_status INTEGER, detail TEXT,
+    pushed_at TEXT NOT NULL, UNIQUE (trade_date, client_id));
+"""
+
+
+def test_migration_adds_pushed_value_to_an_existing_install(tmp_path, monkeypatch):
+    # Without this ALTER, _SCHEMA_SQL's CREATE TABLE IF NOT EXISTS silently
+    # leaves prod at 14 columns and upsert_crm_push_log — which runs AFTER the
+    # write loop — raises. The run would push ~1,200 clients to the real CRM,
+    # fail to log any of it, and re-push all of them every night after, without
+    # the blast-radius cap ever firing (1,200 < 5,000).
+    from app.core import login_ip_db
+
+    db_path = tmp_path / "login_ip.db"
+    monkeypatch.setattr(login_ip_db, "_DB_PATH", db_path)
+
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(_LEGACY_PUSH_LOG_SQL)
+    conn.execute(
+        "INSERT INTO crm_last_close_ip_push_log (trade_date, client_id, ip_address,"
+        " server_name, account_id, event_time_mt, result, pushed_at) VALUES"
+        " ('20260716', 100335, '106.87.121.169', 'MT4', 8001450, '18:00:10.265',"
+        " 'pushed', '2026-07-16T21:10:00Z')"
+    )
+    conn.commit()
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(crm_last_close_ip_push_log)")}
+    assert "pushed_value" not in cols  # guard the guard: legacy shape confirmed
+    conn.close()
+
+    login_ip_db.init_login_ip_db()
+
+    with login_ip_db.get_connection() as c:
+        cols = {r[1] for r in c.execute("PRAGMA table_info(crm_last_close_ip_push_log)")}
+        assert "pushed_value" in cols
+        row = c.execute(
+            "SELECT ip_address, pushed_value FROM crm_last_close_ip_push_log"
+        ).fetchone()
+    # Legacy row keeps its bare IP and gets a NULL pushed_value — the honest
+    # answer, and what makes the diff re-push it once in the new format.
+    assert row["ip_address"] == "106.87.121.169"
+    assert row["pushed_value"] is None
+    assert login_ip_db.get_known_crm_ips() == {100335: None}
+
+    login_ip_db.init_login_ip_db()  # idempotent: several uvicorn workers re-run it
+    with login_ip_db.get_connection() as c:
+        cols = [r[1] for r in c.execute("PRAGMA table_info(crm_last_close_ip_push_log)")]
+    assert cols.count("pushed_value") == 1
+
+
+def test_duplicate_column_race_does_not_kill_a_losing_worker(tmp_path, monkeypatch):
+    # Workers boot concurrently and all run check-then-ALTER; the losers' ALTERs
+    # hit "duplicate column". An unguarded raise would kill them on startup.
+    from app.core import login_ip_db
+
+    monkeypatch.setattr(login_ip_db, "_DB_PATH", tmp_path / "login_ip.db")
+    login_ip_db.init_login_ip_db()
+
+    with login_ip_db.get_connection() as conn:
+        login_ip_db._alter_ignore_duplicate_column(
+            conn, "ALTER TABLE crm_last_close_ip_push_log ADD COLUMN pushed_value TEXT"
+        )
+        # Any other OperationalError must still surface.
+        with pytest.raises(sqlite3.OperationalError):
+            login_ip_db._alter_ignore_duplicate_column(
+                conn, "ALTER TABLE does_not_exist ADD COLUMN x TEXT"
+            )
+
+
 # ── diff ──────────────────────────────────────────────────────
 
 def test_diff_splits_changed_from_current():
+    # The diff compares the full push value, not the bare IP — `known` holds
+    # what CRM was last given.
     winners = {
-        1: {"ip_address": "1.1.1.1"},   # known, same -> skip
-        2: {"ip_address": "2.2.2.2"},   # known, different -> push
-        3: {"ip_address": "3.3.3.3"},   # never pushed -> push
+        1: {"ip_address": "1.1.1.1", "push_value": "1.1.1.1 (CN)"},  # same -> skip
+        2: {"ip_address": "2.2.2.2", "push_value": "2.2.2.2 (CN)"},  # differs -> push
+        3: {"ip_address": "3.3.3.3", "push_value": "3.3.3.3 (CN)"},  # never pushed -> push
     }
-    known = {1: "1.1.1.1", 2: "9.9.9.9"}
+    known = {1: "1.1.1.1 (CN)", 2: "9.9.9.9 (HK)"}
     to_push, current = svc.diff_winners(winners, known)
 
     assert set(to_push) == {2, 3}
     assert set(current) == {1}
+
+
+def test_diff_repushes_when_country_changed_but_ip_did_not():
+    # Same IP, MaxMind now says HK. The value CRM holds is stale and must be
+    # corrected — a diff on the bare IP would call this "unchanged" forever.
+    winners = {1: {"ip_address": "1.1.1.1", "push_value": "1.1.1.1 (HK)"}}
+    to_push, current = svc.diff_winners(winners, {1: "1.1.1.1 (CN)"})
+
+    assert set(to_push) == {1}
+    assert current == {}
+
+
+def test_diff_repushes_legacy_rows_written_before_the_geo_change():
+    # THE cutover path: pre-2026-07-17 rows have pushed_value NULL, so CRM holds
+    # a bare IP. Every such client must be re-pushed exactly once, in the new
+    # format. If this regresses, the whole fleet either never converts or
+    # re-pushes nightly forever.
+    winners = {
+        1: {"ip_address": "1.1.1.1", "push_value": "1.1.1.1 (CN)"},
+        2: {"ip_address": "2.2.2.2", "push_value": "2.2.2.2 (JP)"},
+    }
+    known = {1: None, 2: None}  # what get_known_crm_ips returns for legacy rows
+    to_push, current = svc.diff_winners(winners, known)
+
+    assert set(to_push) == {1, 2}
+    assert current == {}
 
 
 def test_known_crm_ips_uses_latest_mt_day_and_ignores_unsettled(db):
@@ -231,21 +366,36 @@ def test_known_crm_ips_uses_latest_mt_day_and_ignores_unsettled(db):
     # poison the baseline, or a failed write would never be retried.
     db.upsert_crm_push_log([
         {"trade_date": "20260712", "client_id": 900, "ip_address": "1.1.1.1",
+         "pushed_value": "1.1.1.1 (CN)",
          "server_name": "MT4", "account_id": 1, "event_time_mt": "10:00:00.000",
          "result": "pushed", "pushed_at": "2026-07-12T00:00:00Z"},
         {"trade_date": "20260714", "client_id": 900, "ip_address": "2.2.2.2",
+         "pushed_value": "2.2.2.2 (CN)",
          "server_name": "MT4", "account_id": 1, "event_time_mt": "10:00:00.000",
          "result": "pushed", "pushed_at": "2026-07-14T00:00:00Z"},
         {"trade_date": "20260714", "client_id": 901, "ip_address": "3.3.3.3",
+         "pushed_value": "3.3.3.3 (HK)",
          "server_name": "MT5", "account_id": 2, "event_time_mt": "10:00:00.000",
          "result": "failed", "pushed_at": "2026-07-14T00:00:00Z"},
         {"trade_date": "20260714", "client_id": 902, "ip_address": "4.4.4.4",
+         "pushed_value": "4.4.4.4 (JP)",
          "server_name": "MT5", "account_id": 3, "event_time_mt": "10:00:00.000",
          "result": "dry_run", "pushed_at": "2026-07-14T00:00:00Z"},
     ])
     known = db.get_known_crm_ips()
 
-    assert known == {900: "2.2.2.2"}  # latest day wins; failed/dry_run absent
+    assert known == {900: "2.2.2.2 (CN)"}  # latest day wins; failed/dry_run absent
+
+
+def test_known_crm_ips_returns_none_for_legacy_rows(db):
+    # A row from before the geo change: pushed_value was never set. It must come
+    # back as None (not the bare ip_address) so the diff re-pushes it once.
+    db.upsert_crm_push_log([
+        {"trade_date": "20260716", "client_id": 900, "ip_address": "1.1.1.1",
+         "server_name": "MT4", "account_id": 1, "event_time_mt": "10:00:00.000",
+         "result": "pushed", "pushed_at": "2026-07-16T00:00:00Z"},
+    ])
+    assert db.get_known_crm_ips() == {900: None}
 
 
 # ── CRM client: 200 is not proof ──────────────────────────────
@@ -319,31 +469,49 @@ def snapshot(db):
     return {"1-111": 900, "5-222": 900, "5-333": 901}
 
 
-def _run(db, monkeypatch, snapshot, session, settings, **kw):
+def _run(db, monkeypatch, snapshot, session, settings, *, geo=None, **kw):
     monkeypatch.setattr(svc, "resolve_client_ids", lambda rows, s=None: snapshot)
+    if geo is None:
+        _stub_geo(monkeypatch)
     client = CrmLastCloseIpClient("https://crm.test", "tok", session=session)
     return svc.push_last_close_ips_to_crm(
         "20260714", settings=settings, client=client, send_email=False, **kw
     )
 
 
-def test_live_run_pushes_latest_ip_per_client_and_logs(db, monkeypatch, snapshot):
+def test_live_run_pushes_value_with_country_and_logs(db, monkeypatch, snapshot):
     session = FakeCrmSession(users={900: None, 901: None})
-    summary = _run(db, monkeypatch, snapshot, session, _settings())
+    _stub_geo(monkeypatch, {"2.2.2.2": "CN", "3.3.3.3": "HK"})
+    summary = _run(db, monkeypatch, snapshot, session, _settings(), geo="stubbed")
 
     assert summary["clients"] == 2
     assert summary["pushed"] == 2
     assert summary["ip_conflict_clients"] == 1        # client 900
     assert summary["multi_account_clients"] == 1
     assert summary["pushed_by_server"] == {"MT5": 2}  # both winners are MT5
-    assert session.users == {900: "2.2.2.2", 901: "3.3.3.3"}  # latest close won
+    # What CRM ends up holding: IP plus country, latest close won.
+    assert session.users == {900: "2.2.2.2 (CN)", 901: "3.3.3.3 (HK)"}
+    assert summary["countries"] == {"CN": 1, "HK": 1}
 
     rows = {r["client_id"]: r for r in db.get_crm_push_log("20260714")}
     assert rows[900]["result"] == "pushed"
+    # ip_address stays the bare snapshot value; pushed_value carries the country.
     assert rows[900]["ip_address"] == "2.2.2.2"
+    assert rows[900]["pushed_value"] == "2.2.2.2 (CN)"
     assert rows[900]["value_before"] is None
     assert rows[900]["distinct_ips"] == 2
     assert rows[901]["contenders"] == 1
+
+
+def test_unresolvable_country_pushes_unknown_suffix(db, monkeypatch, snapshot):
+    # MaxMind's definitive "not geolocatable" (private/reserved range). Unknown
+    # is a real answer: it gets pushed and is stable, so it won't churn.
+    session = FakeCrmSession(users={900: None, 901: None})
+    _stub_geo(monkeypatch, {"2.2.2.2": "Unknown", "3.3.3.3": "HK"})
+    summary = _run(db, monkeypatch, snapshot, session, _settings(), geo="stubbed")
+
+    assert session.users[900] == "2.2.2.2 (Unknown)"
+    assert summary["geo_failed"] == 0  # a definitive answer is not a failure
 
 
 def test_rerunning_the_same_day_is_idempotent_and_sends_no_writes(
@@ -351,23 +519,26 @@ def test_rerunning_the_same_day_is_idempotent_and_sends_no_writes(
 ):
     settings = _settings()
     session = FakeCrmSession(users={900: None, 901: None})
-    _run(db, monkeypatch, snapshot, session, settings)
+    _stub_geo(monkeypatch, {"2.2.2.2": "CN", "3.3.3.3": "HK"})
+    _run(db, monkeypatch, snapshot, session, settings, geo="stubbed")
 
     second = FakeCrmSession(users=dict(session.users))
-    summary = _run(db, monkeypatch, snapshot, second, settings)
+    summary = _run(db, monkeypatch, snapshot, second, settings, geo="stubbed")
 
     assert summary["pushed"] == 0
     assert summary["unchanged"] == 2
     assert second.posts == []  # local diff — not one request, read or write
 
 
-def test_value_before_records_the_old_ip_for_rollback(db, monkeypatch, snapshot):
+def test_value_before_records_the_old_value_for_rollback(db, monkeypatch, snapshot):
     session = FakeCrmSession(users={900: "9.9.9.9", 901: None})
-    _run(db, monkeypatch, snapshot, session, _settings())
+    _stub_geo(monkeypatch, {"2.2.2.2": "CN", "3.3.3.3": "HK"})
+    _run(db, monkeypatch, snapshot, session, _settings(), geo="stubbed")
 
     rows = {r["client_id"]: r for r in db.get_crm_push_log("20260714")}
     assert rows[900]["value_before"] == "9.9.9.9"
     assert rows[900]["ip_address"] == "2.2.2.2"
+    assert rows[900]["pushed_value"] == "2.2.2.2 (CN)"
 
 
 def test_dry_run_logs_everything_and_sends_zero_requests(db, monkeypatch, snapshot):
@@ -395,6 +566,141 @@ def test_cap_exceeded_aborts_writing_nothing(db, monkeypatch, snapshot):
     assert summary["aborted"] and "exceeds" in summary["aborted"]
     assert session.posts == []
     assert db.get_crm_push_log("20260714") == []  # not even the unchanged rows
+
+
+# ── geo: the country in "1.2.3.4 (CN)" ────────────────────────
+
+def test_transient_geo_failure_skips_the_client_without_logging_a_row(
+    db, monkeypatch, snapshot
+):
+    # A network blip on one IP. That client keeps whatever CRM already holds and
+    # is retried tomorrow — no row, because a row would settle the diff.
+    session = FakeCrmSession(users={900: None, 901: None})
+    _stub_geo(monkeypatch, {"2.2.2.2": None, "3.3.3.3": "HK"})
+    summary = _run(db, monkeypatch, snapshot, session, _settings(), geo="stubbed")
+
+    assert summary["geo_failed"] == 1
+    assert summary["pushed"] == 1
+    assert session.users[900] is None          # untouched
+    assert session.users[901] == "3.3.3.3 (HK)"
+
+    rows = {r["client_id"]: r for r in db.get_crm_push_log("20260714")}
+    assert 900 not in rows                     # no row at all for the skipped client
+    assert db.get_known_crm_ips() == {901: "3.3.3.3 (HK)"}
+
+
+def test_geo_failure_on_never_pushed_client_does_not_settle_as_unchanged(
+    db, monkeypatch, snapshot
+):
+    # The sharpest trap in this design. Client 900 has never been pushed
+    # (known.get -> None) and geo fails (push_value -> None). If the filter ran
+    # inside the write loop instead of before the diff, `None == None` would read
+    # as "unchanged" and write a settled row asserting CRM holds a value nobody
+    # ever sent — excluding that client from every future push, silently, while
+    # the digest counted them as fine.
+    session = FakeCrmSession(users={900: None, 901: None})
+    _stub_geo(monkeypatch, {"2.2.2.2": None, "3.3.3.3": "HK"})
+    summary = _run(db, monkeypatch, snapshot, session, _settings(), geo="stubbed")
+
+    assert summary["unchanged"] == 0
+    assert 900 not in {r["client_id"] for r in db.get_crm_push_log("20260714")}
+    assert 900 not in db.get_known_crm_ips()
+
+    # Proof it isn't stuck: once geo recovers, the client pushes normally.
+    _stub_geo(monkeypatch, {"2.2.2.2": "CN", "3.3.3.3": "HK"})
+    second = FakeCrmSession(users=dict(session.users))
+    summary2 = _run(db, monkeypatch, snapshot, second, _settings(), geo="stubbed")
+
+    assert summary2["pushed"] == 1
+    assert second.users[900] == "2.2.2.2 (CN)"
+
+
+def test_log_row_refuses_to_persist_a_row_without_a_push_value():
+    # Defence in depth for the trap above: a settled row with no pushed_value
+    # poisons the next diff, so it must be impossible to write, not merely
+    # avoided by the caller.
+    with pytest.raises(ValueError, match="no push_value"):
+        svc._log_row(900, {"ip_address": "1.1.1.1", "server_name": "MT4",
+                           "account_id": 1, "event_time_mt": "10:00:00.000"},
+                     "20260714", result="unchanged")
+
+
+def test_systemic_geo_failure_aborts_the_run_writing_nothing(db, monkeypatch):
+    # Most IPs failing is MaxMind being degraded, not a data quirk. Pushing the
+    # remainder would look like an ordinary night in the digest.
+    db.upsert_last_trade_ips([
+        ("20260714", "MT5", 400 + i, f"10.0.0.{i}", "12:00:00.000", "close", "#1")
+        for i in range(40)
+    ])
+    monkeypatch.setattr(svc, "resolve_client_ids",
+                        lambda rows, s=None: {f"5-{400 + i}": 500 + i for i in range(40)})
+    # 30 of 40 distinct IPs fail = 75%, over both the floor and the ratio.
+    _stub_geo(monkeypatch, {f"10.0.0.{i}": None for i in range(30)})
+    session = FakeCrmSession(users={})
+    client = CrmLastCloseIpClient("https://crm.test", "tok", session=session)
+    summary = svc.push_last_close_ips_to_crm(
+        "20260714", settings=_settings(), client=client, send_email=False
+    )
+
+    assert summary["aborted"] and "geo failed" in summary["aborted"]
+    assert session.posts == []
+    assert db.get_crm_push_log("20260714") == []
+
+
+def test_geo_gate_ignores_the_ratio_on_a_tiny_day(db, monkeypatch, snapshot):
+    # 1 of 3 distinct IPs failing is 33% — over the ratio, but the sample is too
+    # small for the ratio to mean anything. A near-empty day (or a weekend) must
+    # not abort over one blip; the client is just skipped and retried.
+    session = FakeCrmSession(users={900: None, 901: None})
+    _stub_geo(monkeypatch, {"2.2.2.2": None})
+    summary = _run(db, monkeypatch, snapshot, session, _settings(), geo="stubbed")
+
+    assert summary["aborted"] is None
+    assert summary["geo_failed"] == 1
+    assert summary["pushed"] == 1  # the healthy client still goes through
+
+
+def test_geo_account_unusable_aborts_the_run_writing_nothing(
+    db, monkeypatch, snapshot
+):
+    # Out of credit / no entitlement / bad key: every IP would fail the same way.
+    def boom(ips):
+        raise GeoUnusableError("out of queries")
+
+    monkeypatch.setattr(geo_svc, "resolve_countries", boom)
+    session = FakeCrmSession(users={900: None, 901: None})
+    summary = _run(db, monkeypatch, snapshot, session, _settings(), geo="stubbed")
+
+    assert summary["aborted"] and "geo lookup unusable" in summary["aborted"]
+    assert session.posts == []
+    assert db.get_crm_push_log("20260714") == []
+
+
+def test_dry_run_still_resolves_countries_so_the_rehearsal_is_faithful(
+    db, monkeypatch, snapshot
+):
+    # A dry run must answer "what would the live run do?". Serving it from cache
+    # only looks like a saving but isn't: dev's scheduler is off (it can't bill
+    # nightly) and dev/prod share one login_ip.db, so a resolved IP is banked for
+    # prod rather than wasted. Meanwhile a cold-cache dry run would resolve
+    # nothing, trip the systemic-failure gate, and abort — telling you nothing.
+    calls = []
+    _stub_geo(monkeypatch, {"2.2.2.2": "CN", "3.3.3.3": "HK"}, calls=calls)
+    session = FakeCrmSession(users={900: None, 901: None})
+    summary = _run(db, monkeypatch, snapshot, session,
+                   _settings(LAST_CLOSE_IP_CRM_WRITE_ENABLED=False), geo="stubbed")
+
+    assert len(calls) == 1                 # geo ran
+    assert summary["aborted"] is None      # and did NOT abort
+    assert summary["dry_run"] == 2         # the number the rehearsal exists to give
+    assert summary["geo_failed"] == 0
+    assert session.posts == []             # still zero CRM traffic
+
+    rows = {r["client_id"]: r for r in db.get_crm_push_log("20260714")}
+    # The rehearsal shows the exact value a live run would send.
+    assert rows[900]["pushed_value"] == "2.2.2.2 (CN)"
+    assert {r["result"] for r in rows.values()} == {"dry_run"}
+    assert db.get_known_crm_ips() == {}     # dry_run must not settle the diff
 
 
 def test_crm_outage_aborts_after_consecutive_failures_without_raising(
@@ -440,6 +746,7 @@ def test_snapshot_read_is_not_capped_at_the_ui_search_limit(db, monkeypatch):
         svc, "resolve_client_ids",
         lambda rows, s=None: {f"5-{400000 + i}": 500000 + i for i in range(6000)},
     )
+    _stub_geo(monkeypatch)
     session = FakeCrmSession(users={})
     client = CrmLastCloseIpClient("https://crm.test", "tok", session=session)
     summary = svc.push_last_close_ips_to_crm(
@@ -453,6 +760,7 @@ def test_snapshot_read_is_not_capped_at_the_ui_search_limit(db, monkeypatch):
 
 def test_empty_snapshot_is_not_an_error(db, monkeypatch):
     monkeypatch.setattr(svc, "resolve_client_ids", lambda rows, s=None: {})
+    _stub_geo(monkeypatch)
     session = FakeCrmSession(users={})
     client = CrmLastCloseIpClient("https://crm.test", "tok", session=session)
     summary = svc.push_last_close_ips_to_crm(
@@ -483,6 +791,7 @@ def _capture_send(monkeypatch):
 
 def test_digest_attaches_full_conflict_csv_and_has_no_emoji(db, monkeypatch, snapshot):
     monkeypatch.setattr(svc, "resolve_client_ids", lambda rows, s=None: snapshot)
+    _stub_geo(monkeypatch, {"2.2.2.2": "CN", "3.3.3.3": "HK"})
     sent = _capture_send(monkeypatch)
     session = FakeCrmSession(users={900: None, 901: None})
     client = CrmLastCloseIpClient("https://crm.test", "tok", session=session)
@@ -506,6 +815,9 @@ def test_digest_attaches_full_conflict_csv_and_has_no_emoji(db, monkeypatch, sna
     rows = list(csv.DictReader(io.StringIO(csv_text)))
     assert [r["client_id"] for r in rows] == ["900"]   # 901 has one IP, not a conflict
     assert rows[0]["pushed_ip"] == "2.2.2.2"           # latest close won
+    assert rows[0]["pushed_value"] == "2.2.2.2 (CN)"   # what CRM was actually given
+    # The country must never leak into pushed_ip/other_ips: other_ips filters on
+    # the bare IP, so a contaminated winner would list itself as an "other".
     assert rows[0]["other_ips"] == "1.1.1.1"
     assert rows[0]["winning_server"] == "MT5"
     assert rows[0]["distinct_ips"] == "2"
@@ -517,7 +829,9 @@ def test_digest_attaches_full_conflict_csv_and_has_no_emoji(db, monkeypatch, sna
 
 def test_digest_body_stays_small_when_conflicts_are_many(db, monkeypatch):
     # Gmail clips a body at ~102 KB. The body must not scale with the conflict
-    # count — that is the whole reason the list moved to an attachment.
+    # count — that is the whole reason the list moved to an attachment. The
+    # country table is bounded for the same reason: ~1,190 IPs can span ~100
+    # countries, and a row each would add ~18 KB.
     many = [
         (cid, {"ip_address": "1.1.1.1", "all_ips": ["1.1.1.1", "2.2.2.2"],
                "server_name": "MT5", "account_id": cid, "distinct_ips": 2,
@@ -525,14 +839,30 @@ def test_digest_body_stays_small_when_conflicts_are_many(db, monkeypatch):
         for cid in range(1000, 3000)
     ]
     body = svc._build_digest_html(
-        {"write_enabled": True, "ip_conflict_clients": len(many)},
+        {"write_enabled": True, "ip_conflict_clients": len(many),
+         "countries": {f"C{i}": i for i in range(120)}},
         many, "20260714", "x.csv",
     )
     assert len(body) < 20_000, f"body grew to {len(body)} bytes with 2000 conflicts"
 
 
+def test_digest_country_table_is_bounded_and_sums_the_tail():
+    counts = {f"C{i}": 1 for i in range(50)}
+    counts["CN"] = 900
+    counts["HK"] = 100
+    top = svc._top_countries(counts)
+
+    assert top[0] == ("CN", 900)
+    assert top[1] == ("HK", 100)
+    assert len(top) == svc._DIGEST_TOP_COUNTRIES + 1     # +1 for the Other row
+    name, total = top[-1]
+    assert "Other" in name and total == 42               # 50 - 8 shown = 42 tail
+    assert sum(c for _, c in top) == sum(counts.values())  # nothing lost
+
+
 def test_no_attachment_when_there_are_no_conflicts(db, monkeypatch):
     monkeypatch.setattr(svc, "resolve_client_ids", lambda rows, s=None: {"5-333": 901})
+    _stub_geo(monkeypatch)
     db.upsert_last_trade_ips([
         ("20260714", "MT5", 333, "3.3.3.3", "12:00:00.000", "close", "#3"),
     ])
@@ -550,6 +880,7 @@ def test_no_attachment_when_there_are_no_conflicts(db, monkeypatch):
 def test_digest_subject_marks_dry_run_and_abort(db, monkeypatch, snapshot):
     subjects = []
     monkeypatch.setattr(svc, "resolve_client_ids", lambda rows, s=None: snapshot)
+    _stub_geo(monkeypatch)
     monkeypatch.setattr(
         "app.services.email_service.send_email",
         lambda subject, body, to, cc=None, attachments=None: subjects.append(subject),
@@ -592,6 +923,7 @@ def test_unexpected_crash_still_emails_and_does_not_raise(db, monkeypatch, snaps
 
 def test_smtp_failure_does_not_break_the_push(db, monkeypatch, snapshot):
     monkeypatch.setattr(svc, "resolve_client_ids", lambda rows, s=None: snapshot)
+    _stub_geo(monkeypatch)
 
     def boom(**kw):
         raise RuntimeError("SMTP down")
