@@ -32,3 +32,7 @@ apscheduler
 # Explicit pin — previously only a transitive dep (via dash). Used by the
 # OPT-0032 CRM risk-tag client (crm_risk_tag_client.py).
 requests==2.31.0
+# MaxMind GeoIP2 client — resolves the country appended to the last-close IP
+# pushed to the CRM (login_ip_geo_service.py). Pinned to the same version
+# Manager_Log_Monitor has been running against this MaxMind account.
+geoip2==4.8.0

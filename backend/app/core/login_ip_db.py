@@ -211,11 +211,21 @@ CREATE INDEX IF NOT EXISTS idx_last_trade_ip_ip   ON last_trade_ip(ip_address);
 -- of this client's accounts closed that day and how many distinct IPs they
 -- disagreed on. distinct_ips > 1 is the risk-relevant signal (one client
 -- trading from several IPs the same day) and is listed in the digest email.
+--
+-- ip_address vs pushed_value: `ip_address` is SNAPSHOT data (the winning close's
+-- bare IP, traceable to last_trade_ip). `pushed_value` is PUSH data — the exact
+-- string handed to the CRM, "1.2.3.4 (CN)" since the 2026-07-17 geo change.
+-- They are deliberately separate: the diff and the conflict CSV need different
+-- ones, and a single overloaded column would carry two formats with no
+-- discriminator. NULL pushed_value = a row written before the geo change, i.e.
+-- "we don't know what CRM holds in the new format" — which correctly makes the
+-- diff re-push it once.
 CREATE TABLE IF NOT EXISTS crm_last_close_ip_push_log (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     trade_date     TEXT    NOT NULL,   -- YYYYMMDD (MT day)
     client_id      INTEGER NOT NULL,   -- CRM userId (= mt4_users.userId)
-    ip_address     TEXT    NOT NULL,   -- the pushed value (winning close's IP)
+    ip_address     TEXT    NOT NULL,   -- snapshot: winning close's bare IP
+    pushed_value   TEXT,               -- push: exact string sent to CRM, "IP (CC)"; NULL = pre-geo row
     server_name    TEXT    NOT NULL,   -- which account won ...
     account_id     INTEGER NOT NULL,   -- ... so the value is traceable to a close
     event_time_mt  TEXT    NOT NULL,   -- HH:MM:SS.mmm, MT server local time
@@ -231,6 +241,26 @@ CREATE TABLE IF NOT EXISTS crm_last_close_ip_push_log (
 
 CREATE INDEX IF NOT EXISTS idx_crm_push_log_date   ON crm_last_close_ip_push_log(trade_date);
 CREATE INDEX IF NOT EXISTS idx_crm_push_log_client ON crm_last_close_ip_push_log(client_id);
+
+-- IP -> country cache for the CRM push's geo step.
+--
+-- Exists to bound MaxMind Precision credit burn, not for speed. ~1,190 distinct
+-- IPs close positions each day but only ~600 are new; without this cache every
+-- run would re-bill every IP (1,190/day vs ~600/day — the difference between
+-- ~7 and ~14 months of the current credit balance).
+--
+-- Only DEFINITIVE answers are cached: a country, or 'Unknown' when MaxMind says
+-- the IP isn't geolocatable (reserved/private). Transient failures are NOT
+-- cached — caching them would pin a wrong answer for the whole TTL.
+--
+-- source: 'maxmind_api' — kept for forensics and so a future second backend
+-- (e.g. an offline mmdb tier) can be told apart without a schema change.
+CREATE TABLE IF NOT EXISTS ip_geo_cache (
+    ip          TEXT PRIMARY KEY,
+    country     TEXT NOT NULL,   -- ISO code, or 'Unknown' (definitive no-answer)
+    source      TEXT NOT NULL,
+    resolved_at TEXT NOT NULL    -- UTC ISO8601; drives the TTL
+);
 """
 
 
@@ -270,6 +300,50 @@ def get_connection():
         conn.close()
 
 
+def _alter_ignore_duplicate_column(conn: sqlite3.Connection, sql: str) -> None:
+    """Run an ``ALTER TABLE ... ADD COLUMN``, swallowing the duplicate-column race.
+
+    With several uvicorn workers booting concurrently, each runs the same
+    PRAGMA check-then-ALTER sequence; the losers' ALTERs fail with "duplicate
+    column name" even though the schema already ended up correct — an unguarded
+    raise would kill the losing workers on startup. Any other OperationalError
+    (locked DB, missing table, syntax) still raises.
+
+    Same guard as risk_monitor_db._alter_ignore_duplicate_column (OPT-0045).
+    """
+    try:
+        conn.execute(sql)
+    except sqlite3.OperationalError as exc:
+        if "duplicate column" not in str(exc).lower():
+            raise
+
+
+def _migrate_crm_push_log_pushed_value(conn: sqlite3.Connection) -> None:
+    """Add crm_last_close_ip_push_log.pushed_value if missing (2026-07-17 geo change).
+
+    ``_SCHEMA_SQL`` is CREATE TABLE IF NOT EXISTS only, so adding a column there
+    does nothing to an existing install — this ALTER is what actually lands it.
+
+    Skipping it is not a cosmetic bug. ``upsert_crm_push_log`` runs AFTER the
+    write loop, so a missing column means: push ~1,200 clients to the production
+    CRM, then raise "no column named pushed_value" while persisting; the
+    never-raises wrapper emails [ABORTED] and no log rows land; the next run
+    diffs against the same stale rows and pushes all ~1,200 again — a nightly
+    re-write loop that the blast-radius cap never catches (1,200 < 5,000).
+
+    Old rows keep pushed_value = NULL, which is the honest answer ("we don't know
+    what CRM holds in the new format") and makes the diff re-push them once.
+    """
+    rows = list(conn.execute("PRAGMA table_info(crm_last_close_ip_push_log)"))
+    if not rows:
+        return  # table not created yet (fresh install handles it via schema)
+    cols = {row[1] for row in rows}
+    if "pushed_value" not in cols:
+        _alter_ignore_duplicate_column(
+            conn, "ALTER TABLE crm_last_close_ip_push_log ADD COLUMN pushed_value TEXT"
+        )
+
+
 def init_login_ip_db() -> None:
     """Create tables + indexes on first run. Safe to call repeatedly.
 
@@ -279,6 +353,7 @@ def init_login_ip_db() -> None:
     _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with get_connection() as conn:
         conn.executescript(_SCHEMA_SQL)
+        _migrate_crm_push_log_pushed_value(conn)
         conn.execute(
             "INSERT OR IGNORE INTO login_ip_mail_recipients (email, role, remarks) "
             "VALUES (?, ?, ?)",
@@ -553,15 +628,23 @@ def cleanup_old_last_trade_ip(
 CRM_PUSH_SETTLED_RESULTS = ("pushed", "unchanged")
 
 
-def get_known_crm_ips() -> dict[int, str]:
-    """Return ``{client_id: ip}`` — the last value we know CRM holds per client.
+def get_known_crm_ips() -> dict[int, str | None]:
+    """Return ``{client_id: pushed_value}`` — the last value we know CRM holds.
 
-    This is the diff baseline: a client whose winning IP equals this value
+    This is the diff baseline: a client whose candidate push value equals this
     needs no write. "Last" is by MT day, not by row id, so a backfill of an
     older date can never override a newer day's push.
+
+    Reads `pushed_value`, NOT `ip_address` — the diff must compare like with
+    like, and since 2026-07-17 what CRM holds is "1.2.3.4 (CN)", not "1.2.3.4".
+    Rows written before that change return None, which never equals a candidate
+    value and so re-pushes them once, in the new format. Do NOT
+    COALESCE(pushed_value, ip_address) to "fix" the None: it yields the same
+    diff outcome while laundering a bare IP into a field that promises the
+    geo format.
     """
     sql = """
-        SELECT p.client_id, p.ip_address
+        SELECT p.client_id, p.pushed_value
         FROM crm_last_close_ip_push_log p
         WHERE p.result IN (?, ?)
           AND p.trade_date = (
@@ -573,7 +656,7 @@ def get_known_crm_ips() -> dict[int, str]:
     """
     with get_connection() as conn:
         rows = conn.execute(sql, CRM_PUSH_SETTLED_RESULTS * 2).fetchall()
-    return {int(r["client_id"]): r["ip_address"] for r in rows}
+    return {int(r["client_id"]): r["pushed_value"] for r in rows}
 
 
 def upsert_crm_push_log(records: Iterable[dict]) -> int:
@@ -585,6 +668,7 @@ def upsert_crm_push_log(records: Iterable[dict]) -> int:
     rows = [
         (
             r["trade_date"], int(r["client_id"]), r["ip_address"],
+            r.get("pushed_value"),
             r["server_name"], int(r["account_id"]), r["event_time_mt"],
             int(r.get("contenders", 1)), int(r.get("distinct_ips", 1)),
             r.get("value_before"), r["result"],
@@ -598,10 +682,10 @@ def upsert_crm_push_log(records: Iterable[dict]) -> int:
     with get_connection() as conn:
         conn.executemany(
             "INSERT OR REPLACE INTO crm_last_close_ip_push_log "
-            "(trade_date, client_id, ip_address, server_name, account_id, "
+            "(trade_date, client_id, ip_address, pushed_value, server_name, account_id, "
             " event_time_mt, contenders, distinct_ips, value_before, result, "
             " http_status, detail, pushed_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
         conn.commit()
@@ -637,6 +721,89 @@ def cleanup_old_crm_push_log(
         logger.info(
             "cleanup_old_crm_push_log: removed %d rows older than %s", deleted, cutoff
         )
+    return deleted
+
+
+# ---------------------------------------------------------------------------
+# ip_geo_cache CRUD
+# ---------------------------------------------------------------------------
+
+# How long a resolved country stays usable. An IP's country does change (reassigned
+# blocks, mobile carriers), just slowly — 30 days trades a rare stale answer for
+# roughly halving the MaxMind bill.
+DEFAULT_IP_GEO_CACHE_TTL_DAYS = 30
+
+
+def get_cached_countries(
+    ips: Iterable[str], ttl_days: int = DEFAULT_IP_GEO_CACHE_TTL_DAYS
+) -> dict[str, str]:
+    """Return ``{ip: country}`` for the given IPs that are cached and unexpired.
+
+    Missing / expired IPs are simply absent from the result — the caller decides
+    whether to bill MaxMind for them.
+    """
+    ip_list = list(dict.fromkeys(ips))
+    if not ip_list:
+        return {}
+
+    cutoff = (
+        _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=ttl_days)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    found: dict[str, str] = {}
+    with get_connection() as conn:
+        # Chunked to stay under SQLite's variable limit (same 1000-chunk
+        # convention as resolve_client_ids' mt4_users lookup).
+        for start in range(0, len(ip_list), 1000):
+            chunk = ip_list[start : start + 1000]
+            placeholders = ",".join("?" * len(chunk))
+            rows = conn.execute(
+                f"SELECT ip, country FROM ip_geo_cache "
+                f"WHERE ip IN ({placeholders}) AND resolved_at >= ?",
+                (*chunk, cutoff),
+            ).fetchall()
+            found.update({r["ip"]: r["country"] for r in rows})
+    return found
+
+
+def upsert_ip_geo_cache(records: Iterable[dict]) -> int:
+    """INSERT OR REPLACE ``{ip, country, source}`` rows. Returns count written.
+
+    REPLACE so a re-resolve refreshes `resolved_at` and restarts the TTL.
+    Only definitive answers belong here — see the schema comment.
+    """
+    now = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    rows = [(r["ip"], r["country"], r.get("source", "maxmind_api"), now) for r in records]
+    if not rows:
+        return 0
+
+    with get_connection() as conn:
+        conn.executemany(
+            "INSERT OR REPLACE INTO ip_geo_cache (ip, country, source, resolved_at) "
+            "VALUES (?, ?, ?, ?)",
+            rows,
+        )
+        conn.commit()
+    return len(rows)
+
+
+def cleanup_old_ip_geo_cache(days: int = DEFAULT_IP_GEO_CACHE_TTL_DAYS) -> int:
+    """Delete cache rows past their TTL. Returns count deleted.
+
+    Purely housekeeping — `get_cached_countries` already filters on age, so a
+    stale row is inert, just wasted disk.
+    """
+    cutoff = (
+        _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=days)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    with get_connection() as conn:
+        cursor = conn.execute("DELETE FROM ip_geo_cache WHERE resolved_at < ?", (cutoff,))
+        deleted = cursor.rowcount
+        conn.commit()
+
+    if deleted:
+        logger.info("cleanup_old_ip_geo_cache: removed %d rows older than %s", deleted, cutoff)
     return deleted
 
 

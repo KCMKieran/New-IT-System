@@ -295,7 +295,7 @@ def _daily_housekeeping() -> None:
     audit row of the main job — we'd rather keep stale data than lose the
     run record.
 
-    Five sweeps:
+    Six sweeps:
       1. `cleanup_old_login_history`       — drop rows outside the 7-day
          correlation window; this function was defined in `login_ip_db`
          since the migration but had no caller, so history grew forever.
@@ -309,6 +309,9 @@ def _daily_housekeeping() -> None:
          audit trail. Note this table is also the push's diff baseline, so
          pruning it costs a redundant (harmless) re-push for any client who
          hasn't traded in 90 days — see login_ip_db for why that's accepted.
+      6. `cleanup_old_ip_geo_cache`        — drop geo answers past their TTL.
+         Purely disk housekeeping: `get_cached_countries` already filters on
+         age, so a stale row is inert, never served.
     """
     from ..core import login_ip_db
 
@@ -318,14 +321,16 @@ def _daily_housekeeping() -> None:
         reaped = login_ip_db.reap_stuck_running_runs()
         removed_trade_ips = login_ip_db.cleanup_old_last_trade_ip()
         removed_push_log = login_ip_db.cleanup_old_crm_push_log()
+        removed_geo_cache = login_ip_db.cleanup_old_ip_geo_cache()
         logger.info(
             "[housekeeping] history_removed=%d runs_removed=%d runs_reaped=%d "
-            "trade_ips_removed=%d crm_push_log_removed=%d",
+            "trade_ips_removed=%d crm_push_log_removed=%d geo_cache_removed=%d",
             removed_history,
             removed_runs,
             reaped,
             removed_trade_ips,
             removed_push_log,
+            removed_geo_cache,
         )
     except Exception:
         logger.exception("[housekeeping] failed (swallowed; non-fatal)")

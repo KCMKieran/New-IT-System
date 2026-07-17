@@ -216,6 +216,39 @@ class Settings:
             or "it.support@kohleservices.com"
         ).strip()
 
+        # --- Geo enrichment for the last-close-IP push (2026-07-17) -----------
+        # The pushed value is "1.2.3.4 (CN)"; the country comes from MaxMind's
+        # GeoIP2 Precision Country web service. Same vendor account as
+        # Manager_Log_Monitor, which is why these names match its config.
+        #
+        # .strip() is load-bearing here for the same CRLF reason as MAIL_TO above,
+        # and it bites harder: a trailing \r on the license key is invisible in
+        # logs and fails auth as a flat 401, which reads like "wrong key".
+        self.MAXMIND_ACCOUNT_ID = (os.environ.get("MAXMIND_ACCOUNT_ID") or "").strip()
+        self.MAXMIND_LICENSE_KEY = (os.environ.get("MAXMIND_LICENSE_KEY") or "").strip()
+        self.MAXMIND_HOST = (
+            os.environ.get("MAXMIND_HOST") or "geoip.maxmind.com"
+        ).strip()
+        self.MAXMIND_TIMEOUT = float(os.environ.get("MAXMIND_TIMEOUT", "10"))
+        # Parallelism for the per-IP lookups. ~1,190 distinct IPs/day at ~150ms
+        # each would add ~3min serially; 8 workers brings it under 30s. MaxMind
+        # permits concurrent queries — this is polite, not a documented ceiling.
+        self.LAST_CLOSE_IP_GEO_WORKERS = int(
+            os.environ.get("LAST_CLOSE_IP_GEO_WORKERS", "8")
+        )
+        # Cache TTL. Exists to bound credit burn, not for speed — see the
+        # ip_geo_cache schema comment in login_ip_db.py.
+        self.LAST_CLOSE_IP_GEO_CACHE_TTL_DAYS = int(
+            os.environ.get("LAST_CLOSE_IP_GEO_CACHE_TTL_DAYS", "30")
+        )
+        # Systemic-geo-failure gate. If more than this fraction of the day's
+        # distinct IPs fail to resolve, the run aborts writing nothing rather
+        # than pushing a partial set: that many failures means MaxMind is
+        # degraded, not that those IPs are odd.
+        self.LAST_CLOSE_IP_GEO_FAIL_ABORT_RATIO = float(
+            os.environ.get("LAST_CLOSE_IP_GEO_FAIL_ABORT_RATIO", "0.2")
+        )
+
         # View profiles (OPT-0035): comma-separated device-ids allowed to
         # force-release a claim stuck on a lost device-id. The device-id is shown
         # (and copyable) on the Settings page. Empty = nobody can force-release.
