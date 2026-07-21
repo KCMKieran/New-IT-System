@@ -8,7 +8,7 @@ spotted — and filtered — at a glance.
 
 Sources may override that tag with a per-source `prefix` to stay
 distinguishable from each other, not just from the non-risk reports above
-(hedge_open uses "[对冲刷单]"). The override belongs to the *source*, not the
+(hedge_open uses "[交易风控 Trade Risk] [对冲刷单]"). The override belongs to the *source*, not the
 rule: a band holds up to 10 rules and they share one prefix, so the prefix
 count tracks the handful of registered sources rather than the rule list —
 mailbox filters do not need updating every time a rule is added.

@@ -281,7 +281,7 @@ def test_one_digest_merges_multiple_accounts(temp_db):
     body = mail.sent[0]["body"]
     assert "60011332" in body and "60011333" in body
     assert mail.sent[0]["to"] == "kieran.xiang@kohleservices.com"
-    assert "[对冲刷单]" in mail.sent[0]["subject"]
+    assert mail.sent[0]["subject"].startswith("[交易风控 Trade Risk] [对冲刷单]")
     # Sibling section: each account lists the other as a same-day sibling.
     assert "5-60011333" in body and "5-60011332" in body
     # Outbox row sent + stamped; cursor at the max alert id.
@@ -689,7 +689,7 @@ def test_send_test_email_uses_most_recent_match(temp_db):
     assert result["alert_id"] == aid
     assert result["used_fallback"] is False
     assert result["recipient"] == "kieran.xiang@kohleservices.com"
-    assert mail.sent[0]["subject"].startswith("[TEST] [对冲刷单]")
+    assert mail.sent[0]["subject"].startswith("[TEST] [交易风控 Trade Risk] [对冲刷单]")
     assert "60011332" in mail.sent[0]["body"]
 
 
@@ -701,7 +701,7 @@ def test_send_test_email_falls_back_to_sample_fixture(temp_db):
     assert result["used_fallback"] is True
     assert result["alert_id"] == amd.TEST_SEND_SAMPLE_ALERT["id"]
     assert len(mail.sent) == 1
-    assert mail.sent[0]["subject"].startswith("[TEST] [对冲刷单]")
+    assert mail.sent[0]["subject"].startswith("[TEST] [交易风控 Trade Risk] [对冲刷单]")
     body = mail.sent[0]["body"]
     assert "60011332" in body and "NZDJPY" in body
 
@@ -724,7 +724,7 @@ def test_send_test_email_empty_table_uses_sample_fixture(temp_db):
     assert result["used_fallback"] is True
     assert result["alert_id"] == amd.TEST_SEND_SAMPLE_ALERT["id"]
     assert len(mail.sent) == 1
-    assert mail.sent[0]["subject"].startswith("[TEST] [对冲刷单]")
+    assert mail.sent[0]["subject"].startswith("[TEST] [交易风控 Trade Risk] [对冲刷单]")
     # The sample mirrors the real 2026-07-03 case (62 buy + 62 sell NZDJPY).
     body = mail.sent[0]["body"]
     assert "62 buy + 62 sell" in body

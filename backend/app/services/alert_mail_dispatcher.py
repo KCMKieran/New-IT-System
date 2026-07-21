@@ -80,7 +80,10 @@ HEDGE_MODULE = "hedge_open"
 # digest, so it separates risk mail from the other automated reports but not
 # the risk sources from each other. This one is per-source, not per-rule — all
 # of rule band 91-100 shares it, so mailbox filters survive new rules.
-HEDGE_SUBJECT_PREFIX = "[对冲刷单]"
+# A bilingual "[交易风控 Trade Risk]" department tag leads so the mail is
+# attributable (and filterable) as trade-risk business even for readers who
+# don't recognize the per-source Chinese tag.
+HEDGE_SUBJECT_PREFIX = "[交易风控 Trade Risk] [对冲刷单]"
 
 HKT = ZoneInfo("Asia/Hong_Kong")
 
