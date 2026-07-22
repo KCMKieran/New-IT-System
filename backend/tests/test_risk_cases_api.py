@@ -231,3 +231,88 @@ def test_watchlist_end_to_end_with_fixtures():
         assert detail["actions"] == []
     finally:
         seed.remove_fixtures()
+
+
+# ── Open positions: money-trail columns (client-level enrichment) ───────
+
+
+def _open_pos_row(**over) -> dict:
+    base = {
+        "user_id": 128535,
+        "user_name": "T",
+        "country": "CN",
+        "position_count": 3,
+        "account_count": 1,
+        "total_lots": 1.5,
+        "buy_lots": 1.0,
+        "sell_lots": 0.5,
+        "hedged_lots": 0.5,
+        "floating_pl_approx": -10.0,
+        "earliest_open_time": "2026-07-20T00:00:00Z",
+        "snapshot_at": "2026-07-22T05:00:00Z",
+        "symbol_count": 1,
+        "symbols": "XAUUSD",
+        # money-trail columns
+        "trading_net_deposit": 100.5,
+        "ib_withdrawal": -20.0,
+        "profit_7d": 1.0,
+        "profit_30d": 2.0,
+        "profit_all": 3.0,
+        "rebate_7d": None,  # e.g. no rebate rows in window
+        "rebate_30d": 4.0,
+        "rebate_all": 5.0,
+        "equity": 999.99,
+        "floating_pl": -9.5,
+        "zipcode": "111 90",
+    }
+    base.update(over)
+    return base
+
+
+def test_open_positions_money_trail_fields_serialize(client):
+    """New money-trail columns ship through the envelope; NULL stays null
+    (frontend renders "—", never 0)."""
+    with mock.patch.object(
+        risk_cases_route,
+        "query_open_positions",
+        return_value=([_open_pos_row()], "2026-07-22T05:00:00Z"),
+    ):
+        res = client.get("/api/v1/risk-cases/open-positions")
+    assert res.status_code == 200
+    row = res.json()["data"][0]
+    assert row["trading_net_deposit"] == 100.5
+    assert row["ib_withdrawal"] == -20.0
+    assert row["profit_7d"] == 1.0
+    assert row["rebate_7d"] is None  # None passes through, not coerced to 0
+    assert row["equity"] == 999.99
+    assert row["floating_pl"] == -9.5
+    assert row["zipcode"] == "111 90"
+
+
+def test_open_positions_money_trail_fields_default_none(client):
+    """Rows from before the SQL change (or with no source data) omit the
+    columns entirely — schema defaults must be None, not 0."""
+    legacy = {
+        k: v
+        for k, v in _open_pos_row().items()
+        if k
+        not in (
+            "trading_net_deposit", "ib_withdrawal",
+            "profit_7d", "profit_30d", "profit_all",
+            "rebate_7d", "rebate_30d", "rebate_all",
+            "equity", "floating_pl", "zipcode",
+        )
+    }
+    with mock.patch.object(
+        risk_cases_route,
+        "query_open_positions",
+        return_value=([legacy], None),
+    ):
+        res = client.get("/api/v1/risk-cases/open-positions")
+    assert res.status_code == 200
+    row = res.json()["data"][0]
+    for key in (
+        "trading_net_deposit", "ib_withdrawal", "profit_all",
+        "rebate_all", "equity", "floating_pl", "zipcode",
+    ):
+        assert row[key] is None

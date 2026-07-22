@@ -118,6 +118,36 @@ class OpenPositionRow(BaseModel):
     symbol_count: int = 0
     symbols: Optional[str] = None              # distinct base symbols, comma-joined
 
+    # ── Client-level money-trail metrics (all Optional; None = no data,
+    # frontend renders "—"). Cent-account amounts are already normalized
+    # (/100) by the KCM pipeline before landing in these tables — no /100
+    # is applied here.
+    #
+    # From kcm.daily_user_cashflow (T-1: daily job at 03:35 HKT).
+    # trading_net_deposit already EXCLUDES ib_withdrawal (separate bucket).
+    trading_net_deposit: Optional[float] = None
+    ib_withdrawal: Optional[float] = None
+    # From kcm.daily_user_stats.profit_sum — closed-trade PL; today's closed
+    # trades flow in incrementally (<=10 min lag).
+    profit_7d: Optional[float] = None
+    profit_30d: Optional[float] = None
+    profit_all: Optional[float] = None
+    # From kcm.daily_user_rebate.rebate_usd — full-chain rebate, T-1
+    # (today's rebates only appear after the next early-morning refresh).
+    rebate_7d: Optional[float] = None
+    rebate_30d: Optional[float] = None
+    rebate_all: Optional[float] = None
+    # From kcm.user_account_state SUMmed per userId (30s refresh).
+    # floating_pl is the authoritative value ((EQUITY-BALANCE-CREDIT)/cent_div),
+    # unlike floating_pl_approx above which is a ~3 min stale snapshot sum.
+    equity: Optional[float] = None
+    floating_pl: Optional[float] = None
+    # From fxbackoffice.mt4_users.ZIPCODE (CRM MySQL — kcm.user_profile has
+    # no zipcode). Client-level: distinct values across the client's
+    # compliant accounts, comma-joined when they disagree. Fail-open lookup:
+    # None on any MySQL error.
+    zipcode: Optional[str] = None
+
 
 class OpenPositionsResponse(BaseModel):
     """Full aggregated list (client-level) — the set is small (~900 clients),
