@@ -16,11 +16,17 @@ from fastapi import APIRouter, HTTPException, Query, status
 from ....core.risk_cases_pg import RiskCasesUnavailable
 from ....schemas.risk_cases import (
     CaseDetailResponse,
+    OpenPositionRow,
+    OpenPositionsResponse,
     WatchlistResponse,
     WatchlistRow,
     WatchlistStatistics,
 )
-from ....services.risk_cases_service import get_case_detail, query_watchlist
+from ....services.risk_cases_service import (
+    get_case_detail,
+    query_open_positions,
+    query_watchlist,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +87,38 @@ async def watchlist(
         page=page,
         page_size=page_size,
         total_pages=max((total + page_size - 1) // page_size, 1),
+        statistics=WatchlistStatistics(
+            query_time_ms=int((time.perf_counter() - t0) * 1000)
+        ),
+    )
+
+
+@router.get("/open-positions", response_model=OpenPositionsResponse)
+async def open_positions():
+    """Clients currently holding open positions, aggregated one row per
+    userId across accounts. Near-real-time (KCM 60s snapshot), read-only.
+
+    Declared before the /{user_id} route so the literal path is not captured
+    as a user_id.
+    """
+    t0 = time.perf_counter()
+    try:
+        rows, snapshot_at = query_open_positions()
+    except RiskCasesUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"risk_cases database unavailable: {exc}",
+        ) from exc
+    except Exception as exc:
+        logger.error("open-positions query failed", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)
+        ) from exc
+
+    return OpenPositionsResponse(
+        data=[OpenPositionRow(**r) for r in rows],
+        total=len(rows),
+        snapshot_at=snapshot_at,
         statistics=WatchlistStatistics(
             query_time_ms=int((time.perf_counter() - t0) * 1000)
         ),

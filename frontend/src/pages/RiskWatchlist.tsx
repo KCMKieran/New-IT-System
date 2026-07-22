@@ -49,6 +49,7 @@ import {
 } from "@/hooks/useGridColumnPersist";
 import { ColumnVisibilityMenu } from "@/components/ColumnVisibilityMenu";
 import { readFilterState, useFilterPersist } from "@/hooks/useFilterPersist";
+import OpenPositionsPanel from "./OpenPositionsPanel";
 
 // ── API row shapes (mirror backend/app/schemas/risk_cases.py) ────────────
 
@@ -146,6 +147,13 @@ interface CaseDetail {
 const FILTERS_KEY = "RISK_WATCHLIST_MAIN_FILTERS_V1";
 type Filters = { stateFilter: string };
 const FILTER_DEFAULTS: Filters = { stateFilter: "all" };
+
+// View toggle: "positions" = 当前持仓客户 (near-real-time, default while the
+// page is temporarily repurposed 2026-07-21) · "roster" = 返佣观察清单 (the
+// original rebate-arbitrage case roster). Persisted independently.
+const VIEW_KEY = "RISK_WATCHLIST_VIEW_V1";
+type ViewPref = { view: string };
+const VIEW_DEFAULTS: ViewPref = { view: "positions" };
 
 // ── Formatters ("—" for missing values — never a fake 0) ────────────────
 
@@ -274,6 +282,10 @@ export default function RiskWatchlist() {
   const [stateFilter, setStateFilter] = useState<string>(persisted.stateFilter);
   useFilterPersist(FILTERS_KEY, FILTER_DEFAULTS, { stateFilter });
 
+  const persistedView = useMemo(() => readFilterState(VIEW_KEY, VIEW_DEFAULTS), []);
+  const [view, setView] = useState<string>(persistedView.view);
+  useFilterPersist(VIEW_KEY, VIEW_DEFAULTS, { view });
+
   const [rows, setRows] = useState<WatchlistRow[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
@@ -324,10 +336,11 @@ export default function RiskWatchlist() {
   );
 
   useEffect(() => {
+    if (view !== "roster") return; // roster data only loads in the roster view
     const controller = new AbortController();
     fetchRows(controller.signal);
     return () => controller.abort();
-  }, [fetchRows, reloadTick]);
+  }, [fetchRows, reloadTick, view]);
 
   const handleSearch = useCallback(() => {
     appliedSearch.current = searchInput.trim();
@@ -918,6 +931,33 @@ export default function RiskWatchlist() {
 
   return (
     <div className="flex h-full w-full flex-col gap-2 p-1 sm:p-4">
+      {/* View toggle: 当前持仓客户 (near-real-time) vs 返佣观察清单 (case roster).
+          Default is 当前持仓客户 (2026-07-21, temporary repurpose). */}
+      <div className="flex items-center gap-2">
+        <div className="inline-flex rounded-lg border bg-card p-0.5">
+          <Button
+            variant={view === "positions" ? "default" : "ghost"}
+            size="sm"
+            className="h-8"
+            onClick={() => setView("positions")}
+          >
+            当前持仓客户
+          </Button>
+          <Button
+            variant={view === "roster" ? "default" : "ghost"}
+            size="sm"
+            className="h-8"
+            onClick={() => setView("roster")}
+          >
+            返佣观察清单
+          </Button>
+        </div>
+      </div>
+
+      {view === "positions" && <OpenPositionsPanel isDarkMode={isDarkMode} />}
+
+      {view === "roster" && (
+        <>
       {/* Column-logic explainer: how the derived money columns relate.
           Kept dense on purpose so it never pushes the grid below the fold.
           (Rule badges removed 2026-07-14 per user — trigger conditions live
@@ -1260,6 +1300,8 @@ export default function RiskWatchlist() {
           )}
         </SheetContent>
       </Sheet>
+        </>
+      )}
     </div>
   );
 }
