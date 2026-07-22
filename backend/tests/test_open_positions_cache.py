@@ -132,10 +132,8 @@ def test_cache_miss_queries_pg_and_populates_cache(monkeypatch):
 
 
 def test_redis_down_fails_open_to_direct_pg(monkeypatch):
-    def broken_getter():
-        raise ConnectionError("redis down")
-
-    monkeypatch.setattr(svc, "_get_open_positions_redis", broken_getter)
+    # Getter contract: unavailable Redis → None (never raises).
+    monkeypatch.setattr(svc, "_get_open_positions_redis", lambda: None)
     pg = mock.Mock(return_value=(list(ROWS), SNAP))
     monkeypatch.setattr(svc, "query_open_positions", pg)
 
@@ -145,6 +143,41 @@ def test_redis_down_fails_open_to_direct_pg(monkeypatch):
     assert rows == ROWS
     assert snapshot_at == SNAP
     pg.assert_called_once()
+
+
+def test_client_getter_returns_none_when_redis_unreachable(monkeypatch):
+    """The lazy singleton getter itself must fail open: construction/ping
+    failure → None (and retried on the next call), never an exception."""
+    monkeypatch.setattr(svc, "_open_positions_redis", None)
+
+    def broken_ctor(*args, **kwargs):
+        raise ConnectionError("redis down")
+
+    monkeypatch.setattr(svc.redis, "Redis", broken_ctor)
+    assert svc._get_open_positions_redis() is None
+    # Not memoized on failure — the next call retries construction.
+    assert svc._open_positions_redis is None
+
+
+def test_client_getter_memoizes_single_client(monkeypatch):
+    """One client per process: constructed (and pinged) once, then reused."""
+    monkeypatch.setattr(svc, "_open_positions_redis", None)
+    ctor_calls: list[int] = []
+
+    class FakeClient:
+        def ping(self):
+            return True
+
+    def ctor(*args, **kwargs):
+        ctor_calls.append(1)
+        return FakeClient()
+
+    monkeypatch.setattr(svc.redis, "Redis", ctor)
+    first = svc._get_open_positions_redis()
+    second = svc._get_open_positions_redis()
+    assert first is second
+    assert len(ctor_calls) == 1
+    monkeypatch.setattr(svc, "_open_positions_redis", None)  # leave clean
 
 
 def test_redis_write_failure_still_serves_response(monkeypatch):
@@ -158,6 +191,35 @@ def test_redis_write_failure_still_serves_response(monkeypatch):
     assert from_cache is False
     assert rows == ROWS
     assert snapshot_at == SNAP
+
+
+def test_stale_shaped_cache_payload_treated_as_miss(monkeypatch):
+    """Deploy-time skew guard: a payload written by old code whose rows no
+    longer validate against the current OpenPositionRow (missing required
+    field / wrong type) must be treated exactly like a corrupt payload —
+    PG queried, cache overwritten — never surfaced to the route (500)."""
+    stale_payloads = [
+        # Missing the required user_id field entirely.
+        {"rows": [{"login": 123, "total_lots": 1.0}], "snapshot_at": SNAP},
+        # Field present but wrongly typed for the current model.
+        {"rows": [{"user_id": 1, "total_lots": "not-a-number"}],
+         "snapshot_at": SNAP},
+    ]
+    for stale in stale_payloads:
+        fake = FakeRedis({svc.OPEN_POSITIONS_CACHE_KEY: json.dumps(stale)})
+        monkeypatch.setattr(svc, "_get_open_positions_redis", lambda: fake)
+        pg = mock.Mock(return_value=(list(ROWS), SNAP))
+        monkeypatch.setattr(svc, "query_open_positions", pg)
+
+        rows, snapshot_at, from_cache = svc.query_open_positions_cached()
+
+        assert from_cache is False
+        assert rows == ROWS
+        assert snapshot_at == SNAP
+        pg.assert_called_once()
+        # Cache overwritten with the fresh, valid payload.
+        cached = json.loads(fake.store[svc.OPEN_POSITIONS_CACHE_KEY])
+        assert cached["rows"] == ROWS
 
 
 def test_corrupt_cache_payload_refetches(monkeypatch):

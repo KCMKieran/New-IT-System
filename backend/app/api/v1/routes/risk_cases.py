@@ -103,10 +103,12 @@ async def open_positions():
     """
     t0 = time.perf_counter()
     try:
-        # 30s Redis TTL cache + singleflight in the service layer (OPT-0054):
-        # PG runs the 5-CTE aggregation at most once per TTL window no matter
-        # how many tabs poll. from_cache is truthful (hit → true, single-digit
-        # ms); Redis being down fails open to a direct PG query.
+        # 30s Redis TTL cache + per-process singleflight in the service layer
+        # (OPT-0054): PG runs the 5-CTE aggregation at most once per TTL
+        # window PER WORKER PROCESS (prod: 4 uvicorn workers → worst case 4
+        # concurrent queries at TTL expiry, bounded and accepted). from_cache
+        # is truthful (hit → true, single-digit ms); Redis being down fails
+        # open to a direct PG query.
         rows, snapshot_at, from_cache = query_open_positions_cached()
     except RiskCasesUnavailable as exc:
         raise HTTPException(
