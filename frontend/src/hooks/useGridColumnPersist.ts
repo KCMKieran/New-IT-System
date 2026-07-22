@@ -255,7 +255,7 @@ export function useGridColumnPersist(
 
   const saveState = useCallback(() => {
     const api = gridApiRef.current;
-    if (!api) return;
+    if (!api || api.isDestroyed()) return;
     try {
       const state = api.getColumnState();
       localStorage.setItem(storageKey, JSON.stringify(state));
@@ -325,7 +325,7 @@ export function useGridColumnPersist(
 
   const resetState = useCallback(() => {
     const api = gridApiRef.current;
-    if (!api) return;
+    if (!api || api.isDestroyed()) return;
     try {
       localStorage.removeItem(storageKey);
       api.resetColumnState();
@@ -337,7 +337,7 @@ export function useGridColumnPersist(
   const setColumnsVisible = useCallback(
     (colIds: string[], visible: boolean) => {
       const api = gridApiRef.current;
-      if (!api || colIds.length === 0) return;
+      if (!api || api.isDestroyed() || colIds.length === 0) return;
       try {
         api.setColumnsVisible(colIds, visible);
         throttledSave();
@@ -350,9 +350,15 @@ export function useGridColumnPersist(
 
   const getColumnState = useCallback((): ColumnState[] => {
     const api = gridApiRef.current;
-    if (!api) return [];
+    // A destroyed grid api does NOT throw — AG-Grid logs a warning and
+    // returns undefined — so try/catch alone can't protect callers that
+    // iterate the result. Happens when a grid unmounts (e.g. a view toggle)
+    // and the ref still points at the destroyed instance before the next
+    // onGridReady overwrites it.
+    if (!api || api.isDestroyed()) return [];
     try {
-      return api.getColumnState();
+      const state = api.getColumnState();
+      return Array.isArray(state) ? state : [];
     } catch {
       return [];
     }
