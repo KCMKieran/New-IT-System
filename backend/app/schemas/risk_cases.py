@@ -92,6 +92,40 @@ class WatchlistResponse(BaseModel):
     statistics: WatchlistStatistics = WatchlistStatistics()
 
 
+class OpenPositionRow(BaseModel):
+    """One client (userId) with live open positions, aggregated across all
+    their accounts. Fed by the KCM pipeline's 60s snapshot table
+    `kcm.active_positions_snapshot` (a peer project, same PG server) — NOT
+    the daily case baseline. Read-only, near-real-time.
+    """
+
+    user_id: int
+    user_name: Optional[str] = None
+    country: Optional[str] = None
+    position_count: int = 0          # 单数 — rows (one row = one open order)
+    account_count: int = 0           # distinct loginSid with open positions
+    total_lots: float = 0.0          # cent already /100 upstream
+    buy_lots: float = 0.0
+    sell_lots: float = 0.0
+    # SUM(current_profit) — display-only, up to ~3 min stale, NOT the
+    # authoritative floating_pl (see kcm.active_positions_snapshot DDL).
+    floating_pl_approx: Optional[float] = None
+    earliest_open_time: Optional[str] = None  # UTC ISO; frontend derives 持仓时长
+    snapshot_at: Optional[str] = None          # freshness of the KCM snapshot
+    symbol_count: int = 0
+    symbols: Optional[str] = None              # distinct base symbols, comma-joined
+
+
+class OpenPositionsResponse(BaseModel):
+    """Full aggregated list (client-level) — the set is small (~900 clients),
+    so it ships in one page and the grid sorts/filters client-side."""
+
+    data: List[OpenPositionRow]
+    total: int
+    snapshot_at: Optional[str] = None  # newest snapshot across all rows
+    statistics: WatchlistStatistics = WatchlistStatistics()
+
+
 class CaseSignal(BaseModel):
     """One condensed signal-timeline entry (cold storage on the case —
     alert_events itself purges after 30 days)."""

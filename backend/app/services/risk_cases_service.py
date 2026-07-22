@@ -243,6 +243,68 @@ def _fetch_hold_deltas(
     return out
 
 
+# ── Open positions (near-real-time) ─────────────────────────────────────
+#
+# Sourced from the KCM pipeline's 60s snapshot table
+# `kcm.active_positions_snapshot` (peer project, same PG server / DB, `kcm`
+# schema — risk_app has read grant). This is intentionally a *separate* read
+# path from the daily case baseline: it answers "who is holding positions
+# right now", aggregated to one row per client (userId) across all accounts.
+
+_OPEN_POSITIONS_SQL = """
+    SELECT
+        p.user_id,
+        up.user_name,
+        up.country,
+        COUNT(*)                                        AS position_count,
+        COUNT(DISTINCT p.login_sid)                     AS account_count,
+        SUM(p.lots)                                     AS total_lots,
+        SUM(CASE WHEN p.cmd = 0 THEN p.lots ELSE 0 END) AS buy_lots,
+        SUM(CASE WHEN p.cmd = 1 THEN p.lots ELSE 0 END) AS sell_lots,
+        SUM(p.current_profit)                           AS floating_pl_approx,
+        MIN(p.open_time)                                AS earliest_open_time,
+        MAX(p.snapshot_at)                              AS snapshot_at,
+        COUNT(DISTINCT p.base_symbol)                   AS symbol_count,
+        string_agg(DISTINCT p.base_symbol, ', ' ORDER BY p.base_symbol) AS symbols
+    FROM kcm.active_positions_snapshot p
+    LEFT JOIN kcm.user_profile up ON up.user_id = p.user_id
+    GROUP BY p.user_id, up.user_name, up.country
+    ORDER BY total_lots DESC
+"""
+
+_OPEN_POS_FLOAT_COLS = ("total_lots", "buy_lots", "sell_lots", "floating_pl_approx")
+
+
+def query_open_positions(
+    settings: Optional[Settings] = None,
+) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    """All clients currently holding open positions, one row per userId.
+
+    The set is small (~900 clients), so the whole list ships in one page and
+    the grid sorts/filters client-side (same pattern as the roster). Returns
+    (rows, newest_snapshot_iso). Raises RiskCasesUnavailable when PG is down
+    (route → 503).
+    """
+    settings = settings or get_settings()
+    with risk_cases_conn(settings) as conn:
+        with conn.cursor() as cur:
+            cur.execute(_OPEN_POSITIONS_SQL)
+            raw = cur.fetchall()
+
+    rows: List[Dict[str, Any]] = []
+    newest: Optional[str] = None
+    for r in raw:
+        row = dict(r)
+        for key in _OPEN_POS_FLOAT_COLS:
+            row[key] = float(row[key]) if row.get(key) is not None else None
+        for key in ("earliest_open_time", "snapshot_at"):
+            row[key] = _iso(row.get(key))
+        if row["snapshot_at"] and (newest is None or row["snapshot_at"] > newest):
+            newest = row["snapshot_at"]
+        rows.append(row)
+    return rows, newest
+
+
 # Bounded history for the case sheet (Δ context) — ~5 weeks of snapshots.
 _METRICS_HISTORY_DAYS = 35
 
