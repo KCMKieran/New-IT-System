@@ -1,7 +1,7 @@
 ---
 id: OPT-0054
 title: open-positions endpoint 加 TTL 缓存 + singleflight
-status: ready
+status: wip
 priority: P2
 area: backend
 effort: S

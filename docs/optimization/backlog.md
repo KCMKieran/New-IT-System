@@ -13,6 +13,8 @@
 | [OPT-0041](./items/OPT-0041-test-seed-date-rot.md) | opt/test-seed-date-rot | 2026-07-06 | 闸门修复，最先合 |
 | [OPT-0002](./items/OPT-0002-browser-cache-pattern-doc.md) | opt/browser-cache-pattern-doc | 2026-07-06 | 与 0041 并行（docs-only） |
 | [OPT-0028](./items/OPT-0028-risk-monitor-aggregator-hardening.md) | opt/aggregator-hardening | 2026-07-06 | 等 0041 merge 后开工（依赖测试转绿） |
+| [OPT-0054](./items/OPT-0054-open-positions-ttl-cache.md) | opt/open-positions-ttl-cache | 2026-07-22 | 与 0055 并行开发；合并顺序 0055 → 0054 |
+| [OPT-0055](./items/OPT-0055-risk-cases-pg-pool.md) | opt/risk-cases-pg-pool | 2026-07-22 | risk-cases 路由 def 化 + 云 PG 连接池；先于 0054 合并 |
 ## ✅ 待领取（Ready）
 
 > AC 已经在 item 文件里定义好了。按 priority + effort + 你的当前心智状态挑一个。
@@ -27,7 +29,6 @@
 | [OPT-0050](./items/OPT-0050-baseline-test-prod-pollution.md) | P1 | backend | S | 基线幂等测试污染 prod PG（940 行假快照）+ 随 roster 增长挂死（178→940 后 ≥3.6 分钟）；与 0041 关系待定 |
 | [OPT-0051](./items/OPT-0051-verify-gate-live-db-coupling.md) | P1 | backend | M | 后端测试直连云 DB：verify.sh 单轮 733s 且有 .env 会挂死，41 个既有失败掩盖真信号；建议排在 0041 之后 |
 | [OPT-0053](./items/OPT-0053-scheduler-tier-test-flake.md) | P1 | backend | S | verify.sh 硬闸有 flaky 测试：scheduler_tiers 的 fast_burst 保留槽位断言 clean HEAD 实测 1/8 轮随机红；疑 daemon 线程 + 模块级 `_latest_result` 竞态。与 0051 叠加后闸门实际已失效 |
-| [OPT-0054](./items/OPT-0054-open-positions-ttl-cache.md) | P2 | backend | S | open-positions endpoint 加 TTL 缓存 + singleflight：数据源 60s 才变一次，但每 tab 各自轮询触发 ~1.2s 的 5-CTE PG 全量聚合，N viewer = PG 负载 ×N；30-60s TTL（Redis 主选）+ 复用 singleflight，from_cache 置真值 |
 
 ## 💡 想法（Ideas）—— 还不能直接 claim
 
