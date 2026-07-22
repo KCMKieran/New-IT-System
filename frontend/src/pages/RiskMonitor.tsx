@@ -11,7 +11,7 @@
  * the old "latest snapshot" view that only showed the most recent scan.
  *
  * Docs: docs/features/risk-monitor.md
- * Roadmap: docs/features/risk-monitor-roadmap.md
+ * Roadmap: docs/archive/risk-monitor-roadmap.md (archived)
  * Skill: .cursor/skills/risk-monitor/SKILL.md
  */
 import {

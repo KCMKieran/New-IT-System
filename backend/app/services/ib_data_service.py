@@ -75,7 +75,7 @@ SELECT
     -- withdrawal / 'ib withdrawal' amounts are stored NEGATIVE in
     -- stats_transactions, so adding them subtracts the money that went out.
     -- INCLUDES 'ib withdrawal' (IB commission withdrawals), matching the
-    -- business-confirmed formula in docs/features/ib-net-deposit-reform.md and
+    -- business-confirmed formula in docs/archive/ib-net-deposit-reform.md and
     -- the IB Report (clickhouse_service.py net_deposit_range/month).
     -- The IB wallet balance is NOT subtracted here: it is a lifetime stock and
     -- these three legs are window-filtered flows (see wallet_total above).

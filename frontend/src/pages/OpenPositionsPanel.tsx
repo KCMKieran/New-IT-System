@@ -208,7 +208,9 @@ export default function OpenPositionsPanel({
     setLoading(true);
     setErrorMsg(null);
     try {
-      const res = await apiFetch("/api/v1/risk-cases/open-positions", { signal });
+      const res = await apiFetch("/api/v1/risk-cases/open-positions", {
+        signal,
+      });
       if (res.status === 503) {
         const body = await res.json().catch(() => null);
         throw new Error(body?.detail || "数据源暂不可用，请稍后重试");
@@ -713,43 +715,51 @@ export default function OpenPositionsPanel({
         <div className="flex flex-col gap-1.5 text-xs text-muted-foreground">
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
             <span className="font-medium text-foreground/80">
-              当前持仓客户 · Open Positions（近实时）
+              当前持仓客户 · Open Positions（近实时,每分钟更新）
             </span>
             <span className="text-muted-foreground/50">·</span>
-            <span>一行 = 一个客户（userId，多账户已归并）</span>
+            <span>一行 = 一个客户（userId，多个交易账户已合并）</span>
           </div>
           <div>
-            数据源：KCM 风控管道
-            <span className="font-medium text-foreground/80"> 每 60 秒 </span>
-            的未平仓截面快照（本页每 60 秒自动刷新）。持仓单数/手数/最早开仓时间为快照真值；
+            数据源：KCM_Risk_Control_System
             <span className="font-medium text-foreground/80"> 浮动PL </span>
-            为账户级权威值（EQUITY−BALANCE−CREDIT，客户名下全部账户求和，
+            计算公式为: EQUITY−BALANCE−CREDIT
             <span className="font-medium text-foreground/80"> 30 秒 </span>
-            刷新）。
+            刷新。
           </div>
           <div>
-            <span className="font-medium text-foreground/80">锁仓比例</span>
-            列 = 客户在
-            <span className="font-medium text-foreground/80"> 同一品种 </span>
-            内买/卖成对锁住的手数占其总持仓手数的比例（先按 base_symbol 配对锁定手数再汇总，
-            <span className="font-medium text-foreground/80"> 跨品种的反向敞口不计入 </span>
-            ），≥95%（<span className="font-medium text-red-600 dark:text-red-400">红</span>
+            <span className="font-medium text-foreground/80">锁仓比例</span>{" "}
+            Column = 客户在
+            <span className="font-medium text-foreground/80"> 相同Symbol </span>
+            内买/卖成对锁住的手数占其总持仓手数的比例,
+            <span className="font-medium text-foreground/80">
+              {" "}
+              跨品种的反向敞口不计入{" "}
+            </span>
+            ），≥95%（
+            <span className="font-medium text-red-600 dark:text-red-400">
+              红
+            </span>
             ）≈ 净敞口趋零的真锁仓，可优先关注其返佣；
-            <span className="font-medium text-foreground/80"> 对锁手数 </span>
-            = 各品种较小边手数之和,反映对锁体量。
+            <span className="font-medium text-foreground/80"> 对锁手数 </span>=
+            各品种较小边手数之和,反映对锁体量。
           </div>
           <div>
-            钱路列新鲜度：
+            数据新鲜度：
             <span className="font-medium text-foreground/80">已平仓 PL</span>
-            当日 ≤10 分钟入账；
-            <span className="font-medium text-foreground/80">返佣 / 交易净入金</span>
+            当日 ≤10 分钟计入系统；
+            <span className="font-medium text-foreground/80">
+              返佣 / 交易净入金
+            </span>
             为 T-1（当日数据次日凌晨更新）；
-            <span className="font-medium text-foreground/80">净值 / 浮动PL</span>
+            <span className="font-medium text-foreground/80">
+              净值 / 浮动PL
+            </span>
             每 30 秒；
             <span className="font-medium text-foreground/80">
               净赚 = 已平仓PL + 浮动PL + 全链返佣
             </span>
-            ，任一腿缺失显示 —。
+            。
           </div>
         </div>
       </div>
@@ -808,7 +818,10 @@ export default function OpenPositionsPanel({
           </div>
           {countryMode === "global" && (
             <Select value={globalSub} onValueChange={setGlobalSub}>
-              <SelectTrigger className="h-9 w-[150px]" aria-label="Global 细分国家">
+              <SelectTrigger
+                className="h-9 w-[150px]"
+                aria-label="Global 细分国家"
+              >
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -841,7 +854,10 @@ export default function OpenPositionsPanel({
 
           <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground sm:ml-auto">
             <span className="px-2 py-1 bg-slate-100 dark:bg-slate-800/40 rounded">
-              {isFiltered ? `${filtered.length} / ${total}` : total.toLocaleString()} 位持仓客户
+              {isFiltered
+                ? `${filtered.length} / ${total}`
+                : total.toLocaleString()}{" "}
+              位持仓客户
             </span>
             <span className="px-2 py-1 bg-slate-100 dark:bg-slate-800/40 rounded">
               {totals.positions.toLocaleString()} 单 · {fmtLots(totals.lots)} 手
@@ -858,7 +874,10 @@ export default function OpenPositionsPanel({
       {errorMsg && (
         <div className="flex items-center justify-between rounded-md border border-destructive/50 bg-destructive/10 px-4 py-2.5 text-sm text-destructive">
           <span>{errorMsg}</span>
-          <button onClick={() => setErrorMsg(null)} className="ml-4 hover:opacity-70">
+          <button
+            onClick={() => setErrorMsg(null)}
+            className="ml-4 hover:opacity-70"
+          >
             <X className="h-4 w-4" />
           </button>
         </div>
