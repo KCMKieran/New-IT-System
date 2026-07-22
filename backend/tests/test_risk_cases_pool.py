@@ -98,6 +98,28 @@ def test_dead_connection_on_borrow_is_discarded_and_rebuilt():
     dead.close.assert_called()
 
 
+def test_many_stale_pooled_connections_still_recover():
+    """Azure kills idle connections together (e.g. overnight): with 3+ stale
+    connections in a row the borrow loop (bounded by POOL_MAX_CONN + 1) must
+    drain them all and still hand out a fresh working connection."""
+    s = _settings("host=mass-stale dbname=d user=u password=p")
+    stales = [_fake_conn() for _ in range(3)]
+    for stale in stales:
+        stale.cursor.return_value.__enter__.return_value.execute.side_effect = (
+            psycopg2.OperationalError("stale")
+        )
+    good = _fake_conn()
+    with mock.patch.object(
+        risk_cases_pg.psycopg2, "connect", side_effect=[*stales, good]
+    ) as connect:
+        with risk_cases_pg.risk_cases_conn(s) as conn:
+            pass
+    assert conn is good
+    assert connect.call_count == 4
+    for stale in stales:
+        stale.close.assert_called()  # each discarded via putconn(close=True)
+
+
 def test_unavailable_when_rebuilt_connection_is_also_dead():
     s = _settings("host=alldead dbname=d user=u password=p")
     conn = _fake_conn()
@@ -136,8 +158,12 @@ def test_pool_exhausted_falls_back_to_direct_connect():
 # ── Fail-open ───────────────────────────────────────────────────────────
 
 
-def test_connect_failure_raises_unavailable_and_caches_nothing():
-    s = _settings("host=down dbname=d user=u password=p")
+def test_pool_build_failure_cooldown_then_recovery():
+    """A failed pool build is remembered for POOL_FAILURE_COOLDOWN_SEC:
+    within the window callers fail fast (no fresh 5s connect attempt, no
+    threadpool token burned); after it expires the next call retries."""
+    dsn = "host=down dbname=d user=u password=p"
+    s = _settings(dsn)
     ok_conn = _fake_conn()
     with mock.patch.object(
         risk_cases_pg.psycopg2,
@@ -147,8 +173,16 @@ def test_connect_failure_raises_unavailable_and_caches_nothing():
         with pytest.raises(risk_cases_pg.RiskCasesUnavailable):
             with risk_cases_pg.risk_cases_conn(s):
                 pass
-        # A failed pool creation is not cached: the next call retries and
-        # succeeds once PG is back.
+        assert connect.call_count == 1
+        # Immediately after the failure: fail fast, NO new connect attempt.
+        with pytest.raises(risk_cases_pg.RiskCasesUnavailable):
+            with risk_cases_pg.risk_cases_conn(s):
+                pass
+        assert connect.call_count == 1
+        # Expire the cooldown: the next call retries and succeeds.
+        risk_cases_pg._POOL_FAILURES[dsn] -= (
+            risk_cases_pg.POOL_FAILURE_COOLDOWN_SEC + 1
+        )
         with risk_cases_pg.risk_cases_conn(s) as conn:
             assert conn is ok_conn
     assert connect.call_count == 2
@@ -182,6 +216,48 @@ def test_connection_returned_to_pool_when_caller_raises():
             pass
     assert again is conn
     assert connect.call_count == 1
+
+
+def test_mid_query_connection_death_maps_to_unavailable():
+    """A connection dying MID-QUERY (OperationalError / InterfaceError)
+    is a retryable infrastructure condition: surfaced as
+    RiskCasesUnavailable (API -> 503, not 500) and the connection is
+    discarded, so the next borrow gets a fresh one."""
+    s = _settings("host=midquery dbname=d user=u password=p")
+    dead, fresh = _fake_conn(), _fake_conn()
+    with mock.patch.object(
+        risk_cases_pg.psycopg2, "connect", side_effect=[dead, fresh]
+    ):
+        with pytest.raises(risk_cases_pg.RiskCasesUnavailable):
+            with risk_cases_pg.risk_cases_conn(s):
+                raise psycopg2.OperationalError(
+                    "server closed the connection unexpectedly"
+                )
+        dead.close.assert_called()  # discarded, not returned to the pool
+        with risk_cases_pg.risk_cases_conn(s) as again:
+            pass
+    assert again is fresh
+
+
+def test_interface_error_also_maps_to_unavailable():
+    s = _settings("host=iface dbname=d user=u password=p")
+    conn = _fake_conn()
+    with mock.patch.object(risk_cases_pg.psycopg2, "connect", return_value=conn):
+        with pytest.raises(risk_cases_pg.RiskCasesUnavailable):
+            with risk_cases_pg.risk_cases_conn(s):
+                raise psycopg2.InterfaceError("connection already closed")
+
+
+def test_programming_error_propagates_unchanged():
+    """Caller bugs (bad SQL etc.) must NOT be masked as unavailability —
+    only connection-level errors map to RiskCasesUnavailable."""
+    s = _settings("host=progerr dbname=d user=u password=p")
+    conn = _fake_conn()
+    with mock.patch.object(risk_cases_pg.psycopg2, "connect", return_value=conn):
+        with pytest.raises(psycopg2.ProgrammingError):
+            with risk_cases_pg.risk_cases_conn(s):
+                raise psycopg2.ProgrammingError("syntax error at or near")
+        conn.rollback.assert_called()
 
 
 def test_broken_connection_discarded_when_rollback_fails():

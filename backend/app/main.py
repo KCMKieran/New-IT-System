@@ -48,7 +48,7 @@ from app.core.login_ip_scheduler import (
 from app.core.scheduler import start_scheduler, stop_scheduler
 from app.core.burst_open_scheduler import start_burst_scheduler, stop_burst_scheduler
 from app.core.fund_flow_monitor_db import init_fund_flow_monitor_db
-from app.core.risk_cases_pg import init_risk_cases_pg
+from app.core.risk_cases_pg import close_risk_cases_pools, init_risk_cases_pg
 from app.core.view_profiles_db import init_view_profiles_db
 from app.core.fund_flow_scheduler import (
     start_fund_flow_scheduler,
@@ -151,6 +151,9 @@ async def lifespan(app: FastAPI):
         stop_burst_scheduler()
         stop_scheduler()
         _release_scheduler_lock()
+    # OPT-0055: drop the risk-cases PG connection pools AFTER the schedulers
+    # stop (their write pipelines borrow from the pools). Never raises.
+    close_risk_cases_pools()
 
 
 def create_app() -> FastAPI:

@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from contextlib import contextmanager
 from typing import Any, Iterator, Optional
 
@@ -50,19 +51,29 @@ CONNECT_TIMEOUT_SEC = 5
 
 # Connection pool sizing (OPT-0055). The Azure PG handshake (TLS over WAN)
 # costs ~412ms per fresh connection, so reads reuse pooled connections.
-# The pool is PER PROCESS: prod runs 4 uvicorn workers, so the server-side
-# ceiling is POOL_MAX_CONN * 4 = 16 connections — comfortable for the Azure
-# flexible server. ThreadedConnectionPool is required (not SimpleConnectionPool)
-# because borrowers run both in FastAPI's request threadpool and in the
-# APScheduler background threads (case_engine / case_metrics write pipelines).
+# The pool is PER PROCESS: prod runs 4 uvicorn workers, so the pooled
+# server-side ceiling is POOL_MAX_CONN * 4 = 32 connections, PLUS transient
+# one-off direct connections while a pool is exhausted (the availability
+# fallback in _acquire) — still comfortable for the Azure flexible server.
+# ThreadedConnectionPool is required (not SimpleConnectionPool) because
+# borrowers run both in FastAPI's request threadpool and in the APScheduler
+# background threads (case_engine / case_metrics write pipelines).
 POOL_MIN_CONN = 1
-POOL_MAX_CONN = 4
+POOL_MAX_CONN = 8
+
+# After a failed pool build (PG unreachable), fail fast for this long before
+# re-attempting a connect. Without it, during an outage every request pays
+# the full CONNECT_TIMEOUT_SEC while occupying a FastAPI threadpool token.
+POOL_FAILURE_COOLDOWN_SEC = 5.0
 
 # One pool per DSN (in practice a single entry — everything targets the one
-# risk_cases database). Creation/lookup is guarded by _POOL_LOCK; the pool's
-# own getconn/putconn are thread-safe.
+# risk_cases database). Creation/lookup bookkeeping is guarded by _POOL_LOCK
+# (never held across a network connect); the pool's own getconn/putconn are
+# thread-safe. _POOL_FAILURES maps dsn -> time.monotonic() of the last
+# failed pool build, for the fail-fast cooldown above.
 _POOL_LOCK = threading.Lock()
 _POOLS: dict[str, psycopg2_pool.ThreadedConnectionPool] = {}
+_POOL_FAILURES: dict[str, float] = {}
 
 # Case states (skill §3 state machine). V2 rows are always 'watching' —
 # the enum is enforced app-side (no PG CHECK) so V3 can extend without DDL.
@@ -237,26 +248,59 @@ def _get_pool(dsn: str) -> psycopg2_pool.ThreadedConnectionPool:
     """Return the per-process pool for this DSN, creating it lazily.
 
     Pool creation failure (PG down at first borrow) raises
-    RiskCasesUnavailable and caches NOTHING — the next call retries, so the
-    fail-open contract is preserved and app startup never crashes on it.
+    RiskCasesUnavailable and caches only a failure TIMESTAMP: for the next
+    POOL_FAILURE_COOLDOWN_SEC every call fails fast instead of paying the
+    5s connect timeout again, then the next call retries — the fail-open
+    contract is preserved and app startup never crashes on it.
+
+    The network connect happens OUTSIDE _POOL_LOCK: during an outage,
+    holding the global lock across a 5s connect would serialize every
+    request behind it (each waiter also pinning a FastAPI threadpool
+    token). Two racers may therefore both build a pool; the loser's pool
+    is closed (double-checked insert).
     """
     with _POOL_LOCK:
         existing = _POOLS.get(dsn)
         if existing is not None and not existing.closed:
             return existing
-        try:
-            created = psycopg2_pool.ThreadedConnectionPool(
-                POOL_MIN_CONN,
-                POOL_MAX_CONN,
-                dsn,
-                connect_timeout=CONNECT_TIMEOUT_SEC,
-            )
-        except psycopg2.Error as exc:
+        failed_at = _POOL_FAILURES.get(dsn)
+        if (
+            failed_at is not None
+            and (time.monotonic() - failed_at) < POOL_FAILURE_COOLDOWN_SEC
+        ):
             raise RiskCasesUnavailable(
-                f"risk_cases PG unreachable: {exc}"
-            ) from exc
-        _POOLS[dsn] = created
-        return created
+                "risk_cases PG unreachable (pool build failed recently — "
+                f"cooling down {POOL_FAILURE_COOLDOWN_SEC:.0f}s before retry)"
+            )
+    try:
+        created = psycopg2_pool.ThreadedConnectionPool(
+            POOL_MIN_CONN,
+            POOL_MAX_CONN,
+            dsn,
+            connect_timeout=CONNECT_TIMEOUT_SEC,
+        )
+    except psycopg2.Error as exc:
+        with _POOL_LOCK:
+            _POOL_FAILURES[dsn] = time.monotonic()
+        raise RiskCasesUnavailable(f"risk_cases PG unreachable: {exc}") from exc
+    loser: Optional[psycopg2_pool.ThreadedConnectionPool] = None
+    with _POOL_LOCK:
+        _POOL_FAILURES.pop(dsn, None)
+        existing = _POOLS.get(dsn)
+        if existing is not None and not existing.closed:
+            # Another thread won the race while we were connecting: keep
+            # theirs, close ours.
+            loser = created
+            winner = existing
+        else:
+            _POOLS[dsn] = created
+            winner = created
+    if loser is not None:
+        try:
+            loser.closeall()
+        except Exception:  # pragma: no cover - defensive cleanup
+            pass
+    return winner
 
 
 def close_risk_cases_pools() -> None:
@@ -273,6 +317,7 @@ def close_risk_cases_pools() -> None:
             except Exception:  # pragma: no cover - defensive cleanup
                 logger.warning("risk_cases pool closeall failed", exc_info=True)
         _POOLS.clear()
+        _POOL_FAILURES.clear()
 
 
 def _is_alive(conn: Any) -> bool:
@@ -304,9 +349,12 @@ def _acquire(dsn: str) -> tuple[Any, Optional[psycopg2_pool.ThreadedConnectionPo
     instead of returned. Raises RiskCasesUnavailable when PG is unreachable.
     """
     borrow_pool = _get_pool(dsn)
-    # A dead (idle-killed) connection is discarded and re-borrowed once —
-    # the rebuild opens a fresh socket — before giving up.
-    for _ in range(2):
+    # Dead (idle-killed) connections are discarded and re-borrowed. Azure
+    # kills idle connections TOGETHER (e.g. overnight), so up to
+    # POOL_MAX_CONN pooled connections can all be stale at once — the bound
+    # guarantees the loop can drain every stale one and still reach a fresh
+    # connect before giving up.
+    for _ in range(POOL_MAX_CONN + 1):
         try:
             conn = borrow_pool.getconn()
         except psycopg2_pool.PoolError:
@@ -406,13 +454,23 @@ def risk_cases_conn(settings: Optional[Settings] = None) -> Iterator[Any]:
         conn.cursor_factory = RealDictCursor
         yield conn
         conn.commit()
-    except Exception:
+    except Exception as exc:
         try:
             conn.rollback()
         except psycopg2.Error:
             # rollback failing means the connection itself is broken —
             # discard it rather than returning it to the pool.
             broken = True
+        if isinstance(exc, (psycopg2.OperationalError, psycopg2.InterfaceError)):
+            # The connection died mid-query (Azure idle kill, failover,
+            # statement_timeout): a retryable infrastructure condition, not
+            # a caller bug — surface as RiskCasesUnavailable (API → 503,
+            # write pipeline → retry next tick) and discard the connection.
+            # ProgrammingError / DataError etc. keep propagating unchanged.
+            broken = True
+            raise RiskCasesUnavailable(
+                f"risk_cases PG connection lost mid-query: {exc}"
+            ) from exc
         raise
     finally:
         _release(conn, from_pool, broken=broken)
