@@ -33,10 +33,12 @@ watching-state fields):
 from __future__ import annotations
 
 import logging
+import threading
 from contextlib import contextmanager
 from typing import Any, Iterator, Optional
 
 import psycopg2
+from psycopg2 import pool as psycopg2_pool
 from psycopg2.extras import RealDictCursor
 
 from .config import Settings, get_settings
@@ -45,6 +47,22 @@ logger = logging.getLogger(__name__)
 
 # Bounded connect timeout so a PG outage costs a scan tick ~5s, not a hang.
 CONNECT_TIMEOUT_SEC = 5
+
+# Connection pool sizing (OPT-0055). The Azure PG handshake (TLS over WAN)
+# costs ~412ms per fresh connection, so reads reuse pooled connections.
+# The pool is PER PROCESS: prod runs 4 uvicorn workers, so the server-side
+# ceiling is POOL_MAX_CONN * 4 = 16 connections — comfortable for the Azure
+# flexible server. ThreadedConnectionPool is required (not SimpleConnectionPool)
+# because borrowers run both in FastAPI's request threadpool and in the
+# APScheduler background threads (case_engine / case_metrics write pipelines).
+POOL_MIN_CONN = 1
+POOL_MAX_CONN = 4
+
+# One pool per DSN (in practice a single entry — everything targets the one
+# risk_cases database). Creation/lookup is guarded by _POOL_LOCK; the pool's
+# own getconn/putconn are thread-safe.
+_POOL_LOCK = threading.Lock()
+_POOLS: dict[str, psycopg2_pool.ThreadedConnectionPool] = {}
 
 # Case states (skill §3 state machine). V2 rows are always 'watching' —
 # the enum is enforced app-side (no PG CHECK) so V3 can extend without DDL.
@@ -203,8 +221,153 @@ DDL_STATEMENTS: tuple[str, ...] = (
 )
 
 
+class RiskCasesUnavailable(RuntimeError):
+    """The case-layer PG is not configured or not reachable right now."""
+
+
+def _direct_connect(dsn: str):
+    """One-off, caller-owned connection (bypasses the pool)."""
+    try:
+        return psycopg2.connect(dsn, connect_timeout=CONNECT_TIMEOUT_SEC)
+    except psycopg2.Error as exc:
+        raise RiskCasesUnavailable(f"risk_cases PG unreachable: {exc}") from exc
+
+
+def _get_pool(dsn: str) -> psycopg2_pool.ThreadedConnectionPool:
+    """Return the per-process pool for this DSN, creating it lazily.
+
+    Pool creation failure (PG down at first borrow) raises
+    RiskCasesUnavailable and caches NOTHING — the next call retries, so the
+    fail-open contract is preserved and app startup never crashes on it.
+    """
+    with _POOL_LOCK:
+        existing = _POOLS.get(dsn)
+        if existing is not None and not existing.closed:
+            return existing
+        try:
+            created = psycopg2_pool.ThreadedConnectionPool(
+                POOL_MIN_CONN,
+                POOL_MAX_CONN,
+                dsn,
+                connect_timeout=CONNECT_TIMEOUT_SEC,
+            )
+        except psycopg2.Error as exc:
+            raise RiskCasesUnavailable(
+                f"risk_cases PG unreachable: {exc}"
+            ) from exc
+        _POOLS[dsn] = created
+        return created
+
+
+def close_risk_cases_pools() -> None:
+    """Close every pooled connection and drop the pools.
+
+    For app shutdown and test isolation; the next borrow rebuilds lazily.
+    Never raises.
+    """
+    with _POOL_LOCK:
+        for pool in _POOLS.values():
+            try:
+                if not pool.closed:
+                    pool.closeall()
+            except Exception:  # pragma: no cover - defensive cleanup
+                logger.warning("risk_cases pool closeall failed", exc_info=True)
+        _POOLS.clear()
+
+
+def _is_alive(conn: Any) -> bool:
+    """Cheap liveness probe for a just-borrowed pooled connection.
+
+    Azure kills idle connections, so every borrow is validated with SELECT 1
+    (<1ms — trivially cheaper than the ~412ms TLS/WAN reconnect a stale
+    connection would otherwise cost as a mid-request error).
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1")
+            cur.fetchone()
+        # Leave no transaction open behind the probe.
+        conn.rollback()
+        return True
+    except Exception:
+        # psycopg2.Error covers real dead connections; the broad catch is
+        # defensive — a probe failure must classify the connection as dead,
+        # never propagate and leak the borrowed connection.
+        return False
+
+
+def _acquire(dsn: str) -> tuple[Any, Optional[psycopg2_pool.ThreadedConnectionPool]]:
+    """Borrow a live connection.
+
+    Returns (conn, pool); pool is None when the connection is a one-off
+    direct connect (pool-exhausted fallback) that must be closed on release
+    instead of returned. Raises RiskCasesUnavailable when PG is unreachable.
+    """
+    borrow_pool = _get_pool(dsn)
+    # A dead (idle-killed) connection is discarded and re-borrowed once —
+    # the rebuild opens a fresh socket — before giving up.
+    for _ in range(2):
+        try:
+            conn = borrow_pool.getconn()
+        except psycopg2_pool.PoolError:
+            # Pool exhausted (or closed under us): availability over
+            # pooling — hand out a one-off direct connection instead.
+            logger.warning(
+                "risk_cases PG pool exhausted — falling back to direct connect"
+            )
+            return _direct_connect(dsn), None
+        except psycopg2.Error as exc:
+            # getconn had to open a fresh connection and that connect failed.
+            raise RiskCasesUnavailable(
+                f"risk_cases PG unreachable: {exc}"
+            ) from exc
+        if _is_alive(conn):
+            return conn, borrow_pool
+        try:
+            borrow_pool.putconn(conn, close=True)
+        except Exception:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    raise RiskCasesUnavailable(
+        "risk_cases PG: pooled connection dead after discard-and-retry"
+    )
+
+
+def _release(
+    conn: Any,
+    from_pool: Optional[psycopg2_pool.ThreadedConnectionPool],
+    broken: bool = False,
+) -> None:
+    """Return a connection to its pool (or close a one-off direct one).
+
+    Called from finally blocks — never raises and never leaks: a connection
+    that cannot be returned is closed.
+    """
+    if from_pool is None:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return
+    try:
+        from_pool.putconn(conn, close=broken or bool(conn.closed))
+    except Exception:
+        # putconn on a concurrently-closed pool etc. — close instead of leak.
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 def connect_risk_cases(settings: Optional[Settings] = None):
     """Open a psycopg2 connection to the case database.
+
+    Deliberately NOT pooled: callers of this function own the connection and
+    close() it themselves, which would corrupt pool accounting. The pooled
+    path is `risk_cases_conn()` below — use that unless a private dedicated
+    connection is really needed.
 
     Raises `RiskCasesUnavailable` when credentials are missing or the server
     is unreachable — callers decide whether that is fatal (API read path →
@@ -215,28 +378,31 @@ def connect_risk_cases(settings: Optional[Settings] = None):
         raise RiskCasesUnavailable(
             "RISK_CASES_PG_* env not configured (dbname/user/password required)"
         )
-    try:
-        return psycopg2.connect(
-            settings.risk_cases_pg_dsn(),
-            connect_timeout=CONNECT_TIMEOUT_SEC,
-        )
-    except psycopg2.Error as exc:
-        raise RiskCasesUnavailable(f"risk_cases PG unreachable: {exc}") from exc
-
-
-class RiskCasesUnavailable(RuntimeError):
-    """The case-layer PG is not configured or not reachable right now."""
+    return _direct_connect(settings.risk_cases_pg_dsn())
 
 
 @contextmanager
 def risk_cases_conn(settings: Optional[Settings] = None) -> Iterator[Any]:
-    """Context manager: connection with dict rows, commit on success.
+    """Context manager: pooled connection with dict rows, commit on success.
 
-    Rollback + close on error; always closes. Raises RiskCasesUnavailable
-    for connection-level failures (see connect_risk_cases).
+    Backed by a per-process ThreadedConnectionPool (OPT-0055) — safe for both
+    the FastAPI request threadpool and the scheduler's background threads.
+    Rollback + return to pool on error; a broken connection is discarded
+    (`putconn(close=True)`) instead of returned; pool exhaustion falls back
+    to a one-off direct connection closed on exit. Raises
+    RiskCasesUnavailable for connection-level failures.
     """
-    conn = connect_risk_cases(settings)
+    settings = settings or get_settings()
+    if not settings.risk_cases_pg_configured():
+        raise RiskCasesUnavailable(
+            "RISK_CASES_PG_* env not configured (dbname/user/password required)"
+        )
+    conn, from_pool = _acquire(settings.risk_cases_pg_dsn())
+    broken = False
     try:
+        # cursor_factory sticks to the (pooled, reused) connection object.
+        # That is fine: every borrower goes through this context manager, so
+        # every borrow re-applies RealDictCursor.
         conn.cursor_factory = RealDictCursor
         yield conn
         conn.commit()
@@ -244,10 +410,12 @@ def risk_cases_conn(settings: Optional[Settings] = None) -> Iterator[Any]:
         try:
             conn.rollback()
         except psycopg2.Error:
-            pass
+            # rollback failing means the connection itself is broken —
+            # discard it rather than returning it to the pool.
+            broken = True
         raise
     finally:
-        conn.close()
+        _release(conn, from_pool, broken=broken)
 
 
 def init_risk_cases_pg(settings: Optional[Settings] = None) -> bool:

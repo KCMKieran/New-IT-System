@@ -36,7 +36,7 @@ _MAX_PAGE_SIZE = 2000  # roster is thousand-level; frontend fetches one big page
 
 
 @router.get("/watchlist", response_model=WatchlistResponse)
-async def watchlist(
+def watchlist(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=_MAX_PAGE_SIZE),
     sort_by: Optional[str] = Query(
@@ -94,7 +94,7 @@ async def watchlist(
 
 
 @router.get("/open-positions", response_model=OpenPositionsResponse)
-async def open_positions():
+def open_positions():
     """Clients currently holding open positions, aggregated one row per
     userId across accounts. Near-real-time (KCM 60s snapshot), read-only.
 
@@ -126,7 +126,7 @@ async def open_positions():
 
 
 @router.get("/{user_id}", response_model=CaseDetailResponse)
-async def case_detail(user_id: int):
+def case_detail(user_id: int):
     """Full case card: condensed signal timeline + per-account entities +
     recent metric snapshots + (V3) disposition history."""
     t0 = time.perf_counter()
