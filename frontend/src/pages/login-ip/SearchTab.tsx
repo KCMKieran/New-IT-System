@@ -499,6 +499,8 @@ export function SearchTab() {
         ["--ag-header-foreground-color" as string]: "#ffffff",
         ["--ag-header-column-separator-color" as string]: "rgba(255, 255, 255, 0.12)",
         ["--ag-header-column-separator-width" as string]: "1px",
+        // Compact header/cell horizontal padding (quartz default 16px)
+        ["--ag-cell-horizontal-padding" as string]: "4px",
         ["--ag-header-cell-hover-background-color" as string]: "#171717",
         ["--ag-icon-color" as string]: "#ffffff",
         ["--ag-background-color" as string]: "hsl(var(--card))",

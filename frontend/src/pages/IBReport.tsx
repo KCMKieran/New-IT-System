@@ -943,6 +943,8 @@ export default function IBReport() {
               ? "hsl(0 0% 0% / 1)"
               : "hsl(0 0% 100% / 1)",
             ["--ag-header-column-separator-width" as any]: "1px",
+            // Compact header/cell horizontal padding (quartz default 16px)
+            ["--ag-cell-horizontal-padding" as any]: "4px",
             ["--ag-icon-font-color" as any]: isDarkMode
               ? "hsl(0 0% 0% / 1)"
               : "hsl(0 0% 100% / 1)",

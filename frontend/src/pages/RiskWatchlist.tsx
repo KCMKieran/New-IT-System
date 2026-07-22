@@ -1106,6 +1106,8 @@ export default function RiskWatchlist() {
               ? "hsl(0 0% 0% / 1)"
               : "hsl(0 0% 100% / 1)",
             ["--ag-header-column-separator-width" as string]: "1px",
+            // Compact header/cell horizontal padding (quartz default 16px)
+            ["--ag-cell-horizontal-padding" as string]: "4px",
             ["--ag-background-color" as string]: "hsl(var(--card))",
             ["--ag-foreground-color" as string]: "hsl(var(--foreground))",
             ["--ag-row-border-color" as string]: "hsl(var(--border))",

@@ -1062,6 +1062,8 @@ export default function ClientReturnRate() {
               ? "hsl(0 0% 0% / 1)"
               : "hsl(0 0% 100% / 1)",
             ["--ag-header-column-separator-width" as any]: "1px",
+            // Compact header/cell horizontal padding (quartz default 16px)
+            ["--ag-cell-horizontal-padding" as any]: "4px",
             ["--ag-background-color" as any]: "hsl(var(--card))",
             ["--ag-foreground-color" as any]: "hsl(var(--foreground))",
             ["--ag-row-border-color" as any]: "hsl(var(--border))",
