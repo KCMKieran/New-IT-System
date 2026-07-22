@@ -107,6 +107,9 @@ class OpenPositionRow(BaseModel):
     total_lots: float = 0.0          # cent already /100 upstream
     buy_lots: float = 0.0
     sell_lots: float = 0.0
+    # 同一品种内买/卖成对锁住的手数(各品种取较小边求和,单边口径)。
+    # 对锁% = 2×hedged_lots ÷ total_lots,在前端算。跨品种反向敞口不计入。
+    hedged_lots: float = 0.0
     # SUM(current_profit) — display-only, up to ~3 min stale, NOT the
     # authoritative floating_pl (see kcm.active_positions_snapshot DDL).
     floating_pl_approx: Optional[float] = None

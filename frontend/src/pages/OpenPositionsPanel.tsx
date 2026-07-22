@@ -33,6 +33,7 @@ interface OpenPositionRow {
   total_lots: number;
   buy_lots: number;
   sell_lots: number;
+  hedged_lots: number;
   floating_pl_approx: number | null;
   earliest_open_time: string | null;
   snapshot_at: string | null;
@@ -215,12 +216,13 @@ export default function OpenPositionsPanel({
         headerName: "对锁",
         colId: "hedge",
         width: 90,
+        headerTooltip:
+          "同一品种内买/卖成对锁住的比例 = 2×对锁手数 ÷ 总持仓手数(后端已按 base_symbol 配对,跨品种反向敞口不计入)。≥95% ≈ 净敞口趋零的真锁仓。",
         valueGetter: (p: ValueGetterParams<OpenPositionRow>) => {
           const d = p.data;
-          if (!d || d.buy_lots <= 0 || d.sell_lots <= 0) return 0;
-          const lo = Math.min(d.buy_lots, d.sell_lots);
-          const hi = Math.max(d.buy_lots, d.sell_lots);
-          return hi > 0 ? lo / hi : 0;
+          if (!d || d.total_lots <= 0 || d.hedged_lots <= 0) return 0;
+          // 锁定占用买、卖各一份手数,故 ×2;上限 1(全仓对锁)。
+          return Math.min(1, (2 * d.hedged_lots) / d.total_lots);
         },
         cellRenderer: (p: { value: number }) =>
           p.value > 0 ? (
@@ -237,6 +239,16 @@ export default function OpenPositionsPanel({
           ) : (
             <span className="text-muted-foreground">{EMDASH}</span>
           ),
+      },
+      {
+        headerName: "对锁手数",
+        field: "hedged_lots",
+        width: 100,
+        type: "numericColumn",
+        headerTooltip:
+          "同一品种内买/卖成对锁住的手数(各品种取较小边求和,单边口径)。用于判断对锁比例背后的实际体量。",
+        valueFormatter: (p) => (p.value > 0 ? fmtLots(p.value) : EMDASH),
+        cellClass: "text-right text-muted-foreground",
       },
       {
         headerName: "浮动PL≈",
@@ -308,9 +320,14 @@ export default function OpenPositionsPanel({
           </div>
           <div>
             <span className="font-medium text-foreground/80">对锁</span>
-            列 = 同一客户在同一品种上买/卖同时持仓的对锁比例（LEAST/GREATEST），
-            ≥95%（<span className="font-medium text-red-600 dark:text-red-400">红</span>
-            ）≈ 净敞口趋零的真锁仓，可优先关注其返佣。
+            列 = 客户在
+            <span className="font-medium text-foreground/80"> 同一品种 </span>
+            内买/卖成对锁住的手数占其总持仓手数的比例（先按 base_symbol 配对锁定手数再汇总，
+            <span className="font-medium text-foreground/80"> 跨品种的反向敞口不计入 </span>
+            ），≥95%（<span className="font-medium text-red-600 dark:text-red-400">红</span>
+            ）≈ 净敞口趋零的真锁仓，可优先关注其返佣；
+            <span className="font-medium text-foreground/80"> 对锁手数 </span>
+            = 各品种较小边手数之和,反映对锁体量。
           </div>
         </div>
       </div>
