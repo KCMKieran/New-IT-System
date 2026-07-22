@@ -252,6 +252,29 @@ def _fetch_hold_deltas(
 # right now", aggregated to one row per client (userId) across all accounts.
 
 _OPEN_POSITIONS_SQL = """
+    WITH per_symbol AS (
+        -- 先按 (客户, base_symbol) 聚合,才能算「同一品种」的对锁。
+        -- 关键:锁仓必须在同一品种内配对——buy XAUUSD / sell EURUSD 是两笔
+        -- 反向敞口,不是对锁。若直接对客户级总买/总卖取 LEAST/GREATEST,会把
+        -- 这种跨品种敞口误判为锁仓(这正是旧口径的 bug)。
+        SELECT
+            p.user_id,
+            p.base_symbol,
+            SUM(CASE WHEN p.cmd = 0 THEN p.lots ELSE 0 END) AS sym_buy,
+            SUM(CASE WHEN p.cmd = 1 THEN p.lots ELSE 0 END) AS sym_sell
+        FROM kcm.active_positions_snapshot p
+        GROUP BY p.user_id, p.base_symbol
+    ),
+    hedge AS (
+        -- 每个品种被锁住的手数 = 该品种买/卖的较小边;跨品种求和 = 客户级
+        -- 对锁手数(单边口径)。对锁% 在前端算 = 2×hedged_lots ÷ total_lots
+        -- (锁定占用买、卖各一份,故 ×2),表示「总持仓中处于同品种对锁的比例」。
+        SELECT
+            user_id,
+            SUM(LEAST(sym_buy, sym_sell)) AS hedged_lots
+        FROM per_symbol
+        GROUP BY user_id
+    )
     SELECT
         p.user_id,
         up.user_name,
@@ -265,14 +288,22 @@ _OPEN_POSITIONS_SQL = """
         MIN(p.open_time)                                AS earliest_open_time,
         MAX(p.snapshot_at)                              AS snapshot_at,
         COUNT(DISTINCT p.base_symbol)                   AS symbol_count,
-        string_agg(DISTINCT p.base_symbol, ', ' ORDER BY p.base_symbol) AS symbols
+        string_agg(DISTINCT p.base_symbol, ', ' ORDER BY p.base_symbol) AS symbols,
+        COALESCE(h.hedged_lots, 0)                      AS hedged_lots
     FROM kcm.active_positions_snapshot p
     LEFT JOIN kcm.user_profile up ON up.user_id = p.user_id
-    GROUP BY p.user_id, up.user_name, up.country
+    LEFT JOIN hedge h ON h.user_id = p.user_id
+    GROUP BY p.user_id, up.user_name, up.country, h.hedged_lots
     ORDER BY total_lots DESC
 """
 
-_OPEN_POS_FLOAT_COLS = ("total_lots", "buy_lots", "sell_lots", "floating_pl_approx")
+_OPEN_POS_FLOAT_COLS = (
+    "total_lots",
+    "buy_lots",
+    "sell_lots",
+    "hedged_lots",
+    "floating_pl_approx",
+)
 
 
 def query_open_positions(
