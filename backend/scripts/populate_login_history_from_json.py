@@ -7,8 +7,8 @@ Why this exists
 The legacy `monitoring.db` ships with an empty `login_history` table (verified
 2026-04-23). When the new platform's daily job runs, the 7-day historical IP
 pool would be empty on day 1, so correlation alerts would miss genuine
-multi-day shared-IP patterns for the first week. (See login-ip_migration.md
-§9 pitfall #2.)
+multi-day shared-IP patterns for the first week. (See
+docs/archive/login-ip_migration.md §9 pitfall #2.)
 
 This script seeds the history table from the analysis JSONs already produced
 by `scripts/backfill_login_ip.py` in `backend/data/login_ip/YYYYMMDD/`.

@@ -119,7 +119,7 @@ router = APIRouter(prefix="/risk-monitor")
 # it to 1-10 today would require migrating live alert_events rows, so the
 # 50-wide band is grandfathered. New Tabs follow the 10-wide convention.
 #
-# Canonical doc: `.cursor/skills/risk-monitor/SKILL.md` § "Adding a New Rule" Step 3.
+# Canonical doc: `.cursor/skills/risk-monitor/references/adding-rule-or-column.md` § "Adding a New Rule" Step 3.
 
 MAX_RULES = 10  # per-Tab cap on user-configurable rules; raise alongside the band size if a Tab ever needs more
 BURST_RULE_MAX_ID = QUICK_RULE_ID_BASE - 1

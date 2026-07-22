@@ -78,3 +78,4 @@ ai-dev-techniques-sharing.html
 temp_folder/
 backend/scripts/zipcode_set_by_idlist.py
 backend/scripts/logs/zipcode_set_by_idlist_20260604.jsonl
+.local-backup/

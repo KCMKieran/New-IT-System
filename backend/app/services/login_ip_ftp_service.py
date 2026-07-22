@@ -250,7 +250,7 @@ def download_daily_logs(
     Args:
         target_date: YYYYMMDD string, tz-agnostic — caller is responsible for
             converting to Asia/Shanghai "yesterday" if that's the intent.
-            (See login-ip_migration.md §9 pitfall #6 re timezone.)
+            (See docs/archive/login-ip_migration.md §9 pitfall #6 re timezone.)
         base_dir: The parent directory under which a `<target_date>/` subdir
             is created. Typical value: `backend/data/login_ip/tmp`.
         timeout: Socket timeout per server in seconds.
