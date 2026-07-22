@@ -18,8 +18,13 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { RefreshCw, Search, X } from "lucide-react";
 import { AgGridReact } from "ag-grid-react";
-import type { ColDef, ValueGetterParams } from "ag-grid-community";
+import type {
+  ColDef,
+  ValueGetterParams,
+  ICellRendererParams,
+} from "ag-grid-community";
 import { cn } from "@/lib/utils";
+import { crmUserUrl } from "@/lib/crm-links";
 
 const EMDASH = "—";
 const REFRESH_MS = 60_000; // KCM snapshot cadence
@@ -172,7 +177,21 @@ export default function OpenPositionsPanel({
         pinned: "left",
         width: 110,
         cellClass: "font-mono",
-        valueFormatter: (p) => String(p.value),
+        cellRenderer: (p: ICellRendererParams<OpenPositionRow>) => {
+          const id = p.data?.user_id;
+          const href = crmUserUrl(id);
+          if (!href) return <span>{id ?? EMDASH}</span>;
+          return (
+            <a
+              href={href}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-blue-600 hover:underline dark:text-blue-400"
+            >
+              {id}
+            </a>
+          );
+        },
       },
       { headerName: "客户名", field: "user_name", width: 170, valueFormatter: (p) => p.value ?? EMDASH },
       { headerName: "国家", field: "country", width: 80, valueFormatter: (p) => p.value ?? EMDASH },
