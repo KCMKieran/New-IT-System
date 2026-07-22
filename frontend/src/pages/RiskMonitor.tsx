@@ -906,7 +906,11 @@ async function exportGridAsCsv(opts: {
 }): Promise<void> {
   const { api, alertsPath, filterQs, sortBy, sortOrder, total, currentRows } =
     opts;
-  if (!api) return;
+  // isDestroyed: the agg/detail keyed ternary destroys the detail grid while
+  // its persist ref still points at the dead api — a destroyed api no-ops
+  // with a console warning instead of throwing, so this must be an explicit
+  // check (try/catch would not fire). See grid-column-persist.md §5.6.
+  if (!api || api.isDestroyed()) return;
 
   const PAGE = 500; // = backend _MAX_PAGE_SIZE
   const pageCount = Math.max(1, Math.ceil((total || 0) / PAGE));
@@ -925,6 +929,9 @@ async function exportGridAsCsv(opts: {
     if (entries.length < PAGE) break; // last page reached
   }
 
+  // Re-check after the (multi-second) paged fetch: the user may have toggled
+  // the agg/detail view mid-flight, destroying this grid.
+  if (api.isDestroyed()) return;
   api.setGridOption("rowData", all);
   try {
     api.exportDataAsCsv({
@@ -938,7 +945,7 @@ async function exportGridAsCsv(opts: {
           : params.value,
     });
   } finally {
-    api.setGridOption("rowData", currentRows);
+    if (!api.isDestroyed()) api.setGridOption("rowData", currentRows);
   }
 }
 
@@ -4582,7 +4589,7 @@ function QuickProfitTab({ active }: { active: boolean }) {
           };
         })
         .filter(Boolean) as AlertEvent[];
-      if (updates.length && gridApiRef.current) {
+      if (updates.length && gridApiRef.current && !gridApiRef.current.isDestroyed()) {
         gridApiRef.current.applyTransaction({ update: updates });
       }
       // Keep React state in sync so a future re-render uses fresh values.
@@ -4711,10 +4718,10 @@ function QuickProfitTab({ active }: { active: boolean }) {
   // ref), so nudge just the "窗口分钟" cells to recompute once config arrives /
   // changes. Far cheaper than rebuilding the whole columnDefs.
   useEffect(() => {
-    columnPersist.gridApiRef.current?.refreshCells({
-      columns: ["lookback_min"],
-      force: true,
-    });
+    const api = columnPersist.gridApiRef.current;
+    if (api && !api.isDestroyed()) {
+      api.refreshCells({ columns: ["lookback_min"], force: true });
+    }
   }, [config?.rules, columnPersist.gridApiRef]);
 
   const columnDefs: ColDef<AlertEvent>[] = useMemo(

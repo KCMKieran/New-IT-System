@@ -746,9 +746,13 @@ export default function ClientPnLMonitor() {
   
   // 保存列状态
   const saveGridState = useCallback(() => {
-    if (!gridApi) return
+    // isDestroyed + Array.isArray: a destroyed grid api returns undefined
+    // (warning, no throw) — stringifying that would persist the literal
+    // string "undefined" and corrupt the saved layout.
+    if (!gridApi || gridApi.isDestroyed()) return
     try {
       const state = gridApi.getColumnState()
+      if (!Array.isArray(state)) return
       localStorage.setItem('client_pnl_grid_state', JSON.stringify(state))
     } catch {}
   }, [gridApi])
