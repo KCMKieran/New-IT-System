@@ -24,7 +24,7 @@ from ....schemas.risk_cases import (
 )
 from ....services.risk_cases_service import (
     get_case_detail,
-    query_open_positions,
+    query_open_positions_cached,
     query_watchlist,
 )
 
@@ -103,7 +103,13 @@ def open_positions():
     """
     t0 = time.perf_counter()
     try:
-        rows, snapshot_at = query_open_positions()
+        # 30s Redis TTL cache + per-process singleflight in the service layer
+        # (OPT-0054): PG runs the 5-CTE aggregation at most once per TTL
+        # window PER WORKER PROCESS (prod: 4 uvicorn workers → worst case 4
+        # concurrent queries at TTL expiry, bounded and accepted). from_cache
+        # is truthful (hit → true, single-digit ms); Redis being down fails
+        # open to a direct PG query.
+        rows, snapshot_at, from_cache = query_open_positions_cached()
     except RiskCasesUnavailable as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -120,7 +126,8 @@ def open_positions():
         total=len(rows),
         snapshot_at=snapshot_at,
         statistics=WatchlistStatistics(
-            query_time_ms=int((time.perf_counter() - t0) * 1000)
+            from_cache=from_cache,
+            query_time_ms=int((time.perf_counter() - t0) * 1000),
         ),
     )
 

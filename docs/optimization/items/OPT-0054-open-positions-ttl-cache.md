@@ -1,7 +1,7 @@
 ---
 id: OPT-0054
 title: open-positions endpoint 加 TTL 缓存 + singleflight
-status: wip
+status: done
 priority: P2
 area: backend
 effort: S
@@ -83,4 +83,30 @@ gzip 后 ~35KB/响应。
 
 ## 结果
 
-<done/dropped 时填>
+2026-07-22 close，两个 commit（`942eb43` 实现 + `5f048d6` 冷审硬化），与
+[[OPT-0055]] 同日并行开发、按 0055 → 0054 顺序合并。
+
+**交付 vs AC**：Redis 30s TTL（`risk_cases:open_positions:v1`）+ 每进程
+singleflight ✅；`from_cache` 真值（singleflight 等待方如实报 false）✅；
+`snapshot_at` 随缓存存取 ✅；Redis down/slow/corrupt 全部 fail-open 直查 PG ✅；
+既有 route-mock 测试不破 + 新增 10 个缓存路径测试（21 passed）✅。
+待验证三项全部落实：rows 纯 JSON 类型确认、TTL 拍板 30s、fail-open 落地。
+
+**冷审（outsider-review）处理记录**：
+- 「async 路由卡事件循环 / singleflight 失效」——reviewer 不知道 [[OPT-0055]]
+  的存在，该项正是 0055 交付的（合并后消解），无动作
+- 「Redis 无 maxmemory」——已在 [[OPT-0018]]（全链路缓存审计）追踪，无动作
+- 4 条当场修（`5f048d6`）：模块级 Redis 单例（原每请求新建 client 不关闭）+
+  `REDIS_PORT` 可配；socket 超时 2s → 0.5s（Redis 假死最坏 +4s → +1s）；
+  滚动部署 schema skew 容错（缓存行先过 `OpenPositionRow` 校验，失败走
+  corrupt-payload 路径回落直查，不再 500）；并发注释改真（per-process，
+  4 worker 最坏 4 发/过期瞬间）
+
+**Follow-up（live with，冷审建议、有意不做）**：
+- 跨 worker serve-stale/SWR（SET NX 刷新锁 + 软过期）：4 发/30s 有界且远低于
+  现状，viewer 到 10+ 或 p99 报警再做
+- TTL 30s vs 上游 60s：spec 有意拍板（新鲜度 worst-case 90s vs 120s），不改
+- `snapshot_at` 跨 poll 回退 ≤60s：纯展示，可忍；介意时加 compare-before-SET
+- 命中路径 CPU 随行数线性（json.loads + Pydantic ×800 行）：行数到几千时改
+  预序列化 body 直出（现成杠杆，届时另 file）
+- 统计字段语义（等待方计时含 owner 全程）在 schema 注释补充说明

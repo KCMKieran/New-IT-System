@@ -10,14 +10,20 @@ services/case_metrics_service.py (daily snapshots).
 
 from __future__ import annotations
 
+import json
 import logging
+import os
+import threading
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 import pymysql
+import redis
 
 from ..core.config import Settings, get_settings
 from ..core.risk_cases_pg import risk_cases_conn
+from ..core.singleflight import SingleFlight
+from ..schemas.risk_cases import OpenPositionRow
 
 logger = logging.getLogger(__name__)
 
@@ -478,6 +484,145 @@ def query_open_positions(
     for row in rows:
         row["zipcode"] = zip_map.get(row["user_id"])
     return rows, newest
+
+
+# ── Open-positions TTL cache + singleflight (OPT-0054) ──────────────────
+#
+# The upstream snapshot table (`kcm.active_positions_snapshot`) refreshes
+# every 60s, but every open browser tab polls this endpoint every 60s and
+# each poll used to run the ~1.2s 5-CTE PG aggregation from scratch. A short
+# shared Redis TTL cache (30s, versioned key) plus per-process singleflight
+# on miss caps the PG load at one _OPEN_POSITIONS_SQL run per TTL window
+# PER WORKER PROCESS. Prod runs 4 uvicorn workers, so the worst case at TTL
+# expiry is 4 concurrent PG queries — bounded and accepted; cross-worker
+# coordination (e.g. a serve-stale/SWR design) was reviewed and consciously
+# deferred. Fail-open: any Redis error only logs a warning and falls
+# through to the direct PG query — the endpoint must never 5xx because
+# Redis is down.
+
+# Versioning rule: bump the `:v1` suffix whenever the _OPEN_POSITIONS_SQL
+# output columns or the OpenPositionRow schema change, so workers on a new
+# deploy never try to serve a stale-shaped payload written by old code.
+OPEN_POSITIONS_CACHE_KEY = "risk_cases:open_positions:v1"
+OPEN_POSITIONS_CACHE_TTL_S = 30
+
+_REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+_REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+
+# Coalesces concurrent cache misses within this process so only one caller
+# runs the PG query; the other callers block and share the owner's result.
+_open_positions_flight = SingleFlight()
+
+# Lazily-created module-level Redis client (redis-py clients are thread-safe
+# and pool connections internally) — building a client per request would
+# churn TCP connections against the shared Redis for no benefit.
+_open_positions_redis: Optional["redis.Redis"] = None
+_open_positions_redis_lock = threading.Lock()
+
+
+def _get_open_positions_redis() -> Optional["redis.Redis"]:
+    """Return the shared module-level Redis client, creating it on first use.
+
+    Fail-open contract: if the client cannot be created or Redis does not
+    answer a ping, log a warning and return None (the caller then goes
+    straight to PG). Creation is retried on the next call. Short socket
+    timeouts (Redis is same-host) keep the fail-open path fast when Redis
+    is wedged rather than refusing connections.
+    """
+    global _open_positions_redis
+    if _open_positions_redis is not None:
+        return _open_positions_redis
+    with _open_positions_redis_lock:
+        if _open_positions_redis is None:
+            try:
+                client = redis.Redis(
+                    host=_REDIS_HOST,
+                    port=_REDIS_PORT,
+                    decode_responses=True,
+                    socket_connect_timeout=0.5,
+                    socket_timeout=0.5,
+                )
+                client.ping()
+                _open_positions_redis = client
+            except Exception as exc:
+                logger.warning(
+                    "open-positions Redis client unavailable, fail-open: %s",
+                    exc,
+                )
+                return None
+        return _open_positions_redis
+
+
+def query_open_positions_cached(
+    settings: Optional[Settings] = None,
+) -> Tuple[List[Dict[str, Any]], Optional[str], bool]:
+    """query_open_positions() behind a 30s Redis TTL cache + singleflight.
+
+    Returns (rows, newest_snapshot_iso, from_cache). The cached payload
+    stores rows together with snapshot_at, so a cache hit reports the exact
+    snapshot time of the cached result (never a fabricated/fresher one).
+    Rows are JSON-safe by construction (query_open_positions coerces floats
+    and ISO strings); a serialization surprise would only skip the cache
+    write, never break the response. The singleflight is per-process (see
+    module comment: 4 workers → worst case 4 concurrent PG queries at TTL
+    expiry, accepted). RiskCasesUnavailable still propagates on the miss
+    path so the route can 503.
+    """
+    client = _get_open_positions_redis()
+    cached: Optional[str] = None
+    if client is not None:
+        try:
+            cached = client.get(OPEN_POSITIONS_CACHE_KEY)
+        except Exception as exc:
+            logger.warning(
+                "open-positions cache read failed, fail-open to direct PG: %s",
+                exc,
+            )
+            client = None
+
+    if cached is not None:
+        try:
+            payload = json.loads(cached)
+            rows = payload["rows"]
+            if not isinstance(rows, list):
+                raise ValueError("cached rows is not a list")
+            if rows:
+                # Deploy-time skew guard: during a rolling deploy a new
+                # worker can read a payload written by old code with a
+                # different row shape. The route does OpenPositionRow(**r)
+                # on every row, so a shape mismatch would 500 the flagship
+                # page for up to a TTL. Validate the first row against the
+                # current model here; any mismatch is treated exactly like
+                # a corrupt payload (refetch from PG, overwrite cache).
+                OpenPositionRow(**rows[0])
+            return rows, payload.get("snapshot_at"), True
+        except Exception as exc:
+            logger.warning(
+                "open-positions cache payload invalid or stale-shaped, "
+                "refetching: %s",
+                exc,
+            )
+
+    def _fetch() -> Tuple[List[Dict[str, Any]], Optional[str]]:
+        rows, snapshot_at = query_open_positions(settings)
+        if client is not None:
+            try:
+                client.set(
+                    OPEN_POSITIONS_CACHE_KEY,
+                    json.dumps({"rows": rows, "snapshot_at": snapshot_at}),
+                    ex=OPEN_POSITIONS_CACHE_TTL_S,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "open-positions cache write failed, serving uncached: %s",
+                    exc,
+                )
+        return rows, snapshot_at
+
+    rows, snapshot_at = _open_positions_flight.do(
+        OPEN_POSITIONS_CACHE_KEY, _fetch
+    )
+    return rows, snapshot_at, False
 
 
 # Bounded history for the case sheet (Δ context) — ~5 weeks of snapshots.

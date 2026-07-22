@@ -10,6 +10,7 @@ Append-only 日志。最新的写在最上面。
 
 | 日期 | ID | Commit | 标题 |
 |------|----|--------|------|
+| 2026-07-22 | [OPT-0054](./items/OPT-0054-open-positions-ttl-cache.md) | — | open-positions 加 30s Redis TTL 缓存 + singleflight（N viewer 不再 ×N 打 PG），含冷审 4 项硬化 |
 | 2026-07-22 | [OPT-0055](./items/OPT-0055-risk-cases-pg-pool.md) | — | risk-cases 路由 def 化（脱离事件循环）+ 云 PG ThreadedConnectionPool（省 412ms/请求建连），含冷审 6 项硬化 |
 | 2026-07-13 | [OPT-0047](./items/OPT-0047-case-engine-watchlist.md) | — | 风控V2 归集引擎+观察清单（Phase A 收官）：云 PG 四表幂等 DDL + 契约 API（watchlist/detail，503 语义）+ 信号→case upsert（游标护栏 fail-open）+ 日基线/NULL 修复双 cron + /risk-watchlist AG-Grid 页（§4 列/column group/全套持久化；范围变更=纯展示+filter）；50 后端新测+tsc/vitest 绿、冒烟 12 fixture 案卷 e2e 通过（17 账户归并验证）；冷审 11 yellow 全部打包 [[OPT-0048]] hardening；∆1 与真信号归并两 AC 待管道通补验 |
 | 2026-07-12 | [OPT-0046](./items/OPT-0046-rebate-arb-detection.md) | — | 返佣套利检测 rule 121（band 121-130 预留）+ alert_rebate_arb_detail + 10min tick + 邮件源：懒重建日基线 [T-30,T-2] + tick 增量 ≥T-1 + rebate 每轮全量重读；触发 rebate_30d≥$500 ∧ combined>0（env 可调）；真库验证 149 告警/双条件逐条过、tick 1.3s、463 pytest 零新增红；workflow 冷审 18 findings→对抗验证 4 confirmed：F1 CEN 按行币种/F2 可变 T-1 窗/F4 编排测试 当场修（d1d509e）+ F3 去重 UNIQUE 化 live-with 待拍板 |
