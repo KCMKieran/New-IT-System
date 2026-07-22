@@ -325,7 +325,22 @@ class Settings:
         db = self.RISK_CASES_PG_DBNAME or "risk_cases"
         user = self.RISK_CASES_PG_USER or "risk_app"
         password = self.RISK_CASES_PG_PASSWORD or ""
-        return f"host={host} port={port} dbname={db} user={user} password={password}"
+        # Hardening (OPT-0055):
+        # - TCP keepalives detect Azure silently killing idle WAN
+        #   connections (pooled connections would otherwise hang on a dead
+        #   socket instead of failing fast).
+        # - sslmode=require: Azure PG already enforces TLS, this just makes
+        #   the requirement explicit client-side (no-op hardening).
+        # - statement_timeout=30s: deliberately NOT lower — the case-engine
+        #   write pipeline shares this DSN and its DELETE/upserts can wait
+        #   on row locks; 30s converts a rare indefinite hang into a
+        #   fail-open retry without cancelling legitimately slow writes.
+        return (
+            f"host={host} port={port} dbname={db} user={user} password={password}"
+            " keepalives=1 keepalives_idle=30 keepalives_interval=10"
+            " keepalives_count=3 sslmode=require application_name=risk_cases"
+            " options='-c statement_timeout=30000'"
+        )
 
 
 def get_settings() -> Settings:

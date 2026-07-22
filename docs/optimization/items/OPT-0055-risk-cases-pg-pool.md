@@ -1,7 +1,7 @@
 ---
 id: OPT-0055
 title: risk-cases 路由脱离事件循环（def 化）+ 云 PG 连接池
-status: wip
+status: done
 priority: P2
 area: backend
 effort: S
@@ -88,4 +88,28 @@ risk-cases 三个只读路由（watchlist / open-positions / case_detail）都�
 
 ## 结果
 
-<done/dropped 时填>
+2026-07-22 close，两个 commit（`7f688d8` 实现 + `9b88b2b` 冷审硬化）。
+
+**交付 vs AC**：三个 handler 全部 `def` 化（线程池执行）✅；`ThreadedConnectionPool`
+（minconn 1 / maxconn 8——冷审后从 4 提到 8）✅；fail-open 契约原样保留 ✅；
+陈旧连接探活 + 重试上界 `POOL_MAX_CONN + 1`（冷审 finding：原 2 次上界在隔夜
+全池同死时会假 503）✅；测试 30 passed（含 live-PG 集成，端到端验证硬化 DSN）✅。
+「并发实测 P50 0.9s」两条 AC 留待 prod 部署后验证（worktree 无真实流量）。
+
+**冷审（outsider-review）处理记录**——6 条全部当场修（`9b88b2b`）：
+1. 重试上界 2 → `POOL_MAX_CONN + 1`
+2. DSN 硬化：keepalives ×4 + `sslmode=require` + `application_name` +
+   `statement_timeout=30000`（30s 不能再低——写管道共享 DSN，锁等待计入）
+3. 查询中途连接死亡 `OperationalError`/`InterfaceError` → 重新抛
+   `RiskCasesUnavailable`（503 可重试，不再 500）；`QueryCanceled` 是
+   `OperationalError` 子类，超时同样走 503
+4. `close_risk_cases_pools()` 接入 lifespan teardown（调度器停止之后）
+5. 池创建移出 `_POOL_LOCK`（double-checked）+ 5s failure cooldown fail-fast
+   （PG 故障时不再全 app 串行放大）
+6. maxconn 8，注释如实写 8×4 worker = 32 池内 + 瞬态直连溢出
+
+**Follow-up（live with，冷审 nice-to-have）**：
+- 探活是 2 次 WAN 往返（非 <1ms）——keepalives 落地后可改「空闲 >N 秒才探活」
+- 线程池饥饿观察项：sync 路由共享每 worker 40 token 的 anyio 池，viewer 上
+  30+ 且 p95 >1s 时再动（观察 `query_time_ms`）
+- 多线程并发 borrow 的压测型测试未写（现有单测覆盖机制、不覆盖并发压力）

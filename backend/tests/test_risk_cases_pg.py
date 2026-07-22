@@ -23,6 +23,18 @@ def _settings_with(**env: str) -> Settings:
         return Settings()
 
 
+@pytest.fixture(autouse=True)
+def _fresh_pool():
+    """Drop the module-level connection pools around every test (OPT-0055).
+
+    Pools cache connections keyed by DSN; without this, a MagicMock
+    connection primed in one test would be re-borrowed by the next.
+    """
+    risk_cases_pg.close_risk_cases_pools()
+    yield
+    risk_cases_pg.close_risk_cases_pools()
+
+
 # ── DSN / config wiring ─────────────────────────────────────────────────
 
 
@@ -81,25 +93,43 @@ def test_init_returns_false_on_unexpected_ddl_error():
     s.risk_cases_pg_configured.return_value = True
     s.risk_cases_pg_dsn.return_value = "host=h port=5432 dbname=d user=u password=p"
     fake_conn = mock.MagicMock()
+    fake_conn.closed = False
     fake_cursor = mock.MagicMock()
     fake_conn.cursor.return_value.__enter__.return_value = fake_cursor
-    fake_cursor.execute.side_effect = RuntimeError("permission denied")
+
+    def _execute(sql, *args, **kwargs):
+        # The pool's borrow-time liveness probe must pass; only DDL fails.
+        if sql.strip() == "SELECT 1":
+            return None
+        raise RuntimeError("permission denied")
+
+    fake_cursor.execute.side_effect = _execute
     with mock.patch.object(risk_cases_pg.psycopg2, "connect", return_value=fake_conn):
         assert risk_cases_pg.init_risk_cases_pg(s) is False
     fake_conn.rollback.assert_called()
-    fake_conn.close.assert_called()
 
 
-def test_risk_cases_conn_commits_on_success_and_closes():
+def test_risk_cases_conn_commits_on_success_and_returns_to_pool():
+    """OPT-0055: success path commits and RETURNS the connection to the pool
+    (previously it closed); the next borrow reuses it with no new connect."""
     s = mock.Mock(spec=Settings)
     s.risk_cases_pg_configured.return_value = True
     s.risk_cases_pg_dsn.return_value = "host=h port=5432 dbname=d user=u password=p"
     fake_conn = mock.MagicMock()
-    with mock.patch.object(risk_cases_pg.psycopg2, "connect", return_value=fake_conn):
-        with risk_cases_pg.risk_cases_conn(s):
+    fake_conn.closed = False
+    with mock.patch.object(
+        risk_cases_pg.psycopg2, "connect", return_value=fake_conn
+    ) as connect:
+        with risk_cases_pg.risk_cases_conn(s) as first:
             pass
-    fake_conn.commit.assert_called_once()
-    fake_conn.close.assert_called_once()
+        with risk_cases_pg.risk_cases_conn(s) as second:
+            pass
+    fake_conn.commit.assert_called()
+    assert first is fake_conn
+    assert second is fake_conn
+    # One physical connect (pool priming) serves both borrows.
+    assert connect.call_count == 1
+    fake_conn.close.assert_not_called()
 
 
 # ── DDL shape guards (no DB needed) ─────────────────────────────────────
