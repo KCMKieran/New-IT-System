@@ -14,6 +14,8 @@ import logging
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
+import pymysql
+
 from ..core.config import Settings, get_settings
 from ..core.risk_cases_pg import risk_cases_conn
 
@@ -274,6 +276,56 @@ _OPEN_POSITIONS_SQL = """
             SUM(LEAST(sym_buy, sym_sell)) AS hedged_lots
         FROM per_symbol
         GROUP BY user_id
+    ),
+    -- Client-level money-trail aggregates. Each CTE is restricted to the
+    -- userIds currently holding positions (pos_users) so we never aggregate
+    -- the full 24k+ userId universe. Cent amounts are already normalized
+    -- upstream by the KCM pipeline — no /100 here.
+    pos_users AS (
+        SELECT DISTINCT user_id FROM kcm.active_positions_snapshot
+    ),
+    cash AS (
+        -- kcm.daily_user_cashflow: T-1 (daily job 03:35 HKT).
+        -- trading_net_deposit already excludes ib_withdrawal (own bucket).
+        SELECT c.user_id,
+               SUM(c.trading_net_deposit) AS trading_net_deposit,
+               SUM(c.ib_withdrawal)       AS ib_withdrawal
+        FROM kcm.daily_user_cashflow c
+        JOIN pos_users pu ON pu.user_id = c.user_id
+        GROUP BY c.user_id
+    ),
+    closed_pl AS (
+        -- kcm.daily_user_stats.profit_sum: closed-trade PL, today's closes
+        -- flow in incrementally (<=10 min lag).
+        SELECT s.user_id,
+               SUM(s.profit_sum) FILTER (WHERE s.stat_date > CURRENT_DATE - 7)  AS profit_7d,
+               SUM(s.profit_sum) FILTER (WHERE s.stat_date > CURRENT_DATE - 30) AS profit_30d,
+               SUM(s.profit_sum)                                                AS profit_all
+        FROM kcm.daily_user_stats s
+        JOIN pos_users pu ON pu.user_id = s.user_id
+        GROUP BY s.user_id
+    ),
+    rebate AS (
+        -- kcm.daily_user_rebate.rebate_usd: full-chain rebate, T-1 (today's
+        -- rebates only land after the next early-morning refresh).
+        SELECT r.user_id,
+               SUM(r.rebate_usd) FILTER (WHERE r.stat_date > CURRENT_DATE - 7)  AS rebate_7d,
+               SUM(r.rebate_usd) FILTER (WHERE r.stat_date > CURRENT_DATE - 30) AS rebate_30d,
+               SUM(r.rebate_usd)                                                AS rebate_all
+        FROM kcm.daily_user_rebate r
+        JOIN pos_users pu ON pu.user_id = r.user_id
+        GROUP BY r.user_id
+    ),
+    acct AS (
+        -- kcm.user_account_state summed per userId (30s refresh).
+        -- floating_pl here is authoritative ((EQUITY-BALANCE-CREDIT)/cent_div),
+        -- unlike floating_pl_approx (~3 min stale snapshot sum).
+        SELECT a.user_id,
+               SUM(a.equity)      AS equity,
+               SUM(a.floating_pl) AS floating_pl
+        FROM kcm.user_account_state a
+        JOIN pos_users pu ON pu.user_id = a.user_id
+        GROUP BY a.user_id
     )
     SELECT
         p.user_id,
@@ -289,11 +341,29 @@ _OPEN_POSITIONS_SQL = """
         MAX(p.snapshot_at)                              AS snapshot_at,
         COUNT(DISTINCT p.base_symbol)                   AS symbol_count,
         string_agg(DISTINCT p.base_symbol, ', ' ORDER BY p.base_symbol) AS symbols,
-        COALESCE(h.hedged_lots, 0)                      AS hedged_lots
+        COALESCE(h.hedged_lots, 0)                      AS hedged_lots,
+        ca.trading_net_deposit,
+        ca.ib_withdrawal,
+        cp.profit_7d,
+        cp.profit_30d,
+        cp.profit_all,
+        rb.rebate_7d,
+        rb.rebate_30d,
+        rb.rebate_all,
+        ac.equity,
+        ac.floating_pl
     FROM kcm.active_positions_snapshot p
     LEFT JOIN kcm.user_profile up ON up.user_id = p.user_id
     LEFT JOIN hedge h ON h.user_id = p.user_id
-    GROUP BY p.user_id, up.user_name, up.country, h.hedged_lots
+    LEFT JOIN cash ca ON ca.user_id = p.user_id
+    LEFT JOIN closed_pl cp ON cp.user_id = p.user_id
+    LEFT JOIN rebate rb ON rb.user_id = p.user_id
+    LEFT JOIN acct ac ON ac.user_id = p.user_id
+    GROUP BY p.user_id, up.user_name, up.country, h.hedged_lots,
+             ca.trading_net_deposit, ca.ib_withdrawal,
+             cp.profit_7d, cp.profit_30d, cp.profit_all,
+             rb.rebate_7d, rb.rebate_30d, rb.rebate_all,
+             ac.equity, ac.floating_pl
     ORDER BY total_lots DESC
 """
 
@@ -303,7 +373,75 @@ _OPEN_POS_FLOAT_COLS = (
     "sell_lots",
     "hedged_lots",
     "floating_pl_approx",
+    # Money-trail columns — None passes through (NULL must NOT become 0;
+    # frontend renders "—" for missing data).
+    "trading_net_deposit",
+    "ib_withdrawal",
+    "profit_7d",
+    "profit_30d",
+    "profit_all",
+    "rebate_7d",
+    "rebate_30d",
+    "rebate_all",
+    "equity",
+    "floating_pl",
 )
+
+
+def _query_zipcodes_by_userid(
+    settings: Settings, user_ids: List[int]
+) -> Dict[int, str]:
+    """Client-level zipcode from fxbackoffice.mt4_users (CRM MySQL slave).
+
+    kcm.user_profile carries no zipcode, so this is the one non-PG lookup on
+    the open-positions path (a single indexed IN query over ~800 userIds).
+    A client's accounts normally share one zipcode; distinct values are
+    comma-joined so a mismatch is visible instead of silently picked from.
+    Compliance filter mirrors the sibling client-level helpers in
+    account_enrichment.py (sid allow-list + demo exclusion).
+
+    Fail-open: any MySQL error returns {} — callers write NULL → "—".
+    """
+    if not user_ids:
+        return {}
+    placeholders = ",".join(["%s"] * len(user_ids))
+    sql = f"""
+        SELECT userId AS userid,
+               GROUP_CONCAT(DISTINCT TRIM(ZIPCODE) ORDER BY TRIM(ZIPCODE)
+                            SEPARATOR ', ') AS zipcode
+        FROM fxbackoffice.mt4_users
+        WHERE userId IN ({placeholders})
+          AND sid IN (1, 2, 5, 6)
+          AND `GROUP` NOT LIKE '%%demo%%'
+          AND ZIPCODE IS NOT NULL AND TRIM(ZIPCODE) <> ''
+        GROUP BY userId
+    """
+    try:
+        conn = pymysql.connect(
+            host=settings.DB_HOST,
+            user=settings.DB_USER,
+            password=settings.DB_PASSWORD,
+            database=settings.DB_NAME,
+            port=int(settings.DB_PORT),
+            charset=settings.DB_CHARSET,
+            cursorclass=pymysql.cursors.DictCursor,
+            connect_timeout=5,
+            read_timeout=15,
+        )
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, tuple(user_ids))
+                fetched = cur.fetchall()
+        finally:
+            conn.close()
+        return {
+            int(r["userid"]): r["zipcode"]
+            for r in fetched
+            if r.get("zipcode")
+        }
+    except Exception:
+        logger.error("Zipcode lookup from mt4_users failed", exc_info=True)
+        return {}
 
 
 def query_open_positions(
@@ -333,6 +471,12 @@ def query_open_positions(
         if row["snapshot_at"] and (newest is None or row["snapshot_at"] > newest):
             newest = row["snapshot_at"]
         rows.append(row)
+
+    zip_map = _query_zipcodes_by_userid(
+        settings, [row["user_id"] for row in rows]
+    )
+    for row in rows:
+        row["zipcode"] = zip_map.get(row["user_id"])
     return rows, newest
 
 
