@@ -274,8 +274,8 @@ def test_open_positions_money_trail_fields_serialize(client):
     (frontend renders "—", never 0)."""
     with mock.patch.object(
         risk_cases_route,
-        "query_open_positions",
-        return_value=([_open_pos_row()], "2026-07-22T05:00:00Z"),
+        "query_open_positions_cached",
+        return_value=([_open_pos_row()], "2026-07-22T05:00:00Z", False),
     ):
         res = client.get("/api/v1/risk-cases/open-positions")
     assert res.status_code == 200
@@ -305,8 +305,8 @@ def test_open_positions_money_trail_fields_default_none(client):
     }
     with mock.patch.object(
         risk_cases_route,
-        "query_open_positions",
-        return_value=([legacy], None),
+        "query_open_positions_cached",
+        return_value=([legacy], None, False),
     ):
         res = client.get("/api/v1/risk-cases/open-positions")
     assert res.status_code == 200

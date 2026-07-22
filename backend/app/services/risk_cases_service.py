@@ -10,14 +10,18 @@ services/case_metrics_service.py (daily snapshots).
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 import pymysql
+import redis
 
 from ..core.config import Settings, get_settings
 from ..core.risk_cases_pg import risk_cases_conn
+from ..core.singleflight import SingleFlight
 
 logger = logging.getLogger(__name__)
 
@@ -478,6 +482,98 @@ def query_open_positions(
     for row in rows:
         row["zipcode"] = zip_map.get(row["user_id"])
     return rows, newest
+
+
+# ── Open-positions TTL cache + singleflight (OPT-0054) ──────────────────
+#
+# The upstream snapshot table (`kcm.active_positions_snapshot`) refreshes
+# every 60s, but every open browser tab polls this endpoint every 60s and
+# each poll used to run the ~1.2s 5-CTE PG aggregation from scratch. A short
+# shared Redis TTL cache (30s, versioned key) plus singleflight on miss caps
+# the PG load at one _OPEN_POSITIONS_SQL run per TTL window regardless of
+# viewer count. Fail-open: any Redis error only logs a warning and falls
+# through to the direct PG query — the endpoint must never 5xx because
+# Redis is down.
+
+OPEN_POSITIONS_CACHE_KEY = "risk_cases:open_positions:v1"
+OPEN_POSITIONS_CACHE_TTL_S = 30
+
+_REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+
+# Coalesces concurrent cache misses so only one caller runs the PG query;
+# the other callers block and share the owner's result.
+_open_positions_flight = SingleFlight()
+
+
+def _get_open_positions_redis() -> "redis.Redis":
+    """Module-local Redis client (same pattern as routes/ib_financial.py).
+
+    Short socket timeouts keep the fail-open path fast when Redis is
+    unreachable — a hung Redis must degrade to a direct PG query, not a
+    stuck request.
+    """
+    return redis.Redis(
+        host=_REDIS_HOST,
+        port=6379,
+        decode_responses=True,
+        socket_connect_timeout=2,
+        socket_timeout=2,
+    )
+
+
+def query_open_positions_cached(
+    settings: Optional[Settings] = None,
+) -> Tuple[List[Dict[str, Any]], Optional[str], bool]:
+    """query_open_positions() behind a 30s Redis TTL cache + singleflight.
+
+    Returns (rows, newest_snapshot_iso, from_cache). The cached payload
+    stores rows together with snapshot_at, so a cache hit reports the exact
+    snapshot time of the cached result (never a fabricated/fresher one).
+    Rows are JSON-safe by construction (query_open_positions coerces floats
+    and ISO strings); a serialization surprise would only skip the cache
+    write, never break the response. RiskCasesUnavailable still propagates
+    on the miss path so the route can 503.
+    """
+    client: Optional["redis.Redis"] = None
+    cached: Optional[str] = None
+    try:
+        client = _get_open_positions_redis()
+        cached = client.get(OPEN_POSITIONS_CACHE_KEY)
+    except Exception as exc:
+        logger.warning(
+            "open-positions cache read failed, fail-open to direct PG: %s", exc
+        )
+        client = None
+
+    if cached is not None:
+        try:
+            payload = json.loads(cached)
+            return payload["rows"], payload.get("snapshot_at"), True
+        except Exception as exc:
+            logger.warning(
+                "open-positions cache payload invalid, refetching: %s", exc
+            )
+
+    def _fetch() -> Tuple[List[Dict[str, Any]], Optional[str]]:
+        rows, snapshot_at = query_open_positions(settings)
+        if client is not None:
+            try:
+                client.set(
+                    OPEN_POSITIONS_CACHE_KEY,
+                    json.dumps({"rows": rows, "snapshot_at": snapshot_at}),
+                    ex=OPEN_POSITIONS_CACHE_TTL_S,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "open-positions cache write failed, serving uncached: %s",
+                    exc,
+                )
+        return rows, snapshot_at
+
+    rows, snapshot_at = _open_positions_flight.do(
+        OPEN_POSITIONS_CACHE_KEY, _fetch
+    )
+    return rows, snapshot_at, False
 
 
 # Bounded history for the case sheet (Δ context) — ~5 weeks of snapshots.
