@@ -155,6 +155,14 @@ const STATUS_META: {
     badge: "bg-sky-100 text-sky-800 dark:bg-sky-900/30 dark:text-sky-300",
   },
   {
+    // Calendar-day window (closed yesterday or today), not rolling 24h;
+    // clients still holding positions land in "holding" first.
+    code: "active_1d",
+    label: "近1天",
+    badge:
+      "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300",
+  },
+  {
     code: "active_7d",
     label: "近7天",
     badge:
@@ -817,7 +825,7 @@ export default function ActivityClientsPanel({
         colId: "user_id",
         field: "user_id",
         pinned: "left",
-        width: 110,
+        width: 96,
         sortable: true,
         comparator: () => 0, // server-side sort; keep the server row order
         cellClass: "font-mono",
@@ -845,7 +853,7 @@ export default function ActivityClientsPanel({
         headerComponent: InfoHeader,
         headerComponentParams: {
           tooltip:
-            "互斥单值状态，优先级瀑布首个命中即停：持仓中 > 近7/30/90天 >\n" +
+            "互斥单值状态，优先级瀑布首个命中即停：持仓中 > 近1/7/30/90天 >\n" +
             "超90天未交易 > 入金未交易 > 新注册(30d)未入金 > 长期未入金。\n" +
             "「交易」= 有平仓记录；只开仓未平过仓的新客由「持仓中」兜住。\n" +
             "用工具栏「交易状态」多选下拉筛选状态（空选 = 不查询）。",
@@ -884,7 +892,7 @@ export default function ActivityClientsPanel({
         headerName: "最近交易",
         colId: "last_trade_date",
         field: "last_trade_date",
-        width: 116,
+        width: 108,
         sortable: true,
         comparator: () => 0,
         sort: "desc", // default server ordering (NULLS LAST)
@@ -901,7 +909,7 @@ export default function ActivityClientsPanel({
         headerName: "注册时间",
         colId: "registered_at",
         field: "registered_at",
-        width: 116,
+        width: 108,
         sortable: true,
         comparator: () => 0,
         valueFormatter: (p) => fmtHkDate(p.value),
@@ -916,7 +924,7 @@ export default function ActivityClientsPanel({
             headerName: "总入金",
             colId: "lifetime_deposit",
             field: "lifetime_deposit",
-            width: 120,
+            width: 112,
             sortable: true,
             comparator: () => 0,
             headerComponent: InfoHeader,
@@ -934,7 +942,7 @@ export default function ActivityClientsPanel({
             headerName: "手数",
             colId: "lifetime_lots",
             field: "lifetime_lots",
-            width: 104,
+            width: 92,
             columnGroupShow: "open",
             sortable: true,
             comparator: () => 0,
@@ -945,7 +953,7 @@ export default function ActivityClientsPanel({
             headerName: "订单数",
             colId: "lifetime_orders",
             field: "lifetime_orders",
-            width: 100,
+            width: 88,
             columnGroupShow: "open",
             sortable: true,
             comparator: () => 0,
@@ -956,7 +964,7 @@ export default function ActivityClientsPanel({
             headerName: "交易天数",
             colId: "trade_days",
             field: "trade_days",
-            width: 100,
+            width: 92,
             columnGroupShow: "open",
             sortable: true,
             comparator: () => 0,
@@ -967,7 +975,7 @@ export default function ActivityClientsPanel({
             headerName: "首笔交易",
             colId: "first_trade_date",
             field: "first_trade_date",
-            width: 116,
+            width: 108,
             columnGroupShow: "open",
             sortable: true,
             comparator: () => 0,
@@ -1033,7 +1041,7 @@ export default function ActivityClientsPanel({
         headerName: "持仓单数",
         colId: "position_count",
         field: "position_count",
-        width: 110,
+        width: 96,
         hide: true,
         type: "numericColumn",
         valueFormatter: (p) => fmtInt(p.value),
@@ -1042,7 +1050,7 @@ export default function ActivityClientsPanel({
         headerName: "账户数",
         colId: "account_count",
         field: "account_count",
-        width: 90,
+        width: 84,
         hide: true,
         type: "numericColumn",
         headerTooltip: "当前有未平仓持仓的账户数（仅「持仓中」档有值）。",
@@ -1060,7 +1068,7 @@ export default function ActivityClientsPanel({
             field: "total_lots",
             sortable: true,
             comparator: () => 0,
-            width: 110,
+            width: 96,
             type: "numericColumn",
             valueFormatter: (p) => fmtLots(p.value),
           },
@@ -1070,7 +1078,7 @@ export default function ActivityClientsPanel({
             field: "buy_lots",
             sortable: true,
             comparator: () => 0,
-            width: 100,
+            width: 88,
             columnGroupShow: "open",
             type: "numericColumn",
             valueFormatter: (p) => fmtLots(p.value),
@@ -1081,7 +1089,7 @@ export default function ActivityClientsPanel({
             field: "sell_lots",
             sortable: true,
             comparator: () => 0,
-            width: 100,
+            width: 88,
             columnGroupShow: "open",
             type: "numericColumn",
             valueFormatter: (p) => fmtLots(p.value),
@@ -1095,7 +1103,7 @@ export default function ActivityClientsPanel({
           {
             headerName: "锁仓比例",
             colId: "hedge",
-            width: 104,
+            width: 100,
             sortable: true,
             comparator: () => 0,
             headerComponent: InfoHeader,
@@ -1136,7 +1144,7 @@ export default function ActivityClientsPanel({
             field: "hedged_lots",
             sortable: true,
             comparator: () => 0,
-            width: 100,
+            width: 92,
             columnGroupShow: "open",
             type: "numericColumn",
             headerTooltip:
@@ -1153,7 +1161,7 @@ export default function ActivityClientsPanel({
         field: "floating_pl",
         sortable: true,
         comparator: () => 0,
-        width: 130,
+        width: 112,
         type: "numericColumn",
         headerComponent: InfoHeader,
         headerComponentParams: {
@@ -1175,7 +1183,7 @@ export default function ActivityClientsPanel({
             field: "trading_net_deposit",
             sortable: true,
             comparator: () => 0,
-            width: 130,
+            width: 120,
             headerComponent: InfoHeader,
             headerComponentParams: {
               tooltip:
@@ -1191,7 +1199,7 @@ export default function ActivityClientsPanel({
             field: "ib_withdrawal",
             sortable: true,
             comparator: () => 0,
-            width: 130,
+            width: 118,
             hide: true,
             columnGroupShow: "open",
             valueFormatter: (p) => fmtMoney(p.value),
@@ -1212,7 +1220,7 @@ export default function ActivityClientsPanel({
             field: "profit_all",
             sortable: true,
             comparator: () => 0,
-            width: 116,
+            width: 110,
             headerComponent: InfoHeader,
             headerComponentParams: {
               tooltip:
@@ -1229,7 +1237,7 @@ export default function ActivityClientsPanel({
             field: "profit_30d",
             sortable: true,
             comparator: () => 0,
-            width: 116,
+            width: 96,
             columnGroupShow: "open",
             valueFormatter: (p) => fmtMoney(p.value),
             cellClass: (p) => profitColor(p.value),
@@ -1240,7 +1248,7 @@ export default function ActivityClientsPanel({
             field: "profit_7d",
             sortable: true,
             comparator: () => 0,
-            width: 110,
+            width: 92,
             columnGroupShow: "open",
             valueFormatter: (p) => fmtMoney(p.value),
             cellClass: (p) => profitColor(p.value),
@@ -1259,7 +1267,7 @@ export default function ActivityClientsPanel({
             field: "rebate_all",
             sortable: true,
             comparator: () => 0,
-            width: 116,
+            width: 110,
             headerComponent: InfoHeader,
             headerComponentParams: {
               tooltip:
@@ -1276,7 +1284,7 @@ export default function ActivityClientsPanel({
             field: "rebate_30d",
             sortable: true,
             comparator: () => 0,
-            width: 116,
+            width: 96,
             columnGroupShow: "open",
             valueFormatter: (p) => fmtMoney(p.value),
             cellClass: (p) => profitColor(p.value),
@@ -1287,7 +1295,7 @@ export default function ActivityClientsPanel({
             field: "rebate_7d",
             sortable: true,
             comparator: () => 0,
-            width: 110,
+            width: 92,
             columnGroupShow: "open",
             valueFormatter: (p) => fmtMoney(p.value),
             cellClass: (p) => profitColor(p.value),
@@ -1301,7 +1309,7 @@ export default function ActivityClientsPanel({
           {
             headerName: "History",
             colId: "combined_all",
-            width: 140,
+            width: 118,
             sortable: true,
             comparator: () => 0,
             headerComponent: InfoHeader,
@@ -1321,7 +1329,7 @@ export default function ActivityClientsPanel({
           {
             headerName: "30d",
             colId: "combined_30d",
-            width: 116,
+            width: 96,
             sortable: true,
             comparator: () => 0,
             columnGroupShow: "open",
@@ -1334,7 +1342,7 @@ export default function ActivityClientsPanel({
           {
             headerName: "7d",
             colId: "combined_7d",
-            width: 110,
+            width: 92,
             sortable: true,
             comparator: () => 0,
             columnGroupShow: "open",
@@ -1349,7 +1357,7 @@ export default function ActivityClientsPanel({
       {
         headerName: "净赚",
         colId: "net_gain",
-        width: 140,
+        width: 112,
         sortable: true,
         comparator: () => 0,
         headerComponent: InfoHeader,
@@ -1371,7 +1379,7 @@ export default function ActivityClientsPanel({
         headerName: "净值",
         colId: "equity",
         field: "equity",
-        width: 116,
+        width: 104,
         sortable: true,
         comparator: () => 0,
         valueFormatter: (p) => fmtMoney(p.value),
@@ -1380,7 +1388,7 @@ export default function ActivityClientsPanel({
       {
         headerName: "最长持仓",
         colId: "longest_hold",
-        width: 120,
+        width: 104,
         hide: true,
         type: "numericColumn",
         headerTooltip:

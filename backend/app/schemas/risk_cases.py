@@ -108,7 +108,7 @@ class ActivityClientRow(BaseModel):
     user_name: Optional[str] = None
     country: Optional[str] = None
     registered_at: Optional[str] = None
-    # holding | active_7d | active_30d | active_90d | dormant |
+    # holding | active_1d | active_7d | active_30d | active_90d | dormant |
     # funded_no_trade | new_no_fund | no_fund
     activity_status: str
     is_verified: Optional[bool] = None

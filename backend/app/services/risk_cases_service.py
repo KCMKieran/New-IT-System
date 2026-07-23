@@ -368,6 +368,7 @@ def _get_risk_cases_redis() -> Optional["redis.Redis"]:
 
 ACTIVITY_STATUS_CODES: Tuple[str, ...] = (
     "holding",
+    "active_1d",
     "active_7d",
     "active_30d",
     "active_90d",
@@ -538,12 +539,15 @@ ACTIVITY_COUNTRY_CODES: frozenset = frozenset((*_ACTIVITY_NAMED_COUNTRIES, "OTHE
 # Priority waterfall, first hit wins. holding MUST stay first: a client
 # whose first-ever order is still open has last_trade_date NULL ("trade" =
 # closed trade in T13) and would otherwise fall into the never-traded
-# buckets. dormant (IS NOT NULL) must stay after the three date windows.
+# buckets. dormant (IS NOT NULL) must stay after the four date windows.
 # lifetime_deposit is GROSS deposit — net would misclassify clients who
-# withdrew everything after funding.
+# withdrew everything after funding. Date windows are calendar-day sliding
+# (last_trade_date is a DATE): active_1d = closed yesterday or today, NOT
+# a rolling 24h window.
 _ACTIVITY_STATUS_CASE = """
         CASE
             WHEN pos.user_id IS NOT NULL                 THEN 'holding'
+            WHEN t.last_trade_date >= current_date - 1   THEN 'active_1d'
             WHEN t.last_trade_date >= current_date - 7   THEN 'active_7d'
             WHEN t.last_trade_date >= current_date - 30  THEN 'active_30d'
             WHEN t.last_trade_date >= current_date - 90  THEN 'active_90d'
@@ -718,7 +722,9 @@ _CRM_FLAG_COL_SQL: Dict[str, str] = {
 # v3 → v4 (2026-07-24 crm_true semantics): flags became a 5-bit TRUE/FALSE
 # vector (every flag always filters) — v3 exclusion-combo entries answer a
 # different question and must never collide.
-ACTIVITY_COUNTS_CACHE_PREFIX = "risk_cases:activity_counts:v4"
+# v4 → v5 (2026-07-24 active_1d bucket): cached count dicts gained a bucket
+# and active_7d shrank — v4 entries would serve stale 8-bucket shapes.
+ACTIVITY_COUNTS_CACHE_PREFIX = "risk_cases:activity_counts:v5"
 ACTIVITY_COUNTS_CACHE_TTL_S = 60
 
 

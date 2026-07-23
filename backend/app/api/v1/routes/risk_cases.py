@@ -108,7 +108,7 @@ def activity_clients(
         alias="status",
         description=(
             "Comma-separated multi-select of activity buckets (holding | "
-            "active_7d | active_30d | active_90d | dormant | funded_no_trade "
+            "active_1d | active_7d | active_30d | active_90d | dormant | funded_no_trade "
             "| new_no_fund | no_fund). Empty/missing → active_7d; any "
             "unknown code → 422. No 'all' token — select all 8 instead."
         ),

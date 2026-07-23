@@ -422,13 +422,13 @@ def test_activity_counts_cache_key_shape():
     key = svc._activity_counts_cache_key(
         countries=["TH", "CN", "TH"], crm_true=["verified", "enabled"],
     )
-    assert key == "risk_cases:activity_counts:v4:CN,TH:01100"
+    assert key == "risk_cases:activity_counts:v5:CN,TH:01100"
     assert svc._activity_counts_cache_key(
         countries=[], crm_true=[],
-    ) == "risk_cases:activity_counts:v4:all:00000"
+    ) == "risk_cases:activity_counts:v5:all:00000"
     assert svc._activity_counts_cache_key(
         countries=[], crm_true=list(svc.CRM_TRUE_CODES),
-    ) == "risk_cases:activity_counts:v4:all:11111"
+    ) == "risk_cases:activity_counts:v5:all:11111"
 
 
 def test_activity_status_case_waterfall_order():
@@ -436,7 +436,7 @@ def test_activity_status_case_waterfall_order():
     # last_trade_date) and dormant after the three date windows.
     case = svc._ACTIVITY_STATUS_CASE
     order = [case.index(f"'{c}'") for c in (
-        "holding", "active_7d", "active_30d", "active_90d",
+        "holding", "active_1d", "active_7d", "active_30d", "active_90d",
         "dormant", "funded_no_trade", "new_no_fund", "no_fund",
     )]
     assert order == sorted(order)
