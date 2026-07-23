@@ -152,6 +152,9 @@ def _activity_row(user_id: int = 100341, **over) -> dict:
         "activity_status": "active_7d",
         "is_verified": True,
         "is_enabled": True,
+        "is_lead": False,
+        "is_all_demo": False,
+        "is_employee": False,
         "first_trade_date": "2024-02-01",
         "last_trade_date": "2026-07-22",
         "trade_days": 120,
@@ -192,16 +195,22 @@ def test_activity_clients_envelope_and_counts(client):
     assert set(body["status_counts"]) == set(svc.ACTIVITY_STATUS_CODES)
     row = body["data"][0]
     assert row["activity_status"] == "active_7d"
+    # Attribute flags round-trip (frontend hidden audit columns)
+    assert row["is_lead"] is False
+    assert row["is_all_demo"] is False
+    assert row["is_employee"] is False
     # Enrichment gaps stay null (frontend renders "—", never 0)
     assert row["position_count"] is None
     assert row["trading_net_deposit"] is None
-    # Default status is active_7d (decision 2026-07-23), default universe
-    # includes disabled clients, no country filter.
+    # Default status is active_7d (decision 2026-07-23), no country filter.
+    # Missing crm_true resolves to the default combo verified+enabled
+    # (2026-07-24 semantics: every flag always filters — listed = TRUE,
+    # unlisted = FALSE; deliberately narrower than the contract's 59,101
+    # universe, UI-layer decision).
     kwargs = q.call_args.kwargs
     assert kwargs["statuses"] == ["active_7d"]
     assert kwargs["countries"] == []
-    assert kwargs["include_disabled"] is True
-    assert kwargs["only_verified"] is False
+    assert kwargs["crm_true"] == ["verified", "enabled"]
 
 
 def test_activity_clients_passes_filters_through(client):
@@ -213,20 +222,43 @@ def test_activity_clients_passes_filters_through(client):
         res = client.get(
             "/api/v1/risk-cases/activity-clients"
             "?status=dormant,holding&countries=cn,other&q=li"
-            "&only_verified=true&include_disabled=false"
+            "&crm_true=Verified,Enabled,EMPLOYEE"
             "&sort_by=lifetime_lots&sort_order=asc"
         )
     assert res.status_code == 200
     kwargs = q.call_args.kwargs
     # Multi-value passthrough: comma-split statuses, case-insensitive
-    # country codes normalized to upper.
+    # country codes normalized to upper / crm codes to lower.
     assert kwargs["statuses"] == ["dormant", "holding"]
     assert kwargs["countries"] == ["CN", "OTHER"]
     assert kwargs["q"] == "li"
-    assert kwargs["only_verified"] is True
-    assert kwargs["include_disabled"] is False
+    assert kwargs["crm_true"] == ["verified", "enabled", "employee"]
     assert kwargs["sort_by"] == "lifetime_lots"
     assert kwargs["sort_order"] == "asc"
+
+
+def test_activity_clients_crm_true_empty_vs_missing(client):
+    # EXPLICIT empty crm_true is legal and means "all five flags FALSE" —
+    # it must reach the service as [], NOT be mistaken for a missing param
+    # (which resolves to the default combo; pinned in the envelope test).
+    with mock.patch.object(
+        risk_cases_route,
+        "query_activity_clients",
+        return_value=([], 0, dict(_ACTIVITY_COUNTS), None),
+    ) as q:
+        res = client.get("/api/v1/risk-cases/activity-clients?crm_true=")
+    assert res.status_code == 200
+    assert q.call_args.kwargs["crm_true"] == []
+
+
+def test_activity_clients_unknown_crm_code_422(client):
+    res = client.get("/api/v1/risk-cases/activity-clients?crm_true=nope")
+    assert res.status_code == 422
+    # One bad code inside an otherwise valid list also 422s.
+    res = client.get(
+        "/api/v1/risk-cases/activity-clients?crm_true=verified,nope"
+    )
+    assert res.status_code == 422
 
 
 def test_activity_clients_unknown_status_422(client):
@@ -293,52 +325,91 @@ def test_activity_sort_whitelist_is_driver_layer_only():
 
 
 def test_activity_where_filters():
-    # Default flags + empty country selection → no extra clauses beyond the
-    # universe WHERE (empty countries = no filter).
+    # 2026-07-24 crm_true semantics: all five flag clauses are ALWAYS
+    # emitted — listed codes filter = TRUE, unlisted = FALSE. Default combo:
     where, params = svc._activity_where(
-        countries=[], q=None, only_verified=False, include_disabled=True,
-    )
-    assert where == ""
-    assert params == []
-    # Toggles + named countries + OTHER + numeric search. Named list and the
-    # OTHER complement OR together inside one parenthesized clause.
-    where, params = svc._activity_where(
-        countries=["CN", "TH", "OTHER"], q="127582",
-        only_verified=True, include_disabled=False,
+        countries=[], q=None, crm_true=["verified", "enabled"],
     )
     assert "p.is_verified = TRUE" in where
     assert "p.is_enabled = TRUE" in where
+    assert "p.is_lead = FALSE" in where
+    assert "p.is_employee = FALSE" in where
+    assert "p.is_all_demo = FALSE" in where
+    assert where.count("AND") == 5  # nothing besides the five flag clauses
+    assert params == []  # flag clauses are literal SQL, never parameterized
+    # crm flags + named countries + OTHER + numeric search. Named list and
+    # the OTHER complement OR together inside one parenthesized clause.
+    where, params = svc._activity_where(
+        countries=["CN", "TH", "OTHER"], q="127582",
+        crm_true=["verified", "enabled"],
+    )
     assert "(p.country IN %s OR (p.country IS NULL OR p.country NOT IN %s))" in where
     assert "p.user_id = %s" in where
     assert 127582 in params
     assert ("CN", "TH") in params
     assert svc._ACTIVITY_NAMED_COUNTRIES in params
-    # Named-only selection: plain IN, no NULL leg.
+    # Named-only selection: plain IN, no NULL leg (country side — the flag
+    # clauses never contain IS NULL).
     where, params = svc._activity_where(
-        countries=["VN"], q=None, only_verified=False, include_disabled=True,
+        countries=["VN"], q=None, crm_true=["verified", "enabled"],
     )
     assert "p.country IN %s" in where
     assert "IS NULL" not in where
     assert params == [("VN",)]
     # OTHER-only selection: complement of the full named list, NULL included.
     where, params = svc._activity_where(
-        countries=["OTHER"], q=None, only_verified=False, include_disabled=True,
+        countries=["OTHER"], q=None, crm_true=["verified", "enabled"],
     )
     assert "(p.country IS NULL OR p.country NOT IN %s)" in where
     assert "p.country IN %s" not in where.replace("NOT IN %s", "")
     assert params == [svc._ACTIVITY_NAMED_COUNTRIES]
 
 
-def test_activity_counts_cache_key_shape():
-    # v2 prefix (v1 keyed on country_mode/global_sub — must never collide);
-    # countries sorted+deduped so equivalent selections share one entry.
-    key = svc._activity_counts_cache_key(
-        countries=["TH", "CN", "TH"], only_verified=False, include_disabled=True,
+def test_activity_where_crm_true_directions():
+    # Empty set = all five flags FALSE (legal, not "no filter").
+    where, params = svc._activity_where(countries=[], q=None, crm_true=[])
+    for col in ("is_lead", "is_verified", "is_enabled", "is_employee",
+                "is_all_demo"):
+        assert f"p.{col} = FALSE" in where
+    assert "= TRUE" not in where
+    assert params == []
+    # Full set = all five TRUE.
+    where, _ = svc._activity_where(
+        countries=[], q=None, crm_true=list(svc.CRM_TRUE_CODES),
     )
-    assert key == "risk_cases:activity_counts:v2:CN,TH:0:1"
+    for col in ("is_lead", "is_verified", "is_enabled", "is_employee",
+                "is_all_demo"):
+        assert f"p.{col} = TRUE" in where
+    assert "FALSE" not in where
+    # Each code flips exactly its own column to TRUE.
+    for code, col in (
+        ("lead", "is_lead"),
+        ("verified", "is_verified"),
+        ("enabled", "is_enabled"),
+        ("employee", "is_employee"),
+        ("demo", "is_all_demo"),
+    ):
+        where, _ = svc._activity_where(countries=[], q=None, crm_true=[code])
+        assert f"p.{col} = TRUE" in where
+        assert where.count("= TRUE") == 1
+        assert where.count("= FALSE") == 4
+
+
+def test_activity_counts_cache_key_shape():
+    # v4 prefix (v3 keys encoded the retired exclusion-switch combos and
+    # answer a different question — must never collide); countries
+    # sorted+deduped; crm_true encoded as a 5-bit vector in CRM_TRUE_CODES
+    # order (lead, verified, enabled, employee, demo).
+    key = svc._activity_counts_cache_key(
+        countries=["TH", "CN", "TH"], crm_true=["verified", "enabled"],
+    )
+    assert key == "risk_cases:activity_counts:v4:CN,TH:01100"
     assert svc._activity_counts_cache_key(
-        countries=[], only_verified=True, include_disabled=False,
-    ) == "risk_cases:activity_counts:v2:all:1:0"
+        countries=[], crm_true=[],
+    ) == "risk_cases:activity_counts:v4:all:00000"
+    assert svc._activity_counts_cache_key(
+        countries=[], crm_true=list(svc.CRM_TRUE_CODES),
+    ) == "risk_cases:activity_counts:v4:all:11111"
 
 
 def test_activity_status_case_waterfall_order():

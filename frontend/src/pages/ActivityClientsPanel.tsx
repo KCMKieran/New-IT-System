@@ -21,6 +21,17 @@
  * 全选 row (all-selected omits the `countries` param — backend no-filter
  * path); statuses deliberately have no 全选 row.
  *
+ * 2026-07-23 (later): third dropdown CRM属性 over the five
+ * kcm.user_profile boolean flags. 2026-07-24 semantic re-decision:
+ * checkbox state maps 1:1 to the column VALUE — checked = only rows where
+ * the flag is TRUE, unchecked = only rows where it is FALSE; all five
+ * flags always filter (no "don't filter" state, replaces the short-lived
+ * exclusion-switch semantics). Default = verified + enabled checked
+ * (verified ∧ enabled ∧ not lead/employee/all-demo) — deliberately
+ * narrower than the contract's 59,101 default universe (UI-layer product
+ * decision). Unlike the other two dropdowns, empty selection is a legal
+ * query (all five flags FALSE).
+ *
  * Because the universe is ~59k, EVERYTHING moved server-side: pagination,
  * status/country filters, search and sorting all hit
  * GET /api/v1/risk-cases/activity-clients. Sorting is limited to
@@ -95,6 +106,9 @@ interface ActivityClientRow {
   activity_status: string;
   is_verified: boolean | null;
   is_enabled: boolean | null;
+  is_lead: boolean | null;
+  is_all_demo: boolean | null;
+  is_employee: boolean | null;
   first_trade_date: string | null;
   last_trade_date: string | null;
   trade_days: number | null;
@@ -224,10 +238,33 @@ const COUNTRY_BY_CODE = Object.fromEntries(
 );
 const ALL_COUNTRY_CODES = COUNTRY_META.map((c) => c.code);
 
+// CRM属性 filter over the five kcm.user_profile boolean flags (2026-07-24
+// re-decided semantics): checkbox state = the flag VALUE shown — checked
+// rows must have the flag TRUE, unchecked rows FALSE. All five flags
+// ALWAYS filter; there is no "don't filter this flag" state. Independent
+// toggles, NOT a same-dimension multi-select: no 全选 row, no counts, and
+// an EMPTY selection is a legal query (all five flags FALSE) — unlike
+// statuses/countries where empty means "don't query". Default = verified +
+// enabled (verified ∧ enabled ∧ not lead/employee/all-demo) — deliberately
+// NARROWER than the contract's 59,101 default universe (UI-layer product
+// decision); the default combo omits the crm_true param entirely.
+// Rows carry the raw CRM field names (CRM fields first, MT-derived 纯Demo
+// last); the per-direction hints were dropped when the semantics unified —
+// one note line at the top of the menu explains checked/unchecked instead.
+const CRM_META: { code: string; label: string; hint?: string }[] = [
+  { code: "lead", label: "isLead" },
+  { code: "verified", label: "isVerified" },
+  { code: "enabled", label: "isEnabled" },
+  { code: "employee", label: "isEmployee" },
+  { code: "demo", label: "纯Demo", hint: "只有Demo账户无Live账户" },
+];
+const CRM_BY_CODE = Object.fromEntries(CRM_META.map((a) => [a.code, a]));
+
 const FILTERS_KEY = "RISK_WATCHLIST_POSITIONS_FILTERS_V2";
 type Filters = {
   statuses: string[];
   countries: string[];
+  crmTrue: string[];
   pageSize: number;
 };
 // 2026-07-24b semantics: empty selection on EITHER dropdown = don't query
@@ -235,9 +272,14 @@ type Filters = {
 // 7 codes selected (default), no longer as an empty array — but when all 7
 // are selected the request omits the `countries` param (same backend
 // no-filter path + hits the existing unfiltered counts cache key).
+// crmTrue added later WITHOUT a key bump — readFilterState fills the
+// missing field from these defaults on old V2 blobs, and the short-lived
+// `excludeAttrs` field from the retired exclusion semantics is simply
+// ignored (stale extra fields don't round-trip into state).
 const FILTER_DEFAULTS: Filters = {
   statuses: ["active_7d"], // default bucket (2026-07-23 decision; 全选行不存在)
   countries: [...ALL_COUNTRY_CODES], // default = all selected (国家 · 全部)
+  crmTrue: ["verified", "enabled"], // 已验证 ∧ 启用 ∧ 非 lead/员工/纯demo
   pageSize: 50,
 };
 
@@ -358,6 +400,10 @@ interface FilterMultiSelectItem {
   label: string;
   /** Optional count badge next to the label (e.g. status bucket sizes). */
   count?: number | null;
+  /** Optional muted helper line under the label (e.g. the 纯Demo caveat
+   *  in the CRM属性 dropdown). Only that dropdown passes hints —
+   *  交易状态/国家 rows render exactly as before. */
+  hint?: string;
 }
 
 /**
@@ -375,6 +421,8 @@ function FilterMultiSelect({
   selected,
   onToggle,
   onToggleAll,
+  note,
+  contentWidthClass = "w-64",
 }: {
   /** Menu heading + accessible name, e.g. "交易状态". */
   label: string;
@@ -386,6 +434,12 @@ function FilterMultiSelect({
   /** When set, renders a 全选 row on top (checked iff every item is
    *  selected) that toggles between select-all and select-none. */
   onToggleAll?: (checked: boolean) => void;
+  /** Optional muted explainer line under the menu heading (e.g. the
+   *  CRM属性 checked/unchecked semantics). */
+  note?: string;
+  /** Tailwind width class for the menu. Default w-64 (「新注册(30d)未入金」
+   *  + count badge must fit on one line). */
+  contentWidthClass?: string;
 }) {
   return (
     <DropdownMenu>
@@ -400,9 +454,13 @@ function FilterMultiSelect({
           <ChevronDown className="h-4 w-4 text-muted-foreground" />
         </Button>
       </DropdownMenuTrigger>
-      {/* w-64: 「新注册(30d)未入金」 + count badge must fit on one line */}
-      <DropdownMenuContent align="start" className="w-64">
+      <DropdownMenuContent align="start" className={contentWidthClass}>
         <DropdownMenuLabel>{label}</DropdownMenuLabel>
+        {note && (
+          <div className="px-2 pb-1.5 text-xs text-muted-foreground">
+            {note}
+          </div>
+        )}
         <DropdownMenuSeparator />
         {onToggleAll && (
           <>
@@ -430,14 +488,26 @@ function FilterMultiSelect({
               <label
                 key={item.code}
                 htmlFor={id}
-                className="flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-sm select-none hover:bg-accent"
+                className={cn(
+                  "flex cursor-pointer gap-2 rounded-sm px-2 py-1.5 text-sm select-none hover:bg-accent",
+                  item.hint ? "items-start" : "items-center",
+                )}
               >
                 <Checkbox
                   id={id}
                   checked={checked}
+                  // Align with the first text line when a hint row follows.
+                  className={item.hint ? "mt-0.5" : undefined}
                   onCheckedChange={(value) => onToggle(item.code, !!value)}
                 />
-                <span className="flex-1 truncate">{item.label}</span>
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate">{item.label}</span>
+                  {item.hint && (
+                    <span className="block text-xs text-muted-foreground">
+                      {item.hint}
+                    </span>
+                  )}
+                </span>
                 {item.count !== undefined && (
                   <span className="rounded bg-slate-100 px-1 py-0 text-[10px] tabular-nums text-muted-foreground dark:bg-slate-800/60">
                     {item.count != null ? item.count.toLocaleString() : "…"}
@@ -496,6 +566,17 @@ export default function ActivityClientsPanel({
     ).filter((c) => COUNTRY_BY_CODE[c]);
     return valid.length ? valid : [...ALL_COUNTRY_CODES];
   });
+  // NO empty-fallback here, unlike statuses/countries: an empty crmTrue
+  // is a legal persisted value (all five flags FALSE), so only a non-array
+  // field (corrupt blob; readFilterState already fills a missing field
+  // from the defaults) falls back. Unknown codes are dropped — including
+  // the retired excludeAttrs code set from the exclusion-switch era.
+  const [crmTrue, setCrmTrue] = useState<string[]>(() => {
+    if (!Array.isArray(persisted.crmTrue)) {
+      return [...FILTER_DEFAULTS.crmTrue];
+    }
+    return persisted.crmTrue.filter((c) => CRM_BY_CODE[c]);
+  });
   const [pageSize, setPageSize] = useState<number>(
     PAGE_SIZES.includes(persisted.pageSize as (typeof PAGE_SIZES)[number])
       ? persisted.pageSize
@@ -504,6 +585,7 @@ export default function ActivityClientsPanel({
   useFilterPersist(FILTERS_KEY, FILTER_DEFAULTS, {
     statuses,
     countries,
+    crmTrue,
     pageSize,
   });
 
@@ -516,6 +598,8 @@ export default function ActivityClientsPanel({
       // Empty selection on either dropdown = "don't query": clear the grid
       // and skip the API call entirely (the 60s auto-refresh short-circuits
       // through the same path). A friendly notice renders in the grid area.
+      // crmTrue is deliberately NOT part of this guard — an empty CRM flag
+      // selection is a legal query (all five flags FALSE).
       if (statuses.length === 0 || countries.length === 0) {
         setRows([]);
         setTotal(0);
@@ -540,6 +624,15 @@ export default function ActivityClientsPanel({
         if (countries.length < ALL_COUNTRY_CODES.length) {
           p.set("countries", countries.join(","));
         }
+        // CRM属性 → crm_true (checked codes; every unlisted flag filters
+        // FALSE server-side). The default combo omits the param (clean URL
+        // + default counts cache key); anything else sends the comma list —
+        // including an EXPLICIT empty value, which the backend reads as
+        // "all five flags FALSE" (distinct from a missing param).
+        const isDefaultCrm =
+          crmTrue.length === FILTER_DEFAULTS.crmTrue.length &&
+          FILTER_DEFAULTS.crmTrue.every((c) => crmTrue.includes(c));
+        if (!isDefaultCrm) p.set("crm_true", crmTrue.join(","));
         if (appliedSearch.current) p.set("q", appliedSearch.current);
         const res = await apiFetch(
           `/api/v1/risk-cases/activity-clients?${p}`,
@@ -564,7 +657,7 @@ export default function ActivityClientsPanel({
         setLoading(false);
       }
     },
-    [page, pageSize, statuses, countries, sortBy, sortOrder],
+    [page, pageSize, statuses, countries, crmTrue, sortBy, sortOrder],
   );
 
   // Initial load + 60s auto-refresh of the CURRENT page params only.
@@ -609,6 +702,20 @@ export default function ActivityClientsPanel({
   // 全选 row: all-selected ↔ none-selected flip.
   const toggleAllCountries = useCallback((checked: boolean) => {
     setCountries(checked ? [...ALL_COUNTRY_CODES] : []);
+    setPage(1);
+  }, []);
+  // CRM属性 flags (checked = flag TRUE, unchecked = flag FALSE); empty
+  // selection is legal here (all five FALSE).
+  const toggleCrmFlag = useCallback((code: string, checked: boolean) => {
+    setCrmTrue((prev) => {
+      if (checked) {
+        if (prev.includes(code)) return prev;
+        return CRM_META.map((a) => a.code).filter(
+          (c) => prev.includes(c) || c === code,
+        );
+      }
+      return prev.filter((c) => c !== code);
+    });
     setPage(1);
   }, []);
   const applyPageSize = useCallback((n: number) => {
@@ -840,6 +947,39 @@ export default function ActivityClientsPanel({
         width: 84,
         hide: true,
         headerTooltip: "CRM isEnabled。FALSE = 账户停用。",
+        valueFormatter: (p) =>
+          p.value == null ? EMDASH : p.value ? "✓" : "✗",
+      },
+      {
+        headerName: "Lead",
+        colId: "is_lead",
+        field: "is_lead",
+        width: 84,
+        hide: true,
+        headerTooltip:
+          "CRM isLead。TRUE = 未通过验证的潜在客户，不算真实客户。「CRM属性」下拉按勾选值过滤（默认未勾 = 只看 FALSE）。",
+        valueFormatter: (p) =>
+          p.value == null ? EMDASH : p.value ? "✓" : "✗",
+      },
+      {
+        headerName: "纯Demo",
+        colId: "is_all_demo",
+        field: "is_all_demo",
+        width: 90,
+        hide: true,
+        headerTooltip:
+          "有 MT 账户且全部为 demo 账户 ⇒ TRUE（MT 推导，非 CRM 字段）。「CRM属性」下拉按勾选值过滤（默认未勾 = 只看 FALSE）。",
+        valueFormatter: (p) =>
+          p.value == null ? EMDASH : p.value ? "✓" : "✗",
+      },
+      {
+        headerName: "员工",
+        colId: "is_employee",
+        field: "is_employee",
+        width: 84,
+        hide: true,
+        headerTooltip:
+          "CRM isEmployee。TRUE = 员工/内部账号。「CRM属性」下拉按勾选值过滤（默认未勾 = 只看 FALSE；勾上 = 只看员工）。",
         valueFormatter: (p) =>
           p.value == null ? EMDASH : p.value ? "✓" : "✗",
       },
@@ -1235,6 +1375,9 @@ export default function ActivityClientsPanel({
         : countries.length === 1
           ? `国家 · ${COUNTRY_BY_CODE[countries[0]]?.label ?? countries[0]}`
           : `国家 · ${countries.length}`;
+  // CRM属性 trigger text is deliberately constant (2026-07-24): with the
+  // value-mapping semantics no suffix summarizes the state honestly — the
+  // menu itself is the readout.
   const statusSummary =
     statuses.length === 0
       ? "未选状态"
@@ -1263,8 +1406,9 @@ export default function ActivityClientsPanel({
             </span>
             <span className="text-muted-foreground/50">·</span>
             <span>
-              一行 = 一个客户（userId，多账户合并）；默认宇宙 = 全量客户排除
-              lead 与纯 demo
+              一行 = 一个客户（userId，多账户合并）；客户范围由「CRM属性」
+              下拉决定——勾选 = 该属性为真、未勾 = 为假，五个字段始终参与
+              过滤（默认：已验证 ∧ 启用 ∧ 非 lead/员工/纯 demo）
             </span>
           </div>
           <div>
@@ -1361,6 +1505,23 @@ export default function ActivityClientsPanel({
             selected={countries}
             onToggle={toggleCountry}
             onToggleAll={toggleAllCountries}
+          />
+
+          {/* CRM属性 flag filter: checkbox state = the flag value shown
+              (checked = TRUE rows, unchecked = FALSE rows; all five flags
+              always filter). Constant trigger text, no 全选 row, no count
+              badges; empty selection = all five FALSE (legal query). */}
+          <FilterMultiSelect
+            label="CRM属性"
+            buttonText="CRM属性"
+            note="勾选 = 该属性为真,未勾 = 为假"
+            items={CRM_META.map((a) => ({
+              code: a.code,
+              label: a.label,
+              hint: a.hint,
+            }))}
+            selected={crmTrue}
+            onToggle={toggleCrmFlag}
           />
 
           <ColumnVisibilityMenu

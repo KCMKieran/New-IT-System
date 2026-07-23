@@ -113,6 +113,11 @@ class ActivityClientRow(BaseModel):
     activity_status: str
     is_verified: Optional[bool] = None
     is_enabled: Optional[bool] = None
+    # Remaining user_profile flags, surfaced for the frontend's hidden
+    # audit columns (the 客户属性 dropdown filters on all five flags).
+    is_lead: Optional[bool] = None
+    is_all_demo: Optional[bool] = None
+    is_employee: Optional[bool] = None
     # T13 lifetime aggregates — None for clients never seen in trades or
     # cashflow (the no_fund/new_no_fund bulk; T13 only covers T4∪T7 users).
     first_trade_date: Optional[str] = None

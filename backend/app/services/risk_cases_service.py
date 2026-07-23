@@ -360,8 +360,9 @@ def _get_risk_cases_redis() -> Optional["redis.Redis"]:
 # Contract: .claude/skills/activity-status-column/SKILL.md (New-IT mirror of
 # the KCM-side design doc). Driver layer = kcm.user_profile LEFT JOIN
 # kcm.user_activity_summary (T13 lifetime narrow table) LEFT JOIN the 60s
-# open-positions snapshot; the default universe is user_profile minus leads
-# minus all-demo clients (~59k). Pagination/filter/sort happen in the driver
+# open-positions snapshot; which slice of user_profile shows is decided by
+# the crm_true flag filter (see CRM_TRUE_CODES below), not a hard-coded
+# WHERE. Pagination/filter/sort happen in the driver
 # layer FIRST; the four money-trail CTEs then enrich only the page's ids —
 # never the full universe (the whole point of the two-stage structure).
 
@@ -415,6 +416,11 @@ _ACTIVITY_STATUS_CASE = """
             ELSE 'no_fund'
         END"""
 
+# The five user_profile boolean flags are ALL parameterized filters
+# (crm_true, see _activity_where): the former hard-coded universe WHERE
+# (is_lead = FALSE AND is_all_demo = FALSE) is gone — checkbox state maps
+# 1:1 to column values and every flag always filters. WHERE TRUE is a
+# constant-true anchor so appended AND clauses stay syntactically valid.
 _ACTIVITY_DRV_SQL = f"""
     WITH pos AS (
         SELECT DISTINCT user_id FROM kcm.active_positions_snapshot
@@ -422,13 +428,14 @@ _ACTIVITY_DRV_SQL = f"""
     drv AS (
         SELECT p.user_id, p.user_name, p.country, p.registered_at,
                p.is_verified, p.is_enabled,
+               p.is_lead, p.is_all_demo, p.is_employee,
                t.first_trade_date, t.last_trade_date, t.trade_days,
                t.lifetime_orders, t.lifetime_lots, t.lifetime_deposit,
                {_ACTIVITY_STATUS_CASE} AS activity_status
         FROM kcm.user_profile p
         LEFT JOIN kcm.user_activity_summary t ON t.user_id = p.user_id
         LEFT JOIN pos ON pos.user_id = p.user_id
-        WHERE p.is_lead = FALSE AND p.is_all_demo = FALSE
+        WHERE TRUE
     """
 
 # Per-page enrichment (<=200 ids): the open-positions aggregation + the four
@@ -537,14 +544,44 @@ _ACTIVITY_FLOAT_COLS = (
     "floating_pl",
 )
 
-# Badge counts scan the full default universe (~59k) → 60s Redis cache.
-# Only filter combos WITHOUT a search term are cached (country/verified/
-# disabled combos are a finite enum; q is unbounded input and would explode
-# the key space). Fail-open like every Redis path in this module.
+# CRM-flag filter (2026-07-24 semantic re-decision, replaces the short-lived
+# five exclusion switches): crm_true is the SET of user_profile boolean
+# columns that must be TRUE for a row to show — and every code NOT in the
+# set filters that column = FALSE. All five flags always apply; there is no
+# "don't filter this flag" state. The default combo ("verified","enabled")
+# = verified ∧ enabled ∧ not-lead ∧ not-employee ∧ not-all-demo, which is
+# deliberately NARROWER than the contract's 59,101 default universe (which
+# only excluded lead + all-demo) — a UI-layer product decision, see
+# docs/features/risk-watchlist.md §7.1.
+CRM_TRUE_CODES: Tuple[str, ...] = (
+    "lead",
+    "verified",
+    "enabled",
+    "employee",
+    "demo",
+)
+DEFAULT_CRM_TRUE: Tuple[str, ...] = ("verified", "enabled")
+_CRM_FLAG_COL_SQL: Dict[str, str] = {
+    "lead": "p.is_lead",
+    "verified": "p.is_verified",
+    "enabled": "p.is_enabled",
+    "employee": "p.is_employee",
+    "demo": "p.is_all_demo",
+}
+
+# Badge counts scan the filtered universe → 60s Redis cache. Only filter
+# combos WITHOUT a search term are cached (countries + the 32 crm_true
+# combos are a finite enum; q is unbounded input and would explode the key
+# space). Fail-open like every Redis path in this module.
 # v1 → v2 (2026-07-24): key shape changed from {country_mode}:{global_sub}
 # to the sorted-deduped {countries} selection — prefix bumped so stale v1
 # entries can never collide with the new shape.
-ACTIVITY_COUNTS_CACHE_PREFIX = "risk_cases:activity_counts:v2"
+# v2 → v3 (2026-07-23 attr dropdown): the five exclusion flags joined the
+# key — v2 entries were all computed under the hard-coded lead+demo WHERE.
+# v3 → v4 (2026-07-24 crm_true semantics): flags became a 5-bit TRUE/FALSE
+# vector (every flag always filters) — v3 exclusion-combo entries answer a
+# different question and must never collide.
+ACTIVITY_COUNTS_CACHE_PREFIX = "risk_cases:activity_counts:v4"
 ACTIVITY_COUNTS_CACHE_TTL_S = 60
 
 
@@ -552,22 +589,24 @@ def _activity_where(
     *,
     countries: Sequence[str],
     q: Optional[str],
-    only_verified: bool,
-    include_disabled: bool,
+    crm_true: Sequence[str],
 ) -> Tuple[str, List[Any]]:
-    """Filter clauses appended INSIDE the drv CTE (after the universe WHERE).
+    """Filter clauses appended INSIDE the drv CTE (after the WHERE TRUE anchor).
+
+    crm_true (validated codes from CRM_TRUE_CODES) = the flags filtered
+    = TRUE; every other flag is filtered = FALSE. All five flag clauses are
+    ALWAYS emitted — checkbox state maps 1:1 to the column value, an empty
+    set legally means "all five FALSE". Literal TRUE/FALSE SQL, no params.
 
     countries is the multi-select country filter (validated codes from
     ACTIVITY_COUNTRY_CODES): named codes → p.country IN (...); OTHER → not
     in the named list, NULL included. Named + OTHER OR together; empty
-    selection = no country filter (full universe).
+    selection = no country filter.
     """
     clauses: List[str] = []
     params: List[Any] = []
-    if only_verified:
-        clauses.append("p.is_verified = TRUE")
-    if not include_disabled:
-        clauses.append("p.is_enabled = TRUE")
+    for code, col in _CRM_FLAG_COL_SQL.items():
+        clauses.append(f"{col} = {'TRUE' if code in crm_true else 'FALSE'}")
     named = tuple(c for c in countries if c != "OTHER")
     country_subs: List[str] = []
     if named:
@@ -595,15 +634,17 @@ def _activity_where(
 def _activity_counts_cache_key(
     *,
     countries: Sequence[str],
-    only_verified: bool,
-    include_disabled: bool,
+    crm_true: Sequence[str],
 ) -> str:
-    # Sorted + deduped so equivalent selections share one cache entry.
+    # Sorted + deduped countries so equivalent selections share one entry;
+    # crm_true is encoded as a 5-bit TRUE/FALSE vector in CRM_TRUE_CODES
+    # order (32 combos, finite enum) — a counts entry is only valid for the
+    # exact flag combo it was computed over.
     countries_key = ",".join(sorted(set(countries))) or "all"
-    return (
-        f"{ACTIVITY_COUNTS_CACHE_PREFIX}:{countries_key}"
-        f":{int(only_verified)}:{int(include_disabled)}"
+    crm_vector = "".join(
+        "1" if code in crm_true else "0" for code in CRM_TRUE_CODES
     )
+    return f"{ACTIVITY_COUNTS_CACHE_PREFIX}:{countries_key}:{crm_vector}"
 
 
 def _query_activity_status_counts(
@@ -635,8 +676,7 @@ def query_activity_clients(
     statuses: Optional[Sequence[str]] = None,
     countries: Optional[Sequence[str]] = None,
     q: Optional[str] = None,
-    only_verified: bool = False,
-    include_disabled: bool = True,
+    crm_true: Optional[Sequence[str]] = None,
     sort_by: Optional[str] = None,
     sort_order: Optional[str] = None,
 ) -> Tuple[List[Dict[str, Any]], int, Dict[str, int], Optional[str]]:
@@ -647,6 +687,11 @@ def query_activity_clients(
     no keyset), then the enrichment SQL runs over the page's ids only.
     statuses is the multi-select bucket filter (empty/None → active_7d);
     countries the multi-select country filter (empty/None → no filter).
+    crm_true = the user_profile flags filtered = TRUE, every other flag
+    = FALSE (all five always apply). None → the default combo
+    ("verified","enabled"); an EMPTY sequence is legal and distinct from
+    None (all five FALSE) — the route maps a missing param to None and an
+    explicit empty string to [].
     Returns (rows, total, status_counts, newest_snapshot_iso). status_counts
     always covers all 8 buckets regardless of the statuses filter (it feeds
     the per-item badges of the dropdown); total = sum over the selected
@@ -665,6 +710,13 @@ def query_activity_clients(
     for c in countries:
         if c not in ACTIVITY_COUNTRY_CODES:
             raise ValueError(f"unknown country code: {c!r}")
+    # None → default combo; [] stays [] (all five flags FALSE — legal).
+    crm_true = list(
+        dict.fromkeys(DEFAULT_CRM_TRUE if crm_true is None else crm_true)
+    )
+    for f in crm_true:
+        if f not in CRM_TRUE_CODES:
+            raise ValueError(f"unknown crm_true code: {f!r}")
     sort_key = sort_by if sort_by in SORTABLE_ACTIVITY_COLS else DEFAULT_ACTIVITY_SORT_BY
     direction = "ASC" if (sort_order or "").lower() == "asc" else "DESC"
     order_expr = (
@@ -675,8 +727,7 @@ def query_activity_clients(
     where, params = _activity_where(
         countries=countries,
         q=q,
-        only_verified=only_verified,
-        include_disabled=include_disabled,
+        crm_true=crm_true,
     )
 
     page_sql = (
@@ -698,8 +749,7 @@ def query_activity_clients(
     if not (q and q.strip()):
         cache_key = _activity_counts_cache_key(
             countries=countries,
-            only_verified=only_verified,
-            include_disabled=include_disabled,
+            crm_true=crm_true,
         )
         client = _get_risk_cases_redis()
         if client is not None:

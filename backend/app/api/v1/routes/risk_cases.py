@@ -25,6 +25,8 @@ from ....schemas.risk_cases import (
 from ....services.risk_cases_service import (
     ACTIVITY_COUNTRY_CODES,
     ACTIVITY_STATUS_CODES,
+    CRM_TRUE_CODES,
+    DEFAULT_CRM_TRUE,
     get_case_detail,
     query_activity_clients,
     query_watchlist,
@@ -123,12 +125,23 @@ def activity_clients(
     q: Optional[str] = Query(
         default=None, max_length=64, description="userId (exact) / name / country"
     ),
-    only_verified: bool = Query(default=False),
-    include_disabled: bool = Query(
-        default=True,
+    # CRM-flag filter (frontend CRM属性 dropdown, 2026-07-24 semantics —
+    # replaces the former five exclusion params exclude_lead/exclude_demo/
+    # exclude_employee/only_verified/include_disabled): comma-separated set
+    # of flags that must be TRUE; every flag NOT listed filters = FALSE.
+    # All five always apply — checkbox state maps 1:1 to column values.
+    # None (param missing) → default combo "verified,enabled"; an EXPLICIT
+    # empty string is legal and different: all five flags FALSE.
+    crm_true: Optional[str] = Query(
+        default=None,
         description=(
-            "Default TRUE = full default universe (~59k, matches the badge "
-            "distribution); FALSE hides is_enabled=FALSE clients"
+            "Comma-separated codes of the kcm.user_profile flags that must "
+            "be TRUE (lead | verified | enabled | employee | demo); every "
+            "code NOT listed is filtered = FALSE — all five flags always "
+            "apply, there is no unfiltered flag. Missing param = default "
+            "combo 'verified,enabled' (verified AND enabled AND not lead/"
+            "employee/all-demo); explicit empty value = all five FALSE "
+            "(legal). Any unknown code → 422."
         ),
     ),
     sort_by: Optional[str] = Query(
@@ -169,6 +182,22 @@ def activity_clients(
                     f"expected one of {sorted(ACTIVITY_COUNTRY_CODES)}"
                 ),
             )
+    # Missing param (None) → the default combo; explicit empty string → []
+    # = all five flags FALSE. The None/"" distinction is the whole reason
+    # this is Optional[str] instead of a defaulted string.
+    if crm_true is None:
+        crm_list = list(DEFAULT_CRM_TRUE)
+    else:
+        crm_list = [f.strip().lower() for f in crm_true.split(",") if f.strip()]
+        for f in crm_list:
+            if f not in CRM_TRUE_CODES:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=(
+                        f"unknown crm_true code {f!r}; "
+                        f"expected one of {sorted(CRM_TRUE_CODES)}"
+                    ),
+                )
     t0 = time.perf_counter()
     try:
         rows, total, counts, snapshot_at = query_activity_clients(
@@ -177,8 +206,7 @@ def activity_clients(
             statuses=status_list,
             countries=country_list,
             q=q,
-            only_verified=only_verified,
-            include_disabled=include_disabled,
+            crm_true=crm_list,
             sort_by=sort_by,
             sort_order=sort_order,
         )
