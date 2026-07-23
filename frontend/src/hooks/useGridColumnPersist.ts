@@ -43,9 +43,12 @@ export const GRID_STORAGE_KEYS = {
   // saved the short-lived V2 state (children hide:true) would stamp them
   // invisible even when the group expands, so force a one-time reset.
   RISK_WATCHLIST: "RISK_WATCHLIST_GRID_STATE_V3",
-  // Open-positions view (当前持仓客户) on the risk-watchlist page — separate
-  // grid instance from the roster, so it gets its own key.
-  RISK_WATCHLIST_POSITIONS: "RISK_WATCHLIST_POSITIONS_GRID_STATE_V1",
+  // Full-universe activity view (全量客户, formerly 当前持仓客户) on the
+  // risk-watchlist page — separate grid instance from the roster, so it gets
+  // its own key. V2 (2026-07-23): the view became server-side paged with new
+  // driver-layer columns and a server sort whitelist; V1 states could carry a
+  // saved sort on a now-unsortable enrichment column, so force a reset.
+  RISK_WATCHLIST_POSITIONS: "RISK_WATCHLIST_POSITIONS_GRID_STATE_V2",
 } as const;
 
 export type GridStorageKey =

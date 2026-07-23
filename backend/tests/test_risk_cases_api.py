@@ -140,6 +140,218 @@ def test_case_detail_503_when_pg_down(client):
     assert res.status_code == 503
 
 
+# ── Activity view (full-universe, server-side paged) ────────────────────
+
+
+def _activity_row(user_id: int = 100341, **over) -> dict:
+    base = {
+        "user_id": user_id,
+        "user_name": "T",
+        "country": "CN",
+        "registered_at": "2024-01-01T00:00:00Z",
+        "activity_status": "active_7d",
+        "is_verified": True,
+        "is_enabled": True,
+        "first_trade_date": "2024-02-01",
+        "last_trade_date": "2026-07-22",
+        "trade_days": 120,
+        "lifetime_orders": 3000,
+        "lifetime_lots": 55.5,
+        "lifetime_deposit": 10000.0,
+        "profit_all": -68863.1,
+        "rebate_all": 37545.49,
+        "equity": 1241.12,
+        "floating_pl": 0.0,
+        "zipcode": "111",
+    }
+    base.update(over)
+    return base
+
+
+_ACTIVITY_COUNTS = {code: 0 for code in svc.ACTIVITY_STATUS_CODES}
+_ACTIVITY_COUNTS["active_7d"] = 1281
+
+
+def test_activity_clients_envelope_and_counts(client):
+    with mock.patch.object(
+        risk_cases_route,
+        "query_activity_clients",
+        return_value=([_activity_row()], 1281, dict(_ACTIVITY_COUNTS), None),
+    ) as q:
+        res = client.get("/api/v1/risk-cases/activity-clients?page=2&page_size=50")
+    assert res.status_code == 200
+    body = res.json()
+    for key in (
+        "data", "total", "page", "page_size", "total_pages",
+        "status_counts", "snapshot_at", "statistics",
+    ):
+        assert key in body
+    assert body["total"] == 1281
+    assert body["total_pages"] == 26
+    assert body["status_counts"]["active_7d"] == 1281
+    assert set(body["status_counts"]) == set(svc.ACTIVITY_STATUS_CODES)
+    row = body["data"][0]
+    assert row["activity_status"] == "active_7d"
+    # Enrichment gaps stay null (frontend renders "—", never 0)
+    assert row["position_count"] is None
+    assert row["trading_net_deposit"] is None
+    # Default status is active_7d (decision 2026-07-23), default universe
+    # includes disabled clients, no country filter.
+    kwargs = q.call_args.kwargs
+    assert kwargs["statuses"] == ["active_7d"]
+    assert kwargs["countries"] == []
+    assert kwargs["include_disabled"] is True
+    assert kwargs["only_verified"] is False
+
+
+def test_activity_clients_passes_filters_through(client):
+    with mock.patch.object(
+        risk_cases_route,
+        "query_activity_clients",
+        return_value=([], 0, dict(_ACTIVITY_COUNTS), None),
+    ) as q:
+        res = client.get(
+            "/api/v1/risk-cases/activity-clients"
+            "?status=dormant,holding&countries=cn,other&q=li"
+            "&only_verified=true&include_disabled=false"
+            "&sort_by=lifetime_lots&sort_order=asc"
+        )
+    assert res.status_code == 200
+    kwargs = q.call_args.kwargs
+    # Multi-value passthrough: comma-split statuses, case-insensitive
+    # country codes normalized to upper.
+    assert kwargs["statuses"] == ["dormant", "holding"]
+    assert kwargs["countries"] == ["CN", "OTHER"]
+    assert kwargs["q"] == "li"
+    assert kwargs["only_verified"] is True
+    assert kwargs["include_disabled"] is False
+    assert kwargs["sort_by"] == "lifetime_lots"
+    assert kwargs["sort_order"] == "asc"
+
+
+def test_activity_clients_unknown_status_422(client):
+    res = client.get("/api/v1/risk-cases/activity-clients?status=nope")
+    assert res.status_code == 422
+    # One bad code inside an otherwise valid multi-select also 422s.
+    res = client.get(
+        "/api/v1/risk-cases/activity-clients?status=holding,nope"
+    )
+    assert res.status_code == 422
+
+
+def test_activity_clients_unknown_country_422(client):
+    res = client.get("/api/v1/risk-cases/activity-clients?countries=XX")
+    assert res.status_code == 422
+    res = client.get(
+        "/api/v1/risk-cases/activity-clients?countries=CN,XX"
+    )
+    assert res.status_code == 422
+
+
+def test_activity_clients_empty_status_falls_back_to_default(client):
+    with mock.patch.object(
+        risk_cases_route,
+        "query_activity_clients",
+        return_value=([], 0, dict(_ACTIVITY_COUNTS), None),
+    ) as q:
+        res = client.get("/api/v1/risk-cases/activity-clients?status=")
+    assert res.status_code == 200
+    assert q.call_args.kwargs["statuses"] == ["active_7d"]
+
+
+def test_activity_clients_503_when_pg_down(client):
+    with mock.patch.object(
+        risk_cases_route,
+        "query_activity_clients",
+        side_effect=RiskCasesUnavailable("down"),
+    ):
+        res = client.get("/api/v1/risk-cases/activity-clients")
+    assert res.status_code == 503
+
+
+def test_activity_clients_not_swallowed_by_user_id_route(client):
+    # /activity-clients is declared before /{user_id}; if the ordering ever
+    # regresses, the literal path parses as user_id and 422s/404s.
+    with mock.patch.object(
+        risk_cases_route,
+        "query_activity_clients",
+        return_value=([], 0, dict(_ACTIVITY_COUNTS), None),
+    ):
+        res = client.get("/api/v1/risk-cases/activity-clients")
+    assert res.status_code == 200
+
+
+def test_activity_sort_whitelist_is_driver_layer_only():
+    assert svc.DEFAULT_ACTIVITY_SORT_BY == "last_trade_date"
+    assert svc.DEFAULT_ACTIVITY_SORT_BY in svc.SORTABLE_ACTIVITY_COLS
+    for col in svc.SORTABLE_ACTIVITY_COLS:
+        assert col in svc._ACTIVITY_SORT_COL_SQL
+    # Enrichment metrics must never become sortable (cross-universe sort is
+    # incompatible with the two-stage query inversion).
+    for col in ("rebate_all", "profit_all", "equity", "combined_30d"):
+        assert col not in svc.SORTABLE_ACTIVITY_COLS
+
+
+def test_activity_where_filters():
+    # Default flags + empty country selection → no extra clauses beyond the
+    # universe WHERE (empty countries = no filter).
+    where, params = svc._activity_where(
+        countries=[], q=None, only_verified=False, include_disabled=True,
+    )
+    assert where == ""
+    assert params == []
+    # Toggles + named countries + OTHER + numeric search. Named list and the
+    # OTHER complement OR together inside one parenthesized clause.
+    where, params = svc._activity_where(
+        countries=["CN", "TH", "OTHER"], q="127582",
+        only_verified=True, include_disabled=False,
+    )
+    assert "p.is_verified = TRUE" in where
+    assert "p.is_enabled = TRUE" in where
+    assert "(p.country IN %s OR (p.country IS NULL OR p.country NOT IN %s))" in where
+    assert "p.user_id = %s" in where
+    assert 127582 in params
+    assert ("CN", "TH") in params
+    assert svc._ACTIVITY_NAMED_COUNTRIES in params
+    # Named-only selection: plain IN, no NULL leg.
+    where, params = svc._activity_where(
+        countries=["VN"], q=None, only_verified=False, include_disabled=True,
+    )
+    assert "p.country IN %s" in where
+    assert "IS NULL" not in where
+    assert params == [("VN",)]
+    # OTHER-only selection: complement of the full named list, NULL included.
+    where, params = svc._activity_where(
+        countries=["OTHER"], q=None, only_verified=False, include_disabled=True,
+    )
+    assert "(p.country IS NULL OR p.country NOT IN %s)" in where
+    assert "p.country IN %s" not in where.replace("NOT IN %s", "")
+    assert params == [svc._ACTIVITY_NAMED_COUNTRIES]
+
+
+def test_activity_counts_cache_key_shape():
+    # v2 prefix (v1 keyed on country_mode/global_sub — must never collide);
+    # countries sorted+deduped so equivalent selections share one entry.
+    key = svc._activity_counts_cache_key(
+        countries=["TH", "CN", "TH"], only_verified=False, include_disabled=True,
+    )
+    assert key == "risk_cases:activity_counts:v2:CN,TH:0:1"
+    assert svc._activity_counts_cache_key(
+        countries=[], only_verified=True, include_disabled=False,
+    ) == "risk_cases:activity_counts:v2:all:1:0"
+
+
+def test_activity_status_case_waterfall_order():
+    # holding must be evaluated first (open-only new clients have NULL
+    # last_trade_date) and dormant after the three date windows.
+    case = svc._ACTIVITY_STATUS_CASE
+    order = [case.index(f"'{c}'") for c in (
+        "holding", "active_7d", "active_30d", "active_90d",
+        "dormant", "funded_no_trade", "new_no_fund", "no_fund",
+    )]
+    assert order == sorted(order)
+
+
 # ── Service pure helpers ────────────────────────────────────────────────
 
 
@@ -231,88 +443,3 @@ def test_watchlist_end_to_end_with_fixtures():
         assert detail["actions"] == []
     finally:
         seed.remove_fixtures()
-
-
-# ── Open positions: money-trail columns (client-level enrichment) ───────
-
-
-def _open_pos_row(**over) -> dict:
-    base = {
-        "user_id": 128535,
-        "user_name": "T",
-        "country": "CN",
-        "position_count": 3,
-        "account_count": 1,
-        "total_lots": 1.5,
-        "buy_lots": 1.0,
-        "sell_lots": 0.5,
-        "hedged_lots": 0.5,
-        "floating_pl_approx": -10.0,
-        "earliest_open_time": "2026-07-20T00:00:00Z",
-        "snapshot_at": "2026-07-22T05:00:00Z",
-        "symbol_count": 1,
-        "symbols": "XAUUSD",
-        # money-trail columns
-        "trading_net_deposit": 100.5,
-        "ib_withdrawal": -20.0,
-        "profit_7d": 1.0,
-        "profit_30d": 2.0,
-        "profit_all": 3.0,
-        "rebate_7d": None,  # e.g. no rebate rows in window
-        "rebate_30d": 4.0,
-        "rebate_all": 5.0,
-        "equity": 999.99,
-        "floating_pl": -9.5,
-        "zipcode": "111 90",
-    }
-    base.update(over)
-    return base
-
-
-def test_open_positions_money_trail_fields_serialize(client):
-    """New money-trail columns ship through the envelope; NULL stays null
-    (frontend renders "—", never 0)."""
-    with mock.patch.object(
-        risk_cases_route,
-        "query_open_positions_cached",
-        return_value=([_open_pos_row()], "2026-07-22T05:00:00Z", False),
-    ):
-        res = client.get("/api/v1/risk-cases/open-positions")
-    assert res.status_code == 200
-    row = res.json()["data"][0]
-    assert row["trading_net_deposit"] == 100.5
-    assert row["ib_withdrawal"] == -20.0
-    assert row["profit_7d"] == 1.0
-    assert row["rebate_7d"] is None  # None passes through, not coerced to 0
-    assert row["equity"] == 999.99
-    assert row["floating_pl"] == -9.5
-    assert row["zipcode"] == "111 90"
-
-
-def test_open_positions_money_trail_fields_default_none(client):
-    """Rows from before the SQL change (or with no source data) omit the
-    columns entirely — schema defaults must be None, not 0."""
-    legacy = {
-        k: v
-        for k, v in _open_pos_row().items()
-        if k
-        not in (
-            "trading_net_deposit", "ib_withdrawal",
-            "profit_7d", "profit_30d", "profit_all",
-            "rebate_7d", "rebate_30d", "rebate_all",
-            "equity", "floating_pl", "zipcode",
-        )
-    }
-    with mock.patch.object(
-        risk_cases_route,
-        "query_open_positions_cached",
-        return_value=([legacy], None, False),
-    ):
-        res = client.get("/api/v1/risk-cases/open-positions")
-    assert res.status_code == 200
-    row = res.json()["data"][0]
-    for key in (
-        "trading_net_deposit", "ib_withdrawal", "profit_all",
-        "rebate_all", "equity", "floating_pl", "zipcode",
-    ):
-        assert row[key] is None

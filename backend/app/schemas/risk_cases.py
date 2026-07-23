@@ -92,70 +92,78 @@ class WatchlistResponse(BaseModel):
     statistics: WatchlistStatistics = WatchlistStatistics()
 
 
-class OpenPositionRow(BaseModel):
-    """One client (userId) with live open positions, aggregated across all
-    their accounts. Fed by the KCM pipeline's 60s snapshot table
-    `kcm.active_positions_snapshot` (a peer project, same PG server) — NOT
-    the daily case baseline. Read-only, near-real-time.
+class ActivityClientRow(BaseModel):
+    """One client of the full-universe activity view (server-side paged).
+
+    Driver layer = kcm.user_profile LEFT JOIN kcm.user_activity_summary (T13,
+    lifetime aggregates) LEFT JOIN the open-positions snapshot; the mutually
+    exclusive activity_status is a priority-waterfall CASE (holding first —
+    a client whose first order is still open has last_trade_date NULL).
+    Enrichment columns are filled per page (<=200 ids) from the kcm-schema
+    positions/money-trail tables; None = no data → frontend renders "—".
     """
 
+    # ── Driver layer (kcm.user_profile ⟕ T13) ──
     user_id: int
     user_name: Optional[str] = None
     country: Optional[str] = None
-    position_count: int = 0          # 单数 — rows (one row = one open order)
-    account_count: int = 0           # distinct loginSid with open positions
-    total_lots: float = 0.0          # cent already /100 upstream
-    buy_lots: float = 0.0
-    sell_lots: float = 0.0
-    # 同一品种内买/卖成对锁住的手数(各品种取较小边求和,单边口径)。
-    # 对锁% = 2×hedged_lots ÷ total_lots,在前端算。跨品种反向敞口不计入。
-    hedged_lots: float = 0.0
-    # SUM(current_profit) — display-only, up to ~3 min stale, NOT the
-    # authoritative floating_pl (see kcm.active_positions_snapshot DDL).
-    floating_pl_approx: Optional[float] = None
-    earliest_open_time: Optional[str] = None  # UTC ISO; frontend derives 持仓时长
-    snapshot_at: Optional[str] = None          # freshness of the KCM snapshot
-    symbol_count: int = 0
-    symbols: Optional[str] = None              # distinct base symbols, comma-joined
+    registered_at: Optional[str] = None
+    # holding | active_7d | active_30d | active_90d | dormant |
+    # funded_no_trade | new_no_fund | no_fund
+    activity_status: str
+    is_verified: Optional[bool] = None
+    is_enabled: Optional[bool] = None
+    # T13 lifetime aggregates — None for clients never seen in trades or
+    # cashflow (the no_fund/new_no_fund bulk; T13 only covers T4∪T7 users).
+    first_trade_date: Optional[str] = None
+    last_trade_date: Optional[str] = None
+    trade_days: Optional[int] = None
+    lifetime_orders: Optional[int] = None
+    lifetime_lots: Optional[float] = None
+    # Gross lifetime deposit (never net — net would misclassify clients who
+    # withdrew everything after funding).
+    lifetime_deposit: Optional[float] = None
 
-    # ── Client-level money-trail metrics (all Optional; None = no data,
-    # frontend renders "—"). Cent-account amounts are already normalized
-    # (/100) by the KCM pipeline before landing in these tables — no /100
-    # is applied here.
-    #
-    # From kcm.daily_user_cashflow (T-1: daily job at 03:35 HKT).
-    # trading_net_deposit already EXCLUDES ib_withdrawal (separate bucket).
+    # ── Enrichment: open positions (holding clients only, 60s snapshot) ──
+    position_count: Optional[int] = None
+    account_count: Optional[int] = None   # accounts WITH open positions
+    total_lots: Optional[float] = None
+    buy_lots: Optional[float] = None
+    sell_lots: Optional[float] = None
+    hedged_lots: Optional[float] = None   # same-symbol pairing, one-sided
+    earliest_open_time: Optional[str] = None
+    symbol_count: Optional[int] = None
+    symbols: Optional[str] = None
+
+    # ── Enrichment: money trail (kcm-schema sources; freshness: cashflow
+    # T-1 / closed PL <=10min / rebate T-1 / equity+floating 30s) ──
     trading_net_deposit: Optional[float] = None
     ib_withdrawal: Optional[float] = None
-    # From kcm.daily_user_stats.profit_sum — closed-trade PL; today's closed
-    # trades flow in incrementally (<=10 min lag).
     profit_7d: Optional[float] = None
     profit_30d: Optional[float] = None
     profit_all: Optional[float] = None
-    # From kcm.daily_user_rebate.rebate_usd — full-chain rebate, T-1
-    # (today's rebates only appear after the next early-morning refresh).
     rebate_7d: Optional[float] = None
     rebate_30d: Optional[float] = None
     rebate_all: Optional[float] = None
-    # From kcm.user_account_state SUMmed per userId (30s refresh).
-    # floating_pl is the authoritative value ((EQUITY-BALANCE-CREDIT)/cent_div),
-    # unlike floating_pl_approx above which is a ~3 min stale snapshot sum.
     equity: Optional[float] = None
     floating_pl: Optional[float] = None
-    # From fxbackoffice.mt4_users.ZIPCODE (CRM MySQL — kcm.user_profile has
-    # no zipcode). Client-level: distinct values across the client's
-    # compliant accounts, comma-joined when they disagree. Fail-open lookup:
-    # None on any MySQL error.
+    # CRM MySQL leg (fail-open), client-level distinct comma-joined
     zipcode: Optional[str] = None
 
 
-class OpenPositionsResponse(BaseModel):
-    """Full aggregated list (client-level) — the set is small (~900 clients),
-    so it ships in one page and the grid sorts/filters client-side."""
+class ActivityClientsResponse(BaseModel):
+    """Server-side paged activity view over the default client universe
+    (user_profile minus leads minus all-demo clients, ~59k)."""
 
-    data: List[OpenPositionRow]
+    data: List[ActivityClientRow]
     total: int
-    snapshot_at: Optional[str] = None  # newest snapshot across all rows
+    page: int = 1
+    page_size: int = 50
+    total_pages: int = 1
+    # Per-status badge counts over the SAME filters minus the status filter
+    # (60s-cached when no search term); keys = the 8 activity codes.
+    status_counts: dict[str, int] = {}
+    snapshot_at: Optional[str] = None  # newest positions snapshot on the page
     statistics: WatchlistStatistics = WatchlistStatistics()
 
 

@@ -33,7 +33,9 @@ export const FILTER_STATE_KEYS: readonly string[] = [
   "RISK_MONITOR_GAP_TRADE_FILTERS_V1",
   "ALERT_MAIL_OUTBOX_FILTERS_V1",
   "RISK_WATCHLIST_MAIN_FILTERS_V1",
-  "RISK_WATCHLIST_POSITIONS_FILTERS_V1",
+  // V1 → V2 (2026-07-24): activity view filters changed shape (statuses[] /
+  // countries[] multi-selects replaced status/countryMode/globalSub).
+  "RISK_WATCHLIST_POSITIONS_FILTERS_V2",
 ];
 
 /**

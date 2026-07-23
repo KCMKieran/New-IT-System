@@ -16,6 +16,11 @@
  * Data: GET /api/v1/risk-cases/watchlist (one big page — roster is
  * thousand-level; sorting/filtering then happen client-side in AG-Grid),
  * GET /api/v1/risk-cases/{userId} for the case sheet.
+ *
+ * A view toggle also hosts 全量客户 (all-clients activity view, reworked
+ * 2026-07-23 from the former open-positions view): server-side paginated
+ * activity-status browsing over the full client universe — see
+ * ActivityClientsPanel.tsx and GET /api/v1/risk-cases/activity-clients.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTheme } from "@/components/theme-provider";
@@ -49,7 +54,7 @@ import {
 } from "@/hooks/useGridColumnPersist";
 import { ColumnVisibilityMenu } from "@/components/ColumnVisibilityMenu";
 import { readFilterState, useFilterPersist } from "@/hooks/useFilterPersist";
-import OpenPositionsPanel from "./OpenPositionsPanel";
+import ActivityClientsPanel from "./ActivityClientsPanel";
 
 // ── API row shapes (mirror backend/app/schemas/risk_cases.py) ────────────
 
@@ -148,9 +153,11 @@ const FILTERS_KEY = "RISK_WATCHLIST_MAIN_FILTERS_V1";
 type Filters = { stateFilter: string };
 const FILTER_DEFAULTS: Filters = { stateFilter: "all" };
 
-// View toggle: "positions" = 当前持仓客户 (near-real-time, default while the
-// page is temporarily repurposed 2026-07-21) · "roster" = 返佣观察清单 (the
-// original rebate-arbitrage case roster). Persisted independently.
+// View toggle: "positions" = 全量客户 (all-clients activity view — reworked
+// 2026-07-23 from the former open-positions view into server-side paginated
+// activity-status browsing; internal value kept as "positions" for persisted
+// preference compat) · "roster" = 返佣观察清单 (the original rebate-arbitrage
+// case roster). Persisted independently.
 const VIEW_KEY = "RISK_WATCHLIST_VIEW_V1";
 type ViewPref = { view: string };
 const VIEW_DEFAULTS: ViewPref = { view: "positions" };
@@ -939,8 +946,8 @@ export default function RiskWatchlist() {
 
   return (
     <div className="flex h-full w-full flex-col gap-2 p-1 sm:p-4">
-      {/* View toggle: 当前持仓客户 (near-real-time) vs 返佣观察清单 (case roster).
-          Default is 当前持仓客户 (2026-07-21, temporary repurpose). */}
+      {/* View toggle: 全量客户 (all-clients activity view, reworked 2026-07-23)
+          vs 返佣观察清单 (case roster). Default is 全量客户. */}
       <div className="flex items-center gap-2">
         <div className="inline-flex rounded-lg border bg-card p-0.5">
           <Button
@@ -949,7 +956,7 @@ export default function RiskWatchlist() {
             className="h-8"
             onClick={() => setView("positions")}
           >
-            当前持仓客户
+            全量客户
           </Button>
           <Button
             variant={view === "roster" ? "default" : "ghost"}
@@ -962,7 +969,7 @@ export default function RiskWatchlist() {
         </div>
       </div>
 
-      {view === "positions" && <OpenPositionsPanel isDarkMode={isDarkMode} />}
+      {view === "positions" && <ActivityClientsPanel isDarkMode={isDarkMode} />}
 
       {view === "roster" && (
         <>

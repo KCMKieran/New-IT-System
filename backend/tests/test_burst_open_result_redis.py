@@ -8,7 +8,7 @@ GET /burst-open on the 3 non-owner workers stops answering a constant 503.
 
 All Redis access goes through the module-level client getter
 (burst_open_scheduler._get_result_redis), so every test fakes Redis by
-monkeypatching that getter — same style as tests/test_open_positions_cache.py
+monkeypatching that getter — same style as tests/test_risk_cases_redis.py
 (OPT-0054). No live Redis is required.
 
 Locked behaviors:

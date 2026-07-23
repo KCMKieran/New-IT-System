@@ -15,15 +15,13 @@ import logging
 import os
 import threading
 from datetime import date, datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import pymysql
 import redis
 
 from ..core.config import Settings, get_settings
 from ..core.risk_cases_pg import risk_cases_conn
-from ..core.singleflight import SingleFlight
-from ..schemas.risk_cases import OpenPositionRow
 
 logger = logging.getLogger(__name__)
 
@@ -251,158 +249,16 @@ def _fetch_hold_deltas(
     return out
 
 
-# ── Open positions (near-real-time) ─────────────────────────────────────
-#
-# Sourced from the KCM pipeline's 60s snapshot table
-# `kcm.active_positions_snapshot` (peer project, same PG server / DB, `kcm`
-# schema — risk_app has read grant). This is intentionally a *separate* read
-# path from the daily case baseline: it answers "who is holding positions
-# right now", aggregated to one row per client (userId) across all accounts.
-
-_OPEN_POSITIONS_SQL = """
-    WITH per_symbol AS (
-        -- 先按 (客户, base_symbol) 聚合,才能算「同一品种」的对锁。
-        -- 关键:锁仓必须在同一品种内配对——buy XAUUSD / sell EURUSD 是两笔
-        -- 反向敞口,不是对锁。若直接对客户级总买/总卖取 LEAST/GREATEST,会把
-        -- 这种跨品种敞口误判为锁仓(这正是旧口径的 bug)。
-        SELECT
-            p.user_id,
-            p.base_symbol,
-            SUM(CASE WHEN p.cmd = 0 THEN p.lots ELSE 0 END) AS sym_buy,
-            SUM(CASE WHEN p.cmd = 1 THEN p.lots ELSE 0 END) AS sym_sell
-        FROM kcm.active_positions_snapshot p
-        GROUP BY p.user_id, p.base_symbol
-    ),
-    hedge AS (
-        -- 每个品种被锁住的手数 = 该品种买/卖的较小边;跨品种求和 = 客户级
-        -- 对锁手数(单边口径)。对锁% 在前端算 = 2×hedged_lots ÷ total_lots
-        -- (锁定占用买、卖各一份,故 ×2),表示「总持仓中处于同品种对锁的比例」。
-        SELECT
-            user_id,
-            SUM(LEAST(sym_buy, sym_sell)) AS hedged_lots
-        FROM per_symbol
-        GROUP BY user_id
-    ),
-    -- Client-level money-trail aggregates. Each CTE is restricted to the
-    -- userIds currently holding positions (pos_users) so we never aggregate
-    -- the full 24k+ userId universe. Cent amounts are already normalized
-    -- upstream by the KCM pipeline — no /100 here.
-    pos_users AS (
-        SELECT DISTINCT user_id FROM kcm.active_positions_snapshot
-    ),
-    cash AS (
-        -- kcm.daily_user_cashflow: T-1 (daily job 03:35 HKT).
-        -- trading_net_deposit already excludes ib_withdrawal (own bucket).
-        SELECT c.user_id,
-               SUM(c.trading_net_deposit) AS trading_net_deposit,
-               SUM(c.ib_withdrawal)       AS ib_withdrawal
-        FROM kcm.daily_user_cashflow c
-        JOIN pos_users pu ON pu.user_id = c.user_id
-        GROUP BY c.user_id
-    ),
-    closed_pl AS (
-        -- kcm.daily_user_stats.profit_sum: closed-trade PL, today's closes
-        -- flow in incrementally (<=10 min lag).
-        SELECT s.user_id,
-               SUM(s.profit_sum) FILTER (WHERE s.stat_date > CURRENT_DATE - 7)  AS profit_7d,
-               SUM(s.profit_sum) FILTER (WHERE s.stat_date > CURRENT_DATE - 30) AS profit_30d,
-               SUM(s.profit_sum)                                                AS profit_all
-        FROM kcm.daily_user_stats s
-        JOIN pos_users pu ON pu.user_id = s.user_id
-        GROUP BY s.user_id
-    ),
-    rebate AS (
-        -- kcm.daily_user_rebate.rebate_usd: full-chain rebate, T-1 (today's
-        -- rebates only land after the next early-morning refresh).
-        SELECT r.user_id,
-               SUM(r.rebate_usd) FILTER (WHERE r.stat_date > CURRENT_DATE - 7)  AS rebate_7d,
-               SUM(r.rebate_usd) FILTER (WHERE r.stat_date > CURRENT_DATE - 30) AS rebate_30d,
-               SUM(r.rebate_usd)                                                AS rebate_all
-        FROM kcm.daily_user_rebate r
-        JOIN pos_users pu ON pu.user_id = r.user_id
-        GROUP BY r.user_id
-    ),
-    acct AS (
-        -- kcm.user_account_state summed per userId (30s refresh).
-        -- floating_pl here is authoritative ((EQUITY-BALANCE-CREDIT)/cent_div),
-        -- unlike floating_pl_approx (~3 min stale snapshot sum).
-        SELECT a.user_id,
-               SUM(a.equity)      AS equity,
-               SUM(a.floating_pl) AS floating_pl
-        FROM kcm.user_account_state a
-        JOIN pos_users pu ON pu.user_id = a.user_id
-        GROUP BY a.user_id
-    )
-    SELECT
-        p.user_id,
-        up.user_name,
-        up.country,
-        COUNT(*)                                        AS position_count,
-        COUNT(DISTINCT p.login_sid)                     AS account_count,
-        SUM(p.lots)                                     AS total_lots,
-        SUM(CASE WHEN p.cmd = 0 THEN p.lots ELSE 0 END) AS buy_lots,
-        SUM(CASE WHEN p.cmd = 1 THEN p.lots ELSE 0 END) AS sell_lots,
-        SUM(p.current_profit)                           AS floating_pl_approx,
-        MIN(p.open_time)                                AS earliest_open_time,
-        MAX(p.snapshot_at)                              AS snapshot_at,
-        COUNT(DISTINCT p.base_symbol)                   AS symbol_count,
-        string_agg(DISTINCT p.base_symbol, ', ' ORDER BY p.base_symbol) AS symbols,
-        COALESCE(h.hedged_lots, 0)                      AS hedged_lots,
-        ca.trading_net_deposit,
-        ca.ib_withdrawal,
-        cp.profit_7d,
-        cp.profit_30d,
-        cp.profit_all,
-        rb.rebate_7d,
-        rb.rebate_30d,
-        rb.rebate_all,
-        ac.equity,
-        ac.floating_pl
-    FROM kcm.active_positions_snapshot p
-    LEFT JOIN kcm.user_profile up ON up.user_id = p.user_id
-    LEFT JOIN hedge h ON h.user_id = p.user_id
-    LEFT JOIN cash ca ON ca.user_id = p.user_id
-    LEFT JOIN closed_pl cp ON cp.user_id = p.user_id
-    LEFT JOIN rebate rb ON rb.user_id = p.user_id
-    LEFT JOIN acct ac ON ac.user_id = p.user_id
-    GROUP BY p.user_id, up.user_name, up.country, h.hedged_lots,
-             ca.trading_net_deposit, ca.ib_withdrawal,
-             cp.profit_7d, cp.profit_30d, cp.profit_all,
-             rb.rebate_7d, rb.rebate_30d, rb.rebate_all,
-             ac.equity, ac.floating_pl
-    ORDER BY total_lots DESC
-"""
-
-_OPEN_POS_FLOAT_COLS = (
-    "total_lots",
-    "buy_lots",
-    "sell_lots",
-    "hedged_lots",
-    "floating_pl_approx",
-    # Money-trail columns — None passes through (NULL must NOT become 0;
-    # frontend renders "—" for missing data).
-    "trading_net_deposit",
-    "ib_withdrawal",
-    "profit_7d",
-    "profit_30d",
-    "profit_all",
-    "rebate_7d",
-    "rebate_30d",
-    "rebate_all",
-    "equity",
-    "floating_pl",
-)
-
-
 def _query_zipcodes_by_userid(
     settings: Settings, user_ids: List[int]
 ) -> Dict[int, str]:
     """Client-level zipcode from fxbackoffice.mt4_users (CRM MySQL slave).
 
     kcm.user_profile carries no zipcode, so this is the one non-PG lookup on
-    the open-positions path (a single indexed IN query over ~800 userIds).
-    A client's accounts normally share one zipcode; distinct values are
-    comma-joined so a mismatch is visible instead of silently picked from.
+    the activity-clients path (a single indexed IN query over the page's
+    <=200 userIds). A client's accounts normally share one zipcode; distinct
+    values are comma-joined so a mismatch is visible instead of silently
+    picked from.
     Compliance filter mirrors the sibling client-level helpers in
     account_enrichment.py (sid allow-list + demo exclusion).
 
@@ -449,78 +305,24 @@ def _query_zipcodes_by_userid(
         logger.error("Zipcode lookup from mt4_users failed", exc_info=True)
         return {}
 
-
-def query_open_positions(
-    settings: Optional[Settings] = None,
-) -> Tuple[List[Dict[str, Any]], Optional[str]]:
-    """All clients currently holding open positions, one row per userId.
-
-    The set is small (~900 clients), so the whole list ships in one page and
-    the grid sorts/filters client-side (same pattern as the roster). Returns
-    (rows, newest_snapshot_iso). Raises RiskCasesUnavailable when PG is down
-    (route → 503).
-    """
-    settings = settings or get_settings()
-    with risk_cases_conn(settings) as conn:
-        with conn.cursor() as cur:
-            cur.execute(_OPEN_POSITIONS_SQL)
-            raw = cur.fetchall()
-
-    rows: List[Dict[str, Any]] = []
-    newest: Optional[str] = None
-    for r in raw:
-        row = dict(r)
-        for key in _OPEN_POS_FLOAT_COLS:
-            row[key] = float(row[key]) if row.get(key) is not None else None
-        for key in ("earliest_open_time", "snapshot_at"):
-            row[key] = _iso(row.get(key))
-        if row["snapshot_at"] and (newest is None or row["snapshot_at"] > newest):
-            newest = row["snapshot_at"]
-        rows.append(row)
-
-    zip_map = _query_zipcodes_by_userid(
-        settings, [row["user_id"] for row in rows]
-    )
-    for row in rows:
-        row["zipcode"] = zip_map.get(row["user_id"])
-    return rows, newest
-
-
-# ── Open-positions TTL cache + singleflight (OPT-0054) ──────────────────
+# ── Shared Redis client (fail-open) ─────────────────────────────────────
 #
-# The upstream snapshot table (`kcm.active_positions_snapshot`) refreshes
-# every 60s, but every open browser tab polls this endpoint every 60s and
-# each poll used to run the ~1.2s 5-CTE PG aggregation from scratch. A short
-# shared Redis TTL cache (30s, versioned key) plus per-process singleflight
-# on miss caps the PG load at one _OPEN_POSITIONS_SQL run per TTL window
-# PER WORKER PROCESS. Prod runs 4 uvicorn workers, so the worst case at TTL
-# expiry is 4 concurrent PG queries — bounded and accepted; cross-worker
-# coordination (e.g. a serve-stale/SWR design) was reviewed and consciously
-# deferred. Fail-open: any Redis error only logs a warning and falls
-# through to the direct PG query — the endpoint must never 5xx because
-# Redis is down.
-
-# Versioning rule: bump the `:v1` suffix whenever the _OPEN_POSITIONS_SQL
-# output columns or the OpenPositionRow schema change, so workers on a new
-# deploy never try to serve a stale-shaped payload written by old code.
-OPEN_POSITIONS_CACHE_KEY = "risk_cases:open_positions:v1"
-OPEN_POSITIONS_CACHE_TTL_S = 30
+# One lazily-created module-level client per process (redis-py clients are
+# thread-safe and pool connections internally) — building a client per
+# request would churn TCP connections against the shared Redis for no
+# benefit. Currently the only consumer is the activity-view badge-counts
+# cache below. Fail-open contract: any Redis problem only logs a warning
+# and the caller falls back to a direct PG query — endpoints must never
+# 5xx because Redis is down.
 
 _REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 _REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 
-# Coalesces concurrent cache misses within this process so only one caller
-# runs the PG query; the other callers block and share the owner's result.
-_open_positions_flight = SingleFlight()
-
-# Lazily-created module-level Redis client (redis-py clients are thread-safe
-# and pool connections internally) — building a client per request would
-# churn TCP connections against the shared Redis for no benefit.
-_open_positions_redis: Optional["redis.Redis"] = None
-_open_positions_redis_lock = threading.Lock()
+_risk_cases_redis: Optional["redis.Redis"] = None
+_risk_cases_redis_lock = threading.Lock()
 
 
-def _get_open_positions_redis() -> Optional["redis.Redis"]:
+def _get_risk_cases_redis() -> Optional["redis.Redis"]:
     """Return the shared module-level Redis client, creating it on first use.
 
     Fail-open contract: if the client cannot be created or Redis does not
@@ -529,11 +331,11 @@ def _get_open_positions_redis() -> Optional["redis.Redis"]:
     timeouts (Redis is same-host) keep the fail-open path fast when Redis
     is wedged rather than refusing connections.
     """
-    global _open_positions_redis
-    if _open_positions_redis is not None:
-        return _open_positions_redis
-    with _open_positions_redis_lock:
-        if _open_positions_redis is None:
+    global _risk_cases_redis
+    if _risk_cases_redis is not None:
+        return _risk_cases_redis
+    with _risk_cases_redis_lock:
+        if _risk_cases_redis is None:
             try:
                 client = redis.Redis(
                     host=_REDIS_HOST,
@@ -543,86 +345,428 @@ def _get_open_positions_redis() -> Optional["redis.Redis"]:
                     socket_timeout=0.5,
                 )
                 client.ping()
-                _open_positions_redis = client
+                _risk_cases_redis = client
             except Exception as exc:
                 logger.warning(
-                    "open-positions Redis client unavailable, fail-open: %s",
+                    "risk-cases Redis client unavailable, fail-open: %s",
                     exc,
                 )
                 return None
-        return _open_positions_redis
+        return _risk_cases_redis
 
 
-def query_open_positions_cached(
-    settings: Optional[Settings] = None,
-) -> Tuple[List[Dict[str, Any]], Optional[str], bool]:
-    """query_open_positions() behind a 30s Redis TTL cache + singleflight.
+# ── Activity view: full client universe, server-side paged ──────────────
+#
+# Contract: .claude/skills/activity-status-column/SKILL.md (New-IT mirror of
+# the KCM-side design doc). Driver layer = kcm.user_profile LEFT JOIN
+# kcm.user_activity_summary (T13 lifetime narrow table) LEFT JOIN the 60s
+# open-positions snapshot; the default universe is user_profile minus leads
+# minus all-demo clients (~59k). Pagination/filter/sort happen in the driver
+# layer FIRST; the four money-trail CTEs then enrich only the page's ids —
+# never the full universe (the whole point of the two-stage structure).
 
-    Returns (rows, newest_snapshot_iso, from_cache). The cached payload
-    stores rows together with snapshot_at, so a cache hit reports the exact
-    snapshot time of the cached result (never a fabricated/fresher one).
-    Rows are JSON-safe by construction (query_open_positions coerces floats
-    and ISO strings); a serialization surprise would only skip the cache
-    write, never break the response. The singleflight is per-process (see
-    module comment: 4 workers → worst case 4 concurrent PG queries at TTL
-    expiry, accepted). RiskCasesUnavailable still propagates on the miss
-    path so the route can 503.
+ACTIVITY_STATUS_CODES: Tuple[str, ...] = (
+    "holding",
+    "active_7d",
+    "active_30d",
+    "active_90d",
+    "dormant",
+    "funded_no_trade",
+    "new_no_fund",
+    "no_fund",
+)
+
+# Sortable columns = driver-layer columns ONLY (T13 + profile). Enrichment
+# metrics (rebate/profit/equity…) are per-page and cannot be sorted across
+# the universe — the frontend marks those columns sortable: false.
+_ACTIVITY_SORT_COL_SQL: Dict[str, str] = {
+    "user_id": "user_id",
+    "registered_at": "registered_at",
+    "first_trade_date": "first_trade_date",
+    "last_trade_date": "last_trade_date",
+    "trade_days": "trade_days",
+    "lifetime_orders": "lifetime_orders",
+    "lifetime_lots": "lifetime_lots",
+    "lifetime_deposit": "lifetime_deposit",
+}
+SORTABLE_ACTIVITY_COLS: frozenset = frozenset(_ACTIVITY_SORT_COL_SQL)
+DEFAULT_ACTIVITY_SORT_BY = "last_trade_date"
+
+# Named country codes offered by the frontend multi-select. OTHER is the
+# complement bucket: country not in this list (NULL country included).
+_ACTIVITY_NAMED_COUNTRIES: Tuple[str, ...] = ("CN", "TH", "VN", "NG", "LA", "TW")
+ACTIVITY_COUNTRY_CODES: frozenset = frozenset((*_ACTIVITY_NAMED_COUNTRIES, "OTHER"))
+
+# Priority waterfall, first hit wins. holding MUST stay first: a client
+# whose first-ever order is still open has last_trade_date NULL ("trade" =
+# closed trade in T13) and would otherwise fall into the never-traded
+# buckets. dormant (IS NOT NULL) must stay after the three date windows.
+# lifetime_deposit is GROSS deposit — net would misclassify clients who
+# withdrew everything after funding.
+_ACTIVITY_STATUS_CASE = """
+        CASE
+            WHEN pos.user_id IS NOT NULL                 THEN 'holding'
+            WHEN t.last_trade_date >= current_date - 7   THEN 'active_7d'
+            WHEN t.last_trade_date >= current_date - 30  THEN 'active_30d'
+            WHEN t.last_trade_date >= current_date - 90  THEN 'active_90d'
+            WHEN t.last_trade_date IS NOT NULL           THEN 'dormant'
+            WHEN COALESCE(t.lifetime_deposit, 0) > 0     THEN 'funded_no_trade'
+            WHEN p.registered_at >= current_date - 30    THEN 'new_no_fund'
+            ELSE 'no_fund'
+        END"""
+
+_ACTIVITY_DRV_SQL = f"""
+    WITH pos AS (
+        SELECT DISTINCT user_id FROM kcm.active_positions_snapshot
+    ),
+    drv AS (
+        SELECT p.user_id, p.user_name, p.country, p.registered_at,
+               p.is_verified, p.is_enabled,
+               t.first_trade_date, t.last_trade_date, t.trade_days,
+               t.lifetime_orders, t.lifetime_lots, t.lifetime_deposit,
+               {_ACTIVITY_STATUS_CASE} AS activity_status
+        FROM kcm.user_profile p
+        LEFT JOIN kcm.user_activity_summary t ON t.user_id = p.user_id
+        LEFT JOIN pos ON pos.user_id = p.user_id
+        WHERE p.is_lead = FALSE AND p.is_all_demo = FALSE
     """
-    client = _get_open_positions_redis()
-    cached: Optional[str] = None
-    if client is not None:
-        try:
-            cached = client.get(OPEN_POSITIONS_CACHE_KEY)
-        except Exception as exc:
-            logger.warning(
-                "open-positions cache read failed, fail-open to direct PG: %s",
-                exc,
-            )
-            client = None
 
-    if cached is not None:
-        try:
-            payload = json.loads(cached)
-            rows = payload["rows"]
-            if not isinstance(rows, list):
-                raise ValueError("cached rows is not a list")
-            if rows:
-                # Deploy-time skew guard: during a rolling deploy a new
-                # worker can read a payload written by old code with a
-                # different row shape. The route does OpenPositionRow(**r)
-                # on every row, so a shape mismatch would 500 the flagship
-                # page for up to a TTL. Validate the first row against the
-                # current model here; any mismatch is treated exactly like
-                # a corrupt payload (refetch from PG, overwrite cache).
-                OpenPositionRow(**rows[0])
-            return rows, payload.get("snapshot_at"), True
-        except Exception as exc:
-            logger.warning(
-                "open-positions cache payload invalid or stale-shaped, "
-                "refetching: %s",
-                exc,
-            )
+# Per-page enrichment (<=200 ids): the open-positions aggregation + the four
+# money-trail CTEs, each restricted to the page ids — same sources, coverage
+# semantics ("no row = event never happened → NULL → frontend —") and
+# no-/100 rule as _OPEN_POSITIONS_SQL.
+_ACTIVITY_ENRICH_SQL = """
+    WITH pos_agg AS (
+        SELECT p.user_id,
+               COUNT(*)                                        AS position_count,
+               COUNT(DISTINCT p.login_sid)                     AS account_count,
+               SUM(p.lots)                                     AS total_lots,
+               SUM(CASE WHEN p.cmd = 0 THEN p.lots ELSE 0 END) AS buy_lots,
+               SUM(CASE WHEN p.cmd = 1 THEN p.lots ELSE 0 END) AS sell_lots,
+               MIN(p.open_time)                                AS earliest_open_time,
+               MAX(p.snapshot_at)                              AS snapshot_at,
+               COUNT(DISTINCT p.base_symbol)                   AS symbol_count,
+               string_agg(DISTINCT p.base_symbol, ', '
+                          ORDER BY p.base_symbol)              AS symbols
+        FROM kcm.active_positions_snapshot p
+        WHERE p.user_id = ANY(%(ids)s)
+        GROUP BY p.user_id
+    ),
+    per_symbol AS (
+        -- Same-symbol pairing only (see _OPEN_POSITIONS_SQL rationale).
+        SELECT p.user_id, p.base_symbol,
+               SUM(CASE WHEN p.cmd = 0 THEN p.lots ELSE 0 END) AS sym_buy,
+               SUM(CASE WHEN p.cmd = 1 THEN p.lots ELSE 0 END) AS sym_sell
+        FROM kcm.active_positions_snapshot p
+        WHERE p.user_id = ANY(%(ids)s)
+        GROUP BY p.user_id, p.base_symbol
+    ),
+    hedge AS (
+        SELECT user_id, SUM(LEAST(sym_buy, sym_sell)) AS hedged_lots
+        FROM per_symbol
+        GROUP BY user_id
+    ),
+    cash AS (
+        SELECT c.user_id,
+               SUM(c.trading_net_deposit) AS trading_net_deposit,
+               SUM(c.ib_withdrawal)       AS ib_withdrawal
+        FROM kcm.daily_user_cashflow c
+        WHERE c.user_id = ANY(%(ids)s)
+        GROUP BY c.user_id
+    ),
+    closed_pl AS (
+        SELECT s.user_id,
+               SUM(s.profit_sum) FILTER (WHERE s.stat_date > CURRENT_DATE - 7)  AS profit_7d,
+               SUM(s.profit_sum) FILTER (WHERE s.stat_date > CURRENT_DATE - 30) AS profit_30d,
+               SUM(s.profit_sum)                                                AS profit_all
+        FROM kcm.daily_user_stats s
+        WHERE s.user_id = ANY(%(ids)s)
+        GROUP BY s.user_id
+    ),
+    rebate AS (
+        SELECT r.user_id,
+               SUM(r.rebate_usd) FILTER (WHERE r.stat_date > CURRENT_DATE - 7)  AS rebate_7d,
+               SUM(r.rebate_usd) FILTER (WHERE r.stat_date > CURRENT_DATE - 30) AS rebate_30d,
+               SUM(r.rebate_usd)                                                AS rebate_all
+        FROM kcm.daily_user_rebate r
+        WHERE r.user_id = ANY(%(ids)s)
+        GROUP BY r.user_id
+    ),
+    acct AS (
+        SELECT a.user_id,
+               SUM(a.equity)      AS equity,
+               SUM(a.floating_pl) AS floating_pl
+        FROM kcm.user_account_state a
+        WHERE a.user_id = ANY(%(ids)s)
+        GROUP BY a.user_id
+    )
+    SELECT i.user_id,
+           pa.position_count, pa.account_count, pa.total_lots,
+           pa.buy_lots, pa.sell_lots, pa.earliest_open_time, pa.snapshot_at,
+           pa.symbol_count, pa.symbols,
+           h.hedged_lots,
+           ca.trading_net_deposit, ca.ib_withdrawal,
+           cp.profit_7d, cp.profit_30d, cp.profit_all,
+           rb.rebate_7d, rb.rebate_30d, rb.rebate_all,
+           ac.equity, ac.floating_pl
+    FROM unnest(%(ids)s::bigint[]) AS i(user_id)
+    LEFT JOIN pos_agg pa ON pa.user_id = i.user_id
+    LEFT JOIN hedge h    ON h.user_id = i.user_id
+    LEFT JOIN cash ca    ON ca.user_id = i.user_id
+    LEFT JOIN closed_pl cp ON cp.user_id = i.user_id
+    LEFT JOIN rebate rb  ON rb.user_id = i.user_id
+    LEFT JOIN acct ac    ON ac.user_id = i.user_id
+"""
 
-    def _fetch() -> Tuple[List[Dict[str, Any]], Optional[str]]:
-        rows, snapshot_at = query_open_positions(settings)
+_ACTIVITY_FLOAT_COLS = (
+    "lifetime_lots",
+    "lifetime_deposit",
+    "total_lots",
+    "buy_lots",
+    "sell_lots",
+    "hedged_lots",
+    "trading_net_deposit",
+    "ib_withdrawal",
+    "profit_7d",
+    "profit_30d",
+    "profit_all",
+    "rebate_7d",
+    "rebate_30d",
+    "rebate_all",
+    "equity",
+    "floating_pl",
+)
+
+# Badge counts scan the full default universe (~59k) → 60s Redis cache.
+# Only filter combos WITHOUT a search term are cached (country/verified/
+# disabled combos are a finite enum; q is unbounded input and would explode
+# the key space). Fail-open like every Redis path in this module.
+# v1 → v2 (2026-07-24): key shape changed from {country_mode}:{global_sub}
+# to the sorted-deduped {countries} selection — prefix bumped so stale v1
+# entries can never collide with the new shape.
+ACTIVITY_COUNTS_CACHE_PREFIX = "risk_cases:activity_counts:v2"
+ACTIVITY_COUNTS_CACHE_TTL_S = 60
+
+
+def _activity_where(
+    *,
+    countries: Sequence[str],
+    q: Optional[str],
+    only_verified: bool,
+    include_disabled: bool,
+) -> Tuple[str, List[Any]]:
+    """Filter clauses appended INSIDE the drv CTE (after the universe WHERE).
+
+    countries is the multi-select country filter (validated codes from
+    ACTIVITY_COUNTRY_CODES): named codes → p.country IN (...); OTHER → not
+    in the named list, NULL included. Named + OTHER OR together; empty
+    selection = no country filter (full universe).
+    """
+    clauses: List[str] = []
+    params: List[Any] = []
+    if only_verified:
+        clauses.append("p.is_verified = TRUE")
+    if not include_disabled:
+        clauses.append("p.is_enabled = TRUE")
+    named = tuple(c for c in countries if c != "OTHER")
+    country_subs: List[str] = []
+    if named:
+        country_subs.append("p.country IN %s")
+        params.append(named)
+    if "OTHER" in countries:
+        country_subs.append("(p.country IS NULL OR p.country NOT IN %s)")
+        params.append(_ACTIVITY_NAMED_COUNTRIES)
+    if country_subs:
+        clauses.append("(" + " OR ".join(country_subs) + ")")
+    if q:
+        term = q.strip()
+        if term:
+            sub = ["p.user_name ILIKE %s", "p.country ILIKE %s"]
+            like = f"%{term}%"
+            params.extend([like, like])
+            if term.isdigit():
+                sub.append("p.user_id = %s")
+                params.append(int(term))
+            clauses.append("(" + " OR ".join(sub) + ")")
+    where = "".join(f"\n          AND {c}" for c in clauses)
+    return where, params
+
+
+def _activity_counts_cache_key(
+    *,
+    countries: Sequence[str],
+    only_verified: bool,
+    include_disabled: bool,
+) -> str:
+    # Sorted + deduped so equivalent selections share one cache entry.
+    countries_key = ",".join(sorted(set(countries))) or "all"
+    return (
+        f"{ACTIVITY_COUNTS_CACHE_PREFIX}:{countries_key}"
+        f":{int(only_verified)}:{int(include_disabled)}"
+    )
+
+
+def _query_activity_status_counts(
+    cur, where: str, params: List[Any]
+) -> Dict[str, int]:
+    """Per-status counts over the current filters (status filter excluded)."""
+    cur.execute(
+        _ACTIVITY_DRV_SQL
+        + where
+        + """
+    )
+    SELECT activity_status, COUNT(*) AS n
+    FROM drv
+    GROUP BY activity_status
+    """,
+        params,
+    )
+    counts = {code: 0 for code in ACTIVITY_STATUS_CODES}
+    for r in cur.fetchall():
+        counts[str(r["activity_status"])] = int(r["n"])
+    return counts
+
+
+def query_activity_clients(
+    settings: Optional[Settings] = None,
+    *,
+    page: int = 1,
+    page_size: int = 50,
+    statuses: Optional[Sequence[str]] = None,
+    countries: Optional[Sequence[str]] = None,
+    q: Optional[str] = None,
+    only_verified: bool = False,
+    include_disabled: bool = True,
+    sort_by: Optional[str] = None,
+    sort_order: Optional[str] = None,
+) -> Tuple[List[Dict[str, Any]], int, Dict[str, int], Optional[str]]:
+    """One page of the full-universe activity view.
+
+    Two-stage by contract: the driver layer pages/filters/sorts over
+    user_profile ⟕ T13 ⟕ positions (~59k, OFFSET is fine at this scale —
+    no keyset), then the enrichment SQL runs over the page's ids only.
+    statuses is the multi-select bucket filter (empty/None → active_7d);
+    countries the multi-select country filter (empty/None → no filter).
+    Returns (rows, total, status_counts, newest_snapshot_iso). status_counts
+    always covers all 8 buckets regardless of the statuses filter (it feeds
+    the per-item badges of the dropdown); total = sum over the selected
+    buckets (same filters, same transaction on the uncached path; at worst
+    60s stale on the cached path — accepted).
+    Raises RiskCasesUnavailable when PG is down (route → 503).
+    """
+    settings = settings or get_settings()
+    # Dedupe preserving order; the page WHERE uses ANY so duplicates would
+    # not change rows, but total (sum of counts) must not double-count.
+    statuses = list(dict.fromkeys(statuses or ())) or ["active_7d"]
+    for s in statuses:
+        if s not in ACTIVITY_STATUS_CODES:
+            raise ValueError(f"unknown activity status: {s!r}")
+    countries = list(dict.fromkeys(countries or ()))
+    for c in countries:
+        if c not in ACTIVITY_COUNTRY_CODES:
+            raise ValueError(f"unknown country code: {c!r}")
+    sort_key = sort_by if sort_by in SORTABLE_ACTIVITY_COLS else DEFAULT_ACTIVITY_SORT_BY
+    direction = "ASC" if (sort_order or "").lower() == "asc" else "DESC"
+    order_expr = (
+        f"{_ACTIVITY_SORT_COL_SQL[sort_key]} {direction} NULLS LAST, user_id ASC"
+    )
+    offset = max(page - 1, 0) * page_size
+
+    where, params = _activity_where(
+        countries=countries,
+        q=q,
+        only_verified=only_verified,
+        include_disabled=include_disabled,
+    )
+
+    page_sql = (
+        _ACTIVITY_DRV_SQL
+        + where
+        + f"""
+    )
+    SELECT * FROM drv
+    WHERE activity_status = ANY(%s)
+    ORDER BY {order_expr}
+    LIMIT %s OFFSET %s
+    """
+    )
+
+    # Badge counts: Redis 60s cache for the no-search filter combos.
+    counts: Optional[Dict[str, int]] = None
+    cache_key: Optional[str] = None
+    client = None
+    if not (q and q.strip()):
+        cache_key = _activity_counts_cache_key(
+            countries=countries,
+            only_verified=only_verified,
+            include_disabled=include_disabled,
+        )
+        client = _get_risk_cases_redis()
         if client is not None:
             try:
-                client.set(
-                    OPEN_POSITIONS_CACHE_KEY,
-                    json.dumps({"rows": rows, "snapshot_at": snapshot_at}),
-                    ex=OPEN_POSITIONS_CACHE_TTL_S,
-                )
+                cached = client.get(cache_key)
+                if cached is not None:
+                    parsed = json.loads(cached)
+                    if isinstance(parsed, dict):
+                        counts = {
+                            code: int(parsed.get(code, 0))
+                            for code in ACTIVITY_STATUS_CODES
+                        }
             except Exception as exc:
                 logger.warning(
-                    "open-positions cache write failed, serving uncached: %s",
-                    exc,
+                    "activity counts cache read failed, recomputing: %s", exc
                 )
-        return rows, snapshot_at
+                client = None
 
-    rows, snapshot_at = _open_positions_flight.do(
-        OPEN_POSITIONS_CACHE_KEY, _fetch
-    )
-    return rows, snapshot_at, False
+    with risk_cases_conn(settings) as conn:
+        with conn.cursor() as cur:
+            if counts is None:
+                counts = _query_activity_status_counts(cur, where, params)
+                if client is not None and cache_key is not None:
+                    try:
+                        client.set(
+                            cache_key,
+                            json.dumps(counts),
+                            ex=ACTIVITY_COUNTS_CACHE_TTL_S,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "activity counts cache write failed: %s", exc
+                        )
+            cur.execute(page_sql, [*params, statuses, page_size, offset])
+            drv_rows = cur.fetchall()
+
+            enrich: Dict[int, Dict[str, Any]] = {}
+            page_ids = [int(r["user_id"]) for r in drv_rows]
+            if page_ids:
+                cur.execute(_ACTIVITY_ENRICH_SQL, {"ids": page_ids})
+                enrich = {int(r["user_id"]): dict(r) for r in cur.fetchall()}
+
+    zip_map = _query_zipcodes_by_userid(settings, page_ids)
+
+    rows: List[Dict[str, Any]] = []
+    newest: Optional[str] = None
+    for r in drv_rows:
+        row = dict(r)
+        row.update(enrich.get(int(row["user_id"]), {}))
+        for key in _ACTIVITY_FLOAT_COLS:
+            row[key] = float(row[key]) if row.get(key) is not None else None
+        for key in (
+            "registered_at",
+            "first_trade_date",
+            "last_trade_date",
+            "earliest_open_time",
+            "snapshot_at",
+        ):
+            row[key] = _iso(row.get(key))
+        snap = row.pop("snapshot_at", None)
+        if snap and (newest is None or snap > newest):
+            newest = snap
+        row["zipcode"] = zip_map.get(int(row["user_id"]))
+        rows.append(row)
+
+    total = sum(counts.get(s, 0) for s in statuses)
+    return rows, total, counts, newest
 
 
 # Bounded history for the case sheet (Δ context) — ~5 weeks of snapshots.

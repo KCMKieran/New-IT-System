@@ -9,6 +9,8 @@ created: 2026-07-22
 related: [[OPT-0047]]
 ---
 
+> ⚠ 历史存档：本文所述 `GET /risk-cases/open-positions` endpoint 及相关缓存已于 2026-07-24 退役删除（被 /activity-clients 的「持仓中」档取代），代码见 git 历史。
+
 ## 问题
 
 `GET /api/v1/risk-cases/open-positions`（risk-watchlist「当前持仓客户」视图的数据源）
