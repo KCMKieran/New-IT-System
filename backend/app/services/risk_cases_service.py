@@ -377,9 +377,7 @@ ACTIVITY_STATUS_CODES: Tuple[str, ...] = (
     "no_fund",
 )
 
-# Sortable columns = driver-layer columns ONLY (T13 + profile). Enrichment
-# metrics (rebate/profit/equity…) are per-page and cannot be sorted across
-# the universe — the frontend marks those columns sortable: false.
+# Driver-layer sortable columns (T13 + profile) — plain columns of drv.
 _ACTIVITY_SORT_COL_SQL: Dict[str, str] = {
     "user_id": "user_id",
     "registered_at": "registered_at",
@@ -390,8 +388,147 @@ _ACTIVITY_SORT_COL_SQL: Dict[str, str] = {
     "lifetime_lots": "lifetime_lots",
     "lifetime_deposit": "lifetime_deposit",
 }
-SORTABLE_ACTIVITY_COLS: frozenset = frozenset(_ACTIVITY_SORT_COL_SQL)
+
+# Metric sort (2026-07-24): enrichment metrics are ALSO server-sortable.
+# When the sort key is a metric, the needed full-universe aggregate CTE(s)
+# are appended after drv and LEFT JOINed into the page SELECT — the sort
+# happens before pagination, the per-page enrichment stays unchanged (its
+# values are what the page displays; these CTEs only feed ORDER BY).
+# Measured cost on prod-size data (2026-07-23): positions 8.6k rows
+# ~0.1s, account state 63k ~0.5s, daily stats/rebate ~1.27M/1.24M ~0.5s
+# each; worst key (net_gain: profit+rebate+acct) ~1.5s. Badge counts and
+# total are untouched (same drv WHERE, no metric join).
+_ACTIVITY_METRIC_CTES: Dict[str, str] = {
+    "m_pos": """
+    m_pos AS (
+        SELECT p.user_id,
+               SUM(p.lots)                                     AS total_lots,
+               SUM(CASE WHEN p.cmd = 0 THEN p.lots ELSE 0 END) AS buy_lots,
+               SUM(CASE WHEN p.cmd = 1 THEN p.lots ELSE 0 END) AS sell_lots
+        FROM kcm.active_positions_snapshot p
+        GROUP BY p.user_id
+    )""",
+    "m_hedge": """
+    m_hedge AS (
+        SELECT user_id, SUM(LEAST(sym_buy, sym_sell)) AS hedged_lots
+        FROM (
+            SELECT p.user_id,
+                   SUM(CASE WHEN p.cmd = 0 THEN p.lots ELSE 0 END) AS sym_buy,
+                   SUM(CASE WHEN p.cmd = 1 THEN p.lots ELSE 0 END) AS sym_sell
+            FROM kcm.active_positions_snapshot p
+            GROUP BY p.user_id, p.base_symbol
+        ) s
+        GROUP BY user_id
+    )""",
+    "m_acct": """
+    m_acct AS (
+        SELECT a.user_id,
+               SUM(a.equity)      AS equity,
+               SUM(a.floating_pl) AS floating_pl
+        FROM kcm.user_account_state a
+        GROUP BY a.user_id
+    )""",
+    "m_cash": """
+    m_cash AS (
+        SELECT c.user_id,
+               SUM(c.trading_net_deposit) AS trading_net_deposit,
+               SUM(c.ib_withdrawal)       AS ib_withdrawal
+        FROM kcm.daily_user_cashflow c
+        GROUP BY c.user_id
+    )""",
+    "m_profit": """
+    m_profit AS (
+        SELECT s.user_id,
+               SUM(s.profit_sum) FILTER (WHERE s.stat_date > CURRENT_DATE - 7)  AS profit_7d,
+               SUM(s.profit_sum) FILTER (WHERE s.stat_date > CURRENT_DATE - 30) AS profit_30d,
+               SUM(s.profit_sum)                                                AS profit_all
+        FROM kcm.daily_user_stats s
+        GROUP BY s.user_id
+    )""",
+    "m_rebate": """
+    m_rebate AS (
+        SELECT r.user_id,
+               SUM(r.rebate_usd) FILTER (WHERE r.stat_date > CURRENT_DATE - 7)  AS rebate_7d,
+               SUM(r.rebate_usd) FILTER (WHERE r.stat_date > CURRENT_DATE - 30) AS rebate_30d,
+               SUM(r.rebate_usd)                                                AS rebate_all
+        FROM kcm.daily_user_rebate r
+        GROUP BY r.user_id
+    )""",
+}
+
+# Combined legs mirror the frontend's sumNullable (null only when BOTH legs
+# null, single null = 0); net_gain mirrors netGain's STRICT nulls (any leg
+# null → null → sorts last) — plain SQL addition propagates NULL. The hedge
+# ratio mirrors the frontend valueGetter: ×2 (a locked pair consumes one
+# buy + one sell leg), capped at 1, NULL when no open lots.
+def _combined_expr(p: str, r: str) -> str:
+    return (
+        f"CASE WHEN {p} IS NULL AND {r} IS NULL THEN NULL "
+        f"ELSE COALESCE({p}, 0) + COALESCE({r}, 0) END"
+    )
+
+
+# sort key → (metric CTEs to attach, ORDER BY expression).
+_ACTIVITY_METRIC_SORT: Dict[str, Tuple[Tuple[str, ...], str]] = {
+    "total_lots": (("m_pos",), "m_pos.total_lots"),
+    "buy_lots": (("m_pos",), "m_pos.buy_lots"),
+    "sell_lots": (("m_pos",), "m_pos.sell_lots"),
+    "hedged_lots": (("m_hedge",), "m_hedge.hedged_lots"),
+    "hedge": (
+        ("m_pos", "m_hedge"),
+        "CASE WHEN m_pos.total_lots > 0 THEN "
+        "LEAST(1, 2 * COALESCE(m_hedge.hedged_lots, 0) / m_pos.total_lots) "
+        "END",
+    ),
+    "equity": (("m_acct",), "m_acct.equity"),
+    "floating_pl": (("m_acct",), "m_acct.floating_pl"),
+    "trading_net_deposit": (("m_cash",), "m_cash.trading_net_deposit"),
+    "ib_withdrawal": (("m_cash",), "m_cash.ib_withdrawal"),
+    "profit_all": (("m_profit",), "m_profit.profit_all"),
+    "profit_30d": (("m_profit",), "m_profit.profit_30d"),
+    "profit_7d": (("m_profit",), "m_profit.profit_7d"),
+    "rebate_all": (("m_rebate",), "m_rebate.rebate_all"),
+    "rebate_30d": (("m_rebate",), "m_rebate.rebate_30d"),
+    "rebate_7d": (("m_rebate",), "m_rebate.rebate_7d"),
+    "combined_all": (
+        ("m_profit", "m_rebate"),
+        _combined_expr("m_profit.profit_all", "m_rebate.rebate_all"),
+    ),
+    "combined_30d": (
+        ("m_profit", "m_rebate"),
+        _combined_expr("m_profit.profit_30d", "m_rebate.rebate_30d"),
+    ),
+    "combined_7d": (
+        ("m_profit", "m_rebate"),
+        _combined_expr("m_profit.profit_7d", "m_rebate.rebate_7d"),
+    ),
+    "net_gain": (
+        ("m_profit", "m_acct", "m_rebate"),
+        "m_profit.profit_all + m_acct.floating_pl + m_rebate.rebate_all",
+    ),
+}
+
+SORTABLE_ACTIVITY_COLS: frozenset = frozenset(_ACTIVITY_SORT_COL_SQL) | frozenset(
+    _ACTIVITY_METRIC_SORT
+)
 DEFAULT_ACTIVITY_SORT_BY = "last_trade_date"
+
+
+def _activity_order_sql(sort_key: str) -> Tuple[str, str, str]:
+    """(extra CTEs, LEFT JOINs, ORDER BY expression) for a whitelisted key.
+
+    Driver-layer keys need no extra SQL; metric keys pull in their aggregate
+    CTE(s). The caller interpolates all three into the page query.
+    """
+    if sort_key in _ACTIVITY_SORT_COL_SQL:
+        return "", "", f"drv.{_ACTIVITY_SORT_COL_SQL[sort_key]}"
+    ctes, expr = _ACTIVITY_METRIC_SORT[sort_key]
+    extra = "".join(f",{_ACTIVITY_METRIC_CTES[name]}" for name in ctes)
+    joins = "".join(
+        f"\n    LEFT JOIN {name} ON {name}.user_id = drv.user_id"
+        for name in ctes
+    )
+    return extra, joins, expr
 
 # Named country codes offered by the frontend multi-select. OTHER is the
 # complement bucket: country not in this list (NULL country included).
@@ -719,9 +856,7 @@ def query_activity_clients(
             raise ValueError(f"unknown crm_true code: {f!r}")
     sort_key = sort_by if sort_by in SORTABLE_ACTIVITY_COLS else DEFAULT_ACTIVITY_SORT_BY
     direction = "ASC" if (sort_order or "").lower() == "asc" else "DESC"
-    order_expr = (
-        f"{_ACTIVITY_SORT_COL_SQL[sort_key]} {direction} NULLS LAST, user_id ASC"
-    )
+    sort_ctes, sort_joins, sort_expr = _activity_order_sql(sort_key)
     offset = max(page - 1, 0) * page_size
 
     where, params = _activity_where(
@@ -734,10 +869,10 @@ def query_activity_clients(
         _ACTIVITY_DRV_SQL
         + where
         + f"""
-    )
-    SELECT * FROM drv
-    WHERE activity_status = ANY(%s)
-    ORDER BY {order_expr}
+    ){sort_ctes}
+    SELECT drv.* FROM drv{sort_joins}
+    WHERE drv.activity_status = ANY(%s)
+    ORDER BY {sort_expr} {direction} NULLS LAST, drv.user_id ASC
     LIMIT %s OFFSET %s
     """
     )

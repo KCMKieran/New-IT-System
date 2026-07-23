@@ -147,8 +147,9 @@ def activity_clients(
     sort_by: Optional[str] = Query(
         default=None,
         description=(
-            "Whitelisted driver-layer column; silently falls back to "
-            "last_trade_date (enrichment metrics are not sortable)"
+            "Whitelisted sort key: driver-layer column or enrichment "
+            "metric (metric sorts attach a full-universe aggregate CTE); "
+            "silently falls back to last_trade_date"
         ),
     ),
     sort_order: Optional[str] = Query(default=None, description="asc | desc"),

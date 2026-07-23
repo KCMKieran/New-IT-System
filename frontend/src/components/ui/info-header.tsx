@@ -1,5 +1,5 @@
-import { useRef } from "react";
-import { Info, Menu, Filter } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { ArrowDown, ArrowUp, Info, Menu, Filter } from "lucide-react";
 import {
   Tooltip,
   TooltipTrigger,
@@ -32,11 +32,23 @@ export function InfoHeader(
   const menuButtonRef = useRef<HTMLSpanElement>(null);
   const filterButtonRef = useRef<HTMLSpanElement>(null);
 
+  // A custom header also replaces the default header's sort arrows — track
+  // the column's sort state and render our own indicator.
+  const [sortDir, setSortDir] = useState(props.column.getSort());
+  useEffect(() => {
+    const onSortChanged = () => setSortDir(props.column.getSort());
+    props.column.addEventListener("sortChanged", onSortChanged);
+    onSortChanged();
+    return () =>
+      props.column.removeEventListener("sortChanged", onSortChanged);
+  }, [props.column]);
+
   const handleSort = () => {
     if (!props.enableSorting) return;
-    const current = props.column.getSort();
-    if (current === "asc") props.setSort("desc");
-    else props.setSort("asc");
+    // Advance along the grid's configured sortingOrder (default asc → desc
+    // → none) instead of a hand-rolled asc/desc toggle: the third click
+    // must CLEAR the sort, same as a plain AG-Grid header.
+    props.progressSort();
   };
 
   const openMenu = (e: React.MouseEvent) => {
@@ -81,6 +93,12 @@ export function InfoHeader(
       >
         {props.displayName}
       </span>
+      {sortDir === "asc" && (
+        <ArrowUp className="h-3.5 w-3.5 shrink-0 text-primary" />
+      )}
+      {sortDir === "desc" && (
+        <ArrowDown className="h-3.5 w-3.5 shrink-0 text-primary" />
+      )}
       <Tooltip>
         <TooltipTrigger asChild>
           <Info className="h-3.5 w-3.5 shrink-0 cursor-help text-muted-foreground opacity-60 hover:opacity-100" />

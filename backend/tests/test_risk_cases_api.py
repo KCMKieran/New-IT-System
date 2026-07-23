@@ -313,15 +313,34 @@ def test_activity_clients_not_swallowed_by_user_id_route(client):
     assert res.status_code == 200
 
 
-def test_activity_sort_whitelist_is_driver_layer_only():
+def test_activity_sort_whitelist_covers_driver_and_metric_keys():
     assert svc.DEFAULT_ACTIVITY_SORT_BY == "last_trade_date"
     assert svc.DEFAULT_ACTIVITY_SORT_BY in svc.SORTABLE_ACTIVITY_COLS
-    for col in svc.SORTABLE_ACTIVITY_COLS:
-        assert col in svc._ACTIVITY_SORT_COL_SQL
-    # Enrichment metrics must never become sortable (cross-universe sort is
-    # incompatible with the two-stage query inversion).
-    for col in ("rebate_all", "profit_all", "equity", "combined_30d"):
-        assert col not in svc.SORTABLE_ACTIVITY_COLS
+    # Whitelist = driver columns ∪ metric keys, with no overlap (a key must
+    # resolve to exactly one ORDER BY strategy).
+    assert svc.SORTABLE_ACTIVITY_COLS == (
+        frozenset(svc._ACTIVITY_SORT_COL_SQL)
+        | frozenset(svc._ACTIVITY_METRIC_SORT)
+    )
+    assert not set(svc._ACTIVITY_SORT_COL_SQL) & set(svc._ACTIVITY_METRIC_SORT)
+    # Every metric key's declared CTEs exist, are joined, and its ORDER BY
+    # expression only references aliases it actually attached.
+    for key, (ctes, expr) in svc._ACTIVITY_METRIC_SORT.items():
+        extra, joins, order_expr = svc._activity_order_sql(key)
+        assert order_expr == expr
+        for name in ctes:
+            assert name in svc._ACTIVITY_METRIC_CTES
+            assert f"{name} AS (" in extra
+            assert f"LEFT JOIN {name} ON {name}.user_id = drv.user_id" in joins
+        for alias in svc._ACTIVITY_METRIC_CTES:
+            if f"{alias}." in expr:
+                assert alias in ctes, f"{key} references unattached {alias}"
+
+
+def test_activity_order_sql_driver_key_has_no_ctes():
+    extra, joins, expr = svc._activity_order_sql("last_trade_date")
+    assert (extra, joins) == ("", "")
+    assert expr == "drv.last_trade_date"
 
 
 def test_activity_where_filters():

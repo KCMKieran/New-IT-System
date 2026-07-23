@@ -34,10 +34,11 @@
  *
  * Because the universe is ~59k, EVERYTHING moved server-side: pagination,
  * status/country filters, search and sorting all hit
- * GET /api/v1/risk-cases/activity-clients. Sorting is limited to
- * driver-layer columns (T13 lifetime + profile columns); enrichment metric
- * columns (money trail / positions) are per-page and deliberately NOT
- * sortable. Sortable columns use a no-op comparator so the header icons
+ * GET /api/v1/risk-cases/activity-clients. Sortable = driver-layer columns
+ * (T13 lifetime + profile) AND enrichment metrics (money trail / positions
+ * / equity — the backend attaches a full-universe aggregate CTE for
+ * ORDER BY, 2026-07-24); only symbols / longest_hold / CRM flags stay
+ * unsortable. Sortable columns use a no-op comparator so the header icons
  * work but the server ordering is never reshuffled client-side.
  *
  * Money-trail columns keep the old view's semantics: nullable, rendered as
@@ -195,8 +196,11 @@ const STATUS_META: {
 ];
 const STATUS_BY_CODE = Object.fromEntries(STATUS_META.map((s) => [s.code, s]));
 
-// Server sort whitelist — driver-layer columns only (mirrors the backend
-// _ACTIVITY_SORT_COL_SQL). Enrichment metrics are per-page and unsortable.
+// Server sort whitelist — mirrors the backend SORTABLE_ACTIVITY_COLS:
+// driver-layer columns (_ACTIVITY_SORT_COL_SQL) + enrichment metrics
+// (_ACTIVITY_METRIC_SORT — the backend attaches a full-universe aggregate
+// CTE for ORDER BY, 2026-07-24). Still unsortable: symbols / longest_hold
+// / snapshot-derived text and the CRM boolean flag columns.
 const SERVER_SORTABLE = new Set([
   "user_id",
   "registered_at",
@@ -206,6 +210,25 @@ const SERVER_SORTABLE = new Set([
   "lifetime_orders",
   "lifetime_lots",
   "lifetime_deposit",
+  "total_lots",
+  "buy_lots",
+  "sell_lots",
+  "hedge",
+  "hedged_lots",
+  "equity",
+  "floating_pl",
+  "trading_net_deposit",
+  "ib_withdrawal",
+  "profit_all",
+  "profit_30d",
+  "profit_7d",
+  "rebate_all",
+  "rebate_30d",
+  "rebate_7d",
+  "combined_all",
+  "combined_30d",
+  "combined_7d",
+  "net_gain",
 ]);
 const DEFAULT_SORT_BY = "last_trade_date";
 const DEFAULT_SORT_ORDER = "desc";
@@ -746,6 +769,28 @@ export default function ActivityClientsPanel({
         .getColumnState()
         .filter((c) => c.sort)
         .sort((a, b) => (a.sortIndex ?? 0) - (b.sortIndex ?? 0))[0];
+      if (!sorted) {
+        // Sort fully cleared (3rd header click) — the server falls back to
+        // the default order, so move the indicator to the default column
+        // instead of showing an unsorted grid that is actually sorted. The
+        // re-entrant sortChanged from applyColumnState resolves to the same
+        // sortBy/sortOrder and is a no-op. EXCEPT when the cleared column
+        // IS the default one: snapping back would trap its cycle at desc →
+        // clear → desc, never reaching asc — leave it unmarked instead (the
+        // data order is unchanged) and let the next click cycle to asc.
+        const clearedDefault = e.columns?.some(
+          (c) => c.getColId() === DEFAULT_SORT_BY,
+        );
+        if (!clearedDefault) {
+          e.api.applyColumnState({
+            state: [
+              { colId: DEFAULT_SORT_BY, sort: DEFAULT_SORT_ORDER as "desc" },
+            ],
+            defaultState: { sort: null },
+          });
+          return;
+        }
+      }
       const nextBy =
         sorted && SERVER_SORTABLE.has(sorted.colId)
           ? sorted.colId
@@ -868,7 +913,7 @@ export default function ActivityClientsPanel({
         groupId: "grp_lifetime",
         children: [
           {
-            headerName: "毛入金",
+            headerName: "总入金",
             colId: "lifetime_deposit",
             field: "lifetime_deposit",
             width: 120,
@@ -877,7 +922,8 @@ export default function ActivityClientsPanel({
             headerComponent: InfoHeader,
             headerComponentParams: {
               tooltip:
-                "生涯毛入金（只加入金、不减出金）——判定「入过金」的口径，\n" +
+                "总入金（Total Deposit）：生涯累计入金金额，只加入金、不减出金。\n" +
+                "这是判定「入过金」的口径，\n" +
                 "净入金会把入金后全提走的客户误判成未入金。\n" +
                 "资金历史起点 2021-07-28，更早只入过金的客户可能显示 —。\n" +
                 "展开列组可见生涯手数 / 订单数 / 交易天数 / 首笔交易。",
@@ -1012,6 +1058,8 @@ export default function ActivityClientsPanel({
             headerName: "总手数",
             colId: "total_lots",
             field: "total_lots",
+            sortable: true,
+            comparator: () => 0,
             width: 110,
             type: "numericColumn",
             valueFormatter: (p) => fmtLots(p.value),
@@ -1020,6 +1068,8 @@ export default function ActivityClientsPanel({
             headerName: "买手数",
             colId: "buy_lots",
             field: "buy_lots",
+            sortable: true,
+            comparator: () => 0,
             width: 100,
             columnGroupShow: "open",
             type: "numericColumn",
@@ -1029,6 +1079,8 @@ export default function ActivityClientsPanel({
             headerName: "卖手数",
             colId: "sell_lots",
             field: "sell_lots",
+            sortable: true,
+            comparator: () => 0,
             width: 100,
             columnGroupShow: "open",
             type: "numericColumn",
@@ -1044,6 +1096,8 @@ export default function ActivityClientsPanel({
             headerName: "锁仓比例",
             colId: "hedge",
             width: 104,
+            sortable: true,
+            comparator: () => 0,
             headerComponent: InfoHeader,
             headerComponentParams: {
               tooltip:
@@ -1080,6 +1134,8 @@ export default function ActivityClientsPanel({
             headerName: "对锁手数",
             colId: "hedged_lots",
             field: "hedged_lots",
+            sortable: true,
+            comparator: () => 0,
             width: 100,
             columnGroupShow: "open",
             type: "numericColumn",
@@ -1095,6 +1151,8 @@ export default function ActivityClientsPanel({
         headerName: "浮动PL",
         colId: "floating_pl",
         field: "floating_pl",
+        sortable: true,
+        comparator: () => 0,
         width: 130,
         type: "numericColumn",
         headerComponent: InfoHeader,
@@ -1115,6 +1173,8 @@ export default function ActivityClientsPanel({
             headerName: "交易净入金",
             colId: "trading_net_deposit",
             field: "trading_net_deposit",
+            sortable: true,
+            comparator: () => 0,
             width: 130,
             headerComponent: InfoHeader,
             headerComponentParams: {
@@ -1129,6 +1189,8 @@ export default function ActivityClientsPanel({
             headerName: "IB佣金提现",
             colId: "ib_withdrawal",
             field: "ib_withdrawal",
+            sortable: true,
+            comparator: () => 0,
             width: 130,
             hide: true,
             columnGroupShow: "open",
@@ -1148,6 +1210,8 @@ export default function ActivityClientsPanel({
             headerName: "History",
             colId: "profit_all",
             field: "profit_all",
+            sortable: true,
+            comparator: () => 0,
             width: 116,
             headerComponent: InfoHeader,
             headerComponentParams: {
@@ -1163,6 +1227,8 @@ export default function ActivityClientsPanel({
             headerName: "30d",
             colId: "profit_30d",
             field: "profit_30d",
+            sortable: true,
+            comparator: () => 0,
             width: 116,
             columnGroupShow: "open",
             valueFormatter: (p) => fmtMoney(p.value),
@@ -1172,6 +1238,8 @@ export default function ActivityClientsPanel({
             headerName: "7d",
             colId: "profit_7d",
             field: "profit_7d",
+            sortable: true,
+            comparator: () => 0,
             width: 110,
             columnGroupShow: "open",
             valueFormatter: (p) => fmtMoney(p.value),
@@ -1189,6 +1257,8 @@ export default function ActivityClientsPanel({
             headerName: "History",
             colId: "rebate_all",
             field: "rebate_all",
+            sortable: true,
+            comparator: () => 0,
             width: 116,
             headerComponent: InfoHeader,
             headerComponentParams: {
@@ -1204,6 +1274,8 @@ export default function ActivityClientsPanel({
             headerName: "30d",
             colId: "rebate_30d",
             field: "rebate_30d",
+            sortable: true,
+            comparator: () => 0,
             width: 116,
             columnGroupShow: "open",
             valueFormatter: (p) => fmtMoney(p.value),
@@ -1213,6 +1285,8 @@ export default function ActivityClientsPanel({
             headerName: "7d",
             colId: "rebate_7d",
             field: "rebate_7d",
+            sortable: true,
+            comparator: () => 0,
             width: 110,
             columnGroupShow: "open",
             valueFormatter: (p) => fmtMoney(p.value),
@@ -1228,6 +1302,8 @@ export default function ActivityClientsPanel({
             headerName: "History",
             colId: "combined_all",
             width: 140,
+            sortable: true,
+            comparator: () => 0,
             headerComponent: InfoHeader,
             headerComponentParams: {
               tooltip:
@@ -1246,6 +1322,8 @@ export default function ActivityClientsPanel({
             headerName: "30d",
             colId: "combined_30d",
             width: 116,
+            sortable: true,
+            comparator: () => 0,
             columnGroupShow: "open",
             filter: "agNumberColumnFilter",
             valueGetter: (p: ValueGetterParams<ActivityClientRow>) =>
@@ -1257,6 +1335,8 @@ export default function ActivityClientsPanel({
             headerName: "7d",
             colId: "combined_7d",
             width: 110,
+            sortable: true,
+            comparator: () => 0,
             columnGroupShow: "open",
             filter: "agNumberColumnFilter",
             valueGetter: (p: ValueGetterParams<ActivityClientRow>) =>
@@ -1270,6 +1350,8 @@ export default function ActivityClientsPanel({
         headerName: "净赚",
         colId: "net_gain",
         width: 140,
+        sortable: true,
+        comparator: () => 0,
         headerComponent: InfoHeader,
         headerComponentParams: {
           tooltip:
@@ -1290,6 +1372,8 @@ export default function ActivityClientsPanel({
         colId: "equity",
         field: "equity",
         width: 116,
+        sortable: true,
+        comparator: () => 0,
         valueFormatter: (p) => fmtMoney(p.value),
         cellClass: (p) => profitColor(p.value),
       },
@@ -1347,9 +1431,10 @@ export default function ActivityClientsPanel({
   const defaultColDef = useMemo<ColDef>(
     () => ({
       resizable: true,
-      // Server-side sorting: only whitelisted driver-layer columns opt in
-      // (sortable: true + no-op comparator). Enrichment metrics are
-      // per-page and cannot be sorted across the 59k universe.
+      // Server-side sorting: whitelisted columns opt in (sortable: true +
+      // no-op comparator). Driver-layer columns sort in the page query;
+      // metric columns make the backend attach a full-universe aggregate
+      // CTE (2026-07-24). Symbols / longest_hold / CRM flags stay off.
       sortable: false,
       filter: true,
       wrapHeaderText: true,
@@ -1419,8 +1504,8 @@ export default function ActivityClientsPanel({
             有平仓记录，只开仓未平过仓的新客由
             <span className="font-medium text-foreground/80">「持仓中」</span>
             兜住；「入过金」按
-            <span className="font-medium text-foreground/80">毛入金</span>
-            判定（净入金会误判入金后全提走的客户）。
+            <span className="font-medium text-foreground/80">总入金</span>
+            （不减出金）判定（净入金会误判入金后全提走的客户）。
           </div>
           <div>
             数据新鲜度：持仓/锁仓/品种列仅「持仓中」档有值（60 秒快照）；
