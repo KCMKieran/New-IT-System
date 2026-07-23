@@ -10,12 +10,14 @@ Set to "false" in dev if you don't want background scans running.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
+import redis
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
@@ -82,6 +84,127 @@ _GAP_TRADE_FINAL_LOCK_TIMEOUT_SEC = 300
 # per day) must never block the 60s fast tick or the gap-trade jobs. Writes
 # go to the same alert_events table but a disjoint rule_id band (121-130).
 _rebate_arb_lock = threading.Lock()
+
+# ── Cross-worker shared latest result (Redis mirror) ──────────────────────
+# Prod runs 4 uvicorn workers, but the flock election in app/main.py lets
+# exactly ONE of them run this scheduler — so `_latest_result` used to live
+# in that single process only, and GET /burst-open landing on any of the
+# other 3 workers always saw None → 503 (~75% of requests). The scan path
+# now mirrors every finished result into a fixed Redis key; workers whose
+# in-process cache is empty fall back to that mirror. Same lazy fail-open
+# client pattern (and REDIS_HOST/REDIS_PORT env) as the OPT-0054
+# open-positions cache — Redis being down only degrades back to the old
+# per-process behavior (503 on non-owner workers), never to a 5xx.
+#
+# Versioning rule: bump the `:v1` suffix whenever the `_latest_result`
+# payload shape changes incompatibly, so a rolling deploy never feeds an
+# old-shaped payload through new code.
+LATEST_RESULT_REDIS_KEY = "risk_monitor:burst_open_latest_result:v1"
+# TTL = 3× the slow-tier scan interval, floored at 10 minutes. Every tick
+# rewrites the key (fast tier every 60s in prod), so if the scheduler owner
+# dies the mirror simply ages out and the API honestly returns 503 again
+# instead of serving a stale snapshot forever.
+_LATEST_RESULT_TTL_MULTIPLIER = 3
+_LATEST_RESULT_TTL_FLOOR_SEC = 600
+
+# Lazily-created module-level Redis client (redis-py clients are thread-safe
+# and pool connections internally).
+_result_redis: redis.Redis | None = None
+_result_redis_lock = threading.Lock()
+
+
+def _get_result_redis() -> redis.Redis | None:
+    """Return the shared Redis client for the latest-result mirror.
+
+    Fail-open contract (mirrors OPT-0054's client getter): construction or
+    ping failure logs a warning and returns None — creation is retried on
+    the next call. Short socket timeouts (Redis is same-host) keep the
+    degraded path fast when Redis is wedged rather than refusing outright.
+    """
+    global _result_redis
+    if _result_redis is not None:
+        return _result_redis
+    with _result_redis_lock:
+        if _result_redis is None:
+            try:
+                client = redis.Redis(
+                    host=os.getenv("REDIS_HOST", "localhost"),
+                    port=int(os.getenv("REDIS_PORT", "6379")),
+                    decode_responses=True,
+                    socket_connect_timeout=0.5,
+                    socket_timeout=0.5,
+                )
+                client.ping()
+                _result_redis = client
+            except Exception as exc:
+                logger.warning(
+                    "burst-open result Redis unavailable, fail-open: %s", exc
+                )
+                return None
+        return _result_redis
+
+
+def _publish_latest_result(
+    result: dict[str, Any], scan_interval_min: int
+) -> None:
+    """Mirror a finished scan result to Redis for the non-owner workers.
+
+    Called right after `_latest_result` is updated — by the scheduler owner
+    on every tick AND by the manual scan-now path (any worker), so the
+    mirror always carries the freshest snapshot. Non-JSON values that may
+    hide inside alert dicts (e.g. datetimes) are stringified via
+    `default=str`. Any Redis failure is swallowed with a warning: the scan
+    itself must never fail because the mirror couldn't be written.
+    """
+    try:
+        client = _get_result_redis()
+        if client is None:
+            return
+        ttl_sec = max(
+            int(scan_interval_min) * 60 * _LATEST_RESULT_TTL_MULTIPLIER,
+            _LATEST_RESULT_TTL_FLOOR_SEC,
+        )
+        client.set(
+            LATEST_RESULT_REDIS_KEY,
+            json.dumps(result, default=str),
+            ex=ttl_sec,
+        )
+    except Exception:
+        logger.warning(
+            "Failed to mirror latest result to Redis (non-fatal)",
+            exc_info=True,
+        )
+
+
+def _read_latest_result_from_redis() -> dict[str, Any] | None:
+    """Cross-worker fallback used by `get_latest_result()`.
+
+    Returns None on ANY problem — Redis down, key missing/expired, corrupt
+    or unexpected payload — so the API path degrades exactly to the old
+    "no scan result yet" 503, never a 500.
+    """
+    try:
+        client = _get_result_redis()
+        if client is None:
+            return None
+        raw = client.get(LATEST_RESULT_REDIS_KEY)
+        if raw is None:
+            return None
+        payload = json.loads(raw)
+        if not isinstance(payload, dict) or not isinstance(
+            payload.get("alerts"), list
+        ):
+            logger.warning(
+                "Mirrored burst-open result has unexpected shape, ignoring"
+            )
+            return None
+        return payload
+    except Exception:
+        logger.warning(
+            "Failed to read latest result mirror from Redis (non-fatal)",
+            exc_info=True,
+        )
+        return None
 
 
 def _fast_tier_enabled() -> bool:
@@ -540,6 +663,13 @@ def _run_scan(*, tier: str = "all", dispatch_mail: bool = False) -> None:
             "tier": tier,
         }
 
+        # Mirror the fresh snapshot to Redis so GET /burst-open answered by
+        # a non-owner uvicorn worker (flock elects ONE scheduler across 4
+        # workers) serves the same result instead of 503'ing. Fail-open.
+        _publish_latest_result(
+            _latest_result, int(config["scan_interval_min"])
+        )
+
         # OPT-0045: resolve CRM client id for every alert about to be
         # persisted (fail-open → NULL, never blocks the write below).
         _backfill_alert_user_ids(settings, this_tick_alerts)
@@ -647,8 +777,21 @@ def _locked_fast_burst_scan() -> None:
 
 
 def get_latest_result() -> dict[str, Any] | None:
-    """Return the most recent scan result (read from in-memory cache)."""
-    return _latest_result
+    """Return the most recent scan result.
+
+    Fast path: this process's in-memory cache (the scheduler-owner worker,
+    or any worker that ran a manual scan-now). Fallback: the Redis mirror
+    written on every finished scan — this is what the non-owner uvicorn
+    workers serve, since the flock election in app/main.py keeps the
+    scheduler (and thus `_latest_result`) in a single process. Both empty
+    (or Redis unreachable) → None, and the route keeps answering 503.
+
+    NOTE: does synchronous Redis IO on the fallback path — callers in route
+    handlers must be plain `def` (threadpool), never `async def`.
+    """
+    if _latest_result is not None:
+        return _latest_result
+    return _read_latest_result_from_redis()
 
 
 def trigger_scan_now() -> dict[str, Any] | None:

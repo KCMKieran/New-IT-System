@@ -257,11 +257,17 @@ async def alerts_stream(request: Request):
 # ── GET /burst-open — read latest cached result ───────────
 
 @router.get("/burst-open", response_model=BurstOpenScanResult)
-async def burst_open_latest():
-    """Return the most recent scan result from in-memory cache.
+def burst_open_latest():
+    """Return the most recent scan result (in-memory, else Redis mirror).
 
     Kept for the "立即扫描" button to show the just-finished scan without
-    waiting for the next /alerts refresh.
+    waiting for the next /alerts refresh. Only the scheduler-owner worker
+    holds the in-memory cache (flock election, 4 workers); the other
+    workers serve the Redis mirror written on every finished scan.
+
+    Plain `def` on purpose (OPT-0055 convention): the Redis fallback inside
+    get_latest_result() is synchronous IO, which would stall the event loop
+    under `async def`. FastAPI runs sync handlers in its threadpool.
     """
     result = get_latest_result()
     if result is None:
@@ -329,8 +335,14 @@ async def burst_open_update_config(config: BurstOpenConfig):
 # ── POST /burst-open/scan-now — immediate scan ───────────
 
 @router.post("/burst-open/scan-now", response_model=BurstOpenScanResult)
-async def burst_open_scan_now():
-    """Trigger an immediate burst-open scan. Blocks until complete."""
+def burst_open_scan_now():
+    """Trigger an immediate burst-open scan. Blocks until complete.
+
+    Plain `def` (OPT-0055 convention): trigger_scan_now() is seconds of
+    synchronous MySQL + SQLite + Redis IO — under `async def` it would
+    freeze the whole event loop for the duration; in the threadpool it
+    only occupies one worker thread.
+    """
     try:
         result = trigger_scan_now()
         if result is None:
