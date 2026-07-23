@@ -66,6 +66,10 @@ docs/**
 !docs/operations/docs-portal.md
 # Pre-migration SQLite backups (created ad-hoc before risky schema changes)
 backend/data/risk_monitor.db.bak-*
+
+# Cross-deploy hashed-assets archive (built by scripts/archive-frontend-assets.sh
+# during ./deploy.sh; bind-mounted read-only into the prod frontend container)
+frontend/.assets-archive/
 frontend/tsconfig.app.tsbuildinfo
 .claude/settings.local.json
 .claude/skills/
