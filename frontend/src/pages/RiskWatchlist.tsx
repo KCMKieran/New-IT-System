@@ -209,11 +209,20 @@ function fmtHkTime(iso: string | null | undefined): string {
   }
 }
 
+/** Unified sign coloring (2026-07-23 decision, page-style-conventions §10):
+ *  every signed number on this page — > 0 green, < 0 red, 0/null uncolored.
+ *  No per-column inversion ("red = company outflow" retired). */
 function profitColor(v: number | null | undefined): string {
   if (v === null || v === undefined || v === 0) return "";
   return v > 0
     ? "text-green-600 dark:text-green-400"
     : "text-red-600 dark:text-red-400";
+}
+
+/** 已平仓 PL+Rebate group emphasis: amber tint on top of the unified sign
+ *  coloring so the column pops (2026-07-23; page-style-conventions §10). */
+function combinedEmphasis(v: number | null | undefined): string {
+  return cn("bg-amber-500/10 dark:bg-amber-400/15", profitColor(v));
 }
 
 /** Sum two nullable legs: null only when BOTH are null (no snapshot);
@@ -224,11 +233,6 @@ function sumNullable(
 ): number | null {
   if (a == null && b == null) return null;
   return (a ?? 0) + (b ?? 0);
-}
-
-/** PL+Rebate columns: > 0 = net company outflow → red highlight. */
-function combinedCellClass(v: number | null | undefined): string {
-  return v != null && v > 0 ? "font-medium text-red-600 dark:text-red-400" : "";
 }
 
 /** 净赚 = closed PL + floating PL + full-chain rebate.
@@ -681,6 +685,7 @@ export default function RiskWatchlist() {
               },
               width: 116,
               valueFormatter: (p) => fmtMoney(p.value),
+              cellClass: (p) => profitColor(p.value),
             },
             {
               colId: "rebate_30d",
@@ -689,6 +694,7 @@ export default function RiskWatchlist() {
               width: 116,
               columnGroupShow: "open",
               valueFormatter: (p) => fmtMoney(p.value),
+              cellClass: (p) => profitColor(p.value),
             },
             {
               colId: "rebate_7d",
@@ -697,6 +703,7 @@ export default function RiskWatchlist() {
               width: 110,
               columnGroupShow: "open",
               valueFormatter: (p) => fmtMoney(p.value),
+              cellClass: (p) => profitColor(p.value),
             },
           ],
         },
@@ -721,7 +728,7 @@ export default function RiskWatchlist() {
               valueGetter: (p) =>
                 sumNullable(p.data?.profit_all, p.data?.rebate_all),
               valueFormatter: (p) => fmtMoney(p.value),
-              cellClass: (p) => combinedCellClass(p.value),
+              cellClass: (p) => combinedEmphasis(p.value),
             },
             {
               colId: "combined_30d",
@@ -730,7 +737,7 @@ export default function RiskWatchlist() {
               width: 116,
               columnGroupShow: "open",
               valueFormatter: (p) => fmtMoney(p.value),
-              cellClass: (p) => combinedCellClass(p.value),
+              cellClass: (p) => combinedEmphasis(p.value),
             },
             {
               colId: "combined_7d",
@@ -741,7 +748,7 @@ export default function RiskWatchlist() {
               valueGetter: (p) =>
                 sumNullable(p.data?.profit_7d, p.data?.rebate_7d),
               valueFormatter: (p) => fmtMoney(p.value),
-              cellClass: (p) => combinedCellClass(p.value),
+              cellClass: (p) => combinedEmphasis(p.value),
             },
           ],
         },
@@ -752,8 +759,8 @@ export default function RiskWatchlist() {
           headerComponentParams: {
             tooltip:
               "净赚 = 已平仓PL + 浮动PL + 全链返佣（均为生涯累计/客户级）。\n" +
-              "客户+代理链最终从公司赢走多少：> 0 客户赢、公司亏（红色）；" +
-              "< 0 客户输、公司赚。\n" +
+              "客户+代理链最终从公司赢走多少：> 0 客户赢、公司亏（绿色）；" +
+              "< 0 客户输、公司赚（红色）。\n" +
               "这是本页唯一回答“公司最终赢输”的列，默认按此降序。\n" +
               "\n" +
               "与 risk-monitor 页「淨賺」的区别：那列 = 净值−交易净入金，" +
@@ -770,7 +777,7 @@ export default function RiskWatchlist() {
           filter: "agNumberColumnFilter",
           valueGetter: (p) => netGain(p.data),
           valueFormatter: (p) => fmtMoney(p.value),
-          cellClass: (p) => combinedCellClass(p.value),
+          cellClass: (p) => profitColor(p.value),
         },
         {
           colId: "floating_pl",
@@ -795,6 +802,7 @@ export default function RiskWatchlist() {
           headerName: "净值",
           width: 116,
           valueFormatter: (p) => fmtMoney(p.value),
+          cellClass: (p) => profitColor(p.value),
         },
         {
           headerName: "主要交易产品(30d)",
@@ -979,8 +987,10 @@ export default function RiskWatchlist() {
           </div>
           <div>
             解读：净赚 &gt; 0 = 客户+代理链最终赢走的钱、公司亏（
+            <span className="font-medium text-green-600 dark:text-green-400">绿色</span>
+            ），&lt; 0 = 公司赚（
             <span className="font-medium text-red-600 dark:text-red-400">红色</span>
-            ），默认按此降序；PL+Rebate 同向但不含浮动。
+            ），默认按此降序；PL+Rebate 同向但不含浮动。全页数字统一：&gt;0 绿、&lt;0 红。
           </div>
           <div>
             更新频率：本页所有指标列是
@@ -1207,7 +1217,9 @@ export default function RiskWatchlist() {
                       <div className="grid grid-cols-2 gap-x-4 gap-y-1 sm:grid-cols-3">
                         <span>
                           反佣30d:{" "}
-                          <span className="font-medium">{fmtMoney(s.rebate_30d)}</span>
+                          <span className={cn("font-medium", profitColor(s.rebate_30d))}>
+                            {fmtMoney(s.rebate_30d)}
+                          </span>
                         </span>
                         <span>
                           PL30d:{" "}
@@ -1217,12 +1229,7 @@ export default function RiskWatchlist() {
                         </span>
                         <span>
                           合计:{" "}
-                          <span
-                            className={cn(
-                              "font-medium",
-                              (s.combined_30d ?? 0) > 0 && "text-red-600 dark:text-red-400",
-                            )}
-                          >
+                          <span className={cn("font-medium", profitColor(s.combined_30d))}>
                             {fmtMoney(s.combined_30d)}
                           </span>
                         </span>

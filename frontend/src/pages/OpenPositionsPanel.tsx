@@ -139,11 +139,20 @@ function fmtHkTime(iso: string | null | undefined): string {
   }
 }
 
+/** Unified sign coloring (2026-07-23 decision, page-style-conventions §10):
+ *  every signed number on this page — > 0 green, < 0 red, 0/null uncolored.
+ *  No per-column inversion ("red = company outflow" retired). */
 function profitColor(v: number | null | undefined): string {
   if (v === null || v === undefined || v === 0) return "";
   return v > 0
     ? "text-green-600 dark:text-green-400"
     : "text-red-600 dark:text-red-400";
+}
+
+/** 已平仓 PL+Rebate group emphasis: amber tint on top of the unified sign
+ *  coloring so the column pops (2026-07-23; page-style-conventions §10). */
+function combinedEmphasis(v: number | null | undefined): string {
+  return cn("bg-amber-500/10 dark:bg-amber-400/15", profitColor(v));
 }
 
 /** Sum two nullable legs: null only when BOTH are null (no snapshot);
@@ -154,11 +163,6 @@ function sumNullable(
 ): number | null {
   if (a == null && b == null) return null;
   return (a ?? 0) + (b ?? 0);
-}
-
-/** PL+Rebate columns: > 0 = net company outflow → red highlight. */
-function combinedCellClass(v: number | null | undefined): string {
-  return v != null && v > 0 ? "font-medium text-red-600 dark:text-red-400" : "";
 }
 
 /** 净赚 = closed PL + floating PL + full-chain rebate.
@@ -558,6 +562,7 @@ export default function OpenPositionsPanel({
                 "T-1：当日返佣次日凌晨才入账。",
             },
             valueFormatter: (p) => fmtMoney(p.value),
+            cellClass: (p) => profitColor(p.value),
           },
           {
             headerName: "30d",
@@ -566,6 +571,7 @@ export default function OpenPositionsPanel({
             width: 116,
             columnGroupShow: "open",
             valueFormatter: (p) => fmtMoney(p.value),
+            cellClass: (p) => profitColor(p.value),
           },
           {
             headerName: "7d",
@@ -574,6 +580,7 @@ export default function OpenPositionsPanel({
             width: 110,
             columnGroupShow: "open",
             valueFormatter: (p) => fmtMoney(p.value),
+            cellClass: (p) => profitColor(p.value),
           },
         ],
       },
@@ -589,7 +596,7 @@ export default function OpenPositionsPanel({
             headerComponentParams: {
               tooltip:
                 "已平仓 Total Profit (History) + 全链返佣 (History)，生涯累计。\n" +
-                "> 0 = 公司净流出（红色）。仅含已平仓盈亏，不含浮动。",
+                "> 0 = 公司净流出（绿色 = 客户赢）。仅含已平仓盈亏，不含浮动。",
             },
             // valueGetter columns can't infer a cell data type — declare
             // the number filter explicitly or it falls back to text.
@@ -597,7 +604,7 @@ export default function OpenPositionsPanel({
             valueGetter: (p: ValueGetterParams<OpenPositionRow>) =>
               sumNullable(p.data?.profit_all, p.data?.rebate_all),
             valueFormatter: (p) => fmtMoney(p.value),
-            cellClass: (p) => combinedCellClass(p.value),
+            cellClass: (p) => combinedEmphasis(p.value),
           },
           {
             headerName: "30d",
@@ -608,7 +615,7 @@ export default function OpenPositionsPanel({
             valueGetter: (p: ValueGetterParams<OpenPositionRow>) =>
               sumNullable(p.data?.profit_30d, p.data?.rebate_30d),
             valueFormatter: (p) => fmtMoney(p.value),
-            cellClass: (p) => combinedCellClass(p.value),
+            cellClass: (p) => combinedEmphasis(p.value),
           },
           {
             headerName: "7d",
@@ -619,7 +626,7 @@ export default function OpenPositionsPanel({
             valueGetter: (p: ValueGetterParams<OpenPositionRow>) =>
               sumNullable(p.data?.profit_7d, p.data?.rebate_7d),
             valueFormatter: (p) => fmtMoney(p.value),
-            cellClass: (p) => combinedCellClass(p.value),
+            cellClass: (p) => combinedEmphasis(p.value),
           },
         ],
       },
@@ -631,15 +638,15 @@ export default function OpenPositionsPanel({
         headerComponentParams: {
           tooltip:
             "净赚 = 已平仓PL + 浮动PL + 全链返佣（客户级）。\n" +
-            "客户+代理链最终从公司赢走多少：> 0 客户赢、公司亏（红色）；" +
-            "< 0 客户输、公司赚。\n" +
+            "客户+代理链最终从公司赢走多少：> 0 客户赢、公司亏（绿色）；" +
+            "< 0 客户输、公司赚（红色）。\n" +
             "浮动腿为 30 秒刷新的账户级权威值；返佣腿 T-1（当日返佣次日入账）。\n" +
             "任一腿缺失显示 —（不假设为 0）。",
         },
         filter: "agNumberColumnFilter",
         valueGetter: (p: ValueGetterParams<OpenPositionRow>) => netGain(p.data),
         valueFormatter: (p) => fmtMoney(p.value),
-        cellClass: (p) => combinedCellClass(p.value),
+        cellClass: (p) => profitColor(p.value),
       },
       {
         headerName: "净值",
@@ -647,6 +654,7 @@ export default function OpenPositionsPanel({
         field: "equity",
         width: 116,
         valueFormatter: (p) => fmtMoney(p.value),
+        cellClass: (p) => profitColor(p.value),
       },
       {
         headerName: "最长持仓",
