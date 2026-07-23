@@ -12,6 +12,15 @@ cd /opt/myproject/New-IT-System
 # Pull latest code
 git pull origin main
 
+# Preserve the currently-served hashed assets BEFORE the rebuild discards them,
+# so browser tabs still holding the previous index.html keep lazy-loading their
+# chunks (no forced full-page reload via lazyWithRetry after each deploy).
+# Keeps the last 3 builds in frontend/.assets-archive/ (gitignored); the merged
+# pool is bind-mounted read-only into the frontend container and served by
+# nginx as an /assets/* fallback. Must never block a deploy — worst case we
+# just lose the stale-tab convenience for this release.
+./scripts/archive-frontend-assets.sh || echo "WARNING: asset archiving failed — continuing deploy"
+
 # Rebuild and restart prod containers only
 docker compose -f docker-compose.prod.yml up -d --build
 

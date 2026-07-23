@@ -17,6 +17,15 @@ services:
       - "3000:80"
     depends_on:
       - api
+    volumes:
+      # Fallback pool of hashed assets from the previous 3 builds, maintained
+      # by scripts/archive-frontend-assets.sh (invoked from deploy.sh before
+      # each rebuild). Nginx serves these when a stale browser tab requests a
+      # chunk hash the current build no longer ships — see the @assets_archive
+      # block in frontend/nginx.conf. Read-only: the container must never
+      # mutate the archive. Mounted OUTSIDE /usr/share/nginx/html so archived
+      # files are only reachable through the /assets fallback, not directly.
+      - ./frontend/.assets-archive/merged:/opt/assets-archive/assets:ro
     restart: unless-stopped
 
   # Backend: FastAPI with Uvicorn (production mode, 2 workers, no --reload)
