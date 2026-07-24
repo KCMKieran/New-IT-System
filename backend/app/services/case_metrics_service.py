@@ -44,8 +44,9 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 from ..core.config import Settings, get_settings
 from ..core.risk_cases_pg import RiskCasesUnavailable, risk_cases_conn
@@ -64,8 +65,14 @@ _CHUNK = 300  # userIds per MySQL roundtrip — bounded IN-lists on the replica
 
 
 def _mt_today() -> date:
-    """Current MT trading date (broker-local UTC+3, no DST)."""
-    return (datetime.now(timezone.utc) + timedelta(hours=3)).date()
+    """Current MT trading date (MT server local day, same boundary as closeDate).
+
+    The MT server clock follows US DST: summer GMT+3 / winter GMT+2. Europe/Athens
+    (EET/EEST) matches that year-round except the few days between US and EU DST
+    transition weeks (accepted — see KCM activity-status-design.md §日界).
+    A fixed +3h anchor would run 1h ahead of the real day boundary all winter.
+    """
+    return datetime.now(ZoneInfo("Europe/Athens")).date()
 
 
 def _chunks(items: List[int], size: int) -> Iterable[List[int]]:
