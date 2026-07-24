@@ -103,7 +103,7 @@ def refresh_pnl_user_summary(body: EtlRefreshRequest) -> EtlRefreshResponse:
                 "exception_type": type(e).__name__,
             },
         )
-        raise HTTPException(status_code=500, detail=error_detail)
+        raise HTTPException(status_code=500, detail="internal error while refreshing pnl user summary")
 
 
 # [DEPRECATED] Removed - was only used by CustomerPnLMonitorV2 (deleted)
@@ -147,4 +147,4 @@ def refresh_client_pnl() -> ClientPnlRefreshResponse:
                 "exception_type": type(e).__name__,
             },
         )
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="internal error while refreshing client pnl")

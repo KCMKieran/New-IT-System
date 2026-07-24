@@ -16,6 +16,7 @@ to pass through VERBATIM, which ConditionTree coercion would silently strip.
 
 from __future__ import annotations
 
+import logging
 import math
 import time
 from typing import Any, Dict, Optional
@@ -29,6 +30,8 @@ from app.schemas.alert_mail import (
     TestSendRequest,
 )
 from app.services.alert_mail import service as svc
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/alert-mail", tags=["alert-mail"])
 
@@ -122,7 +125,8 @@ def test_send(subscription_id: int, payload: TestSendRequest):
     except svc.NoRenderableAlert as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     except svc.MailSendFailed as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+        logger.exception("alert-mail test-send delivery failed for subscription_id=%s", subscription_id)
+        raise HTTPException(status_code=502, detail="mail delivery failed")
     return {"data": data, "statistics": {"query_time_ms": _ms(t0)}}
 
 

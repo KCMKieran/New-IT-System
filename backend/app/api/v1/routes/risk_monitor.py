@@ -298,7 +298,7 @@ async def burst_open_get_config():
         logger.error("Failed to read burst-open config: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
+            detail="internal error while reading burst-open config",
         ) from exc
 
 
@@ -328,7 +328,7 @@ async def burst_open_update_config(config: BurstOpenConfig):
         logger.error("Failed to update burst-open config: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
+            detail="internal error while updating burst-open config",
         ) from exc
 
 
@@ -365,7 +365,7 @@ def burst_open_scan_now():
         logger.error("Burst scan-now failed: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
+            detail="internal error while running burst-open scan",
         ) from exc
 
 
@@ -465,7 +465,7 @@ async def burst_open_alerts(
         logger.error("Failed to query alert events: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
+            detail="internal error while querying alert events",
         ) from exc
 
 
@@ -506,7 +506,7 @@ async def burst_open_alerts_stats(
         logger.error("Failed to compute alert stats: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
+            detail="internal error while computing alert stats",
         ) from exc
 
 
@@ -769,7 +769,7 @@ async def burst_open_alerts_export(
         logger.error("Failed to export alert events: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
+            detail="internal error while exporting alert events",
         ) from exc
 
 
@@ -843,7 +843,7 @@ async def burst_open_alerts_aggregated(
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
+            detail="internal error while aggregating burst-open alerts",
         ) from exc
 
 
@@ -858,7 +858,7 @@ async def quick_open_close_get_config():
         logger.error("Failed to read quick-open-close config: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
+            detail="internal error while reading quick-open-close config",
         ) from exc
 
 
@@ -882,7 +882,7 @@ async def quick_open_close_update_config(config: QuickOpenCloseConfig):
         logger.error("Failed to update quick-open-close config: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
+            detail="internal error while updating quick-open-close config",
         ) from exc
 
 
@@ -943,7 +943,7 @@ async def quick_open_close_alerts(
         logger.error("Failed to query quick-open-close alerts: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
+            detail="internal error while querying quick-open-close alerts",
         ) from exc
 
 
@@ -973,7 +973,7 @@ async def quick_open_close_alerts_stats(
         logger.error("Failed to compute quick-open-close stats: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
+            detail="internal error while computing quick-open-close stats",
         ) from exc
 
 
@@ -1022,7 +1022,7 @@ async def quick_open_close_alerts_export(
         logger.error("Failed to export quick-open-close alerts: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
+            detail="internal error while exporting quick-open-close alerts",
         ) from exc
 
 
@@ -1088,7 +1088,7 @@ async def quick_profit_get_config():
         logger.error("Failed to read quick-profit config: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
+            detail="internal error while reading quick-profit config",
         ) from exc
 
 
@@ -1112,7 +1112,7 @@ async def quick_profit_update_config(config: QuickProfitConfig):
         logger.error("Failed to update quick-profit config: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
+            detail="internal error while updating quick-profit config",
         ) from exc
 
 
@@ -1173,7 +1173,7 @@ async def quick_profit_alerts(
         logger.error("Failed to query quick-profit alerts: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
+            detail="internal error while querying quick-profit alerts",
         ) from exc
 
 
@@ -1203,7 +1203,7 @@ async def quick_profit_alerts_stats(
         logger.error("Failed to compute quick-profit stats: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
+            detail="internal error while computing quick-profit stats",
         ) from exc
 
 
@@ -1251,7 +1251,7 @@ async def quick_profit_alerts_export(
         logger.error("Failed to export quick-profit alerts: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
+            detail="internal error while exporting quick-profit alerts",
         ) from exc
 
 
@@ -1312,7 +1312,7 @@ async def quick_profit_floating_refresh(
         logger.error("Quick-profit floating refresh failed: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
+            detail="internal error while refreshing quick-profit floating pnl",
         ) from exc
 
 
@@ -1345,7 +1345,7 @@ async def gap_trade_get_config():
         logger.error("Failed to read gap-trade config: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
+            detail="internal error while reading gap-trade config",
         ) from exc
 
 
@@ -1378,7 +1378,7 @@ async def gap_trade_update_config(config: GapTradeConfig):
         logger.error("Failed to update gap-trade config: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
+            detail="internal error while updating gap-trade config",
         ) from exc
 
 
@@ -1455,7 +1455,7 @@ async def gap_trade_alerts(
         logger.error("Failed to query gap-trade alerts: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
+            detail="internal error while querying gap-trade alerts",
         ) from exc
 
 
@@ -1492,7 +1492,7 @@ async def gap_trade_alerts_stats(
         logger.error("Failed to compute gap-trade stats: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
+            detail="internal error while computing gap-trade stats",
         ) from exc
 
 
@@ -1571,7 +1571,7 @@ async def gap_trade_alerts_export(
         logger.error("Failed to export gap-trade alerts: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
+            detail="internal error while exporting gap-trade alerts",
         ) from exc
 
 
@@ -1638,7 +1638,7 @@ async def hedge_open_get_config():
         logger.error("Failed to read hedge-open config: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
+            detail="internal error while reading hedge-open config",
         ) from exc
 
 
@@ -1662,7 +1662,7 @@ async def hedge_open_update_config(config: HedgeOpenConfig):
         logger.error("Failed to update hedge-open config: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
+            detail="internal error while updating hedge-open config",
         ) from exc
 
 
@@ -1723,7 +1723,7 @@ async def hedge_open_alerts(
         logger.error("Failed to query hedge-open alerts: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
+            detail="internal error while querying hedge-open alerts",
         ) from exc
 
 
@@ -1753,7 +1753,7 @@ async def hedge_open_alerts_stats(
         logger.error("Failed to compute hedge-open stats: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
+            detail="internal error while computing hedge-open stats",
         ) from exc
 
 
@@ -1801,7 +1801,7 @@ async def hedge_open_alerts_export(
         logger.error("Failed to export hedge-open alerts: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
+            detail="internal error while exporting hedge-open alerts",
         ) from exc
 
 
@@ -1873,7 +1873,7 @@ async def hedge_open_alerts_aggregated(
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
+            detail="internal error while aggregating hedge-open alerts",
         ) from exc
 
 
@@ -1909,7 +1909,7 @@ def hedge_mail_test_send(payload: HedgeMailTestSendRequest):
         logger.error("Hedge mail test-send failed: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
+            detail="internal error while sending hedge test mail",
         ) from exc
 
     return HedgeMailTestSendResponse(
@@ -1988,7 +1988,7 @@ async def leverage_abuse_get_config():
         logger.error("Failed to read leverage-abuse config: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
+            detail="internal error while reading leverage-abuse config",
         ) from exc
 
 
@@ -2012,7 +2012,7 @@ async def leverage_abuse_update_config(config: LeverageAbuseConfig):
         logger.error("Failed to update leverage-abuse config: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
+            detail="internal error while updating leverage-abuse config",
         ) from exc
 
 
@@ -2075,7 +2075,7 @@ async def leverage_abuse_alerts(
         logger.error("Failed to query leverage-abuse alerts: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
+            detail="internal error while querying leverage-abuse alerts",
         ) from exc
 
 
@@ -2107,7 +2107,7 @@ async def leverage_abuse_alerts_stats(
         logger.error("Failed to compute leverage-abuse stats: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
+            detail="internal error while computing leverage-abuse stats",
         ) from exc
 
 
@@ -2157,7 +2157,7 @@ async def leverage_abuse_alerts_export(
         logger.error("Failed to export leverage-abuse alerts: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
+            detail="internal error while exporting leverage-abuse alerts",
         ) from exc
 
 
@@ -2226,7 +2226,7 @@ async def martingale_get_config():
         logger.error("Failed to read martingale config: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
+            detail="internal error while reading martingale config",
         ) from exc
 
 
@@ -2250,7 +2250,7 @@ async def martingale_update_config(config: MartingaleConfig):
         logger.error("Failed to update martingale config: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
+            detail="internal error while updating martingale config",
         ) from exc
 
 
@@ -2311,7 +2311,7 @@ async def martingale_alerts(
         logger.error("Failed to query martingale alerts: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
+            detail="internal error while querying martingale alerts",
         ) from exc
 
 
@@ -2341,7 +2341,7 @@ async def martingale_alerts_stats(
         logger.error("Failed to compute martingale stats: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
+            detail="internal error while computing martingale stats",
         ) from exc
 
 
@@ -2389,7 +2389,7 @@ async def martingale_alerts_export(
         logger.error("Failed to export martingale alerts: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
+            detail="internal error while exporting martingale alerts",
         ) from exc
 
 

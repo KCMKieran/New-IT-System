@@ -431,7 +431,10 @@ def test_test_send_smtp_failure_502(client, monkeypatch):
     monkeypatch.setattr(email_service, "send_email", boom)
     r = client.post("/api/v1/alert-mail/subscriptions/1/test-send", json={})
     assert r.status_code == 502
-    assert "smtp exploded" in r.json()["detail"]
+    # OPT-0056: raw SMTP exception text must NOT leak to the client; the
+    # detail is a generic message and the full error goes to the server log.
+    assert r.json()["detail"] == "mail delivery failed"
+    assert "smtp exploded" not in r.json()["detail"]
 
 
 # ── GET /outbox ──────────────────────────────────────────────────────────────

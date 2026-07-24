@@ -1,7 +1,7 @@
 ---
 id: OPT-0056
 title: 全站路由 detail=str(exc) 异常原文泄漏清理 —— 内部细节留日志、对外只回通用文案
-status: wip
+status: done
 priority: P1
 area: backend
 effort: S
@@ -136,6 +136,37 @@ except Exception as exc:
   所有未来路由），**不在本 OPT 范围**——若实施者认为值得，单独 file 一个 follow-up OPT，
   别在本 OPT 里顺手加（避免范围蔓延）。
 
-## 结果
+## 结果（2026-07-24 done，branch `opt/route-exception-detail-leak`，commit `3cc0486`）
 
-（完成时填：实际改了哪些文件/处数、保留的 4xx 清单及理由、follow-up）
+**实际交付：60 处 500/502 泄漏清理，跨 13 个 route 文件 + 1 个测试更新。**
+
+比 grep 清单多修 5 处 —— spec 的 grep 模式（`detail=str(exc)` 直拼）看不见 f-string / 变量拼接
+形式的泄漏，实施 worker 补抓，均在 AC#1「所有 500/502」范围内：
+- `ib_report.py` ×2（`f"...失败: {str(e)}"`，保留文件既有中文泛化措辞 `获取组别列表失败`/`报表查询失败`）
+- `ib_data.py` 两处 `f"查询失败: {str(exc)}"` 500
+- `etl.py` L105（变量 `error_detail` 含 str(e)，改为只进 `logger.error` + 内部事件表，对外泛化）
+- `client_pnl_analysis.py` L65（`f"Query failed: {err_msg}"`）
+
+**补 logger 的 5 个文件**（原缺 module-level logger）：`pnl_summary` / `alert_mail` / `zipcode` /
+`trading_analysis` / `hourly_details`（各加 `import logging` + `logger = logging.getLogger(__name__)`）。
+
+**保留的 4xx（有意校验提示，str(exc) 是对用户输入的反馈、非驱动内幕，未动）**：
+`ib_data` L34/L68、`ib_financial` L172、`client_pnl` L45/L47、`client_return_rate` L86、
+`xauusd_positions` L63、`alert_mail` 404/409/422（catch `svc.SubscriptionNotFound`/
+`NoRenderableAlert`/`InvalidSubscription` 业务异常）、`risk_monitor` L1906(404)/L2464(409)。
+另 `zipcode` L34/L49/L61 的 `{"error": str(e)}` 是 **200 dict 返回**（非 HTTPException 500/502），
+超出本 OPT 范围，未动。
+
+**用户决策落实**：① alert_mail L125 的 502(`MailSendFailed`) → `logger.exception` +
+`detail="mail delivery failed"`；② 全程就地写泛化字符串，无 helper 抽象。
+
+**验证**：Docker（new-it-backend-dev）实跑 `test_alert_mail_api.py` **45 passed**（含被更新的
+`test_test_send_smtp_failure_502`：断言泛化文案 + raw SMTP 文本不再泄漏）+ 13 个改过的 route
+模块导入冒烟全 ok + 改后 re-grep 剩余命中全为有意保留的 4xx。全套 verify.sh 未跑（直连云 DB /
+10-15 分钟 / 41 既有失败噪声）——本改动纯错误文案、无逻辑变更，风险低。
+
+**Stage 1**：用户选不跑 outsider-review，直接合并。
+
+**follow-up（未做，留给未来）**：
+- 全局 `@app.exception_handler` 兜底未捕获异常 → 从根上防漏（本 OPT 明确排除；值得单独 file）。
+- `zipcode.py` L34/L49/L61 的 200-status `{"error": str(e)}` dict 返回若也算泄漏面，可另立小单收口。

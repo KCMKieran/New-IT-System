@@ -18,10 +18,10 @@ async def get_ib_groups():
         data = clickhouse_service.get_ib_groups()
         return data
     except Exception as e:
-        logger.error(f"Failed to fetch IB groups: {e}")
+        logger.error(f"Failed to fetch IB groups: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"获取组别列表失败: {str(e)}"
+            detail="获取组别列表失败"
         )
 
 @router.post("/search", response_model=list[IBReportRow], status_code=status.HTTP_200_OK)
@@ -107,5 +107,5 @@ async def search_ib_report(request: IBReportRequest):
         logger.error(f"Failed to search IB report: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"报表查询失败: {str(e)}"
+            detail="报表查询失败"
         )

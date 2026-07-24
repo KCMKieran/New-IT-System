@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Query, HTTPException
 from pydantic import BaseModel, Field
 
@@ -11,6 +13,8 @@ from app.services.zipcode_service import (
 	get_change_frequency,
 )
 
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/zipcode", tags=["zipcode"])
 
@@ -66,7 +70,8 @@ def create_zipcode_exclusion(payload: ManualExclusionCreate):
 		row = add_manual_exclusion(client_id=payload.client_id, note=note, added_by="WebUser")
 		return {"ok": True, "data": row}
 	except Exception as e:
-		raise HTTPException(status_code=500, detail=str(e)) from e
+		logger.exception("zipcode manual exclusion insert failed")
+		raise HTTPException(status_code=500, detail="internal error while adding exclusion") from e
 
 
 @router.get("/change-frequency")

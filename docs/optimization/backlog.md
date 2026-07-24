@@ -13,7 +13,6 @@
 | [OPT-0041](./items/OPT-0041-test-seed-date-rot.md) | opt/test-seed-date-rot | 2026-07-06 | 闸门修复，最先合 |
 | [OPT-0002](./items/OPT-0002-browser-cache-pattern-doc.md) | opt/browser-cache-pattern-doc | 2026-07-06 | 与 0041 并行（docs-only） |
 | [OPT-0028](./items/OPT-0028-risk-monitor-aggregator-hardening.md) | opt/aggregator-hardening | 2026-07-06 | 等 0041 merge 后开工（依赖测试转绿） |
-| [OPT-0056](./items/OPT-0056-route-exception-detail-leak.md) | opt/route-exception-detail-leak | 2026-07-24 | 500/502 泄漏清理；4xx 校验保留 |
 ## ✅ 待领取（Ready）
 
 > AC 已经在 item 文件里定义好了。按 priority + effort + 你的当前心智状态挑一个。

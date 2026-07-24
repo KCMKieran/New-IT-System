@@ -42,7 +42,7 @@ def get_dashboard_pnl_by_sales_team():
         return DashboardPnlBySalesTeamResponse(items=items)
     except Exception as e:
         logger.exception("Error fetching dashboard pnl-by-sales-team")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="internal error while fetching pnl by sales team")
 
 
 @router.get("/pnl-by-group", response_model=DashboardPnlByGroupResponse)
@@ -56,7 +56,7 @@ def get_dashboard_pnl_by_group():
         return DashboardPnlByGroupResponse(items=items)
     except Exception as e:
         logger.exception("Error fetching dashboard pnl-by-group")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="internal error while fetching pnl by group")
 
 
 @router.get("/pnl-history", response_model=PnlHistoryResponse)
@@ -85,7 +85,7 @@ def get_dashboard_pnl_history(
         )
     except Exception as e:
         logger.exception("Error fetching dashboard pnl-history")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="internal error while fetching pnl history")
 
 
 @router.get(
@@ -118,4 +118,4 @@ def get_dashboard_cn_payment_success_rate(
         )
     except Exception as e:
         logger.exception("Error fetching CN payment success rate")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="internal error while fetching cn payment success rate")

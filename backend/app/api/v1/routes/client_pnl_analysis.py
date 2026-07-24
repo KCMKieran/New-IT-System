@@ -62,4 +62,4 @@ def query_client_pnl_analysis(
                 detail="ClickHouse database might be waking up (Paused). Please try again in 30-60 seconds."
             )
         
-        raise HTTPException(status_code=500, detail=f"Query failed: {err_msg}")
+        raise HTTPException(status_code=500, detail="internal error while running pnl analysis query")
