@@ -113,7 +113,9 @@ def _base_where(
             ]
             like = f"%{term}%"
             params.extend([like, like])
-            if term.isdigit():
+            # len guard: >18 digits overflows PG bigint (psycopg2 would
+            # raise mid-query → 500); such terms fall back to ILIKE only.
+            if term.isdigit() and len(term) <= 18:
                 sub.append("c.user_id = %s")
                 params.append(int(term))
             clauses.append("(" + " OR ".join(sub) + ")")
@@ -841,7 +843,9 @@ def _activity_where(
             sub = ["p.user_name ILIKE %s", "p.country ILIKE %s"]
             like = f"%{term}%"
             params.extend([like, like])
-            if term.isdigit():
+            # Same bigint-overflow guard as _base_where: >18-digit terms
+            # stay on the ILIKE branches instead of a user_id equality.
+            if term.isdigit() and len(term) <= 18:
                 sub.append("p.user_id = %s")
                 params.append(int(term))
             clauses.append("(" + " OR ".join(sub) + ")")
