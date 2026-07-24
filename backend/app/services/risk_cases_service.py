@@ -22,6 +22,7 @@ import redis
 
 from ..core.config import Settings, get_settings
 from ..core.risk_cases_pg import risk_cases_conn
+from ..core.singleflight import SingleFlight
 
 logger = logging.getLogger(__name__)
 
@@ -249,6 +250,68 @@ def _fetch_hold_deltas(
     return out
 
 
+# ── Cached CRM MySQL connection (zipcode lookup) ────────────────────────
+#
+# One lazily-created module-level connection per process, guarded by a lock
+# (PyMySQL connections are NOT thread-safe). Opening a fresh TCP+auth
+# handshake per page load was pure overhead for a single indexed IN query;
+# callers hold the lock for the (fast) query duration, which also bounds
+# concurrent load on the CRM slave. ping(reconnect=True) revives
+# idle-killed connections in place; a short connect timeout keeps a down
+# CRM DB cheap (the lookup is fail-open — see _query_zipcodes_by_userid).
+
+_ZIP_MYSQL_CONNECT_TIMEOUT_S = 3
+
+_zip_mysql_conn: Optional["pymysql.connections.Connection"] = None
+_zip_mysql_lock = threading.Lock()
+
+
+def _get_zip_mysql_conn(settings: Settings) -> "pymysql.connections.Connection":
+    """Return the shared CRM MySQL connection, (re)connecting when needed.
+
+    Caller MUST hold _zip_mysql_lock. Raises on connect failure — the
+    caller's fail-open catch turns that into an empty enrichment map.
+    """
+    global _zip_mysql_conn
+    conn = _zip_mysql_conn
+    if conn is not None:
+        try:
+            # Revives an idle-killed connection in place (bounded by the
+            # original connect_timeout on reconnect).
+            conn.ping(reconnect=True)
+            return conn
+        except Exception:
+            _discard_zip_mysql_conn()
+    conn = pymysql.connect(
+        host=settings.DB_HOST,
+        user=settings.DB_USER,
+        password=settings.DB_PASSWORD,
+        database=settings.DB_NAME,
+        port=int(settings.DB_PORT),
+        charset=settings.DB_CHARSET,
+        cursorclass=pymysql.cursors.DictCursor,
+        connect_timeout=_ZIP_MYSQL_CONNECT_TIMEOUT_S,
+        read_timeout=15,
+        # Read-only lookups on a persistent connection: without autocommit
+        # every SELECT would leave an InnoDB transaction (and its snapshot)
+        # open until the next borrow.
+        autocommit=True,
+    )
+    _zip_mysql_conn = conn
+    return conn
+
+
+def _discard_zip_mysql_conn() -> None:
+    """Close and forget the cached connection (caller holds the lock)."""
+    global _zip_mysql_conn
+    conn, _zip_mysql_conn = _zip_mysql_conn, None
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 def _query_zipcodes_by_userid(
     settings: Settings, user_ids: List[int]
 ) -> Dict[int, str]:
@@ -279,23 +342,17 @@ def _query_zipcodes_by_userid(
         GROUP BY userId
     """
     try:
-        conn = pymysql.connect(
-            host=settings.DB_HOST,
-            user=settings.DB_USER,
-            password=settings.DB_PASSWORD,
-            database=settings.DB_NAME,
-            port=int(settings.DB_PORT),
-            charset=settings.DB_CHARSET,
-            cursorclass=pymysql.cursors.DictCursor,
-            connect_timeout=5,
-            read_timeout=15,
-        )
-        try:
-            with conn.cursor() as cur:
-                cur.execute(sql, tuple(user_ids))
-                fetched = cur.fetchall()
-        finally:
-            conn.close()
+        with _zip_mysql_lock:
+            conn = _get_zip_mysql_conn(settings)
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(sql, tuple(user_ids))
+                    fetched = cur.fetchall()
+            except Exception:
+                # Query failed — discard the cached connection so the next
+                # call reconnects fresh instead of reusing a broken one.
+                _discard_zip_mysql_conn()
+                raise
         return {
             int(r["userid"]): r["zipcode"]
             for r in fetched
@@ -786,6 +843,11 @@ _CRM_FLAG_COL_SQL: Dict[str, str] = {
 ACTIVITY_COUNTS_CACHE_PREFIX = "risk_cases:activity_counts:v5"
 ACTIVITY_COUNTS_CACHE_TTL_S = 60
 
+# Coalesce concurrent recomputes of the full-universe counts GROUP BY: on
+# TTL expiry every in-flight request for the same filter combo (= same
+# cache key) would otherwise hit PG with the identical expensive query.
+_activity_counts_singleflight = SingleFlight()
+
 
 def _activity_where(
     *,
@@ -1049,21 +1111,49 @@ def query_activity_clients(
                 )
                 client = None
 
+    if counts is None and cache_key is not None:
+        # SingleFlight (keyed by the cache key): on TTL expiry only one
+        # thread recomputes; concurrent identical requests wait for and
+        # share its result instead of stampeding PG.
+        def _compute_counts() -> Dict[str, int]:
+            # Re-check Redis inside singleflight (a previous owner may have
+            # populated it while we waited for the lock).
+            if client is not None:
+                try:
+                    cached = client.get(cache_key)
+                    if cached is not None:
+                        parsed = json.loads(cached)
+                        if isinstance(parsed, dict):
+                            return {
+                                code: int(parsed.get(code, 0))
+                                for code in ACTIVITY_STATUS_CODES
+                            }
+                except Exception:
+                    pass
+            with risk_cases_conn(settings) as sf_conn:
+                with sf_conn.cursor() as sf_cur:
+                    fresh = _query_activity_status_counts(sf_cur, where, params)
+            if client is not None:
+                try:
+                    client.set(
+                        cache_key,
+                        json.dumps(fresh),
+                        ex=ACTIVITY_COUNTS_CACHE_TTL_S,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "activity counts cache write failed: %s", exc
+                    )
+            return fresh
+
+        counts = _activity_counts_singleflight.do(cache_key, _compute_counts)
+
     with risk_cases_conn(settings) as conn:
         with conn.cursor() as cur:
             if counts is None:
+                # Uncacheable combos (q / tag filter — unbounded key space,
+                # see above): compute directly on the page connection.
                 counts = _query_activity_status_counts(cur, where, params)
-                if client is not None and cache_key is not None:
-                    try:
-                        client.set(
-                            cache_key,
-                            json.dumps(counts),
-                            ex=ACTIVITY_COUNTS_CACHE_TTL_S,
-                        )
-                    except Exception as exc:
-                        logger.warning(
-                            "activity counts cache write failed: %s", exc
-                        )
             cur.execute(page_sql, [*params, statuses, page_size, offset])
             drv_rows = cur.fetchall()
 
