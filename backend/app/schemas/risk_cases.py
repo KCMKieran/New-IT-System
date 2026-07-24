@@ -92,6 +92,21 @@ class WatchlistResponse(BaseModel):
     statistics: WatchlistStatistics = WatchlistStatistics()
 
 
+class CrmTagChip(BaseModel):
+    """One CRM tag chip (kcm.crm_* mirror of fxbackoffice tags, <=5min stale).
+
+    Colors are the CRM's own hex values (defined per category) so the chip
+    renders pixel-identical to the CRM; all None for uncategorized tags —
+    frontend falls back to a neutral gray. cat = category name, kept so the
+    frontend category whitelist can filter chips client-side.
+    """
+
+    tag: str
+    cat: Optional[str] = None
+    color: Optional[str] = None
+    bg: Optional[str] = None
+
+
 class ActivityClientRow(BaseModel):
     """One client of the full-universe activity view (server-side paged).
 
@@ -163,6 +178,9 @@ class ActivityClientRow(BaseModel):
     closed_geo_hold_sec_delta_30d: Optional[float] = None
     # CRM MySQL leg (fail-open), client-level distinct comma-joined
     zipcode: Optional[str] = None
+    # ── Enrichment: CRM Tags (kcm.crm_user_tags/crm_tags/crm_tag_category,
+    # J15 5-min mirror → <=5min stale). None = client has no CRM tags. ──
+    crm_tags: Optional[List[CrmTagChip]] = None
 
 
 class ActivityClientsResponse(BaseModel):

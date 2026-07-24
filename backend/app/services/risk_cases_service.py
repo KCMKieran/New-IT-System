@@ -648,6 +648,22 @@ _ACTIVITY_ENRICH_SQL = """
         WHERE a.user_id = ANY(%(ids)s)
         GROUP BY a.user_id
     ),
+    crm_tags AS (
+        -- CRM Tags chips (KCM T14 mirror of fxbackoffice tags, J15 5-min
+        -- id-diff sync). Colors live on the category (uncategorized tags →
+        -- NULL color/bg → frontend default gray); cat = category name so the
+        -- frontend whitelist can filter without a second lookup.
+        SELECT ut.user_id,
+               json_agg(json_build_object(
+                            'tag', t.tag, 'cat', c.name,
+                            'color', c.color, 'bg', c.background_color)
+                        ORDER BY t.tag) AS crm_tags
+        FROM kcm.crm_user_tags ut
+        JOIN kcm.crm_tags t ON t.id = ut.tag_id
+        LEFT JOIN kcm.crm_tag_category c ON c.id = t.category_id
+        WHERE ut.user_id = ANY(%(ids)s)
+        GROUP BY ut.user_id
+    ),
     hold AS (
         -- Weighted hold-time leg (activity-status-design.md §5.4): one scan
         -- over the page ids' last 60 T4 days yields all three as-of points
@@ -677,6 +693,7 @@ _ACTIVITY_ENRICH_SQL = """
            cp.profit_7d, cp.profit_30d, cp.profit_all,
            rb.rebate_7d, rb.rebate_30d, rb.rebate_all,
            ac.equity, ac.floating_pl,
+           ct.crm_tags,
            -- API unit = seconds (canonical, sort-stable). Empty window →
            -- NULLIF denominator → NULL (never a fake 0: 0s means "instant
            -- scalping close", a completely different statement); a delta is
@@ -698,6 +715,7 @@ _ACTIVITY_ENRICH_SQL = """
     LEFT JOIN closed_pl cp ON cp.user_id = i.user_id
     LEFT JOIN rebate rb  ON rb.user_id = i.user_id
     LEFT JOIN acct ac    ON ac.user_id = i.user_id
+    LEFT JOIN crm_tags ct ON ct.user_id = i.user_id
     LEFT JOIN hold ho    ON ho.user_id = i.user_id
 """
 

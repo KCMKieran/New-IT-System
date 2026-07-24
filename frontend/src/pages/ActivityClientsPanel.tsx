@@ -147,6 +147,15 @@ interface ActivityClientRow {
   closed_geo_hold_sec_delta_30d: number | null;
   // CRM zipcode (fxbackoffice.mt4_users) — the one non-PG field.
   zipcode: string | null;
+  // CRM Tags chips (kcm.crm_* J15 mirror, ≤5min stale); null = untagged.
+  crm_tags: CrmTagChip[] | null;
+}
+
+interface CrmTagChip {
+  tag: string;
+  cat: string | null; // category name; null = uncategorized (default gray)
+  color: string | null; // CRM's own hex values (per category) — render as-is
+  bg: string | null;
 }
 
 // ── 交易状态 buckets (mutually exclusive priority waterfall, backend CASE) ──
@@ -455,6 +464,50 @@ function StatusBadge({ code }: { code: string }) {
     <Badge className={cn("border-transparent", meta.badge)}>
       {meta.label}
     </Badge>
+  );
+}
+
+// ── CRM Tags chips ──
+// Category whitelist: null = show ALL categories. Once 同事 confirms the
+// risk-relevant subset, list crm_tag_category.name values here, e.g.
+// ["CN_Special Setting", "KG_Blacklisted Client", "CN_is IB"] — chips of
+// other categories are then hidden client-side (the API always sends all).
+const CRM_TAG_CATEGORY_WHITELIST: string[] | null = null;
+const CRM_TAG_MAX_CHIPS = 3; // rest collapses into "+N" (full list on hover)
+
+function CrmTagChips({ chips }: { chips: CrmTagChip[] | null | undefined }) {
+  const visible =
+    (CRM_TAG_CATEGORY_WHITELIST
+      ? chips?.filter(
+          (c) => c.cat !== null && CRM_TAG_CATEGORY_WHITELIST.includes(c.cat),
+        )
+      : chips) ?? [];
+  if (visible.length === 0) return <span>{EMDASH}</span>;
+  const head = visible.slice(0, CRM_TAG_MAX_CHIPS);
+  const rest = visible.length - head.length;
+  return (
+    <span
+      className="flex h-full items-center gap-1 overflow-hidden"
+      title={visible.map((c) => c.tag).join("、")}
+    >
+      {head.map((c) => (
+        <span
+          key={c.tag}
+          className="inline-block max-w-[110px] truncate rounded px-1.5 text-xs leading-5"
+          // CRM's own colors verbatim (pixel-identical to the CRM UI);
+          // uncategorized tags have none → neutral gray, readable in dark too
+          style={{
+            color: c.color ?? "#374151",
+            backgroundColor: c.bg ?? "#d2d6de",
+          }}
+        >
+          {c.tag}
+        </span>
+      ))}
+      {rest > 0 && (
+        <span className="shrink-0 text-xs text-muted-foreground">+{rest}</span>
+      )}
+    </span>
   );
 }
 
@@ -919,6 +972,22 @@ export default function ActivityClientsPanel({
             "来源 fxbackoffice.mt4_users，非 KCM 快照。",
         },
         valueFormatter: (p) => p.value ?? EMDASH,
+      },
+      {
+        headerName: "CRM Tags",
+        colId: "crm_tags",
+        field: "crm_tags",
+        width: 240,
+        headerComponent: InfoHeader,
+        headerComponentParams: {
+          tooltip:
+            "客户在 CRM 打的标签（颜色与 CRM 一致，来源 KCM 镜像，≤5 分钟延迟）。\n" +
+            "超出部分收进 +N，悬停看全量列表。\n" +
+            "≠ 案卷引擎的行为风控 tag——这里是 CRM 人工标注。",
+        },
+        cellRenderer: (p: ICellRendererParams<ActivityClientRow>) => (
+          <CrmTagChips chips={p.data?.crm_tags} />
+        ),
       },
       {
         headerName: "最近交易",
