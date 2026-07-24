@@ -705,6 +705,34 @@ def test_base_where_all_state_is_no_filter():
     assert params == []
 
 
+def test_search_term_bigint_overflow_guard():
+    # Normal digits (≤18 chars) still take the user_id equality branch.
+    where, params = svc._base_where(None, "127582")
+    assert "c.user_id = %s" in where
+    assert 127582 in params
+    # 20-digit input: no user_id clause, no exception — ILIKE legs only
+    # (a Python int that large overflows PG bigint mid-query → 500).
+    long_term = "12345678901234567890"
+    where, params = svc._base_where(None, long_term)
+    assert "c.user_id = %s" not in where
+    assert all(not isinstance(p, int) for p in params)
+    assert f"%{long_term}%" in params  # still searchable via ILIKE
+    # Non-digit input never takes the numeric branch.
+    where, params = svc._base_where(None, "alice")
+    assert "c.user_id = %s" not in where
+    # Same guard on the activity-view builder.
+    where, params = svc._activity_where(
+        countries=[], q=long_term, crm_true=["verified", "enabled"],
+    )
+    assert "p.user_id = %s" not in where
+    assert all(not isinstance(p, int) for p in params)
+    where, params = svc._activity_where(
+        countries=[], q="127582", crm_true=["verified", "enabled"],
+    )
+    assert "p.user_id = %s" in where
+    assert 127582 in params
+
+
 # ── Real-PG integration (skipped without env) ───────────────────────────
 
 
