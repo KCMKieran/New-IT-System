@@ -168,6 +168,8 @@ def activity_clients(
 ):
     """Full-universe activity view (server-side paged, two-stage query).
 
+    Metric-sorted pages are served from a short Redis response cache
+    (singleflight on miss); statistics.from_cache reports it truthfully.
     Declared before the /{user_id} route so the literal path is not captured
     as a user_id.
     """
@@ -230,7 +232,7 @@ def activity_clients(
             ) from exc
     t0 = time.perf_counter()
     try:
-        rows, total, counts, snapshot_at = query_activity_clients(
+        rows, total, counts, snapshot_at, from_cache = query_activity_clients(
             page=page,
             page_size=page_size,
             statuses=status_list,
@@ -261,7 +263,8 @@ def activity_clients(
         status_counts=counts,
         snapshot_at=snapshot_at,
         statistics=WatchlistStatistics(
-            query_time_ms=int((time.perf_counter() - t0) * 1000)
+            from_cache=from_cache,
+            query_time_ms=int((time.perf_counter() - t0) * 1000),
         ),
     )
 

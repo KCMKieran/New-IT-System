@@ -180,7 +180,7 @@ def test_activity_clients_envelope_and_counts(client):
     with mock.patch.object(
         risk_cases_route,
         "query_activity_clients",
-        return_value=([_activity_row()], 1281, dict(_ACTIVITY_COUNTS), None),
+        return_value=([_activity_row()], 1281, dict(_ACTIVITY_COUNTS), None, False),
     ) as q:
         res = client.get("/api/v1/risk-cases/activity-clients?page=2&page_size=50")
     assert res.status_code == 200
@@ -218,7 +218,7 @@ def test_activity_clients_passes_filters_through(client):
     with mock.patch.object(
         risk_cases_route,
         "query_activity_clients",
-        return_value=([], 0, dict(_ACTIVITY_COUNTS), None),
+        return_value=([], 0, dict(_ACTIVITY_COUNTS), None, False),
     ) as q:
         res = client.get(
             "/api/v1/risk-cases/activity-clients"
@@ -245,7 +245,7 @@ def test_activity_clients_crm_true_empty_vs_missing(client):
     with mock.patch.object(
         risk_cases_route,
         "query_activity_clients",
-        return_value=([], 0, dict(_ACTIVITY_COUNTS), None),
+        return_value=([], 0, dict(_ACTIVITY_COUNTS), None, False),
     ) as q:
         res = client.get("/api/v1/risk-cases/activity-clients?crm_true=")
     assert res.status_code == 200
@@ -285,7 +285,7 @@ def test_activity_clients_empty_status_falls_back_to_default(client):
     with mock.patch.object(
         risk_cases_route,
         "query_activity_clients",
-        return_value=([], 0, dict(_ACTIVITY_COUNTS), None),
+        return_value=([], 0, dict(_ACTIVITY_COUNTS), None, False),
     ) as q:
         res = client.get("/api/v1/risk-cases/activity-clients?status=")
     assert res.status_code == 200
@@ -308,7 +308,7 @@ def test_activity_clients_not_swallowed_by_user_id_route(client):
     with mock.patch.object(
         risk_cases_route,
         "query_activity_clients",
-        return_value=([], 0, dict(_ACTIVITY_COUNTS), None),
+        return_value=([], 0, dict(_ACTIVITY_COUNTS), None, False),
     ):
         res = client.get("/api/v1/risk-cases/activity-clients")
     assert res.status_code == 200
@@ -529,7 +529,7 @@ def test_activity_clients_crm_tag_ids_passthrough(client):
     with mock.patch.object(
         risk_cases_route,
         "query_activity_clients",
-        return_value=([], 0, dict(_ACTIVITY_COUNTS), None),
+        return_value=([], 0, dict(_ACTIVITY_COUNTS), None, False),
     ) as q:
         res = client.get(
             "/api/v1/risk-cases/activity-clients?crm_tag_ids=10,%2011,10"
@@ -543,7 +543,7 @@ def test_activity_clients_crm_tag_ids_empty_or_missing_means_no_filter(client):
     with mock.patch.object(
         risk_cases_route,
         "query_activity_clients",
-        return_value=([], 0, dict(_ACTIVITY_COUNTS), None),
+        return_value=([], 0, dict(_ACTIVITY_COUNTS), None, False),
     ) as q:
         assert (
             client.get("/api/v1/risk-cases/activity-clients").status_code == 200

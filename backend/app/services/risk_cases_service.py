@@ -10,6 +10,7 @@ services/case_metrics_service.py (daily snapshots).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -22,6 +23,7 @@ import redis
 
 from ..core.config import Settings, get_settings
 from ..core.risk_cases_pg import risk_cases_conn
+from ..core.singleflight import SingleFlight
 
 logger = logging.getLogger(__name__)
 
@@ -938,6 +940,69 @@ def query_crm_tag_dict(
     return {"categories": categories, "tags": tags}
 
 
+# ── Metric-sort page cache (response-level, 2026-07-24) ─────────────────
+#
+# When the page is sorted by an enrichment metric, the page query attaches
+# full-universe aggregate CTEs (kcm.daily_user_stats / daily_user_rebate at
+# ~1.24M rows each, 0.5-1.5s measured) — and the frontend re-polls every
+# 60s per open tab. A short Redis TTL cache over the endpoint's computed
+# response, keyed on a hash of ALL query parameters, plus singleflight on
+# miss caps the PG load at one metric-sort query per parameter combo per
+# TTL window regardless of viewer count. Driver-column sorts stay uncached
+# (cheap indexed ORDER BY, not worth the staleness). Fail-open like every
+# Redis path in this module: any Redis problem only logs a warning and the
+# caller computes directly — never a 5xx because Redis is down.
+
+ACTIVITY_PAGE_CACHE_PREFIX = "risk_cases:activity_page:v1"
+ACTIVITY_PAGE_CACHE_TTL_S = 60
+
+# Coalesces concurrent identical cache misses so only one caller runs the
+# expensive metric-sort query; the other callers block and share the result.
+_activity_page_flight = SingleFlight()
+
+
+def _activity_page_cache_key(
+    *,
+    page: int,
+    page_size: int,
+    statuses: Sequence[str],
+    countries: Sequence[str],
+    q: Optional[str],
+    crm_true: Sequence[str],
+    crm_tag_ids: Sequence[int],
+    sort_key: str,
+    direction: str,
+) -> str:
+    """Stable cache key over ALL inputs of the activity page query.
+
+    Multi-selects are sorted + deduped (equivalent selections share one
+    entry); crm_true is encoded as the 5-bit TRUE/FALSE vector in
+    CRM_TRUE_CODES order, mirroring the badge-counts key. The canonical
+    payload is hashed: q and the tag-id combos make the raw parameter space
+    unbounded, so a fixed-size digest keeps the key space bounded while the
+    short TTL evicts stale entries.
+    """
+    payload = json.dumps(
+        {
+            "page": page,
+            "page_size": page_size,
+            "statuses": sorted(set(statuses)),
+            "countries": sorted(set(countries)),
+            "q": (q or "").strip(),
+            "crm": "".join(
+                "1" if code in crm_true else "0" for code in CRM_TRUE_CODES
+            ),
+            "tags": sorted(set(crm_tag_ids)),
+            "sort": sort_key,
+            "dir": direction,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return f"{ACTIVITY_PAGE_CACHE_PREFIX}:{digest}"
+
+
 def query_activity_clients(
     settings: Optional[Settings] = None,
     *,
@@ -950,7 +1015,7 @@ def query_activity_clients(
     crm_tag_ids: Optional[Sequence[int]] = None,
     sort_by: Optional[str] = None,
     sort_order: Optional[str] = None,
-) -> Tuple[List[Dict[str, Any]], int, Dict[str, int], Optional[str]]:
+) -> Tuple[List[Dict[str, Any]], int, Dict[str, int], Optional[str], bool]:
     """One page of the full-universe activity view.
 
     Two-stage by contract: the driver layer pages/filters/sorts over
@@ -968,11 +1033,16 @@ def query_activity_clients(
     counts Redis cache (read and write): the tag combination space is
     unbounded like q, so caching would explode the key space for a
     near-zero hit rate. The no-tag path keeps the v5 cache untouched.
-    Returns (rows, total, status_counts, newest_snapshot_iso). status_counts
-    always covers all 8 buckets regardless of the statuses filter (it feeds
-    the per-item badges of the dropdown); total = sum over the selected
-    buckets (same filters, same transaction on the uncached path; at worst
-    60s stale on the cached path — accepted).
+    Returns (rows, total, status_counts, newest_snapshot_iso, from_cache).
+    status_counts always covers all 8 buckets regardless of the statuses
+    filter (it feeds the per-item badges of the dropdown); total = sum over
+    the selected buckets (same filters, same transaction on the uncached
+    path; at worst 60s stale on the cached path — accepted).
+    Metric sorts (sort key in _ACTIVITY_METRIC_SORT) additionally go
+    through the response-level Redis TTL cache + singleflight declared
+    above (ACTIVITY_PAGE_CACHE_*): from_cache is True only when the whole
+    response came from that cache. Driver-column sorts always compute
+    directly (from_cache False).
     Raises RiskCasesUnavailable when PG is down (route → 503).
     """
     settings = settings or get_settings()
@@ -997,6 +1067,105 @@ def query_activity_clients(
     crm_tag_ids = list(dict.fromkeys(int(t) for t in (crm_tag_ids or ())))
     sort_key = sort_by if sort_by in SORTABLE_ACTIVITY_COLS else DEFAULT_ACTIVITY_SORT_BY
     direction = "ASC" if (sort_order or "").lower() == "asc" else "DESC"
+
+    def _compute() -> Tuple[List[Dict[str, Any]], int, Dict[str, int], Optional[str]]:
+        return _query_activity_clients_uncached(
+            settings,
+            page=page,
+            page_size=page_size,
+            statuses=statuses,
+            countries=countries,
+            q=q,
+            crm_true=crm_true,
+            crm_tag_ids=crm_tag_ids,
+            sort_key=sort_key,
+            direction=direction,
+        )
+
+    # Driver-column sorts are cheap (plain indexed columns, no full-universe
+    # aggregate CTEs) — compute directly, no response cache.
+    if sort_key not in _ACTIVITY_METRIC_SORT:
+        rows, total, counts, newest = _compute()
+        return rows, total, counts, newest, False
+
+    page_key = _activity_page_cache_key(
+        page=page,
+        page_size=page_size,
+        statuses=statuses,
+        countries=countries,
+        q=q,
+        crm_true=crm_true,
+        crm_tag_ids=crm_tag_ids,
+        sort_key=sort_key,
+        direction=direction,
+    )
+    client = _get_risk_cases_redis()
+    if client is not None:
+        try:
+            cached = client.get(page_key)
+            if cached is not None:
+                payload = json.loads(cached)
+                return (
+                    payload["rows"],
+                    int(payload["total"]),
+                    payload["counts"],
+                    payload.get("snapshot_at"),
+                    True,
+                )
+        except Exception as exc:
+            # Corrupt payload or Redis hiccup: fail-open to a direct
+            # compute (and skip the write below — client unusable).
+            logger.warning(
+                "activity page cache read failed, recomputing: %s", exc
+            )
+            client = None
+
+    def _compute_and_store() -> Tuple[
+        List[Dict[str, Any]], int, Dict[str, int], Optional[str]
+    ]:
+        rows, total, counts, newest = _compute()
+        if client is not None:
+            try:
+                client.set(
+                    page_key,
+                    json.dumps(
+                        {
+                            "rows": rows,
+                            "total": total,
+                            "counts": counts,
+                            "snapshot_at": newest,
+                        }
+                    ),
+                    ex=ACTIVITY_PAGE_CACHE_TTL_S,
+                )
+            except Exception as exc:
+                logger.warning("activity page cache write failed: %s", exc)
+        return rows, total, counts, newest
+
+    # Concurrent identical misses coalesce: one caller runs the PG query,
+    # the rest share its result. Waiters report from_cache False — they got
+    # a freshly computed response, not a Redis read.
+    rows, total, counts, newest = _activity_page_flight.do(
+        page_key, _compute_and_store
+    )
+    return rows, total, counts, newest, False
+
+
+def _query_activity_clients_uncached(
+    settings: Settings,
+    *,
+    page: int,
+    page_size: int,
+    statuses: List[str],
+    countries: List[str],
+    q: Optional[str],
+    crm_true: List[str],
+    crm_tag_ids: List[int],
+    sort_key: str,
+    direction: str,
+) -> Tuple[List[Dict[str, Any]], int, Dict[str, int], Optional[str]]:
+    """Direct PG compute behind query_activity_clients (inputs pre-validated
+    and normalized there — never call with raw route parameters)."""
     sort_ctes, sort_joins, sort_expr = _activity_order_sql(sort_key)
     offset = max(page - 1, 0) * page_size
 

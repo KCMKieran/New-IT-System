@@ -5,7 +5,8 @@ Formerly test_open_positions_cache.py (OPT-0054): the open-positions TTL
 cache + singleflight were retired on 2026-07-24 together with the
 GET /risk-cases/open-positions endpoint, but the lazy module-level Redis
 client getter survives — it now backs the activity-view badge-counts cache
-(risk_cases_service.query_activity_clients). These tests pin its contract:
+and the metric-sort page cache (risk_cases_service.query_activity_clients).
+These tests pin its contract:
 - construction/ping failure → None, never an exception, retried next call
 - success → one memoized client per process
 """
