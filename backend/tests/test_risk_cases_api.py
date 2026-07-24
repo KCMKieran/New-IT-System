@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from unittest import mock
 
 import pytest
@@ -700,6 +701,120 @@ def test_activity_empty_tag_list_is_no_filter():
     assert len(executed) == 1
     assert "crm_user_tags" not in executed[0][0]
     get_redis.assert_called_once()
+
+
+def test_activity_counts_cache_miss_stampede_coalesced():
+    """On TTL expiry N concurrent identical requests run ONE counts query.
+
+    Thread 1 enters the counts GROUP BY and blocks; thread 2 (same filter
+    combo = same singleflight key) starts only after thread 1 owns the key,
+    so it must coalesce and share the result instead of recomputing.
+    """
+    entered = threading.Event()
+    release = threading.Event()
+    executed: list[str] = []
+    executed_lock = threading.Lock()
+
+    def _execute(sql, params=None):
+        with executed_lock:
+            executed.append(sql)
+        if "GROUP BY activity_status" in sql:
+            entered.set()
+            assert release.wait(timeout=5)
+
+    cur = mock.MagicMock()
+    cur.execute.side_effect = _execute
+    cur.fetchall.return_value = []
+    conn = mock.MagicMock()
+    conn.cursor.return_value.__enter__.return_value = cur
+    cm = mock.MagicMock()
+    cm.__enter__.return_value = conn
+    cm.__exit__.return_value = False
+
+    redis_client = mock.MagicMock()
+    redis_client.get.return_value = None  # cache miss for every reader
+
+    results: list[dict] = []
+
+    def _call():
+        _rows, _total, counts, _snap = svc.query_activity_clients(mock.Mock())
+        results.append(counts)
+
+    # Patch once in the main thread for the whole run — per-thread patching
+    # would restore the real functions while the other thread still runs.
+    with mock.patch.object(svc, "risk_cases_conn", return_value=cm), \
+            mock.patch.object(
+                svc, "_get_risk_cases_redis", return_value=redis_client
+            ):
+        t1 = threading.Thread(target=_call)
+        t1.start()
+        assert entered.wait(timeout=5)  # t1 owns the key, blocked in PG
+        t2 = threading.Thread(target=_call)
+        t2.start()
+        # Give t2 time to reach the singleflight wait, then unblock the owner.
+        t2.join(timeout=0.3)
+        release.set()
+        t1.join(timeout=5)
+        t2.join(timeout=5)
+        assert not t1.is_alive() and not t2.is_alive()
+
+    counts_queries = [s for s in executed if "GROUP BY activity_status" in s]
+    page_queries = [s for s in executed if "SELECT drv.*" in s]
+    assert len(counts_queries) == 1  # coalesced — no stampede
+    assert len(page_queries) == 2  # page query still runs per request
+    assert len(results) == 2 and results[0] == results[1]
+
+
+# ── Zipcode lookup: cached CRM MySQL connection ─────────────────────────
+
+
+@pytest.fixture()
+def _fresh_zip_conn_cache():
+    """Isolate the module-level cached MySQL connection between tests."""
+    with svc._zip_mysql_lock:
+        svc._zip_mysql_conn = None
+    yield
+    with svc._zip_mysql_lock:
+        svc._zip_mysql_conn = None
+
+
+def test_zipcode_lookup_reuses_cached_connection(_fresh_zip_conn_cache):
+    cur = mock.MagicMock()
+    cur.fetchall.return_value = [{"userid": 1, "zipcode": "111"}]
+    conn = mock.MagicMock()
+    conn.cursor.return_value.__enter__.return_value = cur
+    settings = mock.Mock(
+        DB_HOST="h", DB_USER="u", DB_PASSWORD="p", DB_NAME="d",
+        DB_PORT=3306, DB_CHARSET="utf8mb4",
+    )
+    with mock.patch.object(svc.pymysql, "connect", return_value=conn) as pc:
+        out1 = svc._query_zipcodes_by_userid(settings, [1])
+        out2 = svc._query_zipcodes_by_userid(settings, [1])
+    assert out1 == out2 == {1: "111"}
+    pc.assert_called_once()  # second call reuses the cached connection
+    assert conn.ping.call_count == 1  # liveness probe on the reused borrow
+    # Short connect timeout so a down CRM DB costs little (fail-open path).
+    assert pc.call_args.kwargs["connect_timeout"] == \
+        svc._ZIP_MYSQL_CONNECT_TIMEOUT_S
+    assert pc.call_args.kwargs["autocommit"] is True
+
+
+def test_zipcode_lookup_fail_open_discards_broken_connection(
+    _fresh_zip_conn_cache,
+):
+    bad_cur = mock.MagicMock()
+    bad_cur.execute.side_effect = RuntimeError("query blew up")
+    bad_conn = mock.MagicMock()
+    bad_conn.cursor.return_value.__enter__.return_value = bad_cur
+    settings = mock.Mock(
+        DB_HOST="h", DB_USER="u", DB_PASSWORD="p", DB_NAME="d",
+        DB_PORT=3306, DB_CHARSET="utf8mb4",
+    )
+    with mock.patch.object(svc.pymysql, "connect", return_value=bad_conn):
+        # Fail-open: enrichment failure returns {} instead of raising.
+        assert svc._query_zipcodes_by_userid(settings, [1]) == {}
+    bad_conn.close.assert_called_once()  # broken connection discarded
+    assert svc._zip_mysql_conn is None  # next call reconnects fresh
 
 
 # ── Service pure helpers ────────────────────────────────────────────────
