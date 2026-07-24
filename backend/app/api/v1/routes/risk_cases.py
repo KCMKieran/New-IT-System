@@ -82,9 +82,12 @@ def watchlist(
             detail=f"risk_cases database unavailable: {exc}",
         ) from exc
     except Exception as exc:
-        logger.error("watchlist query failed", exc_info=True)
+        # Log the full traceback server-side; never echo raw driver/SQL
+        # error text to the browser.
+        logger.exception("watchlist query failed")
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="internal error while querying watchlist",
         ) from exc
 
     return WatchlistResponse(
@@ -247,9 +250,10 @@ def activity_clients(
             detail=f"risk_cases database unavailable: {exc}",
         ) from exc
     except Exception as exc:
-        logger.error("activity-clients query failed", exc_info=True)
+        logger.exception("activity-clients query failed")
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="internal error while querying activity clients",
         ) from exc
 
     return ActivityClientsResponse(
@@ -283,9 +287,10 @@ def crm_tag_dict():
             detail=f"risk_cases database unavailable: {exc}",
         ) from exc
     except Exception as exc:
-        logger.error("crm tag dict query failed", exc_info=True)
+        logger.exception("crm tag dict query failed")
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="internal error while querying crm tag dict",
         ) from exc
 
     return CrmTagDictResponse(
@@ -310,9 +315,10 @@ def case_detail(user_id: int):
             detail=f"risk_cases database unavailable: {exc}",
         ) from exc
     except Exception as exc:
-        logger.error("case detail query failed for user_id=%s", user_id, exc_info=True)
+        logger.exception("case detail query failed for user_id=%s", user_id)
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="internal error while querying case detail",
         ) from exc
 
     if detail is None:
