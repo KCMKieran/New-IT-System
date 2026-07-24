@@ -298,7 +298,7 @@ def test_activity_clients_missing_or_empty_sort_by_defaults(client):
         with mock.patch.object(
             risk_cases_route,
             "query_activity_clients",
-            return_value=([], 0, dict(_ACTIVITY_COUNTS), None),
+            return_value=([], 0, dict(_ACTIVITY_COUNTS), None, False),
         ) as q:
             res = client.get(f"/api/v1/risk-cases/activity-clients{qs}")
         assert res.status_code == 200
@@ -737,7 +737,7 @@ def test_activity_counts_cache_miss_stampede_coalesced():
     results: list[dict] = []
 
     def _call():
-        _rows, _total, counts, _snap = svc.query_activity_clients(mock.Mock())
+        _rows, _total, counts, _snap, _from_cache = svc.query_activity_clients(mock.Mock())
         results.append(counts)
 
     # Patch once in the main thread for the whole run — per-thread patching
