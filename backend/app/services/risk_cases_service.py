@@ -651,8 +651,8 @@ _ACTIVITY_ENRICH_SQL = """
     crm_tags AS (
         -- CRM Tags chips (KCM T14 mirror of fxbackoffice tags, J15 5-min
         -- id-diff sync). Colors live on the category (uncategorized tags →
-        -- NULL color/bg → frontend default gray); cat = category name so the
-        -- frontend whitelist can filter without a second lookup.
+        -- NULL color/bg → frontend default gray); cat = category name for
+        -- the frontend's grouped full-list popover.
         SELECT ut.user_id,
                json_agg(json_build_object(
                             'tag', t.tag, 'cat', c.name,
@@ -792,6 +792,7 @@ def _activity_where(
     countries: Sequence[str],
     q: Optional[str],
     crm_true: Sequence[str],
+    crm_tag_ids: Sequence[int] = (),
 ) -> Tuple[str, List[Any]]:
     """Filter clauses appended INSIDE the drv CTE (after the WHERE TRUE anchor).
 
@@ -804,11 +805,26 @@ def _activity_where(
     ACTIVITY_COUNTRY_CODES): named codes → p.country IN (...); OTHER → not
     in the named list, NULL included. Named + OTHER OR together; empty
     selection = no country filter.
+
+    crm_tag_ids is the CRM Tags secondary filter (kcm.crm_user_tags J15
+    mirror): one EXISTS with tag_id = ANY(array) — OR semantics across the
+    selected tags (any hit shows the client). Unknown ids simply never
+    match (harmless). Empty = no tag filter. The clause rides the shared
+    WHERE string, so it applies to BOTH the page query and the badge-count
+    query by construction.
     """
     clauses: List[str] = []
     params: List[Any] = []
     for code, col in _CRM_FLAG_COL_SQL.items():
         clauses.append(f"{col} = {'TRUE' if code in crm_true else 'FALSE'}")
+    if crm_tag_ids:
+        clauses.append(
+            "EXISTS (SELECT 1 FROM kcm.crm_user_tags ut "
+            "WHERE ut.user_id = p.user_id AND ut.tag_id = ANY(%s))"
+        )
+        # psycopg2 adapts a Python list to a PG array (a tuple would build
+        # an IN-style row expression instead — must stay a list).
+        params.append(list(crm_tag_ids))
     named = tuple(c for c in countries if c != "OTHER")
     country_subs: List[str] = []
     if named:
@@ -870,6 +886,58 @@ def _query_activity_status_counts(
     return counts
 
 
+def query_crm_tag_dict(
+    settings: Optional[Settings] = None,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Full CRM tag dictionary for the frontend CRM Tags filter dropdown.
+
+    Reads the KCM J15 mirror tables (kcm.crm_tag_category 26 rows /
+    kcm.crm_tags 551 rows — tiny, no pagination, no cache). Colors live on
+    the category (bg = background_color); tags with category_id NULL are
+    the frontend's 未分类 group. Raises RiskCasesUnavailable when PG is
+    down (route → 503).
+    """
+    settings = settings or get_settings()
+    with risk_cases_conn(settings) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, name, color, background_color
+                FROM kcm.crm_tag_category
+                ORDER BY name, id
+                """
+            )
+            categories = [
+                {
+                    "id": int(r["id"]),
+                    "name": r["name"],
+                    "color": r["color"],
+                    "bg": r["background_color"],
+                }
+                for r in cur.fetchall()
+            ]
+            cur.execute(
+                """
+                SELECT id, tag, category_id
+                FROM kcm.crm_tags
+                ORDER BY tag, id
+                """
+            )
+            tags = [
+                {
+                    "id": int(r["id"]),
+                    "tag": r["tag"],
+                    "category_id": (
+                        int(r["category_id"])
+                        if r["category_id"] is not None
+                        else None
+                    ),
+                }
+                for r in cur.fetchall()
+            ]
+    return {"categories": categories, "tags": tags}
+
+
 def query_activity_clients(
     settings: Optional[Settings] = None,
     *,
@@ -879,6 +947,7 @@ def query_activity_clients(
     countries: Optional[Sequence[str]] = None,
     q: Optional[str] = None,
     crm_true: Optional[Sequence[str]] = None,
+    crm_tag_ids: Optional[Sequence[int]] = None,
     sort_by: Optional[str] = None,
     sort_order: Optional[str] = None,
 ) -> Tuple[List[Dict[str, Any]], int, Dict[str, int], Optional[str]]:
@@ -894,6 +963,11 @@ def query_activity_clients(
     ("verified","enabled"); an EMPTY sequence is legal and distinct from
     None (all five FALSE) — the route maps a missing param to None and an
     explicit empty string to [].
+    crm_tag_ids = CRM Tags secondary filter (OR across the selected tags);
+    None/empty = no tag filter. A non-empty selection BYPASSES the badge
+    counts Redis cache (read and write): the tag combination space is
+    unbounded like q, so caching would explode the key space for a
+    near-zero hit rate. The no-tag path keeps the v5 cache untouched.
     Returns (rows, total, status_counts, newest_snapshot_iso). status_counts
     always covers all 8 buckets regardless of the statuses filter (it feeds
     the per-item badges of the dropdown); total = sum over the selected
@@ -919,6 +993,8 @@ def query_activity_clients(
     for f in crm_true:
         if f not in CRM_TRUE_CODES:
             raise ValueError(f"unknown crm_true code: {f!r}")
+    # Dedupe preserving order; ints only (the route already parsed/422'd).
+    crm_tag_ids = list(dict.fromkeys(int(t) for t in (crm_tag_ids or ())))
     sort_key = sort_by if sort_by in SORTABLE_ACTIVITY_COLS else DEFAULT_ACTIVITY_SORT_BY
     direction = "ASC" if (sort_order or "").lower() == "asc" else "DESC"
     sort_ctes, sort_joins, sort_expr = _activity_order_sql(sort_key)
@@ -928,6 +1004,7 @@ def query_activity_clients(
         countries=countries,
         q=q,
         crm_true=crm_true,
+        crm_tag_ids=crm_tag_ids,
     )
 
     page_sql = (
@@ -942,11 +1019,15 @@ def query_activity_clients(
     """
     )
 
-    # Badge counts: Redis 60s cache for the no-search filter combos.
+    # Badge counts: Redis 60s cache for the no-search filter combos. A tag
+    # selection bypasses the cache entirely (read AND write): like q, the
+    # tag combination space is unbounded — caching it would churn keys for
+    # a near-zero hit rate. The no-tag path keeps hitting the v5 keys
+    # unchanged (no prefix bump needed).
     counts: Optional[Dict[str, int]] = None
     cache_key: Optional[str] = None
     client = None
-    if not (q and q.strip()):
+    if not (q and q.strip()) and not crm_tag_ids:
         cache_key = _activity_counts_cache_key(
             countries=countries,
             crm_true=crm_true,

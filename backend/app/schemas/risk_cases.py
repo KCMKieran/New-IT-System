@@ -97,8 +97,9 @@ class CrmTagChip(BaseModel):
 
     Colors are the CRM's own hex values (defined per category) so the chip
     renders pixel-identical to the CRM; all None for uncategorized tags —
-    frontend falls back to a neutral gray. cat = category name, kept so the
-    frontend category whitelist can filter chips client-side.
+    frontend falls back to a neutral gray. cat = category name, used by the
+    frontend to group the full-list popover (all categories always shown —
+    2026-07-24 decision: no category filtering).
     """
 
     tag: str
@@ -181,6 +182,34 @@ class ActivityClientRow(BaseModel):
     # ── Enrichment: CRM Tags (kcm.crm_user_tags/crm_tags/crm_tag_category,
     # J15 5-min mirror → <=5min stale). None = client has no CRM tags. ──
     crm_tags: Optional[List[CrmTagChip]] = None
+
+
+class CrmTagDictCategory(BaseModel):
+    """One CRM tag category (kcm.crm_tag_category mirror). Colors live at
+    this level — tags inherit them; bg = background_color."""
+
+    id: int
+    name: str
+    color: Optional[str] = None
+    bg: Optional[str] = None
+
+
+class CrmTagDictTag(BaseModel):
+    """One CRM tag (kcm.crm_tags mirror). category_id None = uncategorized
+    (frontend 未分类 group, default-gray chips)."""
+
+    id: int
+    tag: str
+    category_id: Optional[int] = None
+
+
+class CrmTagDictResponse(BaseModel):
+    """Full CRM tag dictionary (26 categories / 551 tags — tiny, unpaged).
+    Feeds the CRM Tags filter dropdown; fetched once per page load."""
+
+    categories: List[CrmTagDictCategory] = []
+    tags: List[CrmTagDictTag] = []
+    statistics: WatchlistStatistics = WatchlistStatistics()
 
 
 class ActivityClientsResponse(BaseModel):

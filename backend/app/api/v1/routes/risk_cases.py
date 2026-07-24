@@ -18,6 +18,7 @@ from ....schemas.risk_cases import (
     ActivityClientRow,
     ActivityClientsResponse,
     CaseDetailResponse,
+    CrmTagDictResponse,
     WatchlistResponse,
     WatchlistRow,
     WatchlistStatistics,
@@ -29,6 +30,7 @@ from ....services.risk_cases_service import (
     DEFAULT_CRM_TRUE,
     get_case_detail,
     query_activity_clients,
+    query_crm_tag_dict,
     query_watchlist,
 )
 
@@ -144,6 +146,16 @@ def activity_clients(
             "(legal). Any unknown code → 422."
         ),
     ),
+    crm_tag_ids: Optional[str] = Query(
+        default=None,
+        description=(
+            "Comma-separated CRM tag ids (kcm.crm_tags.id, see "
+            "/risk-cases/crm-tag-dict). OR semantics: a client shows when "
+            "it carries ANY selected tag. Empty/missing = no tag filter; "
+            "any non-integer token → 422. Unknown ids are harmless (never "
+            "match). A non-empty selection bypasses the badge-counts cache."
+        ),
+    ),
     sort_by: Optional[str] = Query(
         default=None,
         description=(
@@ -199,6 +211,23 @@ def activity_clients(
                         f"expected one of {sorted(CRM_TRUE_CODES)}"
                     ),
                 )
+    # CRM tag ids: comma list of ints. Empty/missing = no filter; a
+    # non-integer token is a client bug → explicit 422, never a silent
+    # no-filter fallback.
+    tag_id_list: Optional[list[int]] = None
+    if crm_tag_ids is not None and crm_tag_ids.strip():
+        try:
+            tag_id_list = [
+                int(t.strip()) for t in crm_tag_ids.split(",") if t.strip()
+            ]
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    f"invalid crm_tag_ids {crm_tag_ids!r}; "
+                    "expected comma-separated integers"
+                ),
+            ) from exc
     t0 = time.perf_counter()
     try:
         rows, total, counts, snapshot_at = query_activity_clients(
@@ -208,6 +237,7 @@ def activity_clients(
             countries=country_list,
             q=q,
             crm_true=crm_list,
+            crm_tag_ids=tag_id_list,
             sort_by=sort_by,
             sort_order=sort_order,
         )
@@ -230,6 +260,37 @@ def activity_clients(
         total_pages=max((total + page_size - 1) // page_size, 1),
         status_counts=counts,
         snapshot_at=snapshot_at,
+        statistics=WatchlistStatistics(
+            query_time_ms=int((time.perf_counter() - t0) * 1000)
+        ),
+    )
+
+
+@router.get("/crm-tag-dict", response_model=CrmTagDictResponse)
+def crm_tag_dict():
+    """Full CRM tag dictionary (categories + tags) for the CRM Tags filter.
+
+    Tiny payload (26 categories / 551 tags) — unpaged, uncached. Declared
+    before the /{user_id} route so the literal path is not captured as a
+    user_id.
+    """
+    t0 = time.perf_counter()
+    try:
+        payload = query_crm_tag_dict()
+    except RiskCasesUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"risk_cases database unavailable: {exc}",
+        ) from exc
+    except Exception as exc:
+        logger.error("crm tag dict query failed", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)
+        ) from exc
+
+    return CrmTagDictResponse(
+        categories=payload["categories"],
+        tags=payload["tags"],
         statistics=WatchlistStatistics(
             query_time_ms=int((time.perf_counter() - t0) * 1000)
         ),

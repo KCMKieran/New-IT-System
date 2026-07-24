@@ -12,6 +12,7 @@ Contract tests for the risk-V2 watchlist API (OPT-0047).
 
 from __future__ import annotations
 
+import json
 import os
 from unittest import mock
 
@@ -440,6 +441,242 @@ def test_activity_status_case_waterfall_order():
         "dormant", "funded_no_trade", "new_no_fund", "no_fund",
     )]
     assert order == sorted(order)
+
+
+# ── CRM Tags filter (dict endpoint + crm_tag_ids param) ─────────────────
+
+
+_TAG_DICT = {
+    "categories": [
+        {"id": 1, "name": "CN_Special Setting", "color": "#fff", "bg": "#d9534f"},
+    ],
+    "tags": [
+        {"id": 10, "tag": "AB仓", "category_id": 1},
+        {"id": 11, "tag": "孤儿tag", "category_id": None},
+    ],
+}
+
+
+def test_crm_tag_dict_envelope(client):
+    with mock.patch.object(
+        risk_cases_route, "query_crm_tag_dict", return_value=dict(_TAG_DICT)
+    ) as q:
+        res = client.get("/api/v1/risk-cases/crm-tag-dict")
+    assert res.status_code == 200
+    body = res.json()
+    for key in ("categories", "tags", "statistics"):
+        assert key in body
+    assert body["categories"][0] == _TAG_DICT["categories"][0]
+    # Uncategorized tag keeps category_id null (frontend 未分类 group).
+    assert body["tags"][1]["category_id"] is None
+    assert "query_time_ms" in body["statistics"]
+    q.assert_called_once()
+
+
+def test_crm_tag_dict_503_when_pg_down(client):
+    with mock.patch.object(
+        risk_cases_route,
+        "query_crm_tag_dict",
+        side_effect=RiskCasesUnavailable("down"),
+    ):
+        res = client.get("/api/v1/risk-cases/crm-tag-dict")
+    assert res.status_code == 503
+
+
+def test_crm_tag_dict_not_swallowed_by_user_id_route(client):
+    # /crm-tag-dict is declared before /{user_id}; if the ordering ever
+    # regresses, the literal path parses as user_id and 422s.
+    with mock.patch.object(
+        risk_cases_route, "query_crm_tag_dict", return_value=dict(_TAG_DICT)
+    ):
+        res = client.get("/api/v1/risk-cases/crm-tag-dict")
+    assert res.status_code == 200
+
+
+def test_crm_tag_dict_service_maps_background_color_to_bg():
+    cur = mock.MagicMock()
+    cur.fetchall.side_effect = [
+        [
+            {
+                "id": 1,
+                "name": "CN_Special Setting",
+                "color": "#ffffff",
+                "background_color": "#d9534f",
+            }
+        ],
+        [
+            {"id": 10, "tag": "AB仓", "category_id": 1},
+            {"id": 11, "tag": "孤儿tag", "category_id": None},
+        ],
+    ]
+    conn = mock.MagicMock()
+    conn.cursor.return_value.__enter__.return_value = cur
+    cm = mock.MagicMock()
+    cm.__enter__.return_value = conn
+    cm.__exit__.return_value = False
+    with mock.patch.object(svc, "risk_cases_conn", return_value=cm):
+        out = svc.query_crm_tag_dict(mock.Mock())
+    assert out["categories"] == [
+        {"id": 1, "name": "CN_Special Setting", "color": "#ffffff", "bg": "#d9534f"}
+    ]
+    assert out["tags"] == [
+        {"id": 10, "tag": "AB仓", "category_id": 1},
+        {"id": 11, "tag": "孤儿tag", "category_id": None},
+    ]
+
+
+def test_activity_clients_crm_tag_ids_passthrough(client):
+    with mock.patch.object(
+        risk_cases_route,
+        "query_activity_clients",
+        return_value=([], 0, dict(_ACTIVITY_COUNTS), None),
+    ) as q:
+        res = client.get(
+            "/api/v1/risk-cases/activity-clients?crm_tag_ids=10,%2011,10"
+        )
+    assert res.status_code == 200
+    # Parsed to ints (whitespace tolerated); dedupe is the service's job.
+    assert q.call_args.kwargs["crm_tag_ids"] == [10, 11, 10]
+
+
+def test_activity_clients_crm_tag_ids_empty_or_missing_means_no_filter(client):
+    with mock.patch.object(
+        risk_cases_route,
+        "query_activity_clients",
+        return_value=([], 0, dict(_ACTIVITY_COUNTS), None),
+    ) as q:
+        assert (
+            client.get("/api/v1/risk-cases/activity-clients").status_code == 200
+        )
+        assert q.call_args.kwargs["crm_tag_ids"] is None
+        assert (
+            client.get(
+                "/api/v1/risk-cases/activity-clients?crm_tag_ids="
+            ).status_code
+            == 200
+        )
+        assert q.call_args.kwargs["crm_tag_ids"] is None
+
+
+def test_activity_clients_crm_tag_ids_non_integer_422(client):
+    res = client.get("/api/v1/risk-cases/activity-clients?crm_tag_ids=abc")
+    assert res.status_code == 422
+    # One bad token inside an otherwise valid list also 422s.
+    res = client.get("/api/v1/risk-cases/activity-clients?crm_tag_ids=10,x")
+    assert res.status_code == 422
+    # Floats are not tag ids either.
+    res = client.get("/api/v1/risk-cases/activity-clients?crm_tag_ids=1.5")
+    assert res.status_code == 422
+
+
+def test_activity_where_crm_tag_ids_exists_clause():
+    # One EXISTS with tag_id = ANY(array) — OR semantics across tags; the
+    # param must be a LIST (psycopg2 adapts lists to PG arrays, tuples to
+    # row expressions).
+    where, params = svc._activity_where(
+        countries=[], q=None, crm_true=["verified", "enabled"],
+        crm_tag_ids=[10, 11],
+    )
+    assert where.count("EXISTS (SELECT 1 FROM kcm.crm_user_tags ut") == 1
+    assert "ut.user_id = p.user_id AND ut.tag_id = ANY(%s)" in where
+    assert [10, 11] in params
+    assert isinstance(params[params.index([10, 11])], list)
+    # Empty/default → no tag clause at all.
+    where, params = svc._activity_where(
+        countries=[], q=None, crm_true=["verified", "enabled"],
+    )
+    assert "crm_user_tags" not in where
+    assert params == []
+
+
+def _run_activity_query(*, crm_tag_ids=None, cached_counts=None):
+    """Drive query_activity_clients with a mocked PG conn + Redis client.
+
+    Returns (executed [(sql, params), ...], fake redis client). The cursor
+    answers every fetchall with [] (empty universe) unless the counts query
+    runs, which also gets [] → all-zero buckets.
+    """
+    executed: list[tuple[str, object]] = []
+    cur = mock.MagicMock()
+    cur.execute.side_effect = lambda sql, params=None: executed.append(
+        (sql, params)
+    )
+    cur.fetchall.return_value = []
+    conn = mock.MagicMock()
+    conn.cursor.return_value.__enter__.return_value = cur
+    cm = mock.MagicMock()
+    cm.__enter__.return_value = conn
+    cm.__exit__.return_value = False
+
+    redis_client = mock.MagicMock()
+    redis_client.get.return_value = (
+        None if cached_counts is None else json.dumps(cached_counts)
+    )
+    with mock.patch.object(svc, "risk_cases_conn", return_value=cm), \
+            mock.patch.object(
+                svc, "_get_risk_cases_redis", return_value=redis_client
+            ) as get_redis:
+        svc.query_activity_clients(
+            mock.Mock(), crm_tag_ids=crm_tag_ids,
+        )
+    return executed, redis_client, get_redis
+
+
+def test_activity_tag_filter_reaches_page_and_counts_sql_and_skips_cache():
+    executed, redis_client, get_redis = _run_activity_query(
+        crm_tag_ids=[10, 11, 10]
+    )
+    # Counts query + page query both executed (cache bypassed), and BOTH
+    # carry the EXISTS clause + the deduped id array param.
+    assert len(executed) == 2
+    counts_sql, counts_params = executed[0]
+    page_sql, page_params = executed[1]
+    assert "GROUP BY activity_status" in counts_sql
+    assert "SELECT drv.*" in page_sql
+    for sql, params in executed:
+        assert "EXISTS (SELECT 1 FROM kcm.crm_user_tags ut" in sql
+        assert [10, 11] in params
+    # Cache fully bypassed: neither read nor write, client never fetched.
+    get_redis.assert_not_called()
+    redis_client.get.assert_not_called()
+    redis_client.set.assert_not_called()
+
+
+def test_activity_no_tag_filter_still_uses_counts_cache():
+    cached = {code: 7 for code in svc.ACTIVITY_STATUS_CODES}
+    executed, redis_client, get_redis = _run_activity_query(
+        crm_tag_ids=None, cached_counts=cached
+    )
+    # Cache hit → the counts GROUP BY query never runs; only the page query.
+    assert len(executed) == 1
+    assert "SELECT drv.*" in executed[0][0]
+    assert "GROUP BY activity_status" not in executed[0][0]
+    redis_client.get.assert_called_once()
+    key = redis_client.get.call_args.args[0]
+    assert key.startswith(svc.ACTIVITY_COUNTS_CACHE_PREFIX)
+
+
+def test_activity_no_tag_filter_cache_miss_computes_and_writes():
+    executed, redis_client, _ = _run_activity_query(
+        crm_tag_ids=None, cached_counts=None
+    )
+    # Miss → counts computed on PG and written back under the v5 key.
+    assert len(executed) == 2
+    assert "GROUP BY activity_status" in executed[0][0]
+    redis_client.set.assert_called_once()
+    key = redis_client.set.call_args.args[0]
+    assert key.startswith(svc.ACTIVITY_COUNTS_CACHE_PREFIX)
+
+
+def test_activity_empty_tag_list_is_no_filter():
+    # [] (route never sends this, but the service contract allows it) must
+    # behave exactly like None: no EXISTS, cache path still taken.
+    executed, redis_client, get_redis = _run_activity_query(
+        crm_tag_ids=[], cached_counts={c: 0 for c in svc.ACTIVITY_STATUS_CODES}
+    )
+    assert len(executed) == 1
+    assert "crm_user_tags" not in executed[0][0]
+    get_redis.assert_called_once()
 
 
 # ── Service pure helpers ────────────────────────────────────────────────

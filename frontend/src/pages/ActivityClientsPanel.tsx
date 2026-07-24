@@ -63,6 +63,11 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
+import {
   Select,
   SelectContent,
   SelectItem,
@@ -93,6 +98,13 @@ import {
   useGridColumnPersist,
 } from "@/hooks/useGridColumnPersist";
 import { ColumnVisibilityMenu } from "@/components/ColumnVisibilityMenu";
+import { CrmTagsFilter } from "@/components/CrmTagsFilter";
+import {
+  crmTagIdsParam,
+  groupChipsByCategory,
+  sanitizeCrmTagIds,
+  type CrmTagDict,
+} from "@/lib/crm-tag-filter";
 import { readFilterState, useFilterPersist } from "@/hooks/useFilterPersist";
 
 const EMDASH = "—";
@@ -313,6 +325,7 @@ type Filters = {
   statuses: string[];
   countries: string[];
   crmTrue: string[];
+  crmTagIds: number[];
   pageSize: number;
 };
 // 2026-07-24b semantics: empty selection on EITHER dropdown = don't query
@@ -324,10 +337,15 @@ type Filters = {
 // missing field from these defaults on old V2 blobs, and the short-lived
 // `excludeAttrs` field from the retired exclusion semantics is simply
 // ignored (stale extra fields don't round-trip into state).
+// crmTagIds (CRM Tags secondary filter, 2026-07-24) follows the same
+// no-bump pattern: missing field → default []. Empty = no filter (the
+// request omits the param) — like crmTrue, an empty array is a legal
+// value that must NOT join the statuses/countries "don't query" guard.
 const FILTER_DEFAULTS: Filters = {
   statuses: ["active_7d"], // default bucket (2026-07-23 decision; 全选行不存在)
   countries: [...ALL_COUNTRY_CODES], // default = all selected (国家 · 全部)
   crmTrue: ["verified", "enabled"], // 已验证 ∧ 启用 ∧ 非 lead/员工/纯demo
+  crmTagIds: [], // CRM Tags filter — empty = no tag filter
   pageSize: 50,
 };
 
@@ -467,47 +485,77 @@ function StatusBadge({ code }: { code: string }) {
   );
 }
 
-// ── CRM Tags chips ──
-// Category whitelist: null = show ALL categories. Once 同事 confirms the
-// risk-relevant subset, list crm_tag_category.name values here, e.g.
-// ["CN_Special Setting", "KG_Blacklisted Client", "CN_is IB"] — chips of
-// other categories are then hidden client-side (the API always sends all).
-const CRM_TAG_CATEGORY_WHITELIST: string[] | null = null;
-const CRM_TAG_MAX_CHIPS = 3; // rest collapses into "+N" (full list on hover)
+// ── CRM Tags chips — all categories shown (2026-07-24 拍板:不做分类白名单) ──
+const CRM_TAG_MAX_CHIPS = 3; // rest collapses into "+N" (full list on click)
 
+/** One CRM chip — CRM's own colors verbatim (pixel-identical to the CRM
+ *  UI); uncategorized tags have none → neutral gray, readable in dark too. */
+function CrmChip({ chip, truncate }: { chip: CrmTagChip; truncate?: boolean }) {
+  return (
+    <span
+      className={cn(
+        "rounded px-1.5 text-xs leading-5",
+        truncate && "inline-block max-w-[110px] truncate",
+      )}
+      style={{
+        color: chip.color ?? "#374151",
+        backgroundColor: chip.bg ?? "#d2d6de",
+      }}
+    >
+      {chip.tag}
+    </span>
+  );
+}
+
+/**
+ * Cell content: first chips + "+N", click opens a Popover with the
+ * client's FULL chip list grouped by category (未分类 last), wrapping
+ * freely and scrolling past max-h (2026-07-24, replaces the plain-text
+ * title hover). Safe interaction surface: this grid runs
+ * suppressCellFocus and has no row selection, so a click inside the cell
+ * has no grid side effects.
+ */
 function CrmTagChips({ chips }: { chips: CrmTagChip[] | null | undefined }) {
-  const visible =
-    (CRM_TAG_CATEGORY_WHITELIST
-      ? chips?.filter(
-          (c) => c.cat !== null && CRM_TAG_CATEGORY_WHITELIST.includes(c.cat),
-        )
-      : chips) ?? [];
+  const visible = chips ?? [];
   if (visible.length === 0) return <span>{EMDASH}</span>;
   const head = visible.slice(0, CRM_TAG_MAX_CHIPS);
   const rest = visible.length - head.length;
+  const groups = groupChipsByCategory(visible);
   return (
-    <span
-      className="flex h-full items-center gap-1 overflow-hidden"
-      title={visible.map((c) => c.tag).join("、")}
-    >
-      {head.map((c) => (
-        <span
-          key={c.tag}
-          className="inline-block max-w-[110px] truncate rounded px-1.5 text-xs leading-5"
-          // CRM's own colors verbatim (pixel-identical to the CRM UI);
-          // uncategorized tags have none → neutral gray, readable in dark too
-          style={{
-            color: c.color ?? "#374151",
-            backgroundColor: c.bg ?? "#d2d6de",
-          }}
+    <Popover>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          className="flex h-full w-full cursor-pointer items-center gap-1 overflow-hidden text-left"
+          aria-label="展开全部 CRM 标签"
         >
-          {c.tag}
-        </span>
-      ))}
-      {rest > 0 && (
-        <span className="shrink-0 text-xs text-muted-foreground">+{rest}</span>
-      )}
-    </span>
+          {head.map((c) => (
+            <CrmChip key={c.tag} chip={c} truncate />
+          ))}
+          {rest > 0 && (
+            <span className="shrink-0 text-xs text-muted-foreground">
+              +{rest}
+            </span>
+          )}
+        </button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-80 p-3">
+        <div className="max-h-80 space-y-3 overflow-y-auto">
+          {groups.map((g) => (
+            <div key={g.name}>
+              <div className="mb-1 text-xs font-medium text-muted-foreground">
+                {g.name}
+              </div>
+              <div className="flex flex-wrap gap-1">
+                {g.chips.map((c) => (
+                  <CrmChip key={c.tag} chip={c} />
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      </PopoverContent>
+    </Popover>
   );
 }
 
@@ -693,6 +741,12 @@ export default function ActivityClientsPanel({
     }
     return persisted.crmTrue.filter((c) => CRM_BY_CODE[c]);
   });
+  // Like crmTrue, empty is a legal persisted value (no tag filter) — no
+  // empty-fallback. Ids gone from the dictionary are kept: the backend
+  // EXISTS just never matches them (harmless, no dict-fetch race).
+  const [crmTagIds, setCrmTagIds] = useState<number[]>(() =>
+    sanitizeCrmTagIds(persisted.crmTagIds),
+  );
   const [pageSize, setPageSize] = useState<number>(
     PAGE_SIZES.includes(persisted.pageSize as (typeof PAGE_SIZES)[number])
       ? persisted.pageSize
@@ -702,8 +756,34 @@ export default function ActivityClientsPanel({
     statuses,
     countries,
     crmTrue,
+    crmTagIds,
     pageSize,
   });
+
+  // CRM tag dictionary (26 categories / 551 tags — tiny) for the CRM Tags
+  // dropdown; fetched once. Fail-open: on error it stays null and the
+  // dropdown shows a muted notice — the grid itself is unaffected.
+  const [tagDict, setTagDict] = useState<CrmTagDict | null>(null);
+  useEffect(() => {
+    const controller = new AbortController();
+    (async () => {
+      try {
+        const res = await apiFetch("/api/v1/risk-cases/crm-tag-dict", {
+          signal: controller.signal,
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const body = await res.json();
+        setTagDict({
+          categories: body.categories ?? [],
+          tags: body.tags ?? [],
+        });
+      } catch (e) {
+        if (e instanceof DOMException && e.name === "AbortError") return;
+        // Fail-open — tag filtering is unavailable, nothing else breaks.
+      }
+    })();
+    return () => controller.abort();
+  }, []);
 
   const [page, setPage] = useState(1);
   const [sortBy, setSortBy] = useState<string>(DEFAULT_SORT_BY);
@@ -749,6 +829,11 @@ export default function ActivityClientsPanel({
           crmTrue.length === FILTER_DEFAULTS.crmTrue.length &&
           FILTER_DEFAULTS.crmTrue.every((c) => crmTrue.includes(c));
         if (!isDefaultCrm) p.set("crm_true", crmTrue.join(","));
+        // CRM Tags secondary filter: OR across the selected tag ids; empty
+        // selection OMITS the param (no filter — never an empty string,
+        // and never part of the empty-selection guard above).
+        const tagParam = crmTagIdsParam(crmTagIds);
+        if (tagParam) p.set("crm_tag_ids", tagParam);
         if (appliedSearch.current) p.set("q", appliedSearch.current);
         const res = await apiFetch(
           `/api/v1/risk-cases/activity-clients?${p}`,
@@ -773,7 +858,7 @@ export default function ActivityClientsPanel({
         setLoading(false);
       }
     },
-    [page, pageSize, statuses, countries, crmTrue, sortBy, sortOrder],
+    [page, pageSize, statuses, countries, crmTrue, crmTagIds, sortBy, sortOrder],
   );
 
   // Initial load + 60s auto-refresh of the CURRENT page params only.
@@ -832,6 +917,13 @@ export default function ActivityClientsPanel({
       }
       return prev.filter((c) => c !== code);
     });
+    setPage(1);
+  }, []);
+  // CRM Tags dropdown replaces the selection wholesale (the component
+  // computes the next array via the pure toggle helpers); any change
+  // resets to page 1 like every other filter.
+  const handleCrmTagIdsChange = useCallback((next: number[]) => {
+    setCrmTagIds(next);
     setPage(1);
   }, []);
   const applyPageSize = useCallback((n: number) => {
@@ -978,11 +1070,16 @@ export default function ActivityClientsPanel({
         colId: "crm_tags",
         field: "crm_tags",
         width: 240,
+        // Chip-array cell on a server-paginated grid: the inherited client
+        // filter only sees the current page and can't match the object
+        // values anyway — off. Sorting stays off (no whitelist opt-in).
+        filter: false,
         headerComponent: InfoHeader,
         headerComponentParams: {
           tooltip:
             "客户在 CRM 打的标签（颜色与 CRM 一致，来源 KCM 镜像，≤5 分钟延迟）。\n" +
-            "超出部分收进 +N，悬停看全量列表。\n" +
+            "超出部分收进 +N，点击单元格弹出全部标签（按分类分组）。\n" +
+            "可用工具栏「CRM Tags」下拉按标签筛选（多选任一命中）。\n" +
             "≠ 案卷引擎的行为风控 tag——这里是 CRM 人工标注。",
         },
         cellRenderer: (p: ICellRendererParams<ActivityClientRow>) => (
@@ -1827,6 +1924,15 @@ export default function ActivityClientsPanel({
             }))}
             selected={crmTrue}
             onToggle={toggleCrmFlag}
+          />
+
+          {/* CRM Tags secondary filter (server-side EXISTS, OR across the
+              selected tags). Empty selection = no filter — unlike
+              交易状态/国家 it never blocks the query. */}
+          <CrmTagsFilter
+            dict={tagDict}
+            selected={crmTagIds}
+            onChange={handleCrmTagIdsChange}
           />
 
           <ColumnVisibilityMenu
