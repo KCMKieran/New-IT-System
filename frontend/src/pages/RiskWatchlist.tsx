@@ -294,7 +294,14 @@ export default function RiskWatchlist() {
   useFilterPersist(FILTERS_KEY, FILTER_DEFAULTS, { stateFilter });
 
   const persistedView = useMemo(() => readFilterState(VIEW_KEY, VIEW_DEFAULTS), []);
-  const [view, setView] = useState<string>(persistedView.view);
+  // 返佣观察清单 (roster) view retired 2026-07-24: rebate-arb detection (rule
+  // 121/122) + the 07:10 case baseline are paused, so the page shows only
+  // 全量客户. Normalize any persisted "roster" preference to "positions" so a
+  // returning user never lands on the now-stale roster. The roster render block
+  // and its fetch below are kept intact (unreachable but reversible).
+  const [view] = useState<string>(
+    persistedView.view === "roster" ? "positions" : persistedView.view,
+  );
   useFilterPersist(VIEW_KEY, VIEW_DEFAULTS, { view });
 
   const [rows, setRows] = useState<WatchlistRow[]>([]);
@@ -946,28 +953,12 @@ export default function RiskWatchlist() {
 
   return (
     <div className="flex h-full w-full flex-col gap-2 p-1 sm:p-4">
-      {/* View toggle: 全量客户 (all-clients activity view, reworked 2026-07-23)
-          vs 返佣观察清单 (case roster). Default is 全量客户. */}
-      <div className="flex items-center gap-2">
-        <div className="inline-flex rounded-lg border bg-card p-0.5">
-          <Button
-            variant={view === "positions" ? "default" : "ghost"}
-            size="sm"
-            className="h-8"
-            onClick={() => setView("positions")}
-          >
-            全量客户
-          </Button>
-          <Button
-            variant={view === "roster" ? "default" : "ghost"}
-            size="sm"
-            className="h-8"
-            onClick={() => setView("roster")}
-          >
-            返佣观察清单
-          </Button>
-        </div>
-      </div>
+      {/* View toggle removed 2026-07-24: 返佣观察清单 (rebate-arb case roster)
+          retired along with its detection (rule 121/122) + 07:10 baseline; the
+          page now shows only 全量客户. To restore: re-add the two-button toggle
+          here (with setView), revert the `view` init above, and re-enable
+          REBATE_ARB_SCAN_ENABLED / CASE_ENGINE_JOBS_ENABLED in backend/.env.
+          The roster render block below is left untouched. */}
 
       {view === "positions" && <ActivityClientsPanel isDarkMode={isDarkMode} />}
 
