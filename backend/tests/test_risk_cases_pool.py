@@ -6,8 +6,9 @@ All psycopg2 traffic is mocked — no live PG needed. What is pinned:
 - reuse:      a second borrow returns the SAME connection, no new connect
 - liveness:   a dead connection found on borrow is discarded (close=True)
               and the borrow transparently rebuilds a fresh one
-- exhaustion: PoolError on getconn degrades to a one-off direct connection
-              that is CLOSED on release (availability over pooling)
+- exhaustion: PoolError on getconn waits (bounded) for a returned
+              connection, then raises RiskCasesUnavailable (API → 503) —
+              NEVER an unbounded direct connect (connection-storm guard)
 - fail-open:  connect errors surface as RiskCasesUnavailable (API → 503,
               init_risk_cases_pg → False) and nothing is cached
 - no leaks:   the connection goes back to the pool even when the caller's
@@ -17,6 +18,8 @@ All psycopg2 traffic is mocked — no live PG needed. What is pinned:
 from __future__ import annotations
 
 import contextlib
+import threading
+import time
 from unittest import mock
 
 import psycopg2
@@ -132,27 +135,70 @@ def test_unavailable_when_rebuilt_connection_is_also_dead():
                 pass
 
 
-# ── Exhaustion fallback ─────────────────────────────────────────────────
+# ── Exhaustion backpressure ─────────────────────────────────────────────
 
 
-def test_pool_exhausted_falls_back_to_direct_connect():
+def test_pool_exhausted_waits_then_raises_unavailable():
+    """All POOL_MAX_CONN connections borrowed and none returned within the
+    bounded wait: the overflow borrow must raise RiskCasesUnavailable
+    (API → 503) and must NOT open any direct connection — under sustained
+    overload the old direct-connect fallback was a connection storm."""
     s = _settings("host=burst dbname=d user=u password=p")
-    conns = [_fake_conn() for _ in range(risk_cases_pg.POOL_MAX_CONN + 1)]
+    conns = [_fake_conn() for _ in range(risk_cases_pg.POOL_MAX_CONN)]
     with mock.patch.object(
         risk_cases_pg.psycopg2, "connect", side_effect=conns
-    ) as connect:
+    ) as connect, mock.patch.object(
+        risk_cases_pg, "POOL_EXHAUSTED_WAIT_SEC", 0.15
+    ), mock.patch.object(
+        risk_cases_pg, "POOL_EXHAUSTED_POLL_INTERVAL_SEC", 0.01
+    ):
         with contextlib.ExitStack() as stack:
             held = [
                 stack.enter_context(risk_cases_pg.risk_cases_conn(s))
-                for _ in range(risk_cases_pg.POOL_MAX_CONN + 1)
+                for _ in range(risk_cases_pg.POOL_MAX_CONN)
             ]
-            # All concurrent borrows are distinct live connections.
-            assert len({id(c) for c in held}) == risk_cases_pg.POOL_MAX_CONN + 1
-    # maxconn pool connects + 1 direct fallback connect.
-    assert connect.call_count == risk_cases_pg.POOL_MAX_CONN + 1
-    # The overflow connection was a one-off: closed on release, not pooled.
-    held[-1].close.assert_called()
-    held[-1].commit.assert_called()  # normal commit semantics still apply
+            # All pooled borrows are distinct live connections.
+            assert len({id(c) for c in held}) == risk_cases_pg.POOL_MAX_CONN
+            with pytest.raises(risk_cases_pg.RiskCasesUnavailable):
+                with risk_cases_pg.risk_cases_conn(s):
+                    pass
+    # Backpressure, not fan-out: only the pooled connects ever happened.
+    assert connect.call_count == risk_cases_pg.POOL_MAX_CONN
+
+
+def test_pool_exhausted_wait_picks_up_returned_connection():
+    """A connection returned DURING the bounded wait is picked up — the
+    waiter succeeds instead of erroring."""
+    s = _settings("host=burstwait dbname=d user=u password=p")
+    conns = [_fake_conn() for _ in range(risk_cases_pg.POOL_MAX_CONN)]
+    with mock.patch.object(
+        risk_cases_pg.psycopg2, "connect", side_effect=conns
+    ) as connect, mock.patch.object(
+        risk_cases_pg, "POOL_EXHAUSTED_WAIT_SEC", 5.0
+    ), mock.patch.object(
+        risk_cases_pg, "POOL_EXHAUSTED_POLL_INTERVAL_SEC", 0.01
+    ):
+        with contextlib.ExitStack() as stack:
+            for _ in range(risk_cases_pg.POOL_MAX_CONN - 1):
+                stack.enter_context(risk_cases_pg.risk_cases_conn(s))
+            last_cm = risk_cases_pg.risk_cases_conn(s)
+            last = last_cm.__enter__()  # pool is now exhausted
+
+            got: dict = {}
+
+            def _borrow():
+                with risk_cases_pg.risk_cases_conn(s) as conn:
+                    got["conn"] = conn
+
+            waiter = threading.Thread(target=_borrow)
+            waiter.start()
+            time.sleep(0.05)  # let the waiter hit the exhausted pool
+            last_cm.__exit__(None, None, None)  # free one connection
+            waiter.join(timeout=5)
+            assert not waiter.is_alive()
+    # The waiter reused the freed pooled connection — no extra connect.
+    assert got["conn"] is last
+    assert connect.call_count == risk_cases_pg.POOL_MAX_CONN
 
 
 # ── Fail-open ───────────────────────────────────────────────────────────

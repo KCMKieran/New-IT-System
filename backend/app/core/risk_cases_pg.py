@@ -51,15 +51,23 @@ CONNECT_TIMEOUT_SEC = 5
 
 # Connection pool sizing (OPT-0055). The Azure PG handshake (TLS over WAN)
 # costs ~412ms per fresh connection, so reads reuse pooled connections.
-# The pool is PER PROCESS: prod runs 4 uvicorn workers, so the pooled
-# server-side ceiling is POOL_MAX_CONN * 4 = 32 connections, PLUS transient
-# one-off direct connections while a pool is exhausted (the availability
-# fallback in _acquire) — still comfortable for the Azure flexible server.
-# ThreadedConnectionPool is required (not SimpleConnectionPool) because
-# borrowers run both in FastAPI's request threadpool and in the APScheduler
-# background threads (case_engine / case_metrics write pipelines).
+# The pool is PER PROCESS: prod runs 4 uvicorn workers, so the server-side
+# ceiling is a hard POOL_MAX_CONN * 4 = 32 connections — pool exhaustion
+# waits (bounded, below) instead of opening extra direct connections, so
+# the ceiling cannot be exceeded. ThreadedConnectionPool is required (not
+# SimpleConnectionPool) because borrowers run both in FastAPI's request
+# threadpool and in the APScheduler background threads (case_engine /
+# case_metrics write pipelines).
 POOL_MIN_CONN = 1
 POOL_MAX_CONN = 8
+
+# Pool exhausted (all POOL_MAX_CONN borrowed): getconn is retried with short
+# sleeps for up to POOL_EXHAUSTED_WAIT_SEC, then RiskCasesUnavailable (the
+# routes map it to 503). The former fallback opened an UNBOUNDED one-off
+# direct connection per overflowing request — under sustained overload that
+# is a connection storm against Azure PG instead of backpressure.
+POOL_EXHAUSTED_WAIT_SEC = 3.0
+POOL_EXHAUSTED_POLL_INTERVAL_SEC = 0.1
 
 # After a failed pool build (PG unreachable), fail fast for this long before
 # re-attempting a connect. Without it, during an outage every request pays
@@ -341,12 +349,45 @@ def _is_alive(conn: Any) -> bool:
         return False
 
 
+def _getconn_bounded(
+    borrow_pool: psycopg2_pool.ThreadedConnectionPool,
+) -> Any:
+    """pool.getconn() with a bounded wait when the pool is exhausted.
+
+    ThreadedConnectionPool raises PoolError immediately instead of blocking,
+    so exhaustion is retried with short sleeps for up to
+    POOL_EXHAUSTED_WAIT_SEC waiting for a borrower to return a connection,
+    then surfaced as RiskCasesUnavailable (routes → 503) — bounded
+    backpressure, never an unbounded direct-connect fan-out to Azure PG.
+    A pool closed under us (shutdown) fails immediately.
+    """
+    deadline = time.monotonic() + POOL_EXHAUSTED_WAIT_SEC
+    while True:
+        try:
+            return borrow_pool.getconn()
+        except psycopg2_pool.PoolError as exc:
+            if borrow_pool.closed:
+                raise RiskCasesUnavailable(
+                    "risk_cases PG pool closed while borrowing"
+                ) from exc
+            if time.monotonic() >= deadline:
+                logger.warning(
+                    "risk_cases PG pool exhausted for %.1fs — rejecting "
+                    "request (503) instead of opening direct connections",
+                    POOL_EXHAUSTED_WAIT_SEC,
+                )
+                raise RiskCasesUnavailable(
+                    "risk_cases PG pool exhausted (no connection freed "
+                    f"within {POOL_EXHAUSTED_WAIT_SEC:.0f}s)"
+                ) from exc
+            time.sleep(POOL_EXHAUSTED_POLL_INTERVAL_SEC)
+
+
 def _acquire(dsn: str) -> tuple[Any, Optional[psycopg2_pool.ThreadedConnectionPool]]:
     """Borrow a live connection.
 
-    Returns (conn, pool); pool is None when the connection is a one-off
-    direct connect (pool-exhausted fallback) that must be closed on release
-    instead of returned. Raises RiskCasesUnavailable when PG is unreachable.
+    Returns (conn, pool). Raises RiskCasesUnavailable when PG is
+    unreachable or the pool stays exhausted past the bounded wait.
     """
     borrow_pool = _get_pool(dsn)
     # Dead (idle-killed) connections are discarded and re-borrowed. Azure
@@ -356,14 +397,7 @@ def _acquire(dsn: str) -> tuple[Any, Optional[psycopg2_pool.ThreadedConnectionPo
     # connect before giving up.
     for _ in range(POOL_MAX_CONN + 1):
         try:
-            conn = borrow_pool.getconn()
-        except psycopg2_pool.PoolError:
-            # Pool exhausted (or closed under us): availability over
-            # pooling — hand out a one-off direct connection instead.
-            logger.warning(
-                "risk_cases PG pool exhausted — falling back to direct connect"
-            )
-            return _direct_connect(dsn), None
+            conn = _getconn_bounded(borrow_pool)
         except psycopg2.Error as exc:
             # getconn had to open a fresh connection and that connect failed.
             raise RiskCasesUnavailable(
@@ -388,10 +422,12 @@ def _release(
     from_pool: Optional[psycopg2_pool.ThreadedConnectionPool],
     broken: bool = False,
 ) -> None:
-    """Return a connection to its pool (or close a one-off direct one).
+    """Return a connection to its pool (or close it when poolless).
 
-    Called from finally blocks — never raises and never leaks: a connection
-    that cannot be returned is closed.
+    from_pool None is a defensive leftover (the pooled path always passes a
+    pool since the direct-connect exhaustion fallback was removed): such a
+    connection is simply closed. Called from finally blocks — never raises
+    and never leaks: a connection that cannot be returned is closed.
     """
     if from_pool is None:
         try:
@@ -436,9 +472,9 @@ def risk_cases_conn(settings: Optional[Settings] = None) -> Iterator[Any]:
     Backed by a per-process ThreadedConnectionPool (OPT-0055) — safe for both
     the FastAPI request threadpool and the scheduler's background threads.
     Rollback + return to pool on error; a broken connection is discarded
-    (`putconn(close=True)`) instead of returned; pool exhaustion falls back
-    to a one-off direct connection closed on exit. Raises
-    RiskCasesUnavailable for connection-level failures.
+    (`putconn(close=True)`) instead of returned; pool exhaustion waits a
+    bounded POOL_EXHAUSTED_WAIT_SEC for a free connection, then raises.
+    Raises RiskCasesUnavailable for connection-level failures.
     """
     settings = settings or get_settings()
     if not settings.risk_cases_pg_configured():
