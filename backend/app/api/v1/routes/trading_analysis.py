@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException
 
 from ....core.config import Settings, get_settings
@@ -9,6 +11,8 @@ from ....schemas.trading_analysis import (
 )
 from ....services.trading_analysis_service import get_trading_analysis
 
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/trading")
 
@@ -38,7 +42,7 @@ def post_trading_analysis(
         )
         return result
     except Exception as e:
-        # expose error message for debugging; in prod, map to opaque code
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("trading analysis query failed")
+        raise HTTPException(status_code=500, detail="internal error while running trading analysis")
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import List
 from fastapi import APIRouter, HTTPException, Query
 
@@ -17,6 +18,8 @@ from app.services.pnl_summary_service import (
 from app.services.etl_pg_service import get_user_groups_from_user_summary
 from app.services.etl_service import get_product_config
 
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/pnl", tags=["pnl-summary"])
 
@@ -54,7 +57,8 @@ def refresh_summary(body: RefreshRequest) -> RefreshResponse:
             floating_only_count=etl_result.floating_only_count
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("pnl summary refresh failed")
+        raise HTTPException(status_code=500, detail="internal error while refreshing pnl summary")
 
 
 @router.get("/summary", response_model=PnlSummaryResponse)
@@ -181,6 +185,7 @@ def get_groups(server: str = Query(..., description="服务器名称")) -> List[
         groups = get_user_groups_from_user_summary()
         return groups
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("pnl summary user-groups query failed")
+        raise HTTPException(status_code=500, detail="internal error while fetching user groups")
 
 

@@ -149,7 +149,7 @@ async def scan_now():
         logger.error("fund_flow scan-now failed: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
+            detail="internal error while running fund-flow scan",
         ) from exc
     if result is None:
         raise HTTPException(
@@ -269,7 +269,7 @@ async def ad_hoc_query(req: FundFlowQueryRequest):
         logger.error("fund_flow ad-hoc query failed: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
+            detail="internal error while querying fund flow",
         ) from exc
 
     # ── Write back to cache (only the singleflight owner reaches here for a given key) ──
@@ -312,7 +312,7 @@ async def client_detail(
         logger.error("fund_flow detail failed: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
+            detail="internal error while fetching client fund-flow detail",
         ) from exc
     return FundFlowDetailResponse(**payload)
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException
 
 from ....core.config import Settings, get_settings
@@ -9,6 +11,8 @@ from ....schemas.hourly_details import (
 )
 from ....services.hourly_details_service import get_hourly_trade_details
 
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/trading")
 
@@ -35,5 +39,5 @@ def post_hourly_details(
         )
         return result
     except Exception as e:
-        # 在生产环境中，应该将错误映射为不透明的代码
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("hourly details query failed")
+        raise HTTPException(status_code=500, detail="internal error while fetching hourly details")

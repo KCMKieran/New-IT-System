@@ -34,12 +34,12 @@ async def query_ib_data(payload: IBAnalyticsRequest, settings: Settings = Depend
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     except RuntimeError as exc:
         logger.error(f"Runtime error: {exc}", exc_info=True)
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="internal error while querying ib data") from exc
     except Exception as exc:
         logger.error(f"Unexpected error: {type(exc).__name__}: {exc}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"查询失败: {str(exc)}"
+            detail="internal error while querying ib data"
         ) from exc
 
 
@@ -68,12 +68,12 @@ async def query_region_data(payload: RegionAnalyticsRequest, settings: Settings 
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     except RuntimeError as exc:
         logger.error(f"Runtime error: {exc}", exc_info=True)
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="internal error while querying region analytics") from exc
     except Exception as exc:
         logger.error(f"Unexpected error: {type(exc).__name__}: {exc}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"查询失败: {str(exc)}"
+            detail="internal error while querying region analytics"
         ) from exc
 
 

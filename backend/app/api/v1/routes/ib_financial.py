@@ -81,7 +81,7 @@ async def query_financial(
         logger.error(f"Financial query failed: {exc}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
+            detail="internal error while querying ib financials",
         ) from exc
 
 
