@@ -1,7 +1,7 @@
 ---
 id: OPT-0056
 title: 全站路由 detail=str(exc) 异常原文泄漏清理 —— 内部细节留日志、对外只回通用文案
-status: ready
+status: wip
 priority: P1
 area: backend
 effort: S
@@ -98,6 +98,33 @@ except Exception as exc:
    本改动是纯服务端行为，前端无关。
 5. 抽查 2-3 个改过的路由：制造一个异常（如断开 DB），确认响应体是通用文案、
    服务器日志里有完整栈。
+
+## 用户已拍板决策（2026-07-24，claim 时确认）
+
+1. **`alert_mail.py` L125 的 502（`MailSendFailed`）要改**：它很可能裹了 SMTP 服务器原始报错
+   （主机/端口/认证细节）→ 换成泛化文案（如 `"mail delivery failed"`）。alert_mail 其余
+   404/409/422（catch `svc.InvalidSubscription`/`SubscriptionNotFound`/`NoRenderableAlert`
+   自定义业务异常，人写提示）**全部保留**。
+2. **不抽 helper，就地写字符串**：各文件就地写泛化 `detail`，不引入 `internal_error_detail()`
+   抽象（改动更局部）。
+
+### 逐文件现场核对结论（2026-07-24 grep + 逐处看 status_code）
+
+**必改（500/502，≈57 处）**：
+- `risk_monitor.py`：40 处 HTTP_500 全改；**保留** L1906(404) / L2464(409)（有意校验）
+- `dashboard.py` 4（全 500）、`fund_flow_monitor.py` 3（全 500）、`pnl_summary.py` 2（全 500）
+- `ib_data.py`：L37/L71 的 500（RuntimeError）改；**保留** L34/L68 的 400（ValueError 校验）
+- `ib_financial.py`：L84 的 500 改；**保留** L172 的 400（ValueError 校验）
+- `alert_mail.py`：**仅 L125 的 502** 改（见决策 1）
+- `zipcode.py` L69 / `trading_analysis.py` L42 / `hourly_details.py` L39 / `etl.py` L150：各 1 处 500，改
+
+**确认保留（有意 4xx 校验，勿动）**：
+- `xauusd_positions.py` L63(400)：`validate_export_range` 的 ValueError（范围校验）
+- `client_return_rate.py` L86(400)：代码已有注释 `# ...(Claude-authored) validation message; safe to expose`
+- `client_pnl.py` L47(422)：filter 校验（`join must be 'AND' or 'OR'` 等人写提示）
+- `ib_data.py` L34/L68、`ib_financial.py` L172、`alert_mail.py` 404/409/422、`risk_monitor.py` L1906/L2464
+
+> ⚠ 行号会随改动漂移，实施时对每个文件重新 grep 定位。
 
 ## 开放问题
 
