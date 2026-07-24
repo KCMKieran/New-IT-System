@@ -28,6 +28,7 @@ from ....services.risk_cases_service import (
     ACTIVITY_STATUS_CODES,
     CRM_TRUE_CODES,
     DEFAULT_CRM_TRUE,
+    SORTABLE_ACTIVITY_COLS,
     get_case_detail,
     query_activity_clients,
     query_crm_tag_dict,
@@ -160,8 +161,10 @@ def activity_clients(
         default=None,
         description=(
             "Whitelisted sort key: driver-layer column or enrichment "
-            "metric (metric sorts attach a full-universe aggregate CTE); "
-            "silently falls back to last_trade_date"
+            "metric (metric sorts attach a full-universe aggregate CTE). "
+            "Missing/empty → default sort (last_trade_date); any unknown "
+            "key → 422 (a silent fallback would let the UI show a "
+            "confident sort arrow over wrongly-ordered data)."
         ),
     ),
     sort_order: Optional[str] = Query(default=None, description="asc | desc"),
@@ -228,6 +231,19 @@ def activity_clients(
                     "expected comma-separated integers"
                 ),
             ) from exc
+    # sort_by: missing/empty → None (default sort in the service); any
+    # unknown key is a client bug (frontend SERVER_SORTABLE drifted from
+    # the backend whitelist) → explicit 422, never a silent default-sort
+    # fallback that would render a wrong-but-confident sort arrow.
+    sort_by = (sort_by or "").strip() or None
+    if sort_by is not None and sort_by not in SORTABLE_ACTIVITY_COLS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"unknown sort_by {sort_by!r}; "
+                f"expected one of {sorted(SORTABLE_ACTIVITY_COLS)}"
+            ),
+        )
     t0 = time.perf_counter()
     try:
         rows, total, counts, snapshot_at = query_activity_clients(

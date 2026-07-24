@@ -281,6 +281,29 @@ def test_activity_clients_unknown_country_422(client):
     assert res.status_code == 422
 
 
+def test_activity_clients_unknown_sort_by_422(client):
+    # Unknown sort key must fail loudly, NOT silently fall back to the
+    # default sort — the UI would otherwise show a confident sort arrow
+    # over wrongly-ordered data (frontend/backend whitelist drift).
+    res = client.get("/api/v1/risk-cases/activity-clients?sort_by=nope")
+    assert res.status_code == 422
+    assert "sort_by" in res.json()["detail"]
+
+
+def test_activity_clients_missing_or_empty_sort_by_defaults(client):
+    # Missing param and explicit empty value both mean "default sort":
+    # the service receives sort_by=None and applies last_trade_date.
+    for qs in ("", "?sort_by="):
+        with mock.patch.object(
+            risk_cases_route,
+            "query_activity_clients",
+            return_value=([], 0, dict(_ACTIVITY_COUNTS), None),
+        ) as q:
+            res = client.get(f"/api/v1/risk-cases/activity-clients{qs}")
+        assert res.status_code == 200
+        assert q.call_args.kwargs["sort_by"] is None
+
+
 def test_activity_clients_empty_status_falls_back_to_default(client):
     with mock.patch.object(
         risk_cases_route,
