@@ -266,6 +266,12 @@ const SERVER_SORTABLE = new Set([
   "combined_30d",
   "combined_7d",
   "net_gain",
+  "closed_avg_hold_sec_30d",
+  "closed_avg_hold_sec_delta_1d",
+  "closed_avg_hold_sec_delta_30d",
+  "closed_geo_hold_sec_30d",
+  "closed_geo_hold_sec_delta_1d",
+  "closed_geo_hold_sec_delta_30d",
 ]);
 const DEFAULT_SORT_BY = "last_trade_date";
 const DEFAULT_SORT_ORDER = "desc";
@@ -1019,7 +1025,7 @@ export default function ActivityClientsPanel({
         colId: "user_id",
         field: "user_id",
         pinned: "left",
-        width: 96,
+        width: 82,
         sortable: true,
         comparator: () => 0, // server-side sort; keep the server row order
         cellClass: "font-mono",
@@ -1066,14 +1072,14 @@ export default function ActivityClientsPanel({
         headerName: "国家",
         colId: "country",
         field: "country",
-        width: 80,
+        width: 64,
         valueFormatter: (p) => p.value ?? EMDASH,
       },
       {
         headerName: "Zipcode",
         colId: "zipcode",
         field: "zipcode",
-        width: 110,
+        width: 88,
         headerComponent: InfoHeader,
         headerComponentParams: {
           tooltip:
@@ -1108,6 +1114,7 @@ export default function ActivityClientsPanel({
         colId: "last_trade_date",
         field: "last_trade_date",
         width: 108,
+        hide: true,
         sortable: true,
         comparator: () => 0,
         sort: "desc", // default server ordering (NULLS LAST)
@@ -1125,6 +1132,7 @@ export default function ActivityClientsPanel({
         colId: "registered_at",
         field: "registered_at",
         width: 108,
+        hide: true,
         sortable: true,
         comparator: () => 0,
         valueFormatter: (p) => fmtHkDate(p.value),
@@ -1604,7 +1612,8 @@ export default function ActivityClientsPanel({
         // 已平仓加权持仓时间 (2026-07-24, activity-status-design.md §5.4) —
         // T4 on-the-fly, coexists with the roster tab's grp_hold
         // (avg_hold_days_*, snapshot-based): different tab, different
-        // source, per maintainer decision. Not server-sortable in phase 1.
+        // source, per maintainer decision. Server-sortable via the m_hold
+        // full-universe CTE (_ACTIVITY_METRIC_SORT); mirror SERVER_SORTABLE.
         headerName: "加权持仓时间",
         groupId: "grp_closed_hold",
         children: [
@@ -1613,7 +1622,8 @@ export default function ActivityClientsPanel({
             colId: "closed_avg_hold_sec_30d",
             field: "closed_avg_hold_sec_30d",
             width: 96,
-            hide: true,
+            sortable: true,
+            comparator: () => 0,
             type: "numericColumn",
             headerComponent: InfoHeader,
             headerComponentParams: {
@@ -1630,8 +1640,9 @@ export default function ActivityClientsPanel({
             colId: "closed_avg_hold_sec_delta_1d",
             field: "closed_avg_hold_sec_delta_1d",
             width: 90,
-            hide: true,
             columnGroupShow: "open",
+            sortable: true,
+            comparator: () => 0,
             type: "numericColumn",
             headerComponent: InfoHeader,
             headerComponentParams: {
@@ -1647,8 +1658,9 @@ export default function ActivityClientsPanel({
             colId: "closed_avg_hold_sec_delta_30d",
             field: "closed_avg_hold_sec_delta_30d",
             width: 94,
-            hide: true,
             columnGroupShow: "open",
+            sortable: true,
+            comparator: () => 0,
             type: "numericColumn",
             headerComponent: InfoHeader,
             headerComponentParams: {
@@ -1664,7 +1676,8 @@ export default function ActivityClientsPanel({
             colId: "closed_geo_hold_sec_30d",
             field: "closed_geo_hold_sec_30d",
             width: 96,
-            hide: true,
+            sortable: true,
+            comparator: () => 0,
             type: "numericColumn",
             headerComponent: InfoHeader,
             headerComponentParams: {
@@ -1680,8 +1693,9 @@ export default function ActivityClientsPanel({
             colId: "closed_geo_hold_sec_delta_1d",
             field: "closed_geo_hold_sec_delta_1d",
             width: 90,
-            hide: true,
             columnGroupShow: "open",
+            sortable: true,
+            comparator: () => 0,
             type: "numericColumn",
             headerComponent: InfoHeader,
             headerComponentParams: {
@@ -1697,8 +1711,9 @@ export default function ActivityClientsPanel({
             colId: "closed_geo_hold_sec_delta_30d",
             field: "closed_geo_hold_sec_delta_30d",
             width: 94,
-            hide: true,
             columnGroupShow: "open",
+            sortable: true,
+            comparator: () => 0,
             type: "numericColumn",
             headerComponent: InfoHeader,
             headerComponentParams: {

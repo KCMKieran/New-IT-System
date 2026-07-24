@@ -515,6 +515,40 @@ _ACTIVITY_METRIC_CTES: Dict[str, str] = {
         FROM kcm.daily_user_rebate r
         GROUP BY r.user_id
     )""",
+    # Weighted hold-time sort leg: full-universe mirror of the per-page
+    # enrichment `hold` CTE (same source, same MT-calendar day boundary, same
+    # 3×30d as-of windows) so a row's sort key matches its displayed value.
+    # Emits the 6 final metrics directly to keep the ORDER BY exprs plain.
+    "m_hold": """
+    m_hold AS (
+        SELECT h.user_id,
+               h.hold_num0 / NULLIF(h.hold_den0, 0)                       AS closed_avg_hold_sec_30d,
+               h.hold_num0 / NULLIF(h.hold_den0, 0)
+                 - h.hold_num1 / NULLIF(h.hold_den1, 0)                    AS closed_avg_hold_sec_delta_1d,
+               h.hold_num0 / NULLIF(h.hold_den0, 0)
+                 - h.hold_num30 / NULLIF(h.hold_den30, 0)                  AS closed_avg_hold_sec_delta_30d,
+               EXP(h.hold_ln0 / NULLIF(h.hold_den0, 0))                    AS closed_geo_hold_sec_30d,
+               EXP(h.hold_ln0 / NULLIF(h.hold_den0, 0))
+                 - EXP(h.hold_ln1 / NULLIF(h.hold_den1, 0))                AS closed_geo_hold_sec_delta_1d,
+               EXP(h.hold_ln0 / NULLIF(h.hold_den0, 0))
+                 - EXP(h.hold_ln30 / NULLIF(h.hold_den30, 0))              AS closed_geo_hold_sec_delta_30d
+        FROM (
+            SELECT s.user_id,
+                   SUM(s.hold_sec_lots_sum) FILTER (WHERE s.stat_date BETWEEN a.d0 - 29 AND a.d0)      AS hold_num0,
+                   SUM(s.lots_sum)          FILTER (WHERE s.stat_date BETWEEN a.d0 - 29 AND a.d0)      AS hold_den0,
+                   SUM(s.ln_hold_lots_sum)  FILTER (WHERE s.stat_date BETWEEN a.d0 - 29 AND a.d0)      AS hold_ln0,
+                   SUM(s.hold_sec_lots_sum) FILTER (WHERE s.stat_date BETWEEN a.d0 - 30 AND a.d0 - 1)  AS hold_num1,
+                   SUM(s.lots_sum)          FILTER (WHERE s.stat_date BETWEEN a.d0 - 30 AND a.d0 - 1)  AS hold_den1,
+                   SUM(s.ln_hold_lots_sum)  FILTER (WHERE s.stat_date BETWEEN a.d0 - 30 AND a.d0 - 1)  AS hold_ln1,
+                   SUM(s.hold_sec_lots_sum) FILTER (WHERE s.stat_date BETWEEN a.d0 - 59 AND a.d0 - 30) AS hold_num30,
+                   SUM(s.lots_sum)          FILTER (WHERE s.stat_date BETWEEN a.d0 - 59 AND a.d0 - 30) AS hold_den30,
+                   SUM(s.ln_hold_lots_sum)  FILTER (WHERE s.stat_date BETWEEN a.d0 - 59 AND a.d0 - 30) AS hold_ln30
+            FROM kcm.daily_user_stats s
+            CROSS JOIN (SELECT (now() AT TIME ZONE 'Europe/Athens')::date AS d0) a
+            WHERE s.stat_date >= a.d0 - 59
+            GROUP BY s.user_id
+        ) h
+    )""",
 }
 
 # Combined legs mirror the frontend's sumNullable (null only when BOTH legs
@@ -566,6 +600,24 @@ _ACTIVITY_METRIC_SORT: Dict[str, Tuple[Tuple[str, ...], str]] = {
     "net_gain": (
         ("m_profit", "m_acct", "m_rebate"),
         "m_profit.profit_all + m_acct.floating_pl + m_rebate.rebate_all",
+    ),
+    "closed_avg_hold_sec_30d": (("m_hold",), "m_hold.closed_avg_hold_sec_30d"),
+    "closed_avg_hold_sec_delta_1d": (
+        ("m_hold",),
+        "m_hold.closed_avg_hold_sec_delta_1d",
+    ),
+    "closed_avg_hold_sec_delta_30d": (
+        ("m_hold",),
+        "m_hold.closed_avg_hold_sec_delta_30d",
+    ),
+    "closed_geo_hold_sec_30d": (("m_hold",), "m_hold.closed_geo_hold_sec_30d"),
+    "closed_geo_hold_sec_delta_1d": (
+        ("m_hold",),
+        "m_hold.closed_geo_hold_sec_delta_1d",
+    ),
+    "closed_geo_hold_sec_delta_30d": (
+        ("m_hold",),
+        "m_hold.closed_geo_hold_sec_delta_30d",
     ),
 }
 
