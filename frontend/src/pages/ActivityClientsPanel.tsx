@@ -137,6 +137,14 @@ interface ActivityClientRow {
   rebate_all: number | null;
   equity: number | null;
   floating_pl: number | null;
+  // ── Enrichment: 加权持仓时间 (closed trades, T4 on-the-fly, §5.4) —
+  // seconds; 30d window now vs as-of 1d/30d ago; null = empty window ──
+  closed_avg_hold_sec_30d: number | null;
+  closed_avg_hold_sec_delta_1d: number | null;
+  closed_avg_hold_sec_delta_30d: number | null;
+  closed_geo_hold_sec_30d: number | null;
+  closed_geo_hold_sec_delta_1d: number | null;
+  closed_geo_hold_sec_delta_30d: number | null;
   // CRM zipcode (fxbackoffice.mt4_users) — the one non-PG field.
   zipcode: string | null;
 }
@@ -347,6 +355,30 @@ function fmtDuration(sec: number | null | undefined): string {
   if (d > 0) return `${d}d ${h}h`;
   if (h > 0) return `${h}h ${m}m`;
   return `${m}m`;
+}
+
+/** Adaptive hold-time seconds: <1h → "34m", <1d → "5.2h", ≥1d → "2.1d".
+ *  Scalpers live in the minutes range — a fixed "days" unit would render
+ *  them all as 0.0, hence the adaptive unit (§5.4 decision). */
+function fmtHoldSec(sec: number | null | undefined): string {
+  if (sec === null || sec === undefined) return EMDASH;
+  const abs = Math.abs(sec);
+  if (abs < 3600) return `${Math.round(abs / 60)}m`;
+  if (abs < 86400) return `${(abs / 3600).toFixed(1)}h`;
+  return `${(abs / 86400).toFixed(1)}d`;
+}
+
+/** Signed variant for the ∆ columns (negative = holds getting shorter =
+ *  drifting toward scalping). */
+function fmtHoldDelta(sec: number | null | undefined): string {
+  if (sec === null || sec === undefined) return EMDASH;
+  return `${sec < 0 ? "-" : "+"}${fmtHoldSec(sec)}`;
+}
+
+/** ∆ coloring: only the negative (scalping-trend) side is highlighted. */
+function holdDeltaColor(v: number | null | undefined): string {
+  if (v === null || v === undefined || v >= 0) return "";
+  return "text-red-600 dark:text-red-400";
 }
 
 function fmtHkTime(iso: string | null | undefined): string {
@@ -1384,6 +1416,117 @@ export default function ActivityClientsPanel({
         comparator: () => 0,
         valueFormatter: (p) => fmtMoney(p.value),
         cellClass: (p) => profitColor(p.value),
+      },
+      {
+        // 已平仓加权持仓时间 (2026-07-24, activity-status-design.md §5.4) —
+        // T4 on-the-fly, coexists with the roster tab's grp_hold
+        // (avg_hold_days_*, snapshot-based): different tab, different
+        // source, per maintainer decision. Not server-sortable in phase 1.
+        headerName: "加权持仓时间",
+        groupId: "grp_closed_hold",
+        children: [
+          {
+            headerName: "加权",
+            colId: "closed_avg_hold_sec_30d",
+            field: "closed_avg_hold_sec_30d",
+            width: 96,
+            hide: true,
+            type: "numericColumn",
+            headerComponent: InfoHeader,
+            headerComponentParams: {
+              tooltip:
+                "已平仓算术加权平均每手持仓时长 = Σ(持仓秒×手数) ÷ Σ手数，" +
+                "30 天滑窗（MT server 日界）。重尾敏感——几列一起看。\n" +
+                "自适应单位 34m / 5.2h / 2.1d；窗口内无平仓显示 —（不当 0）。\n" +
+                "展开列组可见 ∆1 / ∆30 趋势。当日平仓约 ≤10 分钟入账。",
+            },
+            valueFormatter: (p) => fmtHoldSec(p.value),
+          },
+          {
+            headerName: "加权∆1",
+            colId: "closed_avg_hold_sec_delta_1d",
+            field: "closed_avg_hold_sec_delta_1d",
+            width: 90,
+            hide: true,
+            columnGroupShow: "open",
+            type: "numericColumn",
+            headerComponent: InfoHeader,
+            headerComponentParams: {
+              tooltip:
+                "加权现值 − as-of 昨日的 30d 窗口值。\n" +
+                "负值红色 = 持仓变短 = 刷单化趋势；任一侧无数据显示 —。",
+            },
+            valueFormatter: (p) => fmtHoldDelta(p.value),
+            cellClass: (p) => cn("text-right", holdDeltaColor(p.value)),
+          },
+          {
+            headerName: "加权∆30",
+            colId: "closed_avg_hold_sec_delta_30d",
+            field: "closed_avg_hold_sec_delta_30d",
+            width: 94,
+            hide: true,
+            columnGroupShow: "open",
+            type: "numericColumn",
+            headerComponent: InfoHeader,
+            headerComponentParams: {
+              tooltip:
+                "加权现值 − as-of 30 天前的 30d 窗口值（需 60 天 T4 历史，已闭合）。\n" +
+                "负值红色 = 持仓变短 = 刷单化趋势；任一侧无数据显示 —。",
+            },
+            valueFormatter: (p) => fmtHoldDelta(p.value),
+            cellClass: (p) => cn("text-right", holdDeltaColor(p.value)),
+          },
+          {
+            headerName: "几何",
+            colId: "closed_geo_hold_sec_30d",
+            field: "closed_geo_hold_sec_30d",
+            width: 96,
+            hide: true,
+            type: "numericColumn",
+            headerComponent: InfoHeader,
+            headerComponentParams: {
+              tooltip:
+                "已平仓几何加权均值 = EXP(Σ(ln持仓秒×手数) ÷ Σ手数)，30 天滑窗。\n" +
+                "重尾稳健——个别长持仓拉不高它，盯刷单主力用这列。\n" +
+                "窗口内无平仓显示 —（不当 0）。展开列组可见 ∆1 / ∆30。",
+            },
+            valueFormatter: (p) => fmtHoldSec(p.value),
+          },
+          {
+            headerName: "几何∆1",
+            colId: "closed_geo_hold_sec_delta_1d",
+            field: "closed_geo_hold_sec_delta_1d",
+            width: 90,
+            hide: true,
+            columnGroupShow: "open",
+            type: "numericColumn",
+            headerComponent: InfoHeader,
+            headerComponentParams: {
+              tooltip:
+                "几何现值 − as-of 昨日的 30d 窗口值。\n" +
+                "负值红色 = 持仓变短 = 刷单化趋势；任一侧无数据显示 —。",
+            },
+            valueFormatter: (p) => fmtHoldDelta(p.value),
+            cellClass: (p) => cn("text-right", holdDeltaColor(p.value)),
+          },
+          {
+            headerName: "几何∆30",
+            colId: "closed_geo_hold_sec_delta_30d",
+            field: "closed_geo_hold_sec_delta_30d",
+            width: 94,
+            hide: true,
+            columnGroupShow: "open",
+            type: "numericColumn",
+            headerComponent: InfoHeader,
+            headerComponentParams: {
+              tooltip:
+                "几何现值 − as-of 30 天前的 30d 窗口值（需 60 天 T4 历史，已闭合）。\n" +
+                "负值红色 = 持仓变短 = 刷单化趋势；任一侧无数据显示 —。",
+            },
+            valueFormatter: (p) => fmtHoldDelta(p.value),
+            cellClass: (p) => cn("text-right", holdDeltaColor(p.value)),
+          },
+        ],
       },
       {
         headerName: "最长持仓",

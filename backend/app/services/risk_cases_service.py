@@ -647,6 +647,26 @@ _ACTIVITY_ENRICH_SQL = """
         FROM kcm.user_account_state a
         WHERE a.user_id = ANY(%(ids)s)
         GROUP BY a.user_id
+    ),
+    hold AS (
+        -- Weighted hold-time leg (activity-status-design.md §5.4): one scan
+        -- over the page ids' last 60 T4 days yields all three as-of points
+        -- (now / -1d / -30d), each a 30-day window. Day boundary = MT server
+        -- calendar day (Europe/Athens ≙ EET/EEST, matches closeDate/T13).
+        SELECT s.user_id,
+               SUM(s.hold_sec_lots_sum) FILTER (WHERE s.stat_date BETWEEN a.d0 - 29 AND a.d0)      AS hold_num0,
+               SUM(s.lots_sum)          FILTER (WHERE s.stat_date BETWEEN a.d0 - 29 AND a.d0)      AS hold_den0,
+               SUM(s.ln_hold_lots_sum)  FILTER (WHERE s.stat_date BETWEEN a.d0 - 29 AND a.d0)      AS hold_ln0,
+               SUM(s.hold_sec_lots_sum) FILTER (WHERE s.stat_date BETWEEN a.d0 - 30 AND a.d0 - 1)  AS hold_num1,
+               SUM(s.lots_sum)          FILTER (WHERE s.stat_date BETWEEN a.d0 - 30 AND a.d0 - 1)  AS hold_den1,
+               SUM(s.ln_hold_lots_sum)  FILTER (WHERE s.stat_date BETWEEN a.d0 - 30 AND a.d0 - 1)  AS hold_ln1,
+               SUM(s.hold_sec_lots_sum) FILTER (WHERE s.stat_date BETWEEN a.d0 - 59 AND a.d0 - 30) AS hold_num30,
+               SUM(s.lots_sum)          FILTER (WHERE s.stat_date BETWEEN a.d0 - 59 AND a.d0 - 30) AS hold_den30,
+               SUM(s.ln_hold_lots_sum)  FILTER (WHERE s.stat_date BETWEEN a.d0 - 59 AND a.d0 - 30) AS hold_ln30
+        FROM kcm.daily_user_stats s
+        CROSS JOIN (SELECT (now() AT TIME ZONE 'Europe/Athens')::date AS d0) a
+        WHERE s.user_id = ANY(%(ids)s) AND s.stat_date >= a.d0 - 59
+        GROUP BY s.user_id
     )
     SELECT i.user_id,
            pa.position_count, pa.account_count, pa.total_lots,
@@ -656,7 +676,21 @@ _ACTIVITY_ENRICH_SQL = """
            ca.trading_net_deposit, ca.ib_withdrawal,
            cp.profit_7d, cp.profit_30d, cp.profit_all,
            rb.rebate_7d, rb.rebate_30d, rb.rebate_all,
-           ac.equity, ac.floating_pl
+           ac.equity, ac.floating_pl,
+           -- API unit = seconds (canonical, sort-stable). Empty window →
+           -- NULLIF denominator → NULL (never a fake 0: 0s means "instant
+           -- scalping close", a completely different statement); a delta is
+           -- NULL when either side is NULL.
+           ho.hold_num0 / NULLIF(ho.hold_den0, 0)                    AS closed_avg_hold_sec_30d,
+           ho.hold_num0 / NULLIF(ho.hold_den0, 0)
+             - ho.hold_num1 / NULLIF(ho.hold_den1, 0)                AS closed_avg_hold_sec_delta_1d,
+           ho.hold_num0 / NULLIF(ho.hold_den0, 0)
+             - ho.hold_num30 / NULLIF(ho.hold_den30, 0)              AS closed_avg_hold_sec_delta_30d,
+           EXP(ho.hold_ln0 / NULLIF(ho.hold_den0, 0))                AS closed_geo_hold_sec_30d,
+           EXP(ho.hold_ln0 / NULLIF(ho.hold_den0, 0))
+             - EXP(ho.hold_ln1 / NULLIF(ho.hold_den1, 0))            AS closed_geo_hold_sec_delta_1d,
+           EXP(ho.hold_ln0 / NULLIF(ho.hold_den0, 0))
+             - EXP(ho.hold_ln30 / NULLIF(ho.hold_den30, 0))          AS closed_geo_hold_sec_delta_30d
     FROM unnest(%(ids)s::bigint[]) AS i(user_id)
     LEFT JOIN pos_agg pa ON pa.user_id = i.user_id
     LEFT JOIN hedge h    ON h.user_id = i.user_id
@@ -664,6 +698,7 @@ _ACTIVITY_ENRICH_SQL = """
     LEFT JOIN closed_pl cp ON cp.user_id = i.user_id
     LEFT JOIN rebate rb  ON rb.user_id = i.user_id
     LEFT JOIN acct ac    ON ac.user_id = i.user_id
+    LEFT JOIN hold ho    ON ho.user_id = i.user_id
 """
 
 _ACTIVITY_FLOAT_COLS = (
@@ -683,6 +718,12 @@ _ACTIVITY_FLOAT_COLS = (
     "rebate_all",
     "equity",
     "floating_pl",
+    "closed_avg_hold_sec_30d",
+    "closed_avg_hold_sec_delta_1d",
+    "closed_avg_hold_sec_delta_30d",
+    "closed_geo_hold_sec_30d",
+    "closed_geo_hold_sec_delta_1d",
+    "closed_geo_hold_sec_delta_30d",
 )
 
 # CRM-flag filter (2026-07-24 semantic re-decision, replaces the short-lived

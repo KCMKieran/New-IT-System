@@ -152,6 +152,15 @@ class ActivityClientRow(BaseModel):
     rebate_all: Optional[float] = None
     equity: Optional[float] = None
     floating_pl: Optional[float] = None
+    # ── Enrichment: weighted hold time, closed trades only (T4 on-the-fly,
+    # activity-status-design.md §5.4). Unit = seconds; 30d window as of now
+    # vs 1d/30d ago; NULL when a window has no closed lots (never fake 0) ──
+    closed_avg_hold_sec_30d: Optional[float] = None
+    closed_avg_hold_sec_delta_1d: Optional[float] = None
+    closed_avg_hold_sec_delta_30d: Optional[float] = None
+    closed_geo_hold_sec_30d: Optional[float] = None
+    closed_geo_hold_sec_delta_1d: Optional[float] = None
+    closed_geo_hold_sec_delta_30d: Optional[float] = None
     # CRM MySQL leg (fail-open), client-level distinct comma-joined
     zipcode: Optional[str] = None
 
