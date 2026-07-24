@@ -1605,6 +1605,16 @@ export default function ActivityClientsPanel({
         width: 104,
         sortable: true,
         comparator: () => 0,
+        headerComponent: InfoHeader,
+        headerComponentParams: {
+          tooltip:
+            "客户名下 live 交易账户(sid 1/5/6)净值 EQUITY = BALANCE + 浮动盈亏，" +
+            "逐账户求和；每 ~30 秒刷新快照。\n" +
+            "只含真实交易账户——不含 IB 佣金钱包(sid=2，IB-WALLET-USD，装未提返佣)" +
+            "与 demo 账户(sid=3)。这两类在 KCM 底座就已排除。\n" +
+            "有未平仓时净值逐 tick 变动，与 CRM 后台不同时刻拍的快照可能差几美元。\n" +
+            "缺数据显示 —（不当 0）。",
+        },
         valueFormatter: (p) => fmtMoney(p.value),
         cellClass: (p) => profitColor(p.value),
       },
