@@ -789,8 +789,21 @@ export default function ActivityClientsPanel({
   const [sortBy, setSortBy] = useState<string>(DEFAULT_SORT_BY);
   const [sortOrder, setSortOrder] = useState<string>(DEFAULT_SORT_ORDER);
 
+  // Stale-response guard shared by ALL fetchRows call sites (initial load,
+  // 60s interval ticks, manual reload): a single AbortController — each new
+  // invocation aborts the previous in-flight request — plus a monotonic
+  // sequence counter checked before every state set, so a slow response that
+  // wasn't aborted in time can never overwrite state for newer params.
+  const fetchAbortRef = useRef<AbortController | null>(null);
+  const fetchSeqRef = useRef(0);
+
   const fetchRows = useCallback(
-    async (signal?: AbortSignal) => {
+    async () => {
+      fetchAbortRef.current?.abort();
+      const controller = new AbortController();
+      fetchAbortRef.current = controller;
+      const seq = ++fetchSeqRef.current;
+      const isStale = () => seq !== fetchSeqRef.current;
       // Empty selection on either dropdown = "don't query": clear the grid
       // and skip the API call entirely (the 60s auto-refresh short-circuits
       // through the same path). A friendly notice renders in the grid area.
@@ -837,7 +850,7 @@ export default function ActivityClientsPanel({
         if (appliedSearch.current) p.set("q", appliedSearch.current);
         const res = await apiFetch(
           `/api/v1/risk-cases/activity-clients?${p}`,
-          { signal },
+          { signal: controller.signal },
         );
         if (res.status === 503) {
           const body = await res.json().catch(() => null);
@@ -845,6 +858,7 @@ export default function ActivityClientsPanel({
         }
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const r = await res.json();
+        if (isStale()) return;
         setRows(r.data || []);
         setTotal(r.total || 0);
         setTotalPages(r.total_pages || 1);
@@ -853,21 +867,24 @@ export default function ActivityClientsPanel({
         setNowTick((t) => t + 1);
       } catch (e) {
         if (e instanceof DOMException && e.name === "AbortError") return;
+        if (isStale()) return;
         setErrorMsg(e instanceof Error ? e.message : "查询失败");
       } finally {
-        setLoading(false);
+        // A stale finally must not clobber the newer invocation's loading=true.
+        if (!isStale()) setLoading(false);
       }
     },
     [page, pageSize, statuses, countries, crmTrue, crmTagIds, sortBy, sortOrder],
   );
 
-  // Initial load + 60s auto-refresh of the CURRENT page params only.
+  // Initial load + 60s auto-refresh of the CURRENT page params only. Every
+  // tick goes through fetchRows' own abort+sequence guard; cleanup aborts
+  // whatever request is in flight (StrictMode double-invoke safe).
   useEffect(() => {
-    const controller = new AbortController();
-    fetchRows(controller.signal);
+    fetchRows();
     const id = setInterval(() => fetchRows(), REFRESH_MS);
     return () => {
-      controller.abort();
+      fetchAbortRef.current?.abort();
       clearInterval(id);
     };
   }, [fetchRows, reloadTick]);
