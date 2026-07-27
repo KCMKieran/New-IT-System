@@ -23,8 +23,13 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/ib-data")
 
 
+# Deliberately sync (`def`, not `async def`): aggregate_ib_data() runs one
+# blocking pymysql query per IB id in a serial loop, and the whole loop is wrapped
+# in `fcntl.flock(LOCK_EX)` (ib_data_service.py) — so a slow run in one uvicorn
+# worker also stalls other workers waiting on the same file lock. FastAPI runs
+# sync handlers in the threadpool, keeping each worker's event loop responsive.
 @router.post("/query", response_model=IBAnalyticsResponse, status_code=status.HTTP_200_OK)
-async def query_ib_data(payload: IBAnalyticsRequest, settings: Settings = Depends(get_settings)):
+def query_ib_data(payload: IBAnalyticsRequest, settings: Settings = Depends(get_settings)):
     """Query IB analytics data with concurrency control."""
     try:
         rows, totals, last_run = aggregate_ib_data(settings, payload.ib_ids, payload.start, payload.end)

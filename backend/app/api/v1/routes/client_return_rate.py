@@ -45,8 +45,13 @@ def _get_client_ip(request: Request) -> str:
     return "unknown"
 
 
+# Deliberately sync (`def`, not `async def`): the service layer runs blocking
+# pymysql queries against the slave (`read_timeout=30`), and this is the busiest
+# page in the app — normal requests take ~0.7-1.2s and a bad time range can sit
+# on the 30s read-timeout ceiling. FastAPI runs sync handlers in the threadpool,
+# so one slow query cannot freeze the event loop for every other endpoint.
 @router.get("/query", response_model=ClientReturnRateResponse)
-async def query_client_return_rate(
+def query_client_return_rate(
     page: int = Query(1, ge=1, description="Page number"),
     page_size: int = Query(50, ge=1, le=10000, description="Items per page"),
     sort_by: Optional[str] = Query("month_trade_profit", description="Column to sort by"),
@@ -175,8 +180,13 @@ async def download_client_return_rate_export(task_id: str):
         raise HTTPException(status_code=500, detail="下载导出文件失败")
 
 
+# Deliberately sync (`def`, not `async def`): this handler runs the full ROACE
+# refresh inline on blocking pymysql (`read_timeout=600` in
+# client_roace_refresh_service.py) — typically 1-3 min, up to 10 min worst case.
+# As `async def` a single click would freeze the whole event loop for minutes;
+# FastAPI runs sync handlers in the threadpool, keeping every other endpoint live.
 @router.post("/roace/refresh")
-async def trigger_roace_refresh():
+def trigger_roace_refresh():
     """Manually trigger the ROACE SQLite snapshot refresh.
 
     Same job that the nightly scheduler runs (06:00 HKT). Useful for backfilling
