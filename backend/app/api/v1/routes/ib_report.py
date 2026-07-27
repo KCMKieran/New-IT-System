@@ -8,8 +8,12 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/ib-report")
 
+# Deliberately sync (`def`, not `async def`): clickhouse_connect blocks, and a
+# ClickHouse Cloud instance that has idled into suspend takes ~50s to wake up.
+# FastAPI runs sync handlers in the threadpool, so that cold start only stalls
+# this one request instead of freezing the event loop for every other endpoint.
 @router.get("/groups", status_code=status.HTTP_200_OK)
-async def get_ib_groups():
+def get_ib_groups():
     """
     获取 IB 报表所有的组别列表及其用户数统计。
     该接口具备 7 天的后端缓存，以减轻 ClickHouse 查询压力。
@@ -24,8 +28,12 @@ async def get_ib_groups():
             detail="获取组别列表失败"
         )
 
+# Deliberately sync (`def`, not `async def`): clickhouse_connect blocks, and a
+# ClickHouse Cloud instance that has idled into suspend takes ~50s to wake up.
+# FastAPI runs sync handlers in the threadpool, so that cold start only stalls
+# this one request instead of freezing the event loop for every other endpoint.
 @router.post("/search", response_model=list[IBReportRow], status_code=status.HTTP_200_OK)
-async def search_ib_report(request: IBReportRequest):
+def search_ib_report(request: IBReportRequest):
     """
     获取 IB 报表数据。
     支持跨月查询，当月数据依据结束日期所在的月份计算。
