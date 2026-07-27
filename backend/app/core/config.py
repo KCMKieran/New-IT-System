@@ -66,6 +66,9 @@ class Settings:
     CLIENT_RETURN_EXPORT_MAX_WORKERS: int
     CLIENT_RETURN_EXPORT_CLEANUP_DAYS: int
 
+    # ClickHouse-backed query endpoints (IB Report / Client PnL Analysis)
+    CLICKHOUSE_ROUTES_ENABLED: bool
+
     # ROACE precompute scheduler (M2 / OPT-0006)
     CLIENT_ROACE_SCHEDULER_ENABLED: bool
     CLIENT_ROACE_REFRESH_HOUR: int
@@ -139,6 +142,17 @@ class Settings:
         )
         self.CLIENT_RETURN_EXPORT_CLEANUP_DAYS = int(
             os.environ.get("CLIENT_RETURN_EXPORT_CLEANUP_DAYS", "7")
+        )
+
+        # Master switch for the two endpoints that query ClickHouse Cloud
+        # directly (IB Report, Client PnL Analysis). Parked 2026-07-27: neither
+        # page is in active use, and the Cloud instance idle-suspends, so a cold
+        # call pays a 36-159s wake-up (measured) that only serves to keep waking
+        # a cluster nobody reads. Defaults to false so no .env edit is needed to
+        # stay parked; set CLICKHOUSE_ROUTES_ENABLED=true to restore.
+        self.CLICKHOUSE_ROUTES_ENABLED = (
+            os.environ.get("CLICKHOUSE_ROUTES_ENABLED", "false").strip().lower()
+            == "true"
         )
 
         # ROACE precompute (OPT-0006). Nightly cron writes avg_daily_equity into

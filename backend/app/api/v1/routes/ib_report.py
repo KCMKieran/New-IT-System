@@ -1,15 +1,26 @@
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 import logging
 from datetime import datetime, timedelta, date, time
+from app.core.feature_gates import require_clickhouse_routes
 from app.services.clickhouse_service import clickhouse_service
 from app.schemas.ib_report import IBReportRequest, IBReportRow
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/ib-report")
+# Parked behind CLICKHOUSE_ROUTES_ENABLED (default false) -- every endpoint here
+# returns 503 until the flag is set. Applied at router level so endpoints added
+# later are parked too. See require_clickhouse_routes for the rationale.
+router = APIRouter(
+    prefix="/ib-report",
+    dependencies=[Depends(require_clickhouse_routes)],
+)
 
+# Deliberately sync (`def`, not `async def`): clickhouse_connect blocks, and a
+# ClickHouse Cloud instance that has idled into suspend takes ~50s to wake up.
+# FastAPI runs sync handlers in the threadpool, so that cold start only stalls
+# this one request instead of freezing the event loop for every other endpoint.
 @router.get("/groups", status_code=status.HTTP_200_OK)
-async def get_ib_groups():
+def get_ib_groups():
     """
     获取 IB 报表所有的组别列表及其用户数统计。
     该接口具备 7 天的后端缓存，以减轻 ClickHouse 查询压力。
@@ -24,8 +35,12 @@ async def get_ib_groups():
             detail="获取组别列表失败"
         )
 
+# Deliberately sync (`def`, not `async def`): clickhouse_connect blocks, and a
+# ClickHouse Cloud instance that has idled into suspend takes ~50s to wake up.
+# FastAPI runs sync handlers in the threadpool, so that cold start only stalls
+# this one request instead of freezing the event loop for every other endpoint.
 @router.post("/search", response_model=list[IBReportRow], status_code=status.HTTP_200_OK)
-async def search_ib_report(request: IBReportRequest):
+def search_ib_report(request: IBReportRequest):
     """
     获取 IB 报表数据。
     支持跨月查询，当月数据依据结束日期所在的月份计算。
