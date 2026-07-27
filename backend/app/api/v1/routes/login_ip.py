@@ -182,8 +182,13 @@ async def list_scheduler_runs(job: str | None = None, limit: int = 30):
     return SchedulerRunsResponse(runs=[SchedulerRunOut(**r) for r in runs])
 
 
+# Deliberately sync (`def`, not `async def`): despite the 202 status this runs
+# the whole job inline — blocking FTPS pulls of raw logs from 3 MT servers, parse,
+# SQLite writes, CRM push via `requests`, then SMTP. That is minutes of blocking
+# IO. FastAPI runs sync handlers in the threadpool, so one ops-triggered run
+# cannot freeze the event loop for every other endpoint.
 @router.post("/scheduler/run-now", status_code=status.HTTP_202_ACCEPTED)
-async def scheduler_run_now(req: SchedulerRunNowRequest):
+def scheduler_run_now(req: SchedulerRunNowRequest):
     """Manually kick off a job right now (useful for ops recovery).
 
     Concurrency is already protected by `threading.Lock` inside
