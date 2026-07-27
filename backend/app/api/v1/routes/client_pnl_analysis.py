@@ -5,14 +5,21 @@ Provides endpoints for querying client profit/loss analysis data
 from ClickHouse with date range filtering and search capabilities.
 """
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from typing import Optional, Dict, Any
 from datetime import date, datetime
 
 from app.services.clickhouse_service import clickhouse_service
+from app.core.feature_gates import require_clickhouse_routes
 from app.core.logging_config import get_logger
 
-router = APIRouter(prefix="/client-pnl-analysis")
+# Parked behind CLICKHOUSE_ROUTES_ENABLED (default false) -- every endpoint here
+# returns 503 until the flag is set. Applied at router level so endpoints added
+# later are parked too. See require_clickhouse_routes for the rationale.
+router = APIRouter(
+    prefix="/client-pnl-analysis",
+    dependencies=[Depends(require_clickhouse_routes)],
+)
 logger = get_logger(__name__)
 
 

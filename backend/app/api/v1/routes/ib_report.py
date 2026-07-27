@@ -1,12 +1,19 @@
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 import logging
 from datetime import datetime, timedelta, date, time
+from app.core.feature_gates import require_clickhouse_routes
 from app.services.clickhouse_service import clickhouse_service
 from app.schemas.ib_report import IBReportRequest, IBReportRow
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/ib-report")
+# Parked behind CLICKHOUSE_ROUTES_ENABLED (default false) -- every endpoint here
+# returns 503 until the flag is set. Applied at router level so endpoints added
+# later are parked too. See require_clickhouse_routes for the rationale.
+router = APIRouter(
+    prefix="/ib-report",
+    dependencies=[Depends(require_clickhouse_routes)],
+)
 
 # Deliberately sync (`def`, not `async def`): clickhouse_connect blocks, and a
 # ClickHouse Cloud instance that has idled into suspend takes ~50s to wake up.
