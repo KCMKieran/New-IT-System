@@ -5,13 +5,9 @@ from .routes.aggregations import router as aggregations_router
 from .routes.trade_summary import router as trade_summary_router
 from .routes.open_positions import router as open_positions_router
 from .routes.xauusd_positions import router as xauusd_positions_router
-# [REMOVED] downloads - page deprecated
-# from .routes.downloads import router as downloads_router
 from .routes.audience import router as audience_router
 from .routes.trading_analysis import router as trading_analysis_router
 from .routes.hourly_details import router as hourly_details_router
-# [DEPRECATED] pnl_summary - CustomerPnLMonitor removed, use client-pnl-analysis instead
-# from .routes.pnl_summary import router as pnl_summary_router
 from .routes.etl import router as etl_router
 from .routes.client_pnl import router as client_pnl_router
 from .routes.zipcode import router as zipcode_router
@@ -37,14 +33,10 @@ api_v1_router.include_router(aggregations_router, tags=["aggregations"])
 api_v1_router.include_router(trade_summary_router, tags=["trade-summary"]) 
 api_v1_router.include_router(open_positions_router, tags=["open-positions"])
 api_v1_router.include_router(xauusd_positions_router, tags=["xauusd-positions"])
-# [REMOVED] downloads - page deprecated
-# api_v1_router.include_router(downloads_router, tags=["downloads"]) 
-api_v1_router.include_router(audience_router, tags=["audience"]) 
+api_v1_router.include_router(audience_router, tags=["audience"])
 api_v1_router.include_router(trading_analysis_router, tags=["trading-analysis"])
-api_v1_router.include_router(hourly_details_router, tags=["hourly-details"]) 
-# [DEPRECATED] pnl_summary - CustomerPnLMonitor removed
-# api_v1_router.include_router(pnl_summary_router, tags=["pnl-summary"]) 
-api_v1_router.include_router(etl_router, tags=["etl"]) 
+api_v1_router.include_router(hourly_details_router, tags=["hourly-details"])
+api_v1_router.include_router(etl_router, tags=["etl"])
 api_v1_router.include_router(client_pnl_router, tags=["client-pnl"]) 
 api_v1_router.include_router(client_pnl_analysis_router, tags=["client-pnl-analysis"])
 api_v1_router.include_router(zipcode_router, tags=["zipcode"]) 
