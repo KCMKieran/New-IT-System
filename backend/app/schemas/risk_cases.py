@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import Any, List, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
 
 class WatchlistRow(BaseModel):
@@ -326,6 +326,67 @@ class CaseDetailResponse(BaseModel):
     metrics_history: List[CaseMetricsSnapshot] = []
     actions: List[CaseAction] = []
     statistics: WatchlistStatistics = WatchlistStatistics()
+
+
+# ── Client Remarks (risk-watchlist 客户备注) ────────────────────────────
+#
+# Shared, server-persisted note per client (user_id), surfaced as a remark
+# column on /risk-watchlist. Mirrors the account-remark models in
+# schemas/risk_monitor.py (docs/features/account-remarks.md §4) at client
+# granularity — same security bounds:
+#   R2 — note capped at 2000 chars (oversize → 422, SQL never touched).
+#   R8 — user_id must be a positive int (validated in the route; else 422).
+#   F4 — `note` non-empty after strip (empty/whitespace-only → 422).
+
+# R2: hard cap on a single note's length. Generous for a research note but
+# small enough that no single row can blow up the table.
+CLIENT_REMARK_NOTE_MAX_LEN = 2000
+
+
+class ClientRemarkUpsert(BaseModel):
+    """Request body for PUT /risk-cases/remarks/{user_id}.
+
+    `note` is bounded at CLIENT_REMARK_NOTE_MAX_LEN (R2) and must be
+    non-empty after stripping surrounding whitespace (F4): an
+    empty/whitespace-only note is rejected with 422, never stored. `author`
+    is an advisory display name only (best-effort, client-supplied
+    attribution — no auth binding; the audited server-side trace id +
+    X-Device-ID, R6, are the accountability trail). `expected_updated_at`
+    carries the optimistic-lock token (R1): the `updated_at` the client last
+    read. When present and it no longer matches the live row, the upsert is
+    rejected with a 409 instead of silently overwriting a concurrent edit.
+    """
+
+    note: str = Field(..., min_length=1, max_length=CLIENT_REMARK_NOTE_MAX_LEN)
+    author: str = Field(default="", max_length=120)
+    expected_updated_at: Optional[str] = Field(default=None, max_length=40)
+
+    @field_validator("note")
+    @classmethod
+    def _strip_note(cls, v: str) -> str:
+        """Strip surrounding whitespace and reject an empty-after-strip note
+        (F4). Raises ValueError → FastAPI surfaces it as a 422."""
+        stripped = v.strip()
+        if not stripped:
+            raise ValueError("note must not be empty or whitespace-only")
+        return stripped
+
+
+class ClientRemark(BaseModel):
+    """A single live client-remark row. updated_at is the optimistic-lock
+    token 'YYYY-MM-DDTHH:MM:SSZ#<history_id>'."""
+
+    user_id: int
+    note: str
+    author: str
+    updated_at: str
+
+
+class ClientRemarkList(BaseModel):
+    """Full remark map (no pagination — the set is small)."""
+
+    data: List[ClientRemark]
+    total: int
 
 
 def as_str_list(value: Any) -> List[str]:

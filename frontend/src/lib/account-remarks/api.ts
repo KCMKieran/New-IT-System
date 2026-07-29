@@ -46,7 +46,13 @@ async function detail(res: Response): Promise<string> {
   }
 }
 
-async function unwrap(res: Response): Promise<unknown> {
+/**
+ * Shared response unwrapper for remark-style APIs (account-level here, reused
+ * by lib/client-remarks): 409 → RemarkConflictError (R1), other non-2xx →
+ * Error carrying the backend `detail`, 2xx → parsed JSON body. Exported for
+ * reuse — additive only, account-level exports are unchanged.
+ */
+export async function unwrapRemarkResponse(res: Response): Promise<unknown> {
   if (res.status === 409) throw new RemarkConflictError(await detail(res));
   if (!res.ok) throw new Error(await detail(res));
   return res.json();
@@ -61,7 +67,7 @@ export function remarkUpdatedAtRaw(token: string | null | undefined): string | n
 
 /** GET /risk-monitor/remarks — the full remark list (no pagination). */
 export async function fetchAllRemarks(signal?: AbortSignal): Promise<AccountRemark[]> {
-  const body = (await unwrap(await apiFetch(BASE, { signal }))) as {
+  const body = (await unwrapRemarkResponse(await apiFetch(BASE, { signal }))) as {
     data: AccountRemark[];
   };
   return body.data ?? [];
@@ -87,7 +93,7 @@ export async function putRemark(
   args: SaveRemarkArgs,
   signal?: AbortSignal,
 ): Promise<AccountRemark> {
-  const body = (await unwrap(
+  const body = (await unwrapRemarkResponse(
     await apiFetch(`${BASE}/${enc(server)}/${login}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
@@ -113,7 +119,7 @@ export async function deleteRemarkApi(
   signal?: AbortSignal,
 ): Promise<{ ok: boolean; deleted: boolean }> {
   const url = `${BASE}/${enc(server)}/${login}?author=${enc(author)}`;
-  const body = (await unwrap(
+  const body = (await unwrapRemarkResponse(
     await apiFetch(url, { method: "DELETE", signal }),
   )) as { ok: boolean; deleted: boolean };
   return body;

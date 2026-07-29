@@ -11,18 +11,23 @@ import logging
 import time
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Header, HTTPException, Path, Query, status
 
+from ....core.logging_config import trace_id_var
 from ....core.risk_cases_pg import RiskCasesUnavailable
 from ....schemas.risk_cases import (
     ActivityClientRow,
     ActivityClientsResponse,
     CaseDetailResponse,
+    ClientRemark,
+    ClientRemarkList,
+    ClientRemarkUpsert,
     CrmTagDictResponse,
     WatchlistResponse,
     WatchlistRow,
     WatchlistStatistics,
 )
+from ....services import client_remarks_service as remarks_svc
 from ....services.risk_cases_service import (
     ACTIVITY_COUNTRY_CODES,
     ACTIVITY_STATUS_CODES,
@@ -319,6 +324,133 @@ def crm_tag_dict():
             query_time_ms=int((time.perf_counter() - t0) * 1000)
         ),
     )
+
+
+# ── Client Remarks (risk-watchlist 客户备注) ────────────────────────────
+#
+# Shared, server-persisted per-client notes surfaced as a remark column on
+# /risk-watchlist. Decoupled from case/activity data: the frontend pulls the
+# full map here and merges via valueGetter. Business logic + audit live in
+# client_remarks_service; this layer is HTTP-only. Mirrors the risk-monitor
+# account-remarks routes (docs/features/account-remarks.md §4):
+#   R1 optimistic-lock conflict → 409.   R2 note>2000 / bad user_id → 422.
+#   PG unreachable → 503 (RiskCasesUnavailable, same as every route here).
+#   R6/R7 — server-generated trace id + best-effort, client-supplied
+#   X-Device-ID (no auth binding) captured into the audit trail.
+#
+# All three are declared BEFORE the /{user_id} route below so the literal
+# /remarks path is never captured as a user_id.
+
+
+def _validate_remark_user_id(user_id: int) -> None:
+    """R8 analog: reject a non-positive user_id before it can reach the DB.
+    422 mirrors a Pydantic validation failure."""
+    if user_id <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="user_id must be a positive integer",
+        )
+
+
+@router.get("/remarks", response_model=ClientRemarkList)
+def list_client_remarks():
+    """Full remark map for all clients (no pagination — the set is small)."""
+    try:
+        rows = remarks_svc.get_all_remarks()
+    except RiskCasesUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"risk_cases database unavailable: {exc}",
+        ) from exc
+    except Exception as exc:
+        logger.exception("client remarks list query failed")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="internal error while querying client remarks",
+        ) from exc
+    return ClientRemarkList(
+        data=[ClientRemark(**r) for r in rows],
+        total=len(rows),
+    )
+
+
+@router.put("/remarks/{user_id}", response_model=ClientRemark)
+def upsert_client_remark(
+    body: ClientRemarkUpsert,
+    user_id: int = Path(...),
+    x_device_id: Optional[str] = Header(default=None),
+):
+    """Create or update a client remark.
+
+    R1: a conflicting `expected_updated_at` (someone else edited the row
+    first) returns 409 Conflict. R2/F4: oversize|empty note → 422 (Pydantic);
+    non-positive user_id → 422 here. R6/R7: the server-generated trace id
+    (not a client-settable header) plus the best-effort, client-supplied
+    X-Device-ID are recorded into the append-only audit trail.
+    """
+    _validate_remark_user_id(user_id)
+    try:
+        row = remarks_svc.upsert_remark(
+            user_id=user_id,
+            note=body.note,
+            author=body.author,
+            device_id=x_device_id,
+            trace_id=trace_id_var.get(),
+            expected_updated_at=body.expected_updated_at,
+        )
+    except remarks_svc.RemarkConflict as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+        ) from exc
+    except RiskCasesUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"risk_cases database unavailable: {exc}",
+        ) from exc
+    except Exception as exc:
+        logger.exception("client remark upsert failed for user_id=%s", user_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="internal error while saving client remark",
+        ) from exc
+    return ClientRemark(**row)
+
+
+@router.delete("/remarks/{user_id}")
+def delete_client_remark(
+    user_id: int = Path(...),
+    # R2: cap mirrors ClientRemarkUpsert.author (120) — without it an oversized
+    # author string would land verbatim in the append-only audit table.
+    author: str = Query(default="", max_length=120),
+    x_device_id: Optional[str] = Header(default=None),
+):
+    """Delete a client remark. The live row is removed but the old note
+    survives in the append-only audit trail (R7), so deletion is recoverable.
+    Deleting a non-existent remark is a no-op (`deleted: false`).
+
+    `author` (F6) is forwarded so delete history rows are attributable like
+    upsert rows. The trace id is the server-generated one (F9); X-Device-ID
+    is best-effort, client-supplied attribution (no auth binding)."""
+    _validate_remark_user_id(user_id)
+    try:
+        deleted = remarks_svc.delete_remark(
+            user_id=user_id,
+            author=author,
+            device_id=x_device_id,
+            trace_id=trace_id_var.get(),
+        )
+    except RiskCasesUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"risk_cases database unavailable: {exc}",
+        ) from exc
+    except Exception as exc:
+        logger.exception("client remark delete failed for user_id=%s", user_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="internal error while deleting client remark",
+        ) from exc
+    return {"deleted": deleted}
 
 
 @router.get("/{user_id}", response_model=CaseDetailResponse)
