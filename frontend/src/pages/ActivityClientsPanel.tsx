@@ -106,6 +106,12 @@ import {
   type CrmTagDict,
 } from "@/lib/crm-tag-filter";
 import { readFilterState, useFilterPersist } from "@/hooks/useFilterPersist";
+import { useClientRemarks } from "@/hooks/useClientRemarks";
+import {
+  clientRemarkColDef,
+  CLIENT_REMARK_COL_ID,
+} from "@/lib/client-remarks/clientRemarkColDef";
+import { ClientRemarkEditDialog } from "@/components/client-remarks/ClientRemarkEditDialog";
 
 const EMDASH = "—";
 const REFRESH_MS = 60_000; // refresh the current page on the KCM cadence
@@ -795,6 +801,33 @@ export default function ActivityClientsPanel({
   const [sortBy, setSortBy] = useState<string>(DEFAULT_SORT_BY);
   const [sortOrder, setSortOrder] = useState<string>(DEFAULT_SORT_ORDER);
 
+  // ── Client remarks (feat/client-remarks) ──────────────────
+  // Shared server-persisted 备注 column keyed by user_id, mirroring
+  // risk-monitor's account-remarks feature. The store is fully decoupled from
+  // the activity-clients rows (its own fetch + 60s poll inside the hook), and
+  // the column reads the map through the STABLE remarksRef so the map identity
+  // must never enter the columnDefs deps (layout-stability trap — see
+  // clientRemarkColDef header comment).
+  const clientRemarks = useClientRemarks();
+  // Edit target = the clicked client's user_id (click-to-open dialog; the grid
+  // auto-refreshes every 60s, so inline editing would be clobbered mid-type).
+  const [remarkEditUserId, setRemarkEditUserId] = useState<number | null>(null);
+  const openRemarkEditor = useCallback(
+    (userId: number) => setRemarkEditUserId(userId),
+    [],
+  );
+
+  // Repaint ONLY the remark column when the shared map changes (fetch / poll /
+  // save / delete). The api crosses an async boundary via the hook's fetches,
+  // so guard with isDestroyed() — a destroyed AG-Grid api returns undefined
+  // from methods instead of throwing (try/catch and ?. don't help).
+  useEffect(() => {
+    const api = gridRef.current?.api;
+    if (api && !api.isDestroyed()) {
+      api.refreshCells({ columns: [CLIENT_REMARK_COL_ID], force: true });
+    }
+  }, [clientRemarks.remarks]);
+
   // Stale-response guard shared by ALL fetchRows call sites (initial load,
   // 60s interval ticks, manual reload): a single AbortController — each new
   // invocation aborts the previous in-flight request — plus a monotonic
@@ -1060,6 +1093,14 @@ export default function ActivityClientsPanel({
         },
         cellRenderer: (p: { value: string }) => <StatusBadge code={p.value} />,
       },
+      // 备注 — shared client-level remark, default VISIBLE right after 交易状态
+      // (locked product decision). Field-less valueGetter column reading the
+      // shared map via the stable ref; stable colId "remark" is picked up by
+      // useGridColumnPersist + the view-profiles manifest automatically.
+      clientRemarkColDef<ActivityClientRow>({
+        remarksRef: clientRemarks.remarksRef,
+        onEdit: openRemarkEditor,
+      }),
       {
         headerName: "客户名",
         colId: "user_name",
@@ -1763,7 +1804,12 @@ export default function ActivityClientsPanel({
         valueFormatter: (p) => p.value ?? EMDASH,
       },
     ],
-    [],
+    // Deps must stay stable — NO `clientRemarks.remarks` (its Map identity
+    // changes on every fetch/poll/save/delete and would snap the persisted
+    // column layout back to the columnDefs order). The colDef reads the map
+    // via remarksRef; the refreshCells effect above repaints just the remark
+    // column when the map changes.
+    [clientRemarks.remarksRef, openRemarkEditor],
   );
 
   // ColumnVisibilityMenu only understands flat leaf defs — flatten groups.
@@ -1841,6 +1887,21 @@ export default function ActivityClientsPanel({
 
   return (
     <>
+      {/* 备注 (remark) column tint — same red as risk-monitor's .rm-remark-cell
+          (light rgba(239,68,68,0.07) / dark rgba(248,113,113,0.14)) but scoped
+          to this page's own grid class, since risk-monitor's rule lives under
+          .risk-monitor-theme. Translucent so zebra striping shows through;
+          cells only — the header is intentionally NOT tinted. Deliberately NOT
+          hsl(var(--primary)) (AG-Grid pitfall, ui-pitfalls.mdc). */}
+      <style>{`
+        .activity-clients-grid .wl-remark-cell {
+          background-color: rgba(239, 68, 68, 0.07);
+        }
+        .dark .activity-clients-grid .wl-remark-cell {
+          background-color: rgba(248, 113, 113, 0.14);
+        }
+      `}</style>
+
       {/* Explainer banner (activity view) */}
       <div className="rounded-xl border bg-card px-4 py-3 md:px-6">
         <div className="flex flex-col gap-1.5 text-xs text-muted-foreground">
@@ -2031,7 +2092,7 @@ export default function ActivityClientsPanel({
       <div className="flex-1 relative">
         <div
           className={cn(
-            "h-[calc(100vh-320px)] min-h-[400px] w-full",
+            "activity-clients-grid h-[calc(100vh-320px)] min-h-[400px] w-full",
             isDarkMode ? "ag-theme-quartz-dark" : "ag-theme-quartz",
           )}
           style={{
@@ -2120,6 +2181,24 @@ export default function ActivityClientsPanel({
           </Button>
         </div>
       </div>
+
+      {/* Client remark editor — single page-level dialog driven by the clicked
+          row's user_id; reads the live row from the shared store so the
+          optimistic-lock token is always the freshest one (R1). */}
+      {remarkEditUserId !== null && (
+        <ClientRemarkEditDialog
+          open={remarkEditUserId !== null}
+          onOpenChange={(o) => {
+            if (!o) setRemarkEditUserId(null);
+          }}
+          userId={remarkEditUserId}
+          existing={clientRemarks.getRemark(remarkEditUserId)}
+          onSave={clientRemarks.saveRemark}
+          onDelete={clientRemarks.deleteRemark}
+          onRefetch={clientRemarks.refetch}
+          formatTime={fmtHkTime}
+        />
+      )}
     </>
   );
 }

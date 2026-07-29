@@ -237,6 +237,37 @@ DDL_STATEMENTS: tuple[str, ...] = (
     CREATE INDEX IF NOT EXISTS idx_case_actions_user
         ON case_actions (user_id, created_at DESC)
     """,
+    # ── Client remarks (risk-watchlist 客户备注) ──────────────────────
+    # Shared, server-persisted note per client (user_id) + append-only audit
+    # history — a 1:1 port of the risk-monitor account_remarks tables
+    # (docs/features/account-remarks.md) at client granularity. updated_at is
+    # the optimistic-lock token 'YYYY-MM-DDTHH:MM:SSZ#<history_id>' (R1);
+    # history rows are never updated or deleted (R7).
+    """
+    CREATE TABLE IF NOT EXISTS client_remarks (
+        user_id    BIGINT PRIMARY KEY,
+        note       TEXT NOT NULL,
+        author     TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS client_remarks_history (
+        id        BIGSERIAL PRIMARY KEY,
+        user_id   BIGINT NOT NULL,
+        action    TEXT NOT NULL,
+        old_note  TEXT,
+        new_note  TEXT,
+        author    TEXT,
+        device_id TEXT,
+        trace_id  TEXT,
+        at        TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_client_remarks_history_user
+        ON client_remarks_history (user_id, at DESC)
+    """,
 )
 
 
@@ -513,7 +544,7 @@ def risk_cases_conn(settings: Optional[Settings] = None) -> Iterator[Any]:
 
 
 def init_risk_cases_pg(settings: Optional[Settings] = None) -> bool:
-    """Create the four case tables + indexes (idempotent).
+    """Create the case tables + client-remark tables + indexes (idempotent).
 
     Returns True on success, False when PG is unavailable — startup must
     never fail because the case layer is down (fail-open: detection and the
@@ -524,7 +555,7 @@ def init_risk_cases_pg(settings: Optional[Settings] = None) -> bool:
             with conn.cursor() as cur:
                 for stmt in DDL_STATEMENTS:
                     cur.execute(stmt)
-        logger.info("risk_cases PG schema ensured (4 tables + indexes)")
+        logger.info("risk_cases PG schema ensured (6 tables + indexes)")
         return True
     except RiskCasesUnavailable as exc:
         logger.warning("risk_cases PG init skipped (fail-open): %s", exc)

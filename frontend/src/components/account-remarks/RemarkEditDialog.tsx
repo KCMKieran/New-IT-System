@@ -19,6 +19,15 @@
  *
  * This component is presentational glue: it does NOT own the remarks store. The
  * parent passes `existing` (the current row, if any) and the hook's mutators.
+ *
+ * Structure (feat/client-remarks): the whole editor body lives in the
+ * target-agnostic `RemarkDialogCore` — it only knows a display `title` and
+ * target-less onSave/onDelete closures, so any remark anchor (account-level
+ * (server, login) here, client-level user_id in
+ * components/client-remarks/ClientRemarkEditDialog.tsx) can drive it. The
+ * exported `RemarkEditDialog` keeps its ORIGINAL (server, login) props and just
+ * binds them into the core — RiskMonitor call sites are untouched and
+ * behavior-identical.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -46,41 +55,51 @@ import {
   setTempAuthorName,
 } from "@/lib/account-remarks/author";
 
-export interface RemarkEditDialogProps {
+/**
+ * Minimal shape the core needs from a live remark row — satisfied by both
+ * AccountRemark and ClientRemark (the anchor fields stay in the wrappers).
+ */
+export interface RemarkLike {
+  note: string;
+  author: string;
+  /** Opaque optimistic-lock token `YYYY-MM-DDTHH:MM:SSZ#<n>` (echoed verbatim). */
+  updated_at: string;
+}
+
+export interface RemarkDialogCoreProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  /** Account this remark is anchored to. */
-  server: string;
-  login: number;
+  /** Dialog heading, e.g. `账户备注 · MT5 / 123` or `客户备注 · 8522845`. */
+  title: string;
   /** Current live row, or undefined if no remark exists yet. */
-  existing: AccountRemark | undefined;
-  /** Save (PUT). Resolves to the new live row; rejects RemarkConflictError on 409. */
+  existing: RemarkLike | undefined;
+  /**
+   * Save (PUT) with the target already bound by the wrapper. Resolves on
+   * success; rejects RemarkConflictError on 409.
+   */
   onSave: (
-    server: string,
-    login: number,
     note: string,
     author: string,
     expectedUpdatedAt: string | null,
-  ) => Promise<AccountRemark>;
-  /** Delete (DELETE). `author` is the current display name for the audit row. */
-  onDelete: (server: string, login: number, author: string) => Promise<void>;
+  ) => Promise<unknown>;
+  /** Delete (DELETE) with the target bound. `author` is for the audit row. */
+  onDelete: (author: string) => Promise<void>;
   /** Re-pull the full map (called after a 409 so tokens refresh). */
   onRefetch: () => Promise<void>;
-  /** Render the provenance timestamp (parent supplies its MT-time formatter). */
+  /** Render the provenance timestamp (parent supplies its time formatter). */
   formatTime?: (raw: string | null) => string;
 }
 
-export function RemarkEditDialog({
+export function RemarkDialogCore({
   open,
   onOpenChange,
-  server,
-  login,
+  title,
   existing,
   onSave,
   onDelete,
   onRefetch,
   formatTime,
-}: RemarkEditDialogProps) {
+}: RemarkDialogCoreProps) {
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
   // Name prompt (degraded identity path): null = resolved, string = pending input.
@@ -131,13 +150,7 @@ export function RemarkEditDialog({
     try {
       // Read the freshest token via the ref so a retry after a 409 (which
       // refetched `existing`) carries the updated optimistic-lock token.
-      await onSave(
-        server,
-        login,
-        note,
-        author,
-        existingRef.current?.updated_at ?? null,
-      );
+      await onSave(note, author, existingRef.current?.updated_at ?? null);
       toast.success("备注已保存");
       onOpenChange(false);
     } catch (err) {
@@ -170,7 +183,7 @@ export function RemarkEditDialog({
     const author = resolveAuthorName() ?? (pendingName ?? "").trim();
     setBusy(true);
     try {
-      await onDelete(server, login, author);
+      await onDelete(author);
       toast.success("备注已删除");
       onOpenChange(false);
     } catch (err) {
@@ -184,9 +197,7 @@ export function RemarkEditDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>
-            账户备注 · {server} / {login}
-          </DialogTitle>
+          <DialogTitle>{title}</DialogTitle>
           {provenance ? (
             <DialogDescription>{provenance}</DialogDescription>
           ) : (
@@ -255,5 +266,60 @@ export function RemarkEditDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+export interface RemarkEditDialogProps {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  /** Account this remark is anchored to. */
+  server: string;
+  login: number;
+  /** Current live row, or undefined if no remark exists yet. */
+  existing: AccountRemark | undefined;
+  /** Save (PUT). Resolves to the new live row; rejects RemarkConflictError on 409. */
+  onSave: (
+    server: string,
+    login: number,
+    note: string,
+    author: string,
+    expectedUpdatedAt: string | null,
+  ) => Promise<AccountRemark>;
+  /** Delete (DELETE). `author` is the current display name for the audit row. */
+  onDelete: (server: string, login: number, author: string) => Promise<void>;
+  /** Re-pull the full map (called after a 409 so tokens refresh). */
+  onRefetch: () => Promise<void>;
+  /** Render the provenance timestamp (parent supplies its MT-time formatter). */
+  formatTime?: (raw: string | null) => string;
+}
+
+/**
+ * Account-level wrapper — the ORIGINAL public component. Props and behavior are
+ * unchanged; it binds (server, login) into the target-agnostic core.
+ */
+export function RemarkEditDialog({
+  open,
+  onOpenChange,
+  server,
+  login,
+  existing,
+  onSave,
+  onDelete,
+  onRefetch,
+  formatTime,
+}: RemarkEditDialogProps) {
+  return (
+    <RemarkDialogCore
+      open={open}
+      onOpenChange={onOpenChange}
+      title={`账户备注 · ${server} / ${login}`}
+      existing={existing}
+      onSave={(note, author, expectedUpdatedAt) =>
+        onSave(server, login, note, author, expectedUpdatedAt)
+      }
+      onDelete={(author) => onDelete(server, login, author)}
+      onRefetch={onRefetch}
+      formatTime={formatTime}
+    />
   );
 }
