@@ -32,7 +32,7 @@ related: [[OPT-0045]] [[OPT-0046]]
 
 ## 交付内容
 
-1. **云 PG 案卷 4 表**（DDL 草案见 risk-disposition skill §10，按 PG 方言落地
+1. **云 PG 案卷 4 表**（实际落地的 DDL 见 `docs/features/risk-watchlist.md` §3，按 PG 方言落地
    SERIAL/timestamptz/JSONB）：`risk_cases`（user_id 主键 / state / tags / action /
    review_after / ai_comment / ip_country 预留）、`case_entities`（三层级联）、
    `case_metrics_daily`（每日指标快照，∆ 列的数据源）、`case_actions`（append-only 处置史）。
