@@ -40,7 +40,7 @@ import { Badge } from "@/components/ui/badge";
 import { IconTrash, IconRefresh } from "@tabler/icons-react";
 import type { MonitoredAccountOut, ServerName } from "./types";
 
-const SERVER_OPTIONS: ServerName[] = ["MT4_Live", "MT5", "MT4_Live2"];
+const SERVER_OPTIONS: ServerName[] = ["MT4", "MT5", "MT4_Live2"];
 
 export function WatchlistTab() {
   const [rows, setRows] = useState<MonitoredAccountOut[]>([]);
@@ -49,7 +49,7 @@ export function WatchlistTab() {
 
   // ── Form state: batch add ────────────────────────────────
   const [accountsText, setAccountsText] = useState("");
-  const [serverName, setServerName] = useState<ServerName>("MT4_Live");
+  const [serverName, setServerName] = useState<ServerName>("MT4");
   const [newRemarks, setNewRemarks] = useState("");
   const [remarksDraft, setRemarksDraft] = useState<Record<number, string>>({});
 

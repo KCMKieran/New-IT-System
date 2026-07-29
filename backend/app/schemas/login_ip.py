@@ -9,17 +9,23 @@ from __future__ import annotations
 
 from typing import Any, List, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 # ---------------------------------------------------------------------------
 # Watchlist (monitored_accounts)
 # ---------------------------------------------------------------------------
 
-# Whitelisted server names — the FTP service only knows these three.
-# Keeping it Literal means Pydantic rejects typos like "MT4live" at the edge,
-# before we try to look up non-existent credentials in .env.
-ServerName = Literal["MT4_Live", "MT5", "MT4_Live2"]
+# Whitelisted server names. Canonical values are the log-filename names the
+# analyzer groups by (`login_ip_analyzer_service.SUPPORTED_SERVERS`): the MT4
+# Live server is "MT4", NOT "MT4_Live" — a row stored as "MT4_Live" is never
+# matched against parsed logs and silently drops out of monitoring.
+# "MT4_Live" stays accepted (stale frontend bundles) and is normalized to
+# "MT4" by the validator below. Keeping it Literal means Pydantic rejects
+# typos like "MT4live" at the edge.
+ServerName = Literal["MT4", "MT4_Live", "MT5", "MT4_Live2"]
+
+_CANONICAL_SERVER_NAME = {"MT4_Live": "MT4"}
 
 
 class MonitoredAccountOut(BaseModel):
@@ -42,6 +48,11 @@ class MonitoredAccountBatchCreate(BaseModel):
     account_ids: List[int] = Field(..., min_length=1, max_length=500)
     server_name: ServerName
     remarks: Optional[str] = None
+
+    @field_validator("server_name", mode="after")
+    @classmethod
+    def _canonicalize_server_name(cls, v: str) -> str:
+        return _CANONICAL_SERVER_NAME.get(v, v)
 
 
 class MonitoredAccountUpdate(BaseModel):

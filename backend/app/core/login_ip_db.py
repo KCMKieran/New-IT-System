@@ -382,7 +382,11 @@ def get_monitored_accounts() -> dict[str, list[dict]]:
 
     grouped: dict[str, list[dict]] = defaultdict(list)
     for r in rows:
-        grouped[r["server_name"]].append(
+        # The analyzer looks these groups up by log-filename server name
+        # ("MT4", not "MT4_Live"). Rows written as "MT4_Live" by pre-fix
+        # frontends would otherwise silently never match any parsed log.
+        server = "MT4" if r["server_name"] == "MT4_Live" else r["server_name"]
+        grouped[server].append(
             {"id": r["id"], "account_id": r["account_id"], "remarks": r["remarks"]}
         )
     return dict(grouped)
