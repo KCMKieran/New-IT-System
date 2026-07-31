@@ -6,7 +6,10 @@
  * and keeps the main page shell small.
  */
 
-export type ServerName = "MT4_Live" | "MT5" | "MT4_Live2";
+// Canonical server names = the log-filename names the backend analyzer groups
+// by ("MT4", not "MT4_Live") — a watchlist row stored under any other name is
+// silently ignored by the daily correlation job.
+export type ServerName = "MT4" | "MT5" | "MT4_Live2";
 
 // ── Watchlist (monitored accounts) ─────────────────────────
 
