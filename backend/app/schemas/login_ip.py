@@ -75,6 +75,10 @@ class ReportCorrelationEntry(BaseModel):
     id: str  # correlated account id, as string (matches legacy JSON shape)
     historical_date: Optional[str] = None  # YYYYMMDD or None
     chinese_name: Optional[str] = None  # enriched via MySQL (may be absent)
+    # Server the correlated account logged in on. Correlation spans servers
+    # (an MT5 account can share an IP with a monitored MT4 account), so this
+    # is not always the monitored account's server.
+    server_name: Optional[str] = None
 
 
 class ReportIPSharedAnalysis(BaseModel):
