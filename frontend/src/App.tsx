@@ -34,6 +34,7 @@ const ClientPnLAnalysisPage = lazyWithRetry(() => import("@/pages/ClientPnLAnaly
 const ClientReturnRatePage = lazyWithRetry(() => import("@/pages/ClientReturnRate"))
 const ConfigPlaceholder = lazyWithRetry(() => import("@/pages/ConfigPlaceholder"))
 const IBReportPage = lazyWithRetry(() => import("@/pages/IBReport"))
+const HoldBucketReportPage = lazyWithRetry(() => import("@/pages/HoldBucketReport"))
 const IBFinancialMonitorPage = lazyWithRetry(() => import("@/pages/IBFinancialMonitor"))
 const RiskMonitorPage = lazyWithRetry(() => import("@/pages/RiskMonitor"))
 const RiskAlertMailCenterPage = lazyWithRetry(() => import("@/pages/RiskAlertMailCenter"))
@@ -102,6 +103,7 @@ function App() {
               <Route path="client-pnl-analysis" element={<ClientPnLAnalysisPage />} />
               <Route path="client-return-rate" element={<ClientReturnRatePage />} />
               <Route path="ib-report" element={<IBReportPage />} />
+              <Route path="hold-bucket-report" element={<HoldBucketReportPage />} />
               <Route path="ib-financial-monitor" element={<IBFinancialMonitorPage />} />
               <Route path="risk-monitor" element={<RiskMonitorPage />} />
               <Route path="risk-alert-mail" element={<RiskAlertMailCenterPage />} />

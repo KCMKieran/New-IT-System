@@ -62,6 +62,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
           title: t("nav.dataQuery"),
           icon: IconDatabase,
           children: [
+            { title: t("nav.holdBucketReport"), url: "/hold-bucket-report" },
             { title: t("nav.ibFinancialMonitor"), url: "/ib-financial-monitor" },
             { title: t("nav.warehouseProducts"), url: "/warehouse/products" },
             { title: t("nav.position"), url: "/position" },
