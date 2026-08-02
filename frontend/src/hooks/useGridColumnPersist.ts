@@ -49,6 +49,7 @@ export const GRID_STORAGE_KEYS = {
   // driver-layer columns and a server sort whitelist; V1 states could carry a
   // saved sort on a now-unsortable enrichment column, so force a reset.
   RISK_WATCHLIST_POSITIONS: "RISK_WATCHLIST_POSITIONS_GRID_STATE_V2",
+  HOLD_BUCKET_REPORT: "HOLD_BUCKET_REPORT_GRID_STATE_V1",
 } as const;
 
 export type GridStorageKey =

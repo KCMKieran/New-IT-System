@@ -36,6 +36,7 @@ export const FILTER_STATE_KEYS: readonly string[] = [
   // V1 → V2 (2026-07-24): activity view filters changed shape (statuses[] /
   // countries[] multi-selects replaced status/countryMode/globalSub).
   "RISK_WATCHLIST_POSITIONS_FILTERS_V2",
+  "HOLD_BUCKET_REPORT_FILTERS_V1",
 ];
 
 /**

@@ -25,6 +25,7 @@ export default function ConfigPlaceholder() {
       title: t("nav.dataQuery"),
       icon: IconChartBar,
       items: [
+        { title: t("nav.holdBucketReport"), url: "/hold-bucket-report" },
         { title: t("nav.ibFinancialMonitor"), url: "/ib-financial-monitor" },
         { title: t("nav.warehouseProducts"), url: "/warehouse/products" },
         { title: t("nav.position"), url: "/position" },

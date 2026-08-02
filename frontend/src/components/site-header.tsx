@@ -30,6 +30,7 @@ const routeToKeyMap: Record<string, string> = {
   "/risk-alert-mail": "pages.riskAlertMail",
   "/risk-watchlist": "pages.riskWatchlist",
   "/swap-free-control": "pages.swapFreeControl",
+  "/hold-bucket-report": "pages.holdBucketReport",
   "/ib-financial-monitor": "pages.ibFinancialMonitor",
   "/customer-pnl-monitor": "pages.customerPnLMonitor",
   "/customer-pnl-monitor-v2": "pages.customerPnLMonitorV2",
