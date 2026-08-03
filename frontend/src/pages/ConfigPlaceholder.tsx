@@ -30,7 +30,6 @@ export default function ConfigPlaceholder() {
         { title: t("nav.warehouseProducts"), url: "/warehouse/products" },
         { title: t("nav.position"), url: "/position" },
         { title: t("nav.ibData"), url: "/warehouse/ib-data" },
-        { title: t("nav.ibReport"), url: "/ib-report" },
       ],
     },
     {

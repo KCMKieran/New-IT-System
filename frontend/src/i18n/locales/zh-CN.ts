@@ -22,7 +22,7 @@ export const zhCN = {
   nav: {
     customerPnLMonitorV2: "交易账户 - 盈亏监控",
     clientPnLMonitor: "客户 - 盈亏监控",
-    ibReport: "IB 业绩报表",
+    // ibReport: "IB 业绩报表", // [REMOVED]
     // equityMonitor: "Equity - Monitor", // [REMOVED]
     clientTrading: "客户交易分析",
     swapFreeControl: "Swap Free Control",
@@ -74,7 +74,7 @@ export const zhCN = {
     loginIPs: "Login IP监测",
     profitAnalysis: "利润分析",
     clientTrading: "客户交易分析",
-    ibReport: "IB 业绩报表",
+    // ibReport: "IB 业绩报表", // [REMOVED]
     riskMonitor: "交易实时监控",
     swapFreeControl: "Swap Free Control",
     customerPnLMonitor: "客户盈亏监控",
