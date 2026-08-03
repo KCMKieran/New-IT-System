@@ -33,7 +33,7 @@ const SwapFreeControlPage = lazyWithRetry(() => import("@/pages/SwapFreeControl"
 const ClientPnLAnalysisPage = lazyWithRetry(() => import("@/pages/ClientPnLAnalysis"))
 const ClientReturnRatePage = lazyWithRetry(() => import("@/pages/ClientReturnRate"))
 const ConfigPlaceholder = lazyWithRetry(() => import("@/pages/ConfigPlaceholder"))
-const IBReportPage = lazyWithRetry(() => import("@/pages/IBReport"))
+// [REMOVED] IBReport page removed from frontend
 const HoldBucketReportPage = lazyWithRetry(() => import("@/pages/HoldBucketReport"))
 const IBFinancialMonitorPage = lazyWithRetry(() => import("@/pages/IBFinancialMonitor"))
 const RiskMonitorPage = lazyWithRetry(() => import("@/pages/RiskMonitor"))
@@ -102,7 +102,7 @@ function App() {
               {/* <Route path="client-pnl-monitor" element={<ClientPnLMonitorPage />} /> */}
               <Route path="client-pnl-analysis" element={<ClientPnLAnalysisPage />} />
               <Route path="client-return-rate" element={<ClientReturnRatePage />} />
-              <Route path="ib-report" element={<IBReportPage />} />
+              {/* [REMOVED] ib-report route removed from frontend */}
               <Route path="hold-bucket-report" element={<HoldBucketReportPage />} />
               <Route path="ib-financial-monitor" element={<IBFinancialMonitorPage />} />
               <Route path="risk-monitor" element={<RiskMonitorPage />} />
