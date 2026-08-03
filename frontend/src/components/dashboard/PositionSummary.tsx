@@ -1,6 +1,10 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import { Link } from "react-router-dom";
 import { apiFetch } from "@/lib/fetch";
+import {
+  buildSummaryGroups,
+  type SymbolSummaryRow,
+} from "@/lib/position-summary";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -19,16 +23,6 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { ArrowUpDown, Search, ExternalLink, Clock } from "lucide-react";
-
-type SymbolSummaryRow = {
-  source: string;
-  symbol: string;
-  volume_buy: number;
-  volume_sell: number;
-  profit_buy: number;
-  profit_sell: number;
-  profit_total: number;
-};
 
 type SymbolSummaryResp = {
   ok: boolean;
@@ -60,8 +54,12 @@ function formatVolume(n: number): string {
   return n.toFixed(1).replace(/\.?0+$/, "");
 }
 
+// Kept in sync with the /position page's dropdown so both surfaces mean the
+// same thing by "所有XAUUSD产品".
+const DEFAULT_SUMMARY_SYMBOL = "XAU_ALL";
+
 export default function PositionSummary() {
-  const [summarySymbol, setSummarySymbol] = useState("XAUUSD");
+  const [summarySymbol, setSummarySymbol] = useState(DEFAULT_SUMMARY_SYMBOL);
   const [summaryData, setSummaryData] = useState<SymbolSummaryResp | null>(
     null,
   );
@@ -69,30 +67,57 @@ export default function PositionSummary() {
   const [summaryError, setSummaryError] = useState<string | null>(null);
   const [fetchedAt, setFetchedAt] = useState<Date | null>(null);
 
-  async function onFetchSummary(symbol?: string) {
-    const targetSymbol = symbol ?? summarySymbol;
-    setSummaryError(null);
-    setSummaryLoading(true);
-    try {
-      const res = await apiFetch(
-        `/api/v1/open-positions/symbol-summary?symbol=${targetSymbol}`,
-      );
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const json = (await res.json()) as SymbolSummaryResp;
-      if (!json.ok) throw new Error(json.error || "unknown error");
-      setSummaryData(json);
-      setFetchedAt(new Date());
-    } catch (e: any) {
-      setSummaryError(e?.message || "查询汇总失败");
-    } finally {
-      setSummaryLoading(false);
-    }
+  // Newest-request id: selecting a product fires a query immediately, so a slow
+  // earlier response must not overwrite a faster later one.
+  const reqIdRef = useRef(0);
+
+  const fetchSummary = useCallback(
+    async (symbol: string, signal?: AbortSignal) => {
+      const reqId = ++reqIdRef.current;
+      const isStale = () => reqIdRef.current !== reqId;
+      setSummaryError(null);
+      setSummaryLoading(true);
+      try {
+        const res = await apiFetch(
+          `/api/v1/open-positions/symbol-summary?symbol=${encodeURIComponent(symbol)}`,
+          { signal },
+        );
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const json = (await res.json()) as SymbolSummaryResp;
+        if (isStale()) return;
+        if (!json.ok) throw new Error(json.error || "unknown error");
+        setSummaryData(json);
+        setFetchedAt(new Date());
+      } catch (e: any) {
+        if (e?.name === "AbortError" || isStale()) return;
+        setSummaryError(e?.message || "查询汇总失败");
+      } finally {
+        if (!signal?.aborted && !isStale()) setSummaryLoading(false);
+      }
+    },
+    [],
+  );
+
+  // Auto-fetch on mount with the default preset.
+  useEffect(() => {
+    const controller = new AbortController();
+    void fetchSummary(DEFAULT_SUMMARY_SYMBOL, controller.signal);
+    return () => controller.abort();
+  }, [fetchSummary]);
+
+  // Selecting a product queries it straight away — no second click needed.
+  function onSelectSymbol(next: string) {
+    setSummarySymbol(next);
+    void fetchSummary(next);
   }
 
-  // Auto-fetch on mount with default symbol
-  useEffect(() => {
-    onFetchSummary("XAUUSD");
-  }, []);
+  // Roll the per-(server, symbol) API rows up to one row per server. The
+  // dashboard card is a glance surface, so there is no symbol drill-down here —
+  // that lives on /position.
+  const summaryGroups = useMemo(
+    () => buildSummaryGroups(summaryData?.items),
+    [summaryData],
+  );
 
   return (
     <Card className="flex flex-col gap-2">
@@ -111,20 +136,28 @@ export default function PositionSummary() {
             跨服务器品种汇总 (MT4, MT5, MT4Live2)
           </label>
           <div className="flex items-center gap-2">
-            <Select value={summarySymbol} onValueChange={setSummarySymbol}>
-              <SelectTrigger className="h-8 w-[160px] text-xs">
+            {/* Options kept identical to the /position page dropdown. */}
+            <Select value={summarySymbol} onValueChange={onSelectSymbol}>
+              <SelectTrigger className="h-8 w-[180px] text-xs">
                 <SelectValue placeholder="选择产品" />
               </SelectTrigger>
               <SelectContent>
+                <SelectItem value="ALL_OPEN">所有持仓产品 (全部)</SelectItem>
+                <SelectItem value="XAU_ALL">所有XAUUSD产品</SelectItem>
+                <SelectItem value="JPY_ALL">外汇对 JPY相关产品</SelectItem>
                 <SelectItem value="XAUUSD">XAUUSD</SelectItem>
-                <SelectItem value="XAUUSD (Related)">XAUUSD相关</SelectItem>
                 <SelectItem value="XAGUSD">XAGUSD</SelectItem>
-                <SelectItem value="XAGUSD (Related)">XAGUSD相关</SelectItem>
+                <SelectItem value="XAGUSD (Related)">
+                  XAGUSD相关 (模糊匹配)
+                </SelectItem>
+                <SelectItem value="OTHERS" disabled>
+                  其他 (联系Kieran添加)
+                </SelectItem>
               </SelectContent>
             </Select>
             <Button
               size="sm"
-              onClick={() => onFetchSummary()}
+              onClick={() => void fetchSummary(summarySymbol)}
               disabled={summaryLoading}
               className="h-8 gap-1 text-xs"
             >
@@ -133,7 +166,7 @@ export default function PositionSummary() {
               ) : (
                 <Search className="h-3 w-3" />
               )}
-              查询
+              重新查询
             </Button>
             {summaryError && (
               <span className="text-xs text-red-600">{summaryError}</span>
@@ -170,31 +203,31 @@ export default function PositionSummary() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {summaryData.items.map((row) => (
-                  <TableRow key={row.source}>
+                {summaryGroups.map((group) => (
+                  <TableRow key={group.source}>
                     <TableCell className="text-xs font-medium py-1.5">
-                      {row.source}
+                      {group.source}
                     </TableCell>
                     <TableCell className="text-xs text-right tabular-nums py-1.5">
-                      {formatVolume(row.volume_buy)}
+                      {formatVolume(group.subtotal.volume_buy)}
                     </TableCell>
                     <TableCell className="text-xs text-right tabular-nums py-1.5">
-                      {formatVolume(row.volume_sell)}
+                      {formatVolume(group.subtotal.volume_sell)}
                     </TableCell>
                     <TableCell
-                      className={`text-xs text-right tabular-nums py-1.5 ${profitClass(row.profit_buy)}`}
+                      className={`text-xs text-right tabular-nums py-1.5 ${profitClass(group.subtotal.profit_buy)}`}
                     >
-                      {format2(row.profit_buy)}
+                      {format2(group.subtotal.profit_buy)}
                     </TableCell>
                     <TableCell
-                      className={`text-xs text-right tabular-nums py-1.5 ${profitClass(row.profit_sell)}`}
+                      className={`text-xs text-right tabular-nums py-1.5 ${profitClass(group.subtotal.profit_sell)}`}
                     >
-                      {format2(row.profit_sell)}
+                      {format2(group.subtotal.profit_sell)}
                     </TableCell>
                     <TableCell
-                      className={`text-xs text-right tabular-nums py-1.5 ${profitClass(row.profit_total)}`}
+                      className={`text-xs text-right tabular-nums py-1.5 ${profitClass(group.subtotal.profit_total)}`}
                     >
-                      {format2(row.profit_total)}
+                      {format2(group.subtotal.profit_total)}
                     </TableCell>
                   </TableRow>
                 ))}
