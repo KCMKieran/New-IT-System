@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Any
+from typing import Any, NamedTuple
 from concurrent.futures import ThreadPoolExecutor
 
 import pymysql
@@ -83,6 +83,54 @@ def compute_net_position(volume_buy: float, volume_sell: float) -> float:
 
 
 _SID_MAP = {"mt4_live": 1, "mt4_live2": 6, "mt5": 5}
+
+
+class SymbolMatch(NamedTuple):
+    """How a UI symbol token resolves into SQL matching.
+
+    - is_like: 1 -> ``SYMBOL LIKE pattern``, 0 -> ``SYMBOL = pattern``
+    - pattern: the LIKE pattern (or the exact symbol when is_like == 0)
+    - display: fallback symbol used when a row carries no SYMBOL of its own
+    """
+
+    is_like: int
+    pattern: str
+    display: str
+
+
+# Named symbol presets used by the /position cross-server summary. Each maps a
+# UI token to a SQL LIKE pattern, so a single dropdown entry can cover a whole
+# product family (which the legacy "<SYM> (Related)" prefix match could not —
+# e.g. JPY pairs need a contains match, not a prefix one).
+_SYMBOL_PRESETS: dict[str, SymbolMatch] = {
+    # The XAUUSD family only: XAUUSD, XAUUSD.c/.cent/.kcm/.kcmc/.kcmv.
+    # Deliberately NOT "XAU%" — that would pull in XAU-CNH, which is a
+    # different book. Same family definition as get_xauusd_position_detail().
+    "XAU_ALL": SymbolMatch(1, "XAUUSD%", "XAU_ALL"),
+    # Every FX pair with JPY on either leg: USDJPY, EURJPY, ..., + cent variants.
+    "JPY_ALL": SymbolMatch(1, "%JPY%", "JPY_ALL"),
+    # No symbol filter at all — every product currently holding an open
+    # position (~160 (server, symbol) rows). The frontend collapses these to
+    # per-server subtotals, so the row count stays readable.
+    "ALL_OPEN": SymbolMatch(1, "%", "ALL_OPEN"),
+}
+
+
+def resolve_symbol_match(symbol: str) -> SymbolMatch:
+    """Resolve a UI symbol token into a SymbolMatch.
+
+    Three forms are supported, in priority order:
+      * a preset token from _SYMBOL_PRESETS ("XAU_ALL") -> its pattern/exclusions
+      * the legacy "<SYM> (Related)" suffix              -> prefix match "<SYM>%"
+      * anything else                                    -> exact match
+    """
+    preset = _SYMBOL_PRESETS.get(symbol)
+    if preset is not None:
+        return preset
+    if " (Related)" in symbol:
+        clean = symbol.replace(" (Related)", "")
+        return SymbolMatch(1, f"{clean}%", clean)
+    return SymbolMatch(0, symbol, symbol)
 
 
 def get_xauusd_position_detail(settings: Settings) -> dict[str, Any]:
@@ -321,8 +369,12 @@ def get_symbol_cross_server_summary(settings: Settings, symbol: str) -> dict[str
     """
     Query a symbol's open positions across all servers (mt4_live, mt4_live2, mt5).
 
+    ``symbol`` is either an exact symbol, a preset token (``XAU_ALL`` /
+    ``JPY_ALL``, see _SYMBOL_PRESETS) or the legacy ``"<SYM> (Related)"``
+    prefix form — see resolve_symbol_match.
+
     The result is broken out **per (server, symbol)**: the SQL groups by
-    ``t.SYMBOL`` so a fuzzy match (``XAUUSD (Related)``) returns one row per
+    ``t.SYMBOL`` so a multi-symbol match (``XAU_ALL``) returns one row per
     distinct matched symbol instead of merging them via GROUP_CONCAT. An exact
     match still yields at most one row per server. Each row carries
     ``net_lots`` = volume_buy − volume_sell, and a grand ``total`` is summed
@@ -350,6 +402,9 @@ def get_symbol_cross_server_summary(settings: Settings, symbol: str) -> dict[str
         groupsid_condition = ""
         groupsid_params = {}
 
+    # Resolve the symbol token once — it does not vary per server.
+    match = resolve_symbol_match(symbol)
+
     sql = f"""
         SELECT
           t.SYMBOL AS symbol,
@@ -371,8 +426,8 @@ def get_symbol_cross_server_summary(settings: Settings, symbol: str) -> dict[str
         WHERE t.sid = %(sid)s
           AND (
             CASE
-              WHEN %(is_fuzzy)s = 1 THEN t.SYMBOL LIKE CONCAT(%(symbol)s, '%%')
-              ELSE t.SYMBOL = %(symbol)s
+              WHEN %(is_like)s = 1 THEN t.SYMBOL LIKE %(pattern)s
+              ELSE t.SYMBOL = %(pattern)s
             END
           )
           AND t.closeDate = '1970-01-01'
@@ -398,14 +453,11 @@ def get_symbol_cross_server_summary(settings: Settings, symbol: str) -> dict[str
 
     def fetch_source_data(source_name: str) -> list[dict[str, Any]]:
         sid = sid_map.get(source_name)
-        # Check if it's a fuzzy search (e.g., 'XAUUSD (Related)')
-        is_fuzzy = 1 if " (Related)" in symbol else 0
-        clean_symbol = symbol.replace(" (Related)", "")
 
         params = {
             "sid": sid,
-            "symbol": clean_symbol,
-            "is_fuzzy": is_fuzzy,
+            "pattern": match.pattern,
+            "is_like": match.is_like,
             "like_test": "%test%",
             "like_kcm": "KCM%",
             "like_testkcm": "testKCM%",
@@ -435,7 +487,7 @@ def get_symbol_cross_server_summary(settings: Settings, symbol: str) -> dict[str
                 out.append(
                     {
                         "source": source_name,
-                        "symbol": res.get("symbol") or clean_symbol,
+                        "symbol": res.get("symbol") or match.display,
                         "volume_buy": volume_buy,
                         "volume_sell": volume_sell,
                         "net_lots": compute_net_position(volume_buy, volume_sell),

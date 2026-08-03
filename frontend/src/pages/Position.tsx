@@ -1,10 +1,22 @@
 import * as React from "react";
 import { apiFetch } from "@/lib/fetch";
+import {
+  DEFAULT_SUMMARY_SORT,
+  buildSummaryGroups,
+  type SummarySort,
+  type SummarySortKey,
+  type SymbolSummaryRow,
+} from "@/lib/position-summary";
 
 import XauusdPositionChart from "@/components/position/XauusdPositionChart";
 
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
+import {
+  Card,
+  CardContent,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import {
   Table,
@@ -16,9 +28,13 @@ import {
 } from "@/components/ui/table";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import {
+  ArrowDown,
+  ArrowUp,
   ArrowUpDown,
   ArrowDownRight,
   ArrowUpRight,
+  ChevronDown,
+  ChevronRight,
   DollarSign,
   TrendingUp,
   Search,
@@ -54,27 +70,15 @@ type OpenPositionsResp = {
   error: string | null;
 };
 
-type SymbolSummaryRow = {
-  source: string;
-  symbol: string;
-  volume_buy: number;
-  volume_sell: number;
-  net_lots: number;
-  profit_buy: number;
-  profit_sell: number;
-  profit_total: number;
-};
-
-// Fixed display order for the cross-server summary so all three servers are
-// always listed (even when one has no matching position).
-const SUMMARY_SERVERS = ["mt4_live", "mt4_live2", "mt5"] as const;
-
 type SymbolSummaryResp = {
   ok: boolean;
   items: SymbolSummaryRow[];
   total: SymbolSummaryRow | null;
   error: string | null;
 };
+
+// Preset selected on first load; also what the mount effect auto-queries.
+const DEFAULT_SUMMARY_SYMBOL = "XAU_ALL";
 
 function format2(n: number): string {
   return Number(n || 0).toLocaleString(undefined, {
@@ -163,6 +167,52 @@ function StatCard({
   );
 }
 
+/**
+ * Sortable header cell for the cross-server summary table. The sort applies to
+ * the symbol rows inside each server group — the three server rows themselves
+ * keep their fixed order.
+ */
+function SummarySortHeader({
+  label,
+  sortKey,
+  sort,
+  onSort,
+  align = "right",
+}: {
+  label: string;
+  sortKey: SummarySortKey;
+  sort: SummarySort;
+  onSort: (key: SummarySortKey) => void;
+  align?: "left" | "right";
+}) {
+  const active = sort.key === sortKey;
+  return (
+    <TableHead className={align === "right" ? "text-right" : undefined}>
+      <button
+        type="button"
+        onClick={() => onSort(sortKey)}
+        aria-sort={
+          active ? (sort.desc ? "descending" : "ascending") : "none"
+        }
+        className={`inline-flex items-center gap-1 hover:text-foreground ${
+          align === "right" ? "flex-row-reverse" : ""
+        } ${active ? "text-foreground font-semibold" : "text-muted-foreground"}`}
+      >
+        {label}
+        {active ? (
+          sort.desc ? (
+            <ArrowDown className="h-3.5 w-3.5" />
+          ) : (
+            <ArrowUp className="h-3.5 w-3.5" />
+          )
+        ) : (
+          <ArrowUpDown className="h-3.5 w-3.5 opacity-40" />
+        )}
+      </button>
+    </TableHead>
+  );
+}
+
 export default function PositionPage() {
   const [items, setItems] = React.useState<OpenPositionsItem[]>([]);
   const [loading, setLoading] = React.useState(false);
@@ -190,12 +240,37 @@ export default function PositionPage() {
     },
   );
 
-  // Cross-server summary state
-  const [summarySymbol, setSummarySymbol] = React.useState("XAUUSD");
+  // Cross-server summary state. Defaults to the "all XAUUSD products" preset,
+  // which is auto-queried on mount (see the effect below) so the page lands
+  // with data instead of an empty card.
+  const [summarySymbol, setSummarySymbol] =
+    React.useState(DEFAULT_SUMMARY_SYMBOL);
   const [summaryData, setSummaryData] =
     React.useState<SymbolSummaryResp | null>(null);
   const [summaryLoading, setSummaryLoading] = React.useState(false);
   const [summaryError, setSummaryError] = React.useState<string | null>(null);
+  // Which server groups are expanded. Risk team reads the per-server subtotals
+  // first, so every group starts collapsed and the symbol breakdown is opt-in.
+  const [expandedSources, setExpandedSources] = React.useState<
+    Record<string, boolean>
+  >({});
+  // Sort applied to the symbol rows inside each server group.
+  const [summarySort, setSummarySort] =
+    React.useState<SummarySort>(DEFAULT_SUMMARY_SORT);
+
+  function toggleSource(source: string) {
+    setExpandedSources((prev) => ({ ...prev, [source]: !prev[source] }));
+  }
+
+  // Numeric columns start descending (biggest first); the symbol column starts
+  // ascending. Clicking the active column flips direction.
+  function toggleSummarySort(key: SummarySortKey) {
+    setSummarySort((prev) =>
+      prev.key === key
+        ? { key, desc: !prev.desc }
+        : { key, desc: key !== "symbol" },
+    );
+  }
 
   async function fetchOpenPositions(signal?: AbortSignal) {
     const res = await apiFetch(`/api/v1/open-positions/today?source=${source}`, {
@@ -209,22 +284,45 @@ export default function PositionPage() {
     return json.items;
   }
 
-  async function onFetchSummary() {
-    setSummaryError(null);
-    setSummaryLoading(true);
-    try {
-      const res = await apiFetch(
-        `/api/v1/open-positions/symbol-summary?symbol=${summarySymbol}`,
-      );
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const json = (await res.json()) as SymbolSummaryResp;
-      if (!json.ok) throw new Error(json.error || "unknown error");
-      setSummaryData(json);
-    } catch (e: any) {
-      setSummaryError(e?.message || "查询汇总失败");
-    } finally {
-      setSummaryLoading(false);
-    }
+  // Monotonic id of the newest summary request. Selecting a product fires a
+  // query immediately, so a slow earlier response can land after a faster later
+  // one — anything but the newest id is dropped.
+  const summaryReqId = React.useRef(0);
+
+  const fetchSummary = React.useCallback(
+    async (symbol: string, signal?: AbortSignal) => {
+      const reqId = ++summaryReqId.current;
+      const isStale = () => summaryReqId.current !== reqId;
+      setSummaryError(null);
+      setSummaryLoading(true);
+      try {
+        const res = await apiFetch(
+          `/api/v1/open-positions/symbol-summary?symbol=${encodeURIComponent(symbol)}`,
+          { signal },
+        );
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const json = (await res.json()) as SymbolSummaryResp;
+        if (isStale()) return;
+        if (!json.ok) throw new Error(json.error || "unknown error");
+        // Collapse everything again: the previous expansion belongs to the
+        // previous product family.
+        setExpandedSources({});
+        setSummaryData(json);
+      } catch (e: any) {
+        if (e?.name === "AbortError" || isStale()) return;
+        setSummaryError(e?.message || "查询汇总失败");
+      } finally {
+        // Skip on abort/stale: a newer request owns the loading flag now.
+        if (!signal?.aborted && !isStale()) setSummaryLoading(false);
+      }
+    },
+    [],
+  );
+
+  // Selecting a product queries it straight away — no second click needed.
+  function onSelectSummarySymbol(next: string) {
+    setSummarySymbol(next);
+    void fetchSummary(next);
   }
 
   async function onRefresh() {
@@ -264,33 +362,10 @@ export default function PositionPage() {
     return sum;
   }, [items]);
 
-  // Group the cross-server summary rows by server (fixed order), computing a
-  // per-server subtotal. Servers with no matching position still appear (empty
-  // group) so the table always lists all three.
-  const summaryGroups = React.useMemo(() => {
-    const items = summaryData?.items ?? [];
-    return SUMMARY_SERVERS.map((source) => {
-      const rows = items.filter((r) => r.source === source);
-      const subtotal = rows.reduce(
-        (acc, r) => {
-          acc.volume_buy += r.volume_buy || 0;
-          acc.volume_sell += r.volume_sell || 0;
-          acc.profit_buy += r.profit_buy || 0;
-          acc.profit_sell += r.profit_sell || 0;
-          acc.profit_total += r.profit_total || 0;
-          return acc;
-        },
-        {
-          volume_buy: 0,
-          volume_sell: 0,
-          profit_buy: 0,
-          profit_sell: 0,
-          profit_total: 0,
-        },
-      );
-      return { source, rows, subtotal };
-    });
-  }, [summaryData]);
+  const summaryGroups = React.useMemo(
+    () => buildSummaryGroups(summaryData?.items, summarySort),
+    [summaryData, summarySort],
+  );
 
   const columns = React.useMemo<ColumnDef<OpenPositionsItem>[]>(
     () => [
@@ -443,29 +518,42 @@ export default function PositionPage() {
     } catch {}
   }, []);
 
+  // Auto-query the default preset (all XAU products) on mount — the summary is
+  // the primary content of this page, so it should not need a manual click.
+  React.useEffect(() => {
+    const controller = new AbortController();
+    void fetchSummary(DEFAULT_SUMMARY_SYMBOL, controller.signal);
+    return () => controller.abort();
+  }, [fetchSummary]);
+
   return (
     <div className="relative space-y-4 px-1 pb-6 sm:px-4 lg:px-6">
-      {/* XAUUSD 持仓分钟级记录图表（OPT-0040）— 页面最顶部 */}
-      <XauusdPositionChart />
-
-      {/* 跨服务器品种汇总查询 */}
-      <Card className="mt-4 border-primary/20 bg-primary/5">
-        <CardContent className="pt-6">
+      {/* 跨服务器品种汇总查询 — 实时持仓仓位 */}
+      <Card className="gap-3 border-primary/20 bg-primary/5">
+        <CardHeader>
+          <CardTitle className="text-base">实时持仓仓位</CardTitle>
+        </CardHeader>
+        <CardContent>
           <div className="flex flex-col gap-6">
             <div className="flex flex-col gap-2">
               <label className="text-sm font-medium text-muted-foreground">
                 选择Symbol (MT4/MT5/MT4Live2)
               </label>
               <div className="flex flex-col sm:flex-row items-center gap-3">
-                <Select value={summarySymbol} onValueChange={setSummarySymbol}>
+                <Select
+                  value={summarySymbol}
+                  onValueChange={onSelectSummarySymbol}
+                >
                   <SelectTrigger className="w-full sm:w-[220px] h-10">
                     <SelectValue placeholder="选择产品" />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="XAUUSD">XAUUSD</SelectItem>
-                    <SelectItem value="XAUUSD (Related)">
-                      XAUUSD相关 (模糊匹配)
+                    <SelectItem value="ALL_OPEN">
+                      所有持仓产品 (全部)
                     </SelectItem>
+                    <SelectItem value="XAU_ALL">所有XAUUSD产品</SelectItem>
+                    <SelectItem value="JPY_ALL">外汇对 JPY相关产品</SelectItem>
+                    <SelectItem value="XAUUSD">XAUUSD</SelectItem>
                     <SelectItem value="XAGUSD">XAGUSD</SelectItem>
                     <SelectItem value="XAGUSD (Related)">
                       XAGUSD相关 (模糊匹配)
@@ -475,8 +563,10 @@ export default function PositionPage() {
                     </SelectItem>
                   </SelectContent>
                 </Select>
+                {/* Selecting a product already queries it; this re-runs the
+                    same query to pull fresh live numbers. */}
                 <Button
-                  onClick={onFetchSummary}
+                  onClick={() => void fetchSummary(summarySymbol)}
                   disabled={summaryLoading}
                   className="w-full sm:w-[200px] h-10 gap-2 shadow-sm"
                 >
@@ -485,7 +575,7 @@ export default function PositionPage() {
                   ) : (
                     <Search className="h-4 w-4" />
                   )}
-                  查询
+                  重新查询
                 </Button>
                 {summaryError && (
                   <span className="text-sm text-red-600">{summaryError}</span>
@@ -501,127 +591,169 @@ export default function PositionPage() {
                     <TableHeader>
                       <TableRow className="bg-muted/50">
                         <TableHead>服务器</TableHead>
-                        <TableHead>产品 (Symbol)</TableHead>
-                        <TableHead className="text-right">Lots (Buy)</TableHead>
-                        <TableHead className="text-right">
-                          Lots (Sell)
-                        </TableHead>
-                        <TableHead className="text-right">Net Lots</TableHead>
-                        <TableHead className="text-right">
-                          Profit (Buy)
-                        </TableHead>
-                        <TableHead className="text-right">
-                          Profit (Sell)
-                        </TableHead>
-                        <TableHead className="text-right">
-                          Total Profit
-                        </TableHead>
+                        <SummarySortHeader
+                          label="产品 (Symbol)"
+                          sortKey="symbol"
+                          sort={summarySort}
+                          onSort={toggleSummarySort}
+                          align="left"
+                        />
+                        <SummarySortHeader
+                          label="Lots (Buy)"
+                          sortKey="volume_buy"
+                          sort={summarySort}
+                          onSort={toggleSummarySort}
+                        />
+                        <SummarySortHeader
+                          label="Lots (Sell)"
+                          sortKey="volume_sell"
+                          sort={summarySort}
+                          onSort={toggleSummarySort}
+                        />
+                        <SummarySortHeader
+                          label="Net Lots"
+                          sortKey="net_lots"
+                          sort={summarySort}
+                          onSort={toggleSummarySort}
+                        />
+                        <SummarySortHeader
+                          label="Profit (Buy)"
+                          sortKey="profit_buy"
+                          sort={summarySort}
+                          onSort={toggleSummarySort}
+                        />
+                        <SummarySortHeader
+                          label="Profit (Sell)"
+                          sortKey="profit_sell"
+                          sort={summarySort}
+                          onSort={toggleSummarySort}
+                        />
+                        <SummarySortHeader
+                          label="Total Profit"
+                          sortKey="profit_total"
+                          sort={summarySort}
+                          onSort={toggleSummarySort}
+                        />
                       </TableRow>
                     </TableHeader>
                     <TableBody>
                       {summaryGroups.map((group) => {
-                        const hasSubtotal = group.rows.length > 1;
-                        // rowSpan covers the symbol rows (or 1 placeholder row
-                        // when empty) plus the subtotal row when present.
-                        const span =
-                          Math.max(group.rows.length, 1) + (hasSubtotal ? 1 : 0);
-                        if (group.rows.length === 0) {
-                          return (
-                            <TableRow key={group.source}>
-                              <TableCell className="font-medium align-middle">
-                                {group.source}
-                              </TableCell>
-                              <TableCell
-                                colSpan={7}
-                                className="text-sm text-muted-foreground"
-                              >
-                                无持仓
-                              </TableCell>
-                            </TableRow>
-                          );
-                        }
+                        const canExpand = group.rows.length > 0;
+                        const isOpen = !!expandedSources[group.source];
                         return (
                           <React.Fragment key={group.source}>
-                            {group.rows.map((row, idx) => (
-                              <TableRow key={`${group.source}-${row.symbol}`}>
-                                {idx === 0 && (
-                                  <TableCell
-                                    rowSpan={span}
-                                    className="font-medium align-middle border-r"
-                                  >
-                                    {group.source}
-                                  </TableCell>
-                                )}
-                                <TableCell className="font-medium">
-                                  {row.symbol || "-"}
-                                </TableCell>
-                                <TableCell className="text-right tabular-nums">
-                                  {formatVolume(row.volume_buy)}
-                                </TableCell>
-                                <TableCell className="text-right tabular-nums">
-                                  {formatVolume(row.volume_sell)}
-                                </TableCell>
-                                <TableCell
-                                  className={`text-right tabular-nums font-medium ${profitClass(row.net_lots)}`}
-                                >
-                                  {formatNetLots(row.net_lots)}
-                                </TableCell>
-                                <TableCell
-                                  className={`text-right tabular-nums ${profitClass(row.profit_buy)}`}
-                                >
-                                  {format2(row.profit_buy)}
-                                </TableCell>
-                                <TableCell
-                                  className={`text-right tabular-nums ${profitClass(row.profit_sell)}`}
-                                >
-                                  {format2(row.profit_sell)}
-                                </TableCell>
-                                <TableCell
-                                  className={`text-right tabular-nums ${profitClass(row.profit_total)}`}
-                                >
-                                  {format2(row.profit_total)}
-                                </TableCell>
-                              </TableRow>
-                            ))}
-                            {hasSubtotal && (
-                              <TableRow className="bg-muted/40 font-semibold">
-                                <TableCell className="text-muted-foreground">
-                                  小计
-                                </TableCell>
-                                <TableCell className="text-right tabular-nums">
-                                  {formatVolume(group.subtotal.volume_buy)}
-                                </TableCell>
-                                <TableCell className="text-right tabular-nums">
-                                  {formatVolume(group.subtotal.volume_sell)}
-                                </TableCell>
-                                <TableCell
-                                  className={`text-right tabular-nums ${profitClass(
-                                    group.subtotal.volume_buy -
-                                      group.subtotal.volume_sell,
-                                  )}`}
-                                >
-                                  {formatNetLots(
-                                    group.subtotal.volume_buy -
-                                      group.subtotal.volume_sell,
+                            {/* Server row = the per-server subtotal. Collapsed
+                                by default; click to reveal the symbol split. */}
+                            <TableRow
+                              className={`font-semibold ${
+                                canExpand
+                                  ? "cursor-pointer hover:bg-muted/50"
+                                  : ""
+                              }`}
+                              role={canExpand ? "button" : undefined}
+                              tabIndex={canExpand ? 0 : undefined}
+                              aria-expanded={canExpand ? isOpen : undefined}
+                              onClick={
+                                canExpand
+                                  ? () => toggleSource(group.source)
+                                  : undefined
+                              }
+                              onKeyDown={
+                                canExpand
+                                  ? (e) => {
+                                      if (e.key === "Enter" || e.key === " ") {
+                                        e.preventDefault();
+                                        toggleSource(group.source);
+                                      }
+                                    }
+                                  : undefined
+                              }
+                            >
+                              <TableCell className="align-middle">
+                                <div className="flex items-center gap-1.5">
+                                  {canExpand ? (
+                                    isOpen ? (
+                                      <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />
+                                    ) : (
+                                      <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
+                                    )
+                                  ) : (
+                                    <span className="h-4 w-4 shrink-0" />
                                   )}
-                                </TableCell>
-                                <TableCell
-                                  className={`text-right tabular-nums ${profitClass(group.subtotal.profit_buy)}`}
+                                  {group.source}
+                                </div>
+                              </TableCell>
+                              <TableCell className="text-xs font-normal text-muted-foreground">
+                                {canExpand
+                                  ? `${group.rows.length} 个产品${isOpen ? "" : "（点击展开）"}`
+                                  : "无持仓"}
+                              </TableCell>
+                              <TableCell className="text-right tabular-nums">
+                                {formatVolume(group.subtotal.volume_buy)}
+                              </TableCell>
+                              <TableCell className="text-right tabular-nums">
+                                {formatVolume(group.subtotal.volume_sell)}
+                              </TableCell>
+                              <TableCell
+                                className={`text-right tabular-nums ${profitClass(group.subtotal.net_lots)}`}
+                              >
+                                {formatNetLots(group.subtotal.net_lots)}
+                              </TableCell>
+                              <TableCell
+                                className={`text-right tabular-nums ${profitClass(group.subtotal.profit_buy)}`}
+                              >
+                                {format2(group.subtotal.profit_buy)}
+                              </TableCell>
+                              <TableCell
+                                className={`text-right tabular-nums ${profitClass(group.subtotal.profit_sell)}`}
+                              >
+                                {format2(group.subtotal.profit_sell)}
+                              </TableCell>
+                              <TableCell
+                                className={`text-right tabular-nums ${profitClass(group.subtotal.profit_total)}`}
+                              >
+                                {format2(group.subtotal.profit_total)}
+                              </TableCell>
+                            </TableRow>
+
+                            {isOpen &&
+                              group.rows.map((row) => (
+                                <TableRow
+                                  key={`${group.source}-${row.symbol}`}
+                                  className="bg-muted/20"
                                 >
-                                  {format2(group.subtotal.profit_buy)}
-                                </TableCell>
-                                <TableCell
-                                  className={`text-right tabular-nums ${profitClass(group.subtotal.profit_sell)}`}
-                                >
-                                  {format2(group.subtotal.profit_sell)}
-                                </TableCell>
-                                <TableCell
-                                  className={`text-right tabular-nums ${profitClass(group.subtotal.profit_total)}`}
-                                >
-                                  {format2(group.subtotal.profit_total)}
-                                </TableCell>
-                              </TableRow>
-                            )}
+                                  <TableCell />
+                                  <TableCell className="pl-6 font-medium">
+                                    {row.symbol || "-"}
+                                  </TableCell>
+                                  <TableCell className="text-right tabular-nums">
+                                    {formatVolume(row.volume_buy)}
+                                  </TableCell>
+                                  <TableCell className="text-right tabular-nums">
+                                    {formatVolume(row.volume_sell)}
+                                  </TableCell>
+                                  <TableCell
+                                    className={`text-right tabular-nums font-medium ${profitClass(row.net_lots)}`}
+                                  >
+                                    {formatNetLots(row.net_lots)}
+                                  </TableCell>
+                                  <TableCell
+                                    className={`text-right tabular-nums ${profitClass(row.profit_buy)}`}
+                                  >
+                                    {format2(row.profit_buy)}
+                                  </TableCell>
+                                  <TableCell
+                                    className={`text-right tabular-nums ${profitClass(row.profit_sell)}`}
+                                  >
+                                    {format2(row.profit_sell)}
+                                  </TableCell>
+                                  <TableCell
+                                    className={`text-right tabular-nums ${profitClass(row.profit_total)}`}
+                                  >
+                                    {format2(row.profit_total)}
+                                  </TableCell>
+                                </TableRow>
+                              ))}
                           </React.Fragment>
                         );
                       })}
@@ -871,6 +1003,9 @@ export default function PositionPage() {
           </div>
         </CardContent>
       </Card>
+
+      {/* XAUUSD 持仓分钟级记录图表（OPT-0040）— 页面最底部 */}
+      <XauusdPositionChart />
     </div>
   );
 }
