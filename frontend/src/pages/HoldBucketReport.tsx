@@ -395,9 +395,11 @@ export default function HoldBucketReport() {
 
   const defaultColDef = useMemo<ColDef>(
     () => ({
-      sortable: true,
+      // Rows are a hand-spliced slot→month tree; client-side sort/filter
+      // would detach month rows from their parent slot rows.
+      sortable: false,
       resizable: true,
-      filter: true,
+      filter: false,
       minWidth: 70,
       wrapHeaderText: true,
       autoHeaderHeight: true,

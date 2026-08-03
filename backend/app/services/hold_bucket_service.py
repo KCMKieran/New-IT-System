@@ -35,7 +35,9 @@ DEFAULT_SIDS = (1, 5, 6)
 TOP_CANDIDATE_LIMIT = 200
 TOP_RESULT_LIMIT = 10
 
-CACHE_PREFIX = "hold_bucket:v1"
+# v2: top-clients profit filter moved from row-level WHERE to client-level
+# HAVING — v1 cached wrong Top10 rows, so the version bump invalidates them.
+CACHE_PREFIX = "hold_bucket:v2"
 CACHE_TTL_S = 1800
 
 _REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
@@ -272,9 +274,9 @@ WHERE h.sid = ANY(%(sids)s)
   AND (
       CASE WHEN %(gran)s = 60 THEN h.open_slot / 2 ELSE h.open_slot END
   ) = %(slot)s
-  AND h.total_profit_sum > 0
   {bucket_clause}
 GROUP BY h.user_id
+HAVING SUM(h.total_profit_sum) > 0
 ORDER BY SUM(h.total_profit_sum) DESC
 LIMIT %(limit)s
 """
