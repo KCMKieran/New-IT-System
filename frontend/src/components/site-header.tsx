@@ -28,6 +28,7 @@ const routeToKeyMap: Record<string, string> = {
   "/risk-monitor": "pages.riskMonitor",
   "/risk-alert-mail": "pages.riskAlertMail",
   "/risk-watchlist": "pages.riskWatchlist",
+  "/window-scan": "pages.windowScan",
   "/swap-free-control": "pages.swapFreeControl",
   "/hold-bucket-report": "pages.holdBucketReport",
   "/ib-financial-monitor": "pages.ibFinancialMonitor",

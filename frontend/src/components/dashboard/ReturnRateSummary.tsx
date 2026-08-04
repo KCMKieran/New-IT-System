@@ -115,7 +115,7 @@ export default function ReturnRateSummary() {
             "口径: 交易净入金 = SUM(deposit) + SUM(withdrawal)，**不含** IB 佣金提现('ib withdrawal')\n" +
             "范围: 全历史，客户级(按 userId 汇总)，sid 1/2/5/6，排除 demo；CEN ÷100\n" +
             "IB 佣金提现只发生在 IB 钱包(sid=2)，不是交易本金，故不计入\n\n" +
-            "完整列(含 IB 佣金提现明细)见「客户回报率查询」页\n\n" +
+            "完整列(含 IB 佣金提现明细)见「客户收益率查询」页\n\n" +
             "Trading net deposit — EXCLUDES 'ib withdrawal' (IB commission cash-outs)",
         },
         minWidth: 110,

@@ -29,8 +29,8 @@ export const zhCN = {
     basisAnalysis: "基差分析",
     // downloads: "数据下载", // [REMOVED]
     warehouse: "报仓数据",
-    warehouseProducts: "交易汇总",
-    ibData: "出入金查询",
+    warehouseProducts: "产品交易汇总",
+    ibData: "IB / 地区出入金",
     position: "实时持仓",
     warehouseOthers: "其他",
     loginIPs: "MT LoginIP 监测",
@@ -52,7 +52,9 @@ export const zhCN = {
     fundFlowMonitor: "频繁出入金监控",
     ibTreeQuery: "IB Tree查询",
     riskAlertMail: "告警邮件中心",
+    riskMonitor: "风控规则告警",
     riskWatchlist: "风控观察清单",
+    windowScan: "开仓时点扫描",
     home: "首页",
   },
 
@@ -67,15 +69,15 @@ export const zhCN = {
     // downloads: "数据下载", // [REMOVED]
     warehouseAgentGlobal: "代理统计Global",
     warehouse: "报仓数据",
-    warehouseProducts: "交易汇总",
-    ibData: "出入金查询",
+    warehouseProducts: "产品交易汇总",
+    ibData: "IB / 地区出入金",
     warehouseOthers: "其他报仓",
     position: "实时持仓",
     loginIPs: "Login IP监测",
     profitAnalysis: "利润分析",
     clientTrading: "客户交易分析",
     // ibReport: "IB 业绩报表", // [REMOVED]
-    riskMonitor: "交易实时监控",
+    riskMonitor: "风控规则告警",
     swapFreeControl: "Swap Free Control",
     customerPnLMonitor: "客户盈亏监控",
     customerPnLMonitorV2: "客户盈亏监控（V2）",
@@ -89,6 +91,7 @@ export const zhCN = {
     ibTreeQuery: "IB Tree查询",
     riskAlertMail: "告警邮件中心",
     riskWatchlist: "风控观察清单",
+    windowScan: "开仓时点扫描",
   },
 
   ibidLotsPage: {

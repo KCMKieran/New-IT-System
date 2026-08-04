@@ -37,6 +37,10 @@ export const FILTER_STATE_KEYS: readonly string[] = [
   // countries[] multi-selects replaced status/countryMode/globalSub).
   "RISK_WATCHLIST_POSITIONS_FILTERS_V2",
   "HOLD_BUCKET_REPORT_FILTERS_V1",
+  // Window Scan: persists viewing preferences only (window_min / hold_bucket /
+  // sids). The investigation context — the `anchor` timestamp and `symbol` —
+  // stays in React state and is deliberately absent from this key's payload.
+  "WINDOW_SCAN_FILTERS_V1",
 ];
 
 /**

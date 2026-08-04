@@ -96,10 +96,10 @@ def query_client_return_rate(
             logger.warning(f"Query timeout for client return rate: {e}")
             raise HTTPException(status_code=504, detail="查询超时，请缩小时间范围后重试")
         logger.exception("MySQL error querying client return rate")
-        raise HTTPException(status_code=500, detail="客户回报率查询失败，请稍后重试")
+        raise HTTPException(status_code=500, detail="客户收益率查询失败，请稍后重试")
     except Exception:
         logger.exception("Error querying client return rate")
-        raise HTTPException(status_code=500, detail="客户回报率查询失败，请稍后重试")
+        raise HTTPException(status_code=500, detail="客户收益率查询失败，请稍后重试")
 
 
 @router.post(

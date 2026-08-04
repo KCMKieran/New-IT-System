@@ -50,6 +50,7 @@ export const GRID_STORAGE_KEYS = {
   // saved sort on a now-unsortable enrichment column, so force a reset.
   RISK_WATCHLIST_POSITIONS: "RISK_WATCHLIST_POSITIONS_GRID_STATE_V2",
   HOLD_BUCKET_REPORT: "HOLD_BUCKET_REPORT_GRID_STATE_V1",
+  WINDOW_SCAN: "WINDOW_SCAN_GRID_STATE_V1",
 } as const;
 
 export type GridStorageKey =
