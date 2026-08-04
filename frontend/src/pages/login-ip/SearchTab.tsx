@@ -624,6 +624,12 @@ export function SearchTab() {
               <span className="text-xs text-muted-foreground">{statusMsg}</span>
             )}
           </div>
+          {/* Export fans each correlated account onto its own CSV row, so the
+              file has more rows than the grid below — say so up front. */}
+          <p className="text-xs text-muted-foreground">
+            导出的 CSV 中，<strong className="font-medium">每个关联账户单独占一行</strong>
+            （关联账号 / Last name / First name 分列），便于在 Excel 里筛选与统计；因此文件行数会多于下方表格的条数。
+          </p>
         </CardContent>
       </Card>
 
