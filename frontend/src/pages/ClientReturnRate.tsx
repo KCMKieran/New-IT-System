@@ -1,5 +1,5 @@
 /**
- * Client Return Rate page - "客户回报率查询"
+ * Client Return Rate page - "客户收益率查询"
  *
  * Shows clients who had closed trades in a selected time range,
  * with their equity, deposit history, and various return rate metrics.

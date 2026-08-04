@@ -29,8 +29,8 @@ export const enUS = {
     basisAnalysis: "Basis Analysis",
     // downloads: "Downloads", // [REMOVED]
     warehouse: "Warehouse Data",
-    warehouseProducts: "Trade Summary",
-    ibData: "Deposit/Withdrawal",
+    warehouseProducts: "Product Trade Summary",
+    ibData: "IB & Region Deposits",
     position: "Open Positions",
     warehouseOthers: "Others",
     loginIPs: "Login IP Monitoring",
@@ -52,7 +52,9 @@ export const enUS = {
     fundFlowMonitor: "Frequent Fund Flow",
     ibTreeQuery: "IB Tree Lookup",
     riskAlertMail: "Alert Mail Center",
+    riskMonitor: "Risk Rule Alerts",
     riskWatchlist: "Risk Watchlist",
+    windowScan: "Window Scan",
     home: "Home",
   },
   
@@ -67,15 +69,15 @@ export const enUS = {
     // downloads: "Downloads", // [REMOVED]
     warehouseAgentGlobal: "Agent Statistics Global",
     warehouse: "Warehouse Data",
-    warehouseProducts: "Trade Summary",
-    ibData: "Deposit/Withdrawal",
+    warehouseProducts: "Product Trade Summary",
+    ibData: "IB & Region Deposits",
     warehouseOthers: "Other Warehouse",
     position: "Open Positions",
     loginIPs: "Login IP Monitoring",
     profitAnalysis: "Profit Analysis",
     clientTrading: "Client Trading Analysis",
     // ibReport: "IB Performance", // [REMOVED]
-    riskMonitor: "Trade Real-time Monitor",
+    riskMonitor: "Risk Rule Alerts",
     swapFreeControl: "Swap Free Control",
     customerPnLMonitor: "Customer P&L Monitor",
     customerPnLMonitorV2: "Customer P&L Monitor (V2)",
@@ -89,6 +91,7 @@ export const enUS = {
     ibTreeQuery: "IB Tree Lookup",
     riskAlertMail: "Alert Mail Center",
     riskWatchlist: "Risk Watchlist",
+    windowScan: "Window Scan",
   },
 
   ibidLotsPage: {

@@ -73,13 +73,14 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
           title: t("nav.riskControlDepartment"),
           icon: IconDashboard,
           children: [
-            { title: "交易实时监控", url: "/risk-monitor" },
-            { title: t("nav.riskAlertMail"), url: "/risk-alert-mail" },
+            { title: t("nav.riskMonitor"), url: "/risk-monitor" },
             { title: t("nav.riskWatchlist"), url: "/risk-watchlist" },
+            { title: t("nav.windowScan"), url: "/window-scan" },
             { title: t("nav.clientReturnRate"), url: "/client-return-rate" },
             // [HIDDEN] Client PnL Analysis - temporarily hidden
             // { title: "盈亏监控 (Preview)", url: "/client-pnl-analysis" },
             { title: t("nav.swapFreeControl"), url: "/swap-free-control" },
+            { title: t("nav.riskAlertMail"), url: "/risk-alert-mail" },
             // [HIDDEN] Basis page - 10.6.20.138:8050 service disabled
             // { title: t("nav.basisAnalysis"), url: "/basis" },
             // [HIDDEN] Profit Analysis - temporarily hidden

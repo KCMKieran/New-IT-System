@@ -26,6 +26,7 @@ from .routes.ib_tree import router as ib_tree_router
 from .routes.alert_mail import router as alert_mail_router
 from .routes.risk_cases import router as risk_cases_router
 from .routes.hold_bucket import router as hold_bucket_router
+from .routes.window_scan import router as window_scan_router
 
 
 api_v1_router = APIRouter()
@@ -55,3 +56,4 @@ api_v1_router.include_router(ib_tree_router, tags=["ib-tree"])
 api_v1_router.include_router(alert_mail_router, tags=["alert-mail"])
 api_v1_router.include_router(risk_cases_router, tags=["risk-cases"])
 api_v1_router.include_router(hold_bucket_router, tags=["hold-bucket"])
+api_v1_router.include_router(window_scan_router, tags=["window-scan"])
