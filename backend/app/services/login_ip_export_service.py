@@ -6,7 +6,9 @@ Mirrors the architecture of `client_return_export_service`:
    module-level `ThreadPoolExecutor`.
 2. The worker re-runs `login_ip_search_service.perform_search()` with the
    original params and writes the result to a CSV file under
-   `backend/data/exports/login-ip/`.
+   `backend/data/exports/login-ip/`. Each correlated account gets its own CSV
+   row (see `_explode_correlated`) — the on-screen grid keeps them collapsed
+   into one cell, the export does not.
 3. `GET /.../tasks/{id}` returns JSON status; `.../download` serves the file.
 4. Lazy cleanup on every create/status/download:
    - succeeded tasks past `expires_at` → marked expired + file removed
@@ -161,6 +163,10 @@ def resolve_download_path(task_id: str) -> tuple[int, str | Path, str | None]:
 # ---------------------------------------------------------------------------
 
 
+# One correlated account per CSV row ("exploded"), so Excel can filter/sort/
+# pivot on the peer account. The base columns repeat across the rows that
+# belong to the same (search_term, date, server, IP) match; correlated_index /
+# correlated_total let a reader tell where one match ends and the next begins.
 _CSV_HEADERS_ACCOUNT = [
     "search_term",
     "search_term_first_name",
@@ -170,14 +176,54 @@ _CSV_HEADERS_ACCOUNT = [
     "server",
     "login_ip",
     "login_count",
-    "correlated_accounts",
+    "correlated_index",
+    "correlated_total",
+    "correlated_login",
+    "correlated_last_name",
+    "correlated_first_name",
 ]
 _CSV_HEADERS_IP = [
     "search_term",
     "date",
     "server",
-    "correlated_accounts",
+    "correlated_index",
+    "correlated_total",
+    "correlated_login",
 ]
+
+
+def _explode_correlated(row: dict[str, Any]) -> list[dict[str, Any]]:
+    """Fan one search result out into one dict per correlated account.
+
+    A row with no correlated accounts still yields exactly one output row with
+    the correlated_* columns left blank — otherwise a date/IP that was matched
+    but had no peers would silently vanish from the export (only reachable in
+    ip_address mode; account_id rows are already filtered upstream).
+    """
+    base = {k: v for k, v in row.items() if k != "correlated_accounts"}
+    corr = row.get("correlated_accounts")
+    items = corr if isinstance(corr, list) else []
+    total = len(items)
+
+    if total == 0:
+        return [{**base, "correlated_index": "", "correlated_total": 0}]
+
+    out: list[dict[str, Any]] = []
+    for idx, item in enumerate(items, start=1):
+        cells: dict[str, Any] = {
+            "correlated_index": idx,
+            "correlated_total": total,
+        }
+        if isinstance(item, dict):
+            # account_id mode: enrichment gave us CRM names alongside the login.
+            cells["correlated_login"] = str(item.get("login", ""))
+            cells["correlated_last_name"] = (item.get("last_name") or "").strip()
+            cells["correlated_first_name"] = (item.get("first_name") or "").strip()
+        else:
+            # ip_address mode: raw account ids, no enrichment.
+            cells["correlated_login"] = str(item)
+        out.append({**base, **cells})
+    return out
 
 
 def _run_task(task_id: str) -> None:
@@ -211,35 +257,15 @@ def _run_task(task_id: str) -> None:
         else:
             headers = _CSV_HEADERS_IP
 
-        def _format_corr_for_csv(corr: object) -> str:
-            if not isinstance(corr, list):
-                return str(corr) if corr is not None else ""
-            parts: list[str] = []
-            for item in corr:
-                if isinstance(item, dict):
-                    acc = str(item.get("login", ""))
-                    fn = (item.get("first_name") or "").strip()
-                    ln = (item.get("last_name") or "").strip()
-                    if fn and ln:
-                        parts.append(f"{acc} ({ln}, {fn})")
-                    elif fn or ln:
-                        parts.append(f"{acc} ({ln or fn})")
-                    else:
-                        parts.append(acc)
-                else:
-                    parts.append(str(item))
-            return "; ".join(parts)
-
+        written = 0
         with file_path.open("w", encoding="utf-8-sig", newline="") as f:
             # utf-8-sig so Excel opens Chinese names correctly without mojibake.
             w = csv.DictWriter(f, fieldnames=headers, extrasaction="ignore")
             w.writeheader()
             for r in rows:
-                row = dict(r)
-                corr = row.get("correlated_accounts")
-                if isinstance(corr, list):
-                    row["correlated_accounts"] = _format_corr_for_csv(corr)
-                w.writerow(row)
+                for out_row in _explode_correlated(dict(r)):
+                    w.writerow(out_row)
+                    written += 1
 
         size = file_path.stat().st_size
         expires = (
@@ -247,13 +273,21 @@ def _run_task(task_id: str) -> None:
         ).strftime("%Y-%m-%d %H:%M:%S")
         login_ip_db.update_export_task_succeeded(
             task_id=task_id,
-            row_count=len(rows),
+            # CSV rows, not search matches — one match now spans N rows, and the
+            # UI reports this number as "已下载 N 行".
+            row_count=written,
             file_path=str(file_path),
             file_size_bytes=size,
             finished_at=_now_hk_iso(),
             expires_at=expires,
         )
-        logger.info("export %s succeeded: %d rows, %s", task_id, len(rows), file_path)
+        logger.info(
+            "export %s succeeded: %d matches -> %d csv rows, %s",
+            task_id,
+            len(rows),
+            written,
+            file_path,
+        )
 
     except Exception as exc:  # noqa: BLE001 — must catch all to record failure
         logger.exception("export task %s failed", task_id)
