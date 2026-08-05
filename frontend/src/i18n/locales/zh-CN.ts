@@ -52,9 +52,11 @@ export const zhCN = {
     fundFlowMonitor: "频繁出入金监控",
     ibTreeQuery: "IB Tree查询",
     riskAlertMail: "告警邮件中心",
-    riskMonitor: "风控规则告警",
-    riskWatchlist: "风控观察清单",
-    windowScan: "开仓时点扫描",
+    // These three risk pages keep English labels in both locales — the Chinese
+    // names were too similar to tell apart at a glance (user decision 2026-08-05).
+    riskMonitor: "Risk Rule Alerts",
+    riskWatchlist: "Client Activity Monitor",
+    windowScan: "Entry Window Scan",
     home: "首页",
   },
 
@@ -77,7 +79,7 @@ export const zhCN = {
     profitAnalysis: "利润分析",
     clientTrading: "客户交易分析",
     // ibReport: "IB 业绩报表", // [REMOVED]
-    riskMonitor: "风控规则告警",
+    riskMonitor: "Risk Rule Alerts", // English in both locales — see nav block
     swapFreeControl: "Swap Free Control",
     customerPnLMonitor: "客户盈亏监控",
     customerPnLMonitorV2: "客户盈亏监控（V2）",
@@ -90,8 +92,8 @@ export const zhCN = {
     ibFinancialMonitor: "IB 资金监控",
     ibTreeQuery: "IB Tree查询",
     riskAlertMail: "告警邮件中心",
-    riskWatchlist: "风控观察清单",
-    windowScan: "开仓时点扫描",
+    riskWatchlist: "Client Activity Monitor", // English in both locales — see nav block
+    windowScan: "Entry Window Scan", // English in both locales — see nav block
   },
 
   ibidLotsPage: {
