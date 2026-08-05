@@ -1,0 +1,84 @@
+# logrotate config for the New-IT-System backend application log.
+#
+# This file is a REPO ARTIFACT, not an installed config. Install it manually:
+#   sudo cp deploy/logrotate/new-it-backend /etc/logrotate.d/new-it-backend
+# See docs/architecture/logging-system.md for the install + verification steps.
+#
+# WHY THIS EXISTS
+# ---------------
+# The backend used to rotate its own log with Python's
+# TimedRotatingFileHandler. Production runs `uvicorn --workers 4`, and every
+# worker re-imports app.main -> every worker built its own handler, its own fd
+# and its own rolloverAt clock, all renaming/unlinking the same path at
+# midnight. Measured on prod: 18 of 30 archives contained cross-day data, 25 of
+# 30 calendar days were split across >=2 files, and doRollover()'s
+# os.remove(dfn) can delete an entire day's archive. The app now uses
+# WatchedFileHandler (reopens when the file's inode changes) and rotation is
+# delegated here, where exactly one process does it.
+#
+# WHY EACH DIRECTIVE
+# ------------------
+# two paths     Production writes backend/logs-prod/, development writes
+#               backend/logs/. Both containers lost in-process rotation with
+#               the WatchedFileHandler switch, so both need covering. Each path
+#               keeps its own independent archive set.
+# su root root  The containers run as root, so backend.log is root-owned, while
+#               the backend/logs/ directory itself is owned by kcm-trade.
+#               logrotate refuses to rotate in a directory whose owner differs
+#               from the file owner unless told which user to act as.
+# daily         Matches the previous when="midnight" cadence.
+# rotate 30     Matches the previous backupCount=30 (30 days retained). This
+#               also replaces the manual `find -mtime +30 -delete` cleanup that
+#               used to be documented.
+# missingok     Dev may be stopped for weeks; a missing backend.log is normal
+#               and must not produce a nightly cron error mail.
+# notifempty    Don't create an empty archive for a day with no traffic.
+# create 0644 root root
+#               LOAD-BEARING — do NOT change this to copytruncate.
+#               `create` rotates by rename(2), which gives the new backend.log a
+#               NEW INODE. That inode change is precisely the signal
+#               WatchedFileHandler stat()s for before each emit, and it is what
+#               lets all 4 workers follow the rotation independently and
+#               atomically. copytruncate keeps the same inode, so the handler
+#               would never notice, every worker would keep writing at its old
+#               (now huge, sparse) offset, and the scheme silently fails —
+#               plus copytruncate has an inherent lost-lines window between the
+#               cp and the truncate. Mode/owner mirror what the containers
+#               already produce (root:root 0644).
+# dateext + dateformat .%Y-%m-%d
+#               Reproduces the existing archive names byte for byte
+#               (backend.log.2026-07-06), instead of logrotate's default
+#               numeric backend.log.1. The 31 existing archives need no
+#               migration, the `backend.log*` glob keeps matching, and every
+#               grep/tail command in the docs keeps working unchanged.
+# dateyesterday logrotate runs shortly after 00:00, so the file being rotated
+#               holds YESTERDAY's lines. Without this the archive would be
+#               stamped with today's date and every filename would be off by
+#               one day.
+# nocompress    The old archives are plain text; keeping them uncompressed
+#               means `grep backend.log*` still works without zgrep. Disk is
+#               not a constraint here (~2MB/day, ~60MB for 30 days per path).
+# nocopytruncate
+#               Explicit belt-and-braces against a future edit or a global
+#               default re-enabling it. See the `create` note above.
+# sharedscripts Run pre/postrotate scripts once for the whole path set rather
+#               than once per path. There are no scripts today (nothing needs
+#               signalling — WatchedFileHandler self-heals), but this makes the
+#               intent explicit if one is ever added.
+
+/opt/myproject/New-IT-System/backend/logs-prod/backend.log
+/opt/myproject/New-IT-System/backend/logs/backend.log
+{
+    su root root
+    daily
+    rotate 30
+    missingok
+    notifempty
+    create 0644 root root
+    dateext
+    dateyesterday
+    dateformat .%Y-%m-%d
+    nocompress
+    nocopytruncate
+    sharedscripts
+}
