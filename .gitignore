@@ -81,5 +81,7 @@ ai-dev-techniques-sharing.html
 # logic notes, ad-hoc scripts) — never publish to the public repo.
 temp_folder/
 backend/scripts/zipcode_set_by_idlist.py
-backend/scripts/logs/zipcode_set_by_idlist_20260604.jsonl
+# Ad-hoc script run logs (contain client ids) — pattern, not per-file: the
+# per-file form only ignored the 2026-06-04 run and leaked every later one.
+backend/scripts/logs/*.jsonl
 .local-backup/
