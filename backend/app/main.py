@@ -159,33 +159,77 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     """
     Create and configure the FastAPI application instance.
-    
-    Fresh grad note:
-    - Middleware order matters: TraceIDMiddleware should be added first
-      so all subsequent middleware and routes have access to trace_id
-    - CORS must be configured for frontend to access the API
+
+    Middleware ordering (read this before touching add_middleware calls):
+
+    Starlette's `add_middleware` does `user_middleware.insert(0, ...)`, and
+    `build_middleware_stack` then wraps with `for cls, ... in reversed(...)`.
+    Net effect: `app.user_middleware` reads outermost-first, and the LAST
+    registered middleware ends up OUTERMOST. Registration order is therefore
+    the reverse of execution order — verified against starlette 0.47.2.
+
+    Target execution order (outer -> inner):
+
+        TraceIDMiddleware -> CORSMiddleware -> APIKeyMiddleware
+            -> [future AuthMiddleware] -> routes
+
+    - Trace outermost: it must see EVERY request, including ones short-circuited
+      by a rejection further in. Previously it sat innermost, so an API-key 403
+      never got an X-Trace-ID header, logged trace_id "-", and produced no
+      Request started/completed pair — the rejected requests were exactly the
+      ones you could not trace.
+    - CORS above the auth-ish layers: a 4xx produced by API-key/auth rejection
+      still needs Access-Control-* headers, otherwise the browser reports a
+      generic CORS failure and hides the real status code from the frontend.
+    - A future AuthMiddleware belongs directly below APIKeyMiddleware, i.e.
+      registered FIRST of all (it should run last, closest to the routes).
+
+    Honest scope note: today both dev (vite proxy) and prod (nginx reverse
+    proxy) serve the frontend same-origin, so CORSMiddleware is effectively
+    dead code and none of this is a live bug fix. This is contract hygiene
+    ahead of wiring real login/auth in.
     """
     logger.info("Creating FastAPI application...")
-    
+
     app = FastAPI(title="New IT System API", version="v1", lifespan=lifespan)
 
-    # Add Trace ID middleware (must be first to capture all requests)
-    app.add_middleware(TraceIDMiddleware)
+    # --- Registered in REVERSE of execution order (see docstring) -------------
 
-    # API Key validation (after trace so rejected requests still get trace IDs)
+    # [future] app.add_middleware(AuthMiddleware)  <- register here (innermost)
+
+    # API Key validation — innermost of the three, closest to the routes.
     app.add_middleware(APIKeyMiddleware)
-    
+
     # CORS: restricted to allowed origins (configured via CORS_ORIGINS env var)
     # After Cloudflare Access bypass on /api/*, CORS is the primary browser-level
-    # security layer preventing unauthorized cross-origin API access
+    # security layer preventing unauthorized cross-origin API access.
+    # Sits above APIKey/Auth so their 4xx responses keep their CORS headers.
     settings = get_settings()
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.CORS_ORIGINS,
         allow_credentials=True,
-        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-        allow_headers=["Content-Type", "Authorization", "X-Trace-ID", "X-API-Key"],
+        # PATCH is used by routes/login_ip.py (`@router.patch("/watchlist/{row_id}")`),
+        # called from frontend/src/pages/login-ip/WatchlistTab.tsx.
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        # X-Device-ID is injected on every /api/ call by frontend/src/lib/fetch.ts;
+        # routes/view_profiles.py returns 400 without it.
+        allow_headers=[
+            "Content-Type",
+            "Authorization",
+            "X-Trace-ID",
+            "X-API-Key",
+            "X-Device-ID",
+        ],
+        # TraceIDMiddleware writes X-Trace-ID on the response; without exposing
+        # it, cross-origin JS cannot read it and users cannot quote it in a bug
+        # report.
+        expose_headers=["X-Trace-ID"],
     )
+
+    # Trace ID middleware — registered LAST so it is OUTERMOST and therefore
+    # tags/logs every request, including ones rejected by the layers below.
+    app.add_middleware(TraceIDMiddleware)
 
     # Mount versioned routers
     app.include_router(api_v1_router, prefix="/api/v1")
