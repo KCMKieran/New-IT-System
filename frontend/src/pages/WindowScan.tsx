@@ -492,7 +492,7 @@ export default function WindowScan() {
 
   return (
     <div className="flex-1 space-y-4 overflow-x-hidden p-4 md:p-6">
-      <h1 className="text-lg font-semibold tracking-tight">开仓时点扫描</h1>
+      <h1 className="text-lg font-semibold tracking-tight">Entry Window Scan</h1>
 
       <QueryPanel
         anchor={anchor}

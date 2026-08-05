@@ -53,8 +53,8 @@ export const enUS = {
     ibTreeQuery: "IB Tree Lookup",
     riskAlertMail: "Alert Mail Center",
     riskMonitor: "Risk Rule Alerts",
-    riskWatchlist: "Risk Watchlist",
-    windowScan: "Window Scan",
+    riskWatchlist: "Client Activity Monitor",
+    windowScan: "Entry Window Scan",
     home: "Home",
   },
   
@@ -90,8 +90,8 @@ export const enUS = {
     ibFinancialMonitor: "IB Financial Monitor",
     ibTreeQuery: "IB Tree Lookup",
     riskAlertMail: "Alert Mail Center",
-    riskWatchlist: "Risk Watchlist",
-    windowScan: "Window Scan",
+    riskWatchlist: "Client Activity Monitor",
+    windowScan: "Entry Window Scan",
   },
 
   ibidLotsPage: {
