@@ -61,9 +61,20 @@
 #               nightly logrotate run for every other config on this host.
 
 /opt/myproject/New-IT-System/logs/nginx-prod/*.log {
+    # su   — logs/nginx-prod/ is created by the bind mount / by hand and ends up
+    #        owned by kcm-trade with group-write, which logrotate refuses to touch
+    #        ("parent directory has insecure permissions"). Rotating as root:root
+    #        matches how nginx itself opens the file (master runs as root).
+    su root root
     daily
     rotate 90
-    size 100M
+    # maxsize (NOT size) — a bare `size` OVERRIDES `daily`, turning this into a
+    # size-only rotation. At the observed ~730 KB/day that means one file every
+    # ~137 days, which destroys the "one day = one file" property the audit trail
+    # depends on. `maxsize` means "rotate daily, OR earlier if it exceeds this",
+    # which is what we actually want (the cap is there to survive an SSE
+    # reconnect storm, not to replace the schedule).
+    maxsize 100M
     missingok
     notifempty
     compress
