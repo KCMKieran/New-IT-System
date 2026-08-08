@@ -17,6 +17,11 @@ services:
       - "3000:80"
     depends_on:
       - api
+    environment:
+      # Same wall clock as the api container, so nginx's $time_iso8601 in
+      # logs/nginx-prod/access.log lines up directly with backend.log instead
+      # of needing an 8-hour mental offset. nginx:alpine already ships tzdata.
+      - TZ=Asia/Hong_Kong
     volumes:
       # Fallback pool of hashed assets from the previous 3 builds, maintained
       # by scripts/archive-frontend-assets.sh (invoked from deploy.sh before
@@ -26,7 +31,33 @@ services:
       # mutate the archive. Mounted OUTSIDE /usr/share/nginx/html so archived
       # files are only reachable through the /assets fallback, not directly.
       - ./frontend/.assets-archive/merged:/opt/assets-archive/assets:ro
+      # Audit access log (kcm_audit JSON format, see frontend/nginx.conf).
+      # Kept on the host so it survives the container rebuild in ./deploy.sh —
+      # the Docker json-file log is keyed by container ID, which gave the old
+      # access log a history horizon of about one day (22 deploys in 30 days).
+      #
+      # Path MUST stay outside ./frontend/: that directory is the Docker build
+      # context, so logs written there would be tarred into every build and
+      # bust the layer cache. frontend/.dockerignore's `*.log` uses
+      # filepath.Match and only matches the context root, so it would not
+      # exclude a nested logs dir either.
+      #
+      # Mount ONLY /var/log/nginx-audit. Mounting /var/log/nginx would destroy
+      # the error.log -> /dev/stderr symlink and hide nginx errors from
+      # `docker logs`, which morning-digest scans.
+      - ./logs/nginx-prod:/var/log/nginx-audit
     restart: unless-stopped
+    # Measured 730 KB/day today, but each permanently-open Risk Monitor tab
+    # reconnects SSE every 18s and adds ~1.97 MB/day on its own. The cap is not
+    # about disk pressure (781 GB free on the host) — it is that "no limit" is
+    # "no policy": an error storm, an SSE reconnect loop or a scanner hammering
+    # the site can add tens of GB in hours with nobody noticing.
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "10"
+        compress: "true"
 
   # Backend: FastAPI with Uvicorn (production mode, 2 workers, no --reload)
   api:
@@ -99,6 +130,15 @@ services:
     # (default maxmemory=0 + noeviction would silently fail new SETs).
     # See docs/optimization/items/OPT-0019-redis-maxmemory-policy.md.
     command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    # Measured 3.9 KB/day, so 3 x 10m is roughly 21 years of headroom. The cap
+    # exists to bound the pathological case (Redis logging an error per client
+    # on OOM / eviction storms), not the steady state.
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        compress: "true"
 
   # OPT-0026: internal docs portal. MkDocs Material live-serves docs/ over
   # the shared compose network; Nginx proxies /docs/ to mkdocs:8000.
@@ -129,3 +169,12 @@ services:
       timeout: 5s
       retries: 3
       start_period: 15s
+    # Measured 72.6 KB/day, ~95% of which is the ~145-line broken-link WARNING
+    # block mkdocs prints on every rebuild. Bounded so a rebuild loop cannot
+    # quietly fill the disk.
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "3"
+        compress: "true"

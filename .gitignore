@@ -71,6 +71,11 @@ backend/data/risk_monitor.db.bak-*
 # during ./deploy.sh; bind-mounted read-only into the prod frontend container)
 frontend/.assets-archive/
 frontend/tsconfig.app.tsbuildinfo
+
+# Nginx audit access log (bind-mounted into the prod web container).
+# Whole directory, not just *.log: the `*.log` rule above cannot match
+# logrotate archives such as access.log-2026-08-05.gz.
+logs/nginx-prod/
 .claude/settings.local.json
 .claude/skills/
 # Local AI-dev scratch notes / sharing exports (not project source)
