@@ -21,6 +21,14 @@ git pull origin main
 # just lose the stale-tab convenience for this release.
 ./scripts/archive-frontend-assets.sh || echo "WARNING: asset archiving failed — continuing deploy"
 
+# Validate nginx.conf BEFORE building. A bad directive still produces a
+# successful image, and the container then crash-loops with the whole site
+# down. `set -e` above means a failure here aborts the deploy instead.
+echo ""
+echo "--- Checking nginx.conf ---"
+./scripts/check-nginx-conf.sh
+echo ""
+
 # Rebuild and restart prod containers only
 docker compose -f docker-compose.prod.yml up -d --build
 
