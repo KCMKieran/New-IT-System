@@ -1,0 +1,250 @@
+"""Integration tests for the auth HTTP layer + AuthMiddleware (auth design P1).
+
+Builds a small FastAPI carrying AuthMiddleware, the auth router and one guarded
+probe route, so the middleware's exemption list and 401 behaviour are tested
+against a real request cycle rather than by reading the tuple.
+
+Harness pattern follows test_view_profiles_api.py; users.db is redirected to a
+temp file per test so backend/data/users.db (a dev+prod shared bind mount) is
+never touched.
+"""
+
+from __future__ import annotations
+
+import pytest
+from fastapi import FastAPI, Request
+from fastapi.testclient import TestClient
+
+DEV_EMAIL = "kieran@kohleservices.com"
+
+
+@pytest.fixture
+def make_client(tmp_path, monkeypatch):
+    """Factory: build a TestClient with the given auth env applied."""
+
+    def _build(**env: str) -> TestClient:
+        monkeypatch.setenv("ALERT_MAIL_ALLOWED_DOMAINS", "kohleservices.com")
+        monkeypatch.setenv("AUTH_MANAGER_EMAILS", "boss@kohleservices.com")
+        for key, value in env.items():
+            monkeypatch.setenv(key, value)
+
+        from app.core import users_db
+
+        monkeypatch.setattr(users_db, "_DB_PATH", tmp_path / "users_test.db")
+        users_db.reset_connection_cache()
+        users_db.init_users_db()
+
+        from app.api.v1.routes.auth import router as auth_router
+        from app.core.auth_middleware import AuthMiddleware
+
+        app = FastAPI()
+        app.include_router(auth_router, prefix="/api/v1")
+
+        @app.get("/api/v1/probe")
+        def probe(request: Request):
+            user = getattr(request.state, "user", None)
+            return {"email": user.email if user else None}
+
+        @app.get("/api/v1/health")
+        def health():
+            return {"status": "ok"}
+
+        @app.post("/api/v1/log/client-error", status_code=204)
+        def client_error():
+            return None
+
+        @app.get("/api/v1/risk-monitor/alerts/stream")
+        def sse():
+            return {"stream": True}
+
+        app.add_middleware(AuthMiddleware)
+        return TestClient(app)
+
+    yield _build
+
+    from app.core import users_db
+
+    users_db.reset_connection_cache()
+
+
+@pytest.fixture
+def enforcing(make_client):
+    return make_client(AUTH_ENABLED="true", AUTH_DEV_LOGIN_EMAIL=DEV_EMAIL)
+
+
+def _bearer(sid: str) -> dict:
+    return {"Authorization": f"Bearer {sid}"}
+
+
+def _login(client: TestClient) -> str:
+    r = client.post("/api/v1/auth/dev-login", json={})
+    assert r.status_code == 200, r.text
+    return r.json()["session_id"]
+
+
+# ── kill switch ──────────────────────────────────────────────────────────────
+
+def test_disabled_auth_lets_everything_through(make_client):
+    """P1 ships with AUTH_ENABLED=false — zero user-visible change."""
+    client = make_client(AUTH_ENABLED="false")
+
+    assert client.get("/api/v1/probe").status_code == 200
+    assert client.get("/api/v1/probe").json() == {"email": None}
+
+
+def test_me_reports_anonymous_when_auth_is_off(make_client):
+    client = make_client(AUTH_ENABLED="false")
+
+    body = client.get("/api/v1/auth/me").json()
+    assert body == {
+        "authenticated": False,
+        "auth_enabled": False,
+        "email": None,
+        "display_name": None,
+        "role": None,
+        "status": None,
+    }
+
+
+def test_me_still_recognises_a_valid_session_when_auth_is_off(make_client):
+    """The kill switch stops enforcement; it does not make /me lie."""
+    client = make_client(AUTH_ENABLED="false", AUTH_DEV_LOGIN_EMAIL=DEV_EMAIL)
+    sid = _login(client)
+
+    body = client.get("/api/v1/auth/me", headers=_bearer(sid)).json()
+    assert body["authenticated"] is True
+    assert body["email"] == DEV_EMAIL
+    assert body["auth_enabled"] is False
+
+
+# ── enforcement ──────────────────────────────────────────────────────────────
+
+def test_guarded_route_401s_without_a_session(enforcing):
+    r = enforcing.get("/api/v1/probe")
+    assert r.status_code == 401
+    assert r.json() == {"detail": "Not authenticated"}
+
+
+def test_guarded_route_passes_with_a_session(enforcing):
+    sid = _login(enforcing)
+
+    r = enforcing.get("/api/v1/probe", headers=_bearer(sid))
+    assert r.status_code == 200
+    assert r.json() == {"email": DEV_EMAIL}
+
+
+def test_garbage_bearer_token_is_401(enforcing):
+    assert enforcing.get("/api/v1/probe", headers=_bearer("nope")).status_code == 401
+
+
+def test_non_api_paths_are_untouched(enforcing):
+    """AuthMiddleware only guards /api/; static files and the SPA are not its business."""
+
+    @enforcing.app.get("/favicon.ico")
+    def favicon():
+        return {"ok": True}
+
+    assert enforcing.get("/favicon.ico").status_code == 200
+
+
+def test_options_preflight_is_never_blocked(enforcing):
+    # A 401 on preflight surfaces in the browser as an opaque CORS error.
+    assert enforcing.options("/api/v1/probe").status_code != 401
+
+
+# ── exemptions ───────────────────────────────────────────────────────────────
+
+def test_health_is_exempt(enforcing):
+    """Probes have no browser and no cookie; a 401 would read as 'service down'."""
+    assert enforcing.get("/api/v1/health").status_code == 200
+
+
+def test_client_error_reporting_is_exempt(enforcing):
+    """The frontend reports chunk-load failures here — exactly when things are broken."""
+    assert enforcing.post("/api/v1/log/client-error").status_code == 204
+
+
+def test_sse_stream_is_exempt(enforcing):
+    """EventSource cannot set headers and P1 issues no cookies; enforcing here
+    would kill the live alert stream for no gain. Removed in P3."""
+    assert enforcing.get("/api/v1/risk-monitor/alerts/stream").status_code == 200
+
+
+def test_auth_endpoints_are_exempt(enforcing):
+    """Otherwise logging in would require already being logged in."""
+    assert enforcing.get("/api/v1/auth/me").status_code == 200
+    assert enforcing.post("/api/v1/auth/logout").status_code == 200
+
+
+# ── dev back door ────────────────────────────────────────────────────────────
+
+def test_dev_login_404s_when_unconfigured(make_client):
+    client = make_client(AUTH_ENABLED="true", AUTH_DEV_LOGIN_EMAIL="")
+    assert client.post("/api/v1/auth/dev-login", json={}).status_code == 404
+
+
+def test_dev_login_cannot_impersonate_someone_else(enforcing):
+    r = enforcing.post("/api/v1/auth/dev-login", json={"email": "boss@kohleservices.com"})
+    assert r.status_code == 403
+
+
+def test_dev_login_still_enforces_the_domain_allowlist(make_client):
+    """Even the back door does not mint sessions for outside addresses."""
+    client = make_client(AUTH_ENABLED="true", AUTH_DEV_LOGIN_EMAIL="attacker@gmail.com")
+    assert client.post("/api/v1/auth/dev-login", json={}).status_code == 403
+
+
+def test_dev_login_grants_the_configured_role(make_client):
+    client = make_client(AUTH_ENABLED="true", AUTH_DEV_LOGIN_EMAIL="boss@kohleservices.com")
+    assert client.post("/api/v1/auth/dev-login", json={}).json()["role"] == "manager"
+
+
+# ── cookies ──────────────────────────────────────────────────────────────────
+
+def test_no_cookie_is_set_by_default(make_client):
+    """P1 builds the cookie mechanism but leaves it off — see config.py."""
+    client = make_client(AUTH_ENABLED="true", AUTH_DEV_LOGIN_EMAIL=DEV_EMAIL)
+    r = client.post("/api/v1/auth/dev-login", json={})
+    assert "set-cookie" not in {k.lower() for k in r.headers}
+
+
+def test_cookie_is_set_and_accepted_when_enabled(make_client):
+    client = make_client(
+        AUTH_ENABLED="true",
+        AUTH_DEV_LOGIN_EMAIL=DEV_EMAIL,
+        AUTH_COOKIE_ENABLED="true",
+        AUTH_COOKIE_NAME="kcm_sid",
+    )
+    r = client.post("/api/v1/auth/dev-login", json={})
+    assert "kcm_sid" in r.cookies
+
+    # TestClient carries the cookie forward, so no Authorization header here.
+    assert client.get("/api/v1/probe").json() == {"email": DEV_EMAIL}
+
+
+def test_cookie_is_httponly(make_client):
+    client = make_client(
+        AUTH_ENABLED="true", AUTH_DEV_LOGIN_EMAIL=DEV_EMAIL, AUTH_COOKIE_ENABLED="true"
+    )
+    r = client.post("/api/v1/auth/dev-login", json={})
+    assert "httponly" in r.headers["set-cookie"].lower()
+
+
+# ── logout ───────────────────────────────────────────────────────────────────
+
+def test_logout_revokes_the_session(enforcing):
+    sid = _login(enforcing)
+    assert enforcing.get("/api/v1/probe", headers=_bearer(sid)).status_code == 200
+
+    assert enforcing.post("/api/v1/auth/logout", headers=_bearer(sid)).json() == {
+        "ok": True,
+        "revoked": True,
+    }
+    assert enforcing.get("/api/v1/probe", headers=_bearer(sid)).status_code == 401
+
+
+def test_logout_without_a_session_is_still_200(enforcing):
+    """"Log me out" is satisfied either way; a 401 would strand the client."""
+    r = enforcing.post("/api/v1/auth/logout")
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "revoked": False}

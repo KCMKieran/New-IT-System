@@ -10,7 +10,8 @@ are silently breakable and painful to notice in production:
      ``app.user_middleware`` reads outermost-first and the LAST registered
      middleware is the OUTERMOST one. Trace must stay outermost, otherwise a
      request rejected by the API-key layer gets no X-Trace-ID and logs
-     trace_id "-" (that was the actual pre-fix behaviour).
+     trace_id "-" (that was the actual pre-fix behaviour). AuthMiddleware must
+     stay innermost, below the cheaper API-key check.
   2. The CORS allow/expose lists, which are edited by hand and drift the moment
      a route starts using a new verb or the frontend sends a new header.
 
@@ -58,17 +59,28 @@ def cors_kwargs(app_main):
 
 # ── middleware order ─────────────────────────────────────────────────────────
 
-def test_all_three_middlewares_registered(middleware_classes):
-    for name in ("TraceIDMiddleware", "CORSMiddleware", "APIKeyMiddleware"):
+def test_all_four_middlewares_registered(middleware_classes):
+    for name in (
+        "TraceIDMiddleware",
+        "CORSMiddleware",
+        "APIKeyMiddleware",
+        "AuthMiddleware",
+    ):
         assert name in middleware_classes, middleware_classes
 
 
-def test_trace_is_outermost_then_cors_then_api_key(middleware_classes):
-    """user_middleware is outermost-first: Trace -> CORS -> APIKey -> routes."""
+def test_execution_order_is_trace_cors_apikey_auth(middleware_classes):
+    """user_middleware is outermost-first: Trace -> CORS -> APIKey -> Auth -> routes.
+
+    Auth last so that (a) a 401 still gets an X-Trace-ID and CORS headers from
+    the layers above it, and (b) a caller with no API key is rejected by the
+    cheaper check before the session store is touched.
+    """
     trace = middleware_classes.index("TraceIDMiddleware")
     cors = middleware_classes.index("CORSMiddleware")
     api_key = middleware_classes.index("APIKeyMiddleware")
-    assert trace < cors < api_key, middleware_classes
+    auth = middleware_classes.index("AuthMiddleware")
+    assert trace < cors < api_key < auth, middleware_classes
 
 
 # ── CORS contract ────────────────────────────────────────────────────────────
@@ -105,3 +117,44 @@ def test_rejected_api_key_response_carries_trace_id(app_main, monkeypatch):
 
     assert resp.status_code == 403, resp.text
     assert resp.headers.get("X-Trace-ID", "").startswith("req-"), dict(resp.headers)
+
+
+# ── auth layer ships OFF ─────────────────────────────────────────────────────
+
+def test_auth_is_disabled_by_default(app_main, monkeypatch):
+    """AUTH_ENABLED must default to false: P1 delivers zero user-visible change.
+
+    If this ever goes green-by-default without an explicit env flag, everyone
+    is locked out of every page the moment the container restarts.
+    """
+    monkeypatch.delenv("AUTH_ENABLED", raising=False)
+    monkeypatch.delenv("API_KEY", raising=False)
+    from app.core.config import get_settings
+
+    assert get_settings().AUTH_ENABLED is False
+
+    client = TestClient(app_main.create_app())
+    assert client.get("/api/v1/health").status_code == 200
+
+
+def test_dev_login_backdoor_is_off_by_default(app_main, monkeypatch):
+    """No AUTH_DEV_LOGIN_EMAIL -> the route 404s as if it did not exist."""
+    monkeypatch.delenv("AUTH_DEV_LOGIN_EMAIL", raising=False)
+    monkeypatch.delenv("API_KEY", raising=False)
+
+    client = TestClient(app_main.create_app())
+    assert client.post("/api/v1/auth/dev-login", json={}).status_code == 404
+
+
+def test_cookies_are_not_issued_by_default(monkeypatch):
+    """P1 builds the cookie mechanism but leaves it off.
+
+    Bare-IP http makes `Secure` inert and cookies ignore ports (RFC 6265), so a
+    session cookie for 10.6.20.138 would also reach :80/:7001/:7003/:8088/:19999
+    and be shared between dev(:5173) and prod(:3000). P2 (domain + TLS) is the
+    prerequisite for flipping AUTH_COOKIE_ENABLED on.
+    """
+    monkeypatch.delenv("AUTH_COOKIE_ENABLED", raising=False)
+    from app.core.config import get_settings
+
+    assert get_settings().AUTH_COOKIE_ENABLED is False

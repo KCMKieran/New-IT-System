@@ -32,6 +32,8 @@ from app.api.v1.routers import api_v1_router
 from app.core.config import get_settings
 from app.core.trace_middleware import TraceIDMiddleware
 from app.core.api_key_middleware import APIKeyMiddleware
+from app.core.auth_middleware import AuthMiddleware
+from app.core.users_db import init_users_db
 from app.core.database import init_db
 from app.core.risk_monitor_db import init_risk_monitor_db
 from app.core.client_return_export_db import init_client_return_export_db
@@ -109,6 +111,7 @@ async def lifespan(app: FastAPI):
     init_login_ip_db()
     init_fund_flow_monitor_db()
     init_view_profiles_db()
+    init_users_db()
     # OPT-0047 risk-V2 case layer (cloud PG). Fail-open: returns False when
     # PG is down/unconfigured — the app must still serve everything else.
     init_risk_cases_pg()
@@ -125,11 +128,37 @@ async def lifespan(app: FastAPI):
             "enable the admin escape hatch."
         )
 
+    # Auth layer (design P1). Log the posture at every boot: "is login on?" is
+    # the first question during an incident, and AUTH_ENABLED is an env flag
+    # with no other visible symptom when it is wrong.
+    _auth_settings = get_settings()
+    if _auth_settings.AUTH_ENABLED:
+        logger.info("AUTH_ENABLED=true — session enforcement is ON for /api/*")
+    else:
+        logger.info("AUTH_ENABLED=false — session layer is present but NOT enforcing")
+    if _auth_settings.AUTH_DEV_LOGIN_EMAIL:
+        # A dev back door that reached prod would be a complete auth bypass, so
+        # it announces itself loudly rather than sitting silently in the env.
+        logger.warning(
+            "AUTH_DEV_LOGIN_EMAIL is set (%s) — POST /api/v1/auth/dev-login can "
+            "mint a session with no identity provider. This must NOT be set in "
+            "production.",
+            _auth_settings.AUTH_DEV_LOGIN_EMAIL,
+        )
+
     owns_scheduler = _try_acquire_scheduler_lock()
     if owns_scheduler:
         logger.info(
             f"Worker pid={os.getpid()} owns scheduler lock — starting schedulers"
         )
+        # Sessions past their absolute ceiling. resolve_session() already drops
+        # expired rows as it meets them, so this only collects the ones nobody
+        # returns to. One worker does it (it is a write) and it is cheap enough
+        # not to justify its own scheduler job.
+        from app.services.auth_service import purge_expired_sessions
+        purged = purge_expired_sessions()
+        if purged:
+            logger.info(f"Purged {purged} expired session(s) from users.db")
         start_scheduler()
         start_burst_scheduler()
         start_login_ip_scheduler()
@@ -171,7 +200,7 @@ def create_app() -> FastAPI:
     Target execution order (outer -> inner):
 
         TraceIDMiddleware -> CORSMiddleware -> APIKeyMiddleware
-            -> [future AuthMiddleware] -> routes
+            -> AuthMiddleware -> routes
 
     - Trace outermost: it must see EVERY request, including ones short-circuited
       by a rejection further in. Previously it sat innermost, so an API-key 403
@@ -181,8 +210,10 @@ def create_app() -> FastAPI:
     - CORS above the auth-ish layers: a 4xx produced by API-key/auth rejection
       still needs Access-Control-* headers, otherwise the browser reports a
       generic CORS failure and hides the real status code from the frontend.
-    - A future AuthMiddleware belongs directly below APIKeyMiddleware, i.e.
-      registered FIRST of all (it should run last, closest to the routes).
+    - AuthMiddleware innermost, i.e. registered FIRST of all: the API key is the
+      cheaper check, so a caller carrying neither credential is turned away
+      before the session store is ever touched. It is also the layer that
+      attaches request.state.user, which only route handlers consume.
 
     Honest scope note: today both dev (vite proxy) and prod (nginx reverse
     proxy) serve the frontend same-origin, so CORSMiddleware is effectively
@@ -195,9 +226,11 @@ def create_app() -> FastAPI:
 
     # --- Registered in REVERSE of execution order (see docstring) -------------
 
-    # [future] app.add_middleware(AuthMiddleware)  <- register here (innermost)
+    # Session auth — registered FIRST so it ends up INNERMOST, closest to the
+    # routes. Inert (one attribute read, no DB) while AUTH_ENABLED is false.
+    app.add_middleware(AuthMiddleware)
 
-    # API Key validation — innermost of the three, closest to the routes.
+    # API Key validation — sits directly above Auth.
     app.add_middleware(APIKeyMiddleware)
 
     # CORS: restricted to allowed origins (configured via CORS_ORIGINS env var)
