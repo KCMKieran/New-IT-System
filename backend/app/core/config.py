@@ -11,6 +11,19 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    """Read a boolean env var tolerantly.
+
+    `.strip()` is load-bearing: backend/.env has CRLF line endings, so a value
+    read through python-dotenv can arrive as "true\\r" and compare unequal to
+    "true" — the same trap the MAIL_TO / MAXMIND settings below already guard.
+    """
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
 class Settings:
     # Database
     DB_HOST: str | None
@@ -80,6 +93,20 @@ class Settings:
 
     # Alert mail center (OPT-0042/0043): recipient domain allowlist
     ALERT_MAIL_ALLOWED_DOMAINS: set[str]
+
+    # Auth session layer (auth design P1)
+    AUTH_ENABLED: bool
+    AUTH_DEV_LOGIN_EMAIL: str
+    AUTH_COOKIE_NAME: str
+    AUTH_COOKIE_ENABLED: bool
+    AUTH_COOKIE_SECURE: bool
+    AUTH_COOKIE_SAMESITE: str
+    AUTH_COOKIE_PATH: str
+    AUTH_COOKIE_DOMAIN: str | None
+    AUTH_SESSION_IDLE_HOURS: int
+    AUTH_SESSION_ABSOLUTE_HOURS: int
+    AUTH_SESSION_RENEW_BELOW_HOURS: int
+    AUTH_MANAGER_EMAILS: set[str]
 
     def __init__(self) -> None:
         self.DB_HOST = os.environ.get("DB_HOST")
@@ -286,6 +313,73 @@ class Settings:
                 or "kohleservices.com,kcmtrade.com,th.kohlecapital.com"
             ).split(",")
             if d.strip()
+        }
+
+        # ── Auth session layer (auth design P1) ──────────────────────────────
+        # Master kill switch. OFF means AuthMiddleware short-circuits before it
+        # touches the DB, /auth/me answers "anonymous", and the product behaves
+        # exactly as it did before P1 — that is the rollback plan (§7.1: flip to
+        # false, `docker compose restart`, back in 30 seconds).
+        self.AUTH_ENABLED = _env_flag("AUTH_ENABLED", False)
+
+        # Dev back door: POST /api/v1/auth/dev-login mints a session for this
+        # address with no IdP. Refuses to work unless the address is set AND
+        # its domain is in ALERT_MAIL_ALLOWED_DOMAINS. Leave empty in prod.
+        self.AUTH_DEV_LOGIN_EMAIL = (
+            os.environ.get("AUTH_DEV_LOGIN_EMAIL") or ""
+        ).strip().lower()
+
+        # Cookie transport. Deliberately DISABLED by default in P1: on bare
+        # `http://10.6.20.138` the `Secure` attribute is inert and `__Host-` is
+        # unusable, and cookies ignore ports (RFC 6265) so a session cookie set
+        # for that IP is also sent to :80/:7001/:7003/:8088/:19999 — five other
+        # projects on this host — and shared between dev(:5173) and prod(:3000).
+        # The mechanism is built and configurable; P2 (internal domain + TLS)
+        # is what makes turning it on correct. Until then sessions travel as
+        # `Authorization: Bearer <sid>`, per the design doc §7.1 fallback.
+        self.AUTH_COOKIE_ENABLED = _env_flag("AUTH_COOKIE_ENABLED", False)
+        self.AUTH_COOKIE_NAME = (
+            os.environ.get("AUTH_COOKIE_NAME") or "kcm_sid"
+        ).strip()
+        self.AUTH_COOKIE_SECURE = _env_flag("AUTH_COOKIE_SECURE", False)
+        # Lax, not Strict: the OIDC callback (P3) is a cross-site navigation
+        # back from login.microsoftonline.com, and Strict withholds the cookie
+        # on exactly that request.
+        self.AUTH_COOKIE_SAMESITE = (
+            os.environ.get("AUTH_COOKIE_SAMESITE") or "lax"
+        ).strip().lower()
+        self.AUTH_COOKIE_PATH = (os.environ.get("AUTH_COOKIE_PATH") or "/").strip()
+        # Empty -> host-only cookie (no Domain attribute), which is the tighter
+        # of the two and what we want unless a subdomain ever needs to share.
+        self.AUTH_COOKIE_DOMAIN = (
+            os.environ.get("AUTH_COOKIE_DOMAIN") or ""
+        ).strip() or None
+
+        # Sliding 12h idle window inside a hard 7d ceiling (design doc §2.2).
+        self.AUTH_SESSION_IDLE_HOURS = int(
+            (os.environ.get("AUTH_SESSION_IDLE_HOURS") or "12").strip()
+        )
+        self.AUTH_SESSION_ABSOLUTE_HOURS = int(
+            (os.environ.get("AUTH_SESSION_ABSOLUTE_HOURS") or "168").strip()
+        )
+        # Only rewrite expires_at when less than this much idle time is left,
+        # so a busy tab does not turn every request into a SQLite write.
+        self.AUTH_SESSION_RENEW_BELOW_HOURS = int(
+            (os.environ.get("AUTH_SESSION_RENEW_BELOW_HOURS") or "6").strip()
+        )
+
+        # Seed managers. Defaults to the three addresses already in
+        # backend/data/ib_financial.db's admin_whitelist (design doc §5.2), so
+        # an unset env still produces a usable manager set.
+        self.AUTH_MANAGER_EMAILS = {
+            e.strip().lower()
+            for e in (
+                os.environ.get("AUTH_MANAGER_EMAILS")
+                or "kieran.xiang@kohleservices.com,"
+                   "lawrence.li@kohleservices.com,"
+                   "teresa.wong@kohleservices.com"
+            ).split(",")
+            if e.strip()
         }
 
     @property
