@@ -123,7 +123,12 @@ class SearchRequest(BaseModel):
     # Already parsed into a list by the frontend (textarea supports
     # comma/space/newline separators; parsing is client-side).
     terms: List[str] = Field(..., min_length=1, max_length=200)
-    days: int = Field(7, ge=1, le=30)
+    # 120 days: the analyzer's per-day JSONs are retained indefinitely (only
+    # raw `.log` files under `tmp/` are pruned at 7 days), so the window is
+    # bounded by taste, not by data. Scanning 120 days parses ~79MB of JSON in
+    # ~0.6s; MySQL enrichment barely grows with the window because the same
+    # correlated accounts recur across days and are de-duped before lookup.
+    days: int = Field(7, ge=1, le=120)
 
 
 class CorrelatedAccountItem(BaseModel):
@@ -244,7 +249,7 @@ class ExportTaskCreateRequest(BaseModel):
     # identical params and writes the result to CSV.
     search_type: Literal["account_id", "ip_address"]
     terms: List[str] = Field(..., min_length=1, max_length=200)
-    days: int = Field(7, ge=1, le=30)
+    days: int = Field(7, ge=1, le=120)
 
 
 class ExportTaskCreateResponse(BaseModel):

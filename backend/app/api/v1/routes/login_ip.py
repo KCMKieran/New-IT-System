@@ -207,8 +207,15 @@ def scheduler_run_now(req: SchedulerRunNowRequest):
 
 
 @router.post("/search", response_model=SearchResponse)
-async def search(req: SearchRequest):
-    """Batch search by account id or IP across the last N days of JSONs."""
+def search(req: SearchRequest):
+    """Batch search by account id or IP across the last N days of JSONs.
+
+    Sync `def` on purpose: `perform_search()` is fully blocking (reads the
+    per-day JSONs off disk, then a synchronous PyMySQL enrichment query). In an
+    `async def` that work runs on the event loop and stalls every other request
+    for its duration — which grows with the `days` window. FastAPI runs a plain
+    `def` route in the threadpool instead.
+    """
     result = login_ip_search_service.perform_search(
         search_type=req.search_type,
         terms=req.terms,

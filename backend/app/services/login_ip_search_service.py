@@ -76,7 +76,7 @@ def perform_search(
     Args:
         search_type: 'account_id' or 'ip_address'
         terms: non-empty list of search strings. De-duped internally.
-        days: 1–30. Number of recent days to scan.
+        days: 1–120. Number of recent days to scan.
     """
     if search_type not in ("account_id", "ip_address"):
         return {"error": f"Invalid search_type: {search_type!r}"}
