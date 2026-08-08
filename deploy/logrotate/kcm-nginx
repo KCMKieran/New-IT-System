@@ -1,0 +1,78 @@
+# logrotate config for the New-IT-System nginx audit access log.
+#
+# This file is a REPO ARTIFACT, not an installed config. Install it manually:
+#   sudo cp deploy/logrotate/kcm-nginx /etc/logrotate.d/kcm-nginx
+# See docs/architecture/logging-system.md for the install + verification steps.
+#
+# WHY THIS EXISTS
+# ---------------
+# frontend/nginx.conf writes a JSON audit line per request to
+# /var/log/nginx-audit/access.log, bind-mounted from logs/nginx-prod/ on the
+# host. Before this, the access log lived only in Docker's json-file driver,
+# which keys the log path by container ID — every ./deploy.sh rebuilt the web
+# container and silently discarded the history (22 deploys in the last 30
+# days, i.e. an effective history horizon of about one day). Persisting it
+# makes rotation our problem, and this is where it is solved.
+#
+# WHY EACH DIRECTIVE
+# ------------------
+# daily         One file per day, matching backend.log's cadence so the two
+#               archives line up when correlating by trace_id.
+# rotate 90     Longer than the backend's 30 days on purpose: this is the
+#               audit source of record (who called what, from which IP, with
+#               which CF Access identity). Investigations routinely reach
+#               further back than debugging does. At the measured 730 KB/day
+#               (worst realistic case ~2 MB/day with several always-open Risk
+#               Monitor tabs on SSE) 90 compressed days is well under 100 MB.
+# size 100M     Belt-and-braces against the pathological case. An SSE
+#               reconnect storm or a scanner hammering /api can produce more
+#               in an afternoon than a normal month; without this, a single
+#               day's file could grow unbounded until the next daily run.
+# missingok     The file does not exist until the web container has been
+#               rebuilt with the new mount; a missing file must not produce a
+#               nightly cron error mail.
+# notifempty    No empty archive for a day with no traffic.
+# compress +    JSON compresses extremely well (~10-15x). delaycompress keeps
+# delaycompress the most recent archive uncompressed so `jq` over
+#               "yesterday" needs no zcat, and — more importantly — it avoids
+#               compressing a file nginx may still hold open in the window
+#               between rotation and the reopen signal below.
+# dateext +     Produces access.log-2026-08-05 instead of logrotate's default
+# dateformat    numeric access.log.1, so a filename states its own date and
+#   -%Y-%m-%d   `ls` sorts chronologically.
+# create 0640 root root
+#               The nginx master process runs as root and opens the log file,
+#               so files land root-owned on the host side. This mirrors the
+#               existing backend/logs-prod/ situation. 0640 (not 0644) because
+#               these lines carry client IPs and CF Access user emails.
+# sharedscripts Run postrotate once for the whole glob, not once per matched
+#               file.
+# postrotate `nginx -s reopen`
+#               LOAD-BEARING — do NOT replace this with copytruncate.
+#               logrotate renames the file; nginx keeps writing to the old
+#               inode until told to reopen. `-s reopen` reopens log files
+#               WITHOUT reloading configuration and without touching in-flight
+#               connections, which matters here because SSE connections are
+#               long-lived (proxy_read_timeout 3600s). copytruncate would be
+#               the alternative, but it loses every line written between the
+#               cp and the truncate — and a continuously-streaming SSE
+#               workload is exactly the shape that loses the most.
+#               `|| true` so a stopped/renamed container can never fail the
+#               nightly logrotate run for every other config on this host.
+
+/opt/myproject/New-IT-System/logs/nginx-prod/*.log {
+    daily
+    rotate 90
+    size 100M
+    missingok
+    notifempty
+    compress
+    delaycompress
+    dateext
+    dateformat -%Y-%m-%d
+    create 0640 root root
+    sharedscripts
+    postrotate
+        /usr/bin/docker exec new-it-frontend-prod nginx -s reopen 2>/dev/null || true
+    endscript
+}

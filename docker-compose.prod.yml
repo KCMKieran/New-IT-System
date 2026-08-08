@@ -17,6 +17,11 @@ services:
       - "3000:80"
     depends_on:
       - api
+    environment:
+      # Same wall clock as the api container, so nginx's $time_iso8601 in
+      # logs/nginx-prod/access.log lines up directly with backend.log instead
+      # of needing an 8-hour mental offset. nginx:alpine already ships tzdata.
+      - TZ=Asia/Hong_Kong
     volumes:
       # Fallback pool of hashed assets from the previous 3 builds, maintained
       # by scripts/archive-frontend-assets.sh (invoked from deploy.sh before
@@ -26,6 +31,21 @@ services:
       # mutate the archive. Mounted OUTSIDE /usr/share/nginx/html so archived
       # files are only reachable through the /assets fallback, not directly.
       - ./frontend/.assets-archive/merged:/opt/assets-archive/assets:ro
+      # Audit access log (kcm_audit JSON format, see frontend/nginx.conf).
+      # Kept on the host so it survives the container rebuild in ./deploy.sh —
+      # the Docker json-file log is keyed by container ID, which gave the old
+      # access log a history horizon of about one day (22 deploys in 30 days).
+      #
+      # Path MUST stay outside ./frontend/: that directory is the Docker build
+      # context, so logs written there would be tarred into every build and
+      # bust the layer cache. frontend/.dockerignore's `*.log` uses
+      # filepath.Match and only matches the context root, so it would not
+      # exclude a nested logs dir either.
+      #
+      # Mount ONLY /var/log/nginx-audit. Mounting /var/log/nginx would destroy
+      # the error.log -> /dev/stderr symlink and hide nginx errors from
+      # `docker logs`, which morning-digest scans.
+      - ./logs/nginx-prod:/var/log/nginx-audit
     restart: unless-stopped
 
   # Backend: FastAPI with Uvicorn (production mode, 2 workers, no --reload)
