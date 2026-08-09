@@ -6,7 +6,7 @@ Skill: .cursor/skills/analysis-ai-report/SKILL.md
 
 Safety protocol (standing rule, enforced here rather than trusted to memory):
     default  -> TEST mode: recipient is REVIEWER, subject gets a "[TEST] " prefix
-    --prod   -> PROD mode: recipient is risk@kcmtrade.com, no prefix
+    --prod   -> PROD mode: recipient is risk@kcmtrade.com, REVIEWER is CC'd, no prefix
 
 Never send prod without the reviewer having seen and approved a test copy first.
 
@@ -35,6 +35,9 @@ from email.utils import formatdate
 # Recipients (SSOT — do not inline these anywhere else).
 REVIEWER = "kieran.xiang@kohleservices.com"
 PROD_TO = "risk@kcmtrade.com"
+# The reviewer is always CC'd on prod sends, so he keeps a copy of exactly what
+# the risk team received. Enforced here rather than left to whoever runs it.
+PROD_CC = [REVIEWER]
 
 # SMTP creds live in a sibling project's .env (Office365 service account).
 ENV_PATH = "/opt/myproject/sales-belong-autofill/.env"
@@ -78,7 +81,8 @@ def main() -> int:
     ap.add_argument(
         "--prod",
         action="store_true",
-        help=f"send to {PROD_TO} instead of the reviewer (requires prior approval)",
+        help=f"send to {PROD_TO} (CC {', '.join(PROD_CC)}) instead of the "
+        "reviewer only; requires prior approval of a test copy",
     )
     ap.add_argument("--cc", default="", help="comma-separated CC list")
     args = ap.parse_args()
@@ -107,6 +111,9 @@ def main() -> int:
         subject = f"[TEST] {args.subject}"
 
     cc = [a.strip() for a in args.cc.split(",") if a.strip()]
+    if args.prod:
+        # Always CC the reviewer on prod, on top of any --cc given.
+        cc += [a for a in PROD_CC if a not in cc and a not in to]
 
     root = MIMEMultipart("related")
     root["Subject"] = subject
