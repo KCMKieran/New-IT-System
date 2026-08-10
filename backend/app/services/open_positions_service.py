@@ -1,3 +1,32 @@
+"""Open-position queries behind the /position page.
+
+Three consumers, all reading fxbackoffice.mt4_trades on the read replica:
+  * get_open_positions_today()        -> the per-symbol table (one server)
+  * get_symbol_cross_server_summary() -> the cross-server summary card
+  * get_xauusd_position_detail()      -> the 1-min XAUUSD snapshot scheduler
+
+⚠ KNOWN DEFECT — `t.LOGIN NOT LIKE '7%'` (all three queries below)
+The 7-prefix login exclusion is an **MT4-only** demo convention. On MT5
+(sid=5) `67xxxxxx` / `77xxxxxx` are REAL client accounts and demo logins are
+`3`-prefixed instead — see docs/features/login-ip.md §3.4 and the
+database-context skill. Applying it to sid=5/6 therefore drops live clients.
+
+Measured on the replica 2026-08-10 (open XAUUSD* positions, raw lots, cent not
+yet scaled): the filter removes 1,026 mt5 orders (127.24 buy / 129.98 sell)
+plus 46 on mt4_live2 and 2 on mt4_live — roughly a third of mt5's gross gold
+book. Net impact happened to be small that day (about -1.6 lots overall
+because the dropped book was two-sided), but nothing bounds it: on a day when
+those accounts lean one way the Buy/Sell lines and the Net line are all off.
+
+Not fixed here on purpose — the correct predicate is
+`(t.sid <> 1 OR t.LOGIN NOT LIKE '7%')` (already used in
+docs/analysis/mt-night-window-sql-playbook.md), but changing it shifts every
+number the page shows AND breaks continuity with the 60 days of snapshots
+already recorded under the old rule. Needs a deliberate call + a note on the
+chart. Same defect exists in risk_monitor_service, window_scan_service,
+rule_quick_profit_service and rule_quick_open_close_service.
+"""
+
 from __future__ import annotations
 
 import threading
@@ -20,6 +49,44 @@ _EXCLUDED_GROUPSIDS_TTL_SEC = 3600
 _excluded_groupsids_cache: list[str] | None = None
 _excluded_groupsids_cached_at: float = 0.0
 _excluded_groupsids_lock = threading.Lock()
+
+# Server-side statement kill switch, deliberately BELOW read_timeout (20s) so
+# the server gives up before the client does. A client-side read_timeout
+# abandons the socket but the server thread keeps waiting (e.g. queued behind
+# an MDL lock) as a permanent zombie — the 2026-08-09 replica incident piled
+# up 2,637 of them from this module's minute-tick snapshot query alone.
+# MAX_EXECUTION_TIME applies to read-only SELECTs only, which is every query
+# this module runs.
+_MAX_EXECUTION_TIME_MS = 15000
+
+
+def _connect(settings: Settings) -> pymysql.connections.Connection:
+    """One connection path for every query in this module.
+
+    All four call sites read fxbackoffice on the replica with the same
+    timeout requirements; keeping them on one helper guarantees none of them
+    can miss the MAX_EXECUTION_TIME guard again.
+    """
+    conn = pymysql.connect(
+        host=settings.DB_HOST,
+        user=settings.DB_USER,
+        password=settings.DB_PASSWORD,
+        database=settings.FXBACK_DB_NAME,
+        port=int(settings.DB_PORT),
+        charset=settings.DB_CHARSET,
+        cursorclass=pymysql.cursors.DictCursor,
+        connect_timeout=5,
+        read_timeout=20,
+    )
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SET SESSION MAX_EXECUTION_TIME = {_MAX_EXECUTION_TIME_MS}"
+            )
+    except Exception:
+        conn.close()
+        raise
+    return conn
 
 
 def _get_excluded_groupsids(settings: Settings) -> list[str]:
@@ -47,17 +114,7 @@ def _get_excluded_groupsids(settings: Settings) -> list[str]:
         WHERE groupsid LIKE '%demo%' OR groupsid LIKE '%test%'
     """
     try:
-        conn = pymysql.connect(
-            host=settings.DB_HOST,
-            user=settings.DB_USER,
-            password=settings.DB_PASSWORD,
-            database=settings.FXBACK_DB_NAME,
-            port=int(settings.DB_PORT),
-            charset=settings.DB_CHARSET,
-            cursorclass=pymysql.cursors.DictCursor,
-            connect_timeout=5,
-            read_timeout=20,
-        )
+        conn = _connect(settings)
         with conn:
             with conn.cursor() as cur:
                 cur.execute(sql)
@@ -172,6 +229,7 @@ def get_xauusd_position_detail(settings: Settings) -> dict[str, Any]:
           AND t.SYMBOL LIKE 'XAUUSD%%'
           AND t.closeDate = '1970-01-01'
           AND t.CMD IN (0, 1)
+          -- MT4-only demo convention; wrong for sid=5/6. See module docstring.
           AND t.LOGIN NOT LIKE '7%%'
           AND NOT EXISTS (
             SELECT 1
@@ -200,17 +258,7 @@ def get_xauusd_position_detail(settings: Settings) -> dict[str, Any]:
             "like_testkcm": "testKCM%",
             **groupsid_params,
         }
-        conn = pymysql.connect(
-            host=settings.DB_HOST,
-            user=settings.DB_USER,
-            password=settings.DB_PASSWORD,
-            database=settings.FXBACK_DB_NAME,
-            port=int(settings.DB_PORT),
-            charset=settings.DB_CHARSET,
-            cursorclass=pymysql.cursors.DictCursor,
-            connect_timeout=5,
-            read_timeout=20,
-        )
+        conn = _connect(settings)
         with conn:
             with conn.cursor() as cur:
                 cur.execute(sql, params)
@@ -316,6 +364,7 @@ def get_open_positions_today(settings: Settings, source: str = "mt4_live") -> di
         WHERE t.sid = %(sid)s
           AND t.closeDate = '1970-01-01'
           AND t.CMD IN (0, 1)
+          -- MT4-only demo convention; wrong for sid=5/6. See module docstring.
           AND t.LOGIN NOT LIKE '7%%'
           AND NOT EXISTS (
             SELECT 1
@@ -344,16 +393,7 @@ def get_open_positions_today(settings: Settings, source: str = "mt4_live") -> di
     }
 
     try:
-        conn = pymysql.connect(
-            host=settings.DB_HOST,
-            user=settings.DB_USER,
-            password=settings.DB_PASSWORD,
-            database=settings.FXBACK_DB_NAME,
-            port=int(settings.DB_PORT),
-            charset=settings.DB_CHARSET,
-            cursorclass=pymysql.cursors.DictCursor,
-        )
-
+        conn = _connect(settings)
         with conn:
             with conn.cursor() as cur:
                 cur.execute(sql, params)
@@ -432,6 +472,7 @@ def get_symbol_cross_server_summary(settings: Settings, symbol: str) -> dict[str
           )
           AND t.closeDate = '1970-01-01'
           AND t.CMD IN (0, 1)
+          -- MT4-only demo convention; wrong for sid=5/6. See module docstring.
           AND t.LOGIN NOT LIKE '7%%'
           AND NOT EXISTS (
             SELECT 1
@@ -465,17 +506,7 @@ def get_symbol_cross_server_summary(settings: Settings, symbol: str) -> dict[str
         }
 
         try:
-            conn = pymysql.connect(
-                host=settings.DB_HOST,
-                user=settings.DB_USER,
-                password=settings.DB_PASSWORD,
-                database=settings.FXBACK_DB_NAME,
-                port=int(settings.DB_PORT),
-                charset=settings.DB_CHARSET,
-                cursorclass=pymysql.cursors.DictCursor,
-                connect_timeout=5,
-                read_timeout=20,
-            )
+            conn = _connect(settings)
             with conn:
                 with conn.cursor() as cur:
                     cur.execute(sql, params)

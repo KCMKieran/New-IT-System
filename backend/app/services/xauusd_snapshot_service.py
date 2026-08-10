@@ -13,6 +13,34 @@ value forward for a series that closed out mid-bucket (no row emitted at the
 later minute), producing a company total that existed at no single instant.
 Taking the latest-instant slice fixes that: a series that has no row at the
 bucket's latest instant correctly contributes nothing.
+
+Net definition: with no server/symbol filter, one point = ALL 3 servers × ALL
+XAUUSD* products summed (XAUUSD, .c, .L2, .cent, .kcm, .kcmc — cent already
+scaled /100 at write time). That is the company-wide client-side net, so the
+broker's own exposure is the opposite sign. The dropdowns drill down to a
+single server / product.
+
+Reading this table for ad-hoc analysis — three traps, all hit in practice:
+
+1. WEEKENDS ARE FROZEN, NOT MISSING. The scheduler keeps writing every minute
+   while the market is closed, repeating the Friday-close position ~2,880
+   times per weekend. Any distribution/threshold statistic over raw minutes is
+   dominated by whatever value happened to be frozen: over 2026-06-29..08-08,
+   2,880 of the 4,891 minutes above |net| > 100 were a single weekend value
+   (114.3, 08-01/02) counted once per minute. Filter to weekdays first.
+2. Sampling a handful of timestamps proves nothing about the tail. |net| > 100
+   is a genuine ~4.7% of weekday minutes overall, but it is regime-dependent —
+   0.53% over 07-02..07-21 vs 10.15% over 07-22..08-08 (the increase is almost
+   entirely mt4_live XAUUSD going long: mean net contribution 8.2 -> 18.0).
+3. The underlying query drops real MT5 clients — see the KNOWN DEFECT note in
+   open_positions_service. Gross Buy/Sell are understated; Net is understated
+   by an unbounded amount whenever the dropped book is one-sided.
+
+Retention is 60 days, so the series self-truncates. The prod scheduler was
+stopped on 2026-08-09 during the replica MDL-lock incident and re-enabled on
+2026-08-10 once open_positions_service gained its MAX_EXECUTION_TIME guard, so
+the series has a permanent gap from 2026-08-09 02:01 to the restart (no
+backfill by design — minute snapshots cannot be reconstructed).
 """
 
 from __future__ import annotations
