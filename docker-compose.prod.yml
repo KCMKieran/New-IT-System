@@ -14,7 +14,10 @@ services:
         API_KEY: ${API_KEY:?API_KEY must be set in .env for the prod build}
     container_name: new-it-frontend-prod
     ports:
-      - "3000:80"
+      # Loopback-only: LAN clients must use https://analysis.kohleservices.com
+      # (via CF tunnel, whose ingress targets localhost:3000). Bare-IP access
+      # is intentionally refused — see auth-login-design.md §4.3.
+      - "127.0.0.1:3000:80"
     depends_on:
       - api
     environment:

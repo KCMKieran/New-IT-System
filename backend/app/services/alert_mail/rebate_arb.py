@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 
 # Prod frontend page linked in the footer (same constant style as the hedge
 # builder — no frontend-base-url setting exists in backend config).
-_RISK_MONITOR_PAGE_URL = "http://10.6.20.138:3000/risk-monitor"
+_RISK_MONITOR_PAGE_URL = "https://analysis.kohleservices.com/risk-monitor"
 
 
 # ── Field getters (subscription condition evaluation) ───────────────────────

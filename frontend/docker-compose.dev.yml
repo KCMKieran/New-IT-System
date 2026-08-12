@@ -9,7 +9,7 @@ services:
     working_dir: /app
     command: sh -lc "[ -d node_modules ] || npm ci; npm run dev -- --host 0.0.0.0 --port 5173"
     ports:
-      - "5173:5173"  
+      - "127.0.0.1:5173:5173"
     volumes:
       - .:/app
       - /app/node_modules

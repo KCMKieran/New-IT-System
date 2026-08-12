@@ -164,7 +164,7 @@ _STALE_SENDING_MIN = 15
 # Frontend page the footer links to (prod). Kept as a constant — there is no
 # frontend-base-url setting in backend config and inventing one for a footer
 # link is not worth the coupling.
-_RISK_MONITOR_PAGE_URL = "http://10.6.20.138:3000/risk-monitor"
+_RISK_MONITOR_PAGE_URL = "https://analysis.kohleservices.com/risk-monitor"
 
 SendFn = Callable[..., None]
 

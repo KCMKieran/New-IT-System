@@ -28,8 +28,7 @@ export default defineConfig({
     allowedHosts: [
       "localhost",
       "127.0.0.1",
-      "analysis.kohleservices.com",
-      "10.6.20.138"
+      "analysis.kohleservices.com"
     ],
     proxy: {
       "/api": {
