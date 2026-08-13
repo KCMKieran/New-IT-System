@@ -112,10 +112,20 @@ graph LR
 
 ## 6. 安全提醒
 
-⚠ 这是**内部** docs 站，含 SQL schema、内网 IP、API 密钥引用、风控规则等敏感信息。开 Cloudflare Tunnel 公网前确认：
+⚠ 这是**内部** docs 站，含 SQL schema、内网 IP、API 密钥引用、风控规则等敏感信息。**mkdocs 容器自身零认证**——它是一个裸 proxy 目标，谁能到达 `/docs/` 谁就能读全部内容。
 
-1. Cloudflare Access 已经把 `analysis.kohleservices.com` 网段保护起来（email/SSO 鉴权）—— `/docs/` 子路径自动继承。
-2. **不要**在 docs 里直接写明文密码/token。引用 `.env` 文件而不是粘贴值。
+1. **访问控制现在归本系统管（auth P3.5，2026-08-13）**：`frontend/nginx.conf` 的 `location /docs/` 上挂了
+   `auth_request` → `GET /api/v1/auth/verify`（有会话 204 / 无会话 401 → `302 /login?return_to=…`），
+   和主应用共用同一次 Entra 登录。
+   ⚠ **这道闸是唯一的门。** 在此之前挡住外人的是 Cloudflare Access 那道罩住整个 hostname 的应用，
+   而**那个应用正在退役**（真登录已上线，它只剩「外网登两次」的副作用）。所以**动 `nginx.conf` 时
+   千万别删掉这三个 location**：`/docs/`、`= /internal/auth-verify`、`@docs_login` —— 删了等于把
+   151 篇内部文档发布到公网，而且不会有任何报错提醒你。
+   验证方法：未登录 `curl -I https://analysis.kohleservices.com/docs/` 应该看到 `302 → /login?return_to=/docs/`。
+2. **不要**在 docs 里直接写明文密码/token。引用 `.env` 文件而不是粘贴值。**这条不因为有了闸就放松**——
+   会话闸挡的是外人，不是「密钥不该落在会被渲染、被搜索、被 logrotate 归档的地方」这件事。
+   （2026-08-13 扫过一遍：现有 151 篇里**没有**活密钥；auth 设计文档里的 tenant/client ID 不是秘密，
+   client secret 只写了「在 `backend/.env`」，这是正确写法。）
 3. `docs/lessons/` 目录是 gitignored 的本地教学资产；如果你不想公开，加到 `mkdocs.yml exclude_docs:`。
 
 ## 7. 不动它的部分
