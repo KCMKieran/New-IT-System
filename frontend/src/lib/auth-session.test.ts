@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { sanitizeReturnTo } from "./auth-session"
+import { isNonSpaPath, sanitizeReturnTo } from "./auth-session"
 
 describe("sanitizeReturnTo", () => {
   it("keeps in-app paths verbatim", () => {
@@ -33,5 +33,21 @@ describe("sanitizeReturnTo", () => {
     expect(sanitizeReturnTo(undefined)).toBeNull()
     expect(sanitizeReturnTo("")).toBeNull()
     expect(sanitizeReturnTo("   ")).toBeNull()
+  })
+})
+
+describe("isNonSpaPath", () => {
+  it("routes the docs portal through the browser, not the SPA router", () => {
+    // /docs/ is proxied to the MkDocs container by Nginx. <Navigate> would find
+    // no matching route and render not-found instead of the document.
+    expect(isNonSpaPath("/docs/")).toBe(true)
+    expect(isNonSpaPath("/docs/architecture/auth-login-design/")).toBe(true)
+  })
+
+  it("leaves real app routes to the router", () => {
+    expect(isNonSpaPath("/")).toBe(false)
+    expect(isNonSpaPath("/risk-monitor")).toBe(false)
+    // Prefix match must not catch a same-named app route.
+    expect(isNonSpaPath("/docsomething")).toBe(false)
   })
 })

@@ -326,3 +326,79 @@ def _expire(auth, sid: str, *, hours: float) -> None:
             "UPDATE sessions SET expires_at = ? WHERE sid_hash = ?",
             (when, auth.hash_sid(sid)),
         )
+
+
+# ── identity is keyed on the immutable subject, not the mutable email (P3.5) ──
+
+def test_a_renamed_mailbox_keeps_the_same_account(auth):
+    """IT renames someone. They must stay one person, with their role intact."""
+    auth.upsert_user("john.smith@kohleservices.com", subject="oid-1")
+    with_role = _rows("users")[0]
+    from app.core.users_db import get_users_db
+
+    with get_users_db() as conn:
+        conn.execute("UPDATE users SET role = 'manager' WHERE id = ?", (with_role["id"],))
+
+    renamed = auth.upsert_user("j.smith@kohleservices.com", subject="oid-1")
+
+    users = _rows("users")
+    assert len(users) == 1, "a rename must not fork the person into a second row"
+    assert renamed["email"] == "j.smith@kohleservices.com"
+    assert renamed["role"] == "manager", "the rename silently demoted them"
+    assert renamed["id"] == with_role["id"], "audit history must stay attached"
+
+
+def test_a_reassigned_mailbox_is_refused_rather_than_inherited(auth):
+    """A leaver's address given to a new hire must not hand over their account."""
+    auth.upsert_user("shared@kohleservices.com", subject="oid-leaver")
+
+    with pytest.raises(auth.AuthError):
+        auth.upsert_user("shared@kohleservices.com", subject="oid-newhire")
+
+    assert len(_rows("users")) == 1
+
+
+def test_the_subject_is_backfilled_onto_a_pre_existing_row(auth):
+    """Rows created before entra_oid existed adopt it on the next login."""
+    auth.upsert_user("legacy@kohleservices.com", subject=None)
+    assert _rows("users")[0]["entra_oid"] is None
+
+    auth.upsert_user("legacy@kohleservices.com", subject="oid-9")
+
+    users = _rows("users")
+    assert len(users) == 1
+    assert users[0]["entra_oid"] == "oid-9"
+
+
+def test_an_identity_conflict_is_recorded_as_a_login_failure(auth):
+    auth.upsert_user("shared@kohleservices.com", subject="oid-a")
+
+    with pytest.raises(auth.AuthError):
+        auth.login("shared@kohleservices.com", subject="oid-b")
+
+    details = [e["detail"] for e in _rows("auth_events") if e["event"] == "login_failure"]
+    assert "identity_conflict" in details
+
+
+# ── login domains are their own knob, not the alert-mail recipient list (P3.5) ─
+
+def test_login_domains_default_to_the_alert_mail_list(auth, monkeypatch):
+    monkeypatch.setenv("ALERT_MAIL_ALLOWED_DOMAINS", "kohleservices.com")
+    monkeypatch.delenv("AUTH_ALLOWED_EMAIL_DOMAINS", raising=False)
+    from app.core.config import get_settings
+
+    get_settings.cache_clear()
+    assert auth.is_allowed_domain("someone@kohleservices.com")
+    assert not auth.is_allowed_domain("someone@gmail.com")
+
+
+def test_adding_a_mail_recipient_domain_does_not_grant_login(auth, monkeypatch):
+    """The bug this split exists to prevent: an auditor added as a report
+    recipient must not thereby become able to log in."""
+    monkeypatch.setenv("ALERT_MAIL_ALLOWED_DOMAINS", "kohleservices.com,auditor-firm.com")
+    monkeypatch.setenv("AUTH_ALLOWED_EMAIL_DOMAINS", "kohleservices.com")
+    from app.core.config import get_settings
+
+    get_settings.cache_clear()
+    assert auth.is_allowed_domain("staff@kohleservices.com")
+    assert not auth.is_allowed_domain("auditor@auditor-firm.com")

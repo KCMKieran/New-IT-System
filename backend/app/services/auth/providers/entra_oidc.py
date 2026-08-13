@@ -37,6 +37,7 @@ import secrets
 import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
+from typing import NamedTuple
 from urllib.parse import urlencode
 
 import jwt
@@ -157,11 +158,16 @@ def _consume_transaction(state: str) -> sqlite3.Row:
         raise ProviderError("state_missing", "Callback carried no state parameter")
 
     with get_users_db() as conn:
+        # DELETE ... RETURNING, not SELECT-then-DELETE. A bare SELECT runs in
+        # autocommit (verified: conn.in_transaction is False after it), so the
+        # two-statement form left a window in which all four uvicorn workers
+        # could read the same row and every one of them believe it had won —
+        # the DELETE's rowcount was never consulted. One statement makes
+        # "reading the row" and "claiming it" the same event, which is what
+        # single-use has to mean. Needs SQLite >= 3.35; the image ships 3.46.
         row = conn.execute(
-            "SELECT * FROM oidc_transactions WHERE state = ?", (state,)
+            "DELETE FROM oidc_transactions WHERE state = ? RETURNING *", (state,)
         ).fetchone()
-        if row is not None:
-            conn.execute("DELETE FROM oidc_transactions WHERE state = ?", (state,))
 
     if row is None:
         # Unknown state means one of: CSRF attempt, a replayed callback, a stale
@@ -176,13 +182,22 @@ def _consume_transaction(state: str) -> sqlite3.Row:
 
 # ── step 1: redirect to Microsoft ────────────────────────────────────────────
 
+class Authorization(NamedTuple):
+    """What ``authorize_url`` hands back: where to send the browser, and the
+    ``state`` the caller must also pin into a cookie so the callback can prove
+    it is talking to the same browser (see the route)."""
+
+    url: str
+    state: str
+
+
 def authorize_url(
     *,
     return_to: str | None = None,
     ip: str | None = None,
     user_agent: str | None = None,
-) -> str:
-    """Start a login. Persists the transaction and returns the URL to 302 to."""
+) -> Authorization:
+    """Start a login. Persists the transaction and returns where to 302 to."""
     settings = get_settings()
     if not settings.ENTRA_ENABLED:
         raise ProviderError("provider_disabled", "Entra OIDC is not configured")
@@ -217,7 +232,8 @@ def authorize_url(
         "code_challenge": code_challenge,
         "code_challenge_method": "S256",
     }
-    return f"{authorize_endpoint(settings.ENTRA_TENANT_ID)}?{urlencode(params)}"
+    url = f"{authorize_endpoint(settings.ENTRA_TENANT_ID)}?{urlencode(params)}"
+    return Authorization(url=url, state=state)
 
 
 # ── JWKS ─────────────────────────────────────────────────────────────────────
@@ -379,7 +395,14 @@ def identity_from_claims(claims: dict) -> AuthenticatedIdentity:
         )
 
     display_name = str(claims.get("name") or "").strip() or None
-    return AuthenticatedIdentity(email=email, display_name=display_name, source=SOURCE)
+    # `oid` is the object id of the user in this tenant and never changes, even
+    # when the mailbox is renamed or reassigned. `sub` is also stable but is
+    # scoped per application, so it would break if the app registration is ever
+    # rebuilt (which already happened once during the tenant switch, §8.1).
+    subject = str(claims.get("oid") or "").strip() or None
+    return AuthenticatedIdentity(
+        email=email, display_name=display_name, source=SOURCE, subject=subject
+    )
 
 
 def exchange_code(code: str, state: str) -> tuple[AuthenticatedIdentity, str | None]:
@@ -407,6 +430,6 @@ def exchange_code(code: str, state: str) -> tuple[AuthenticatedIdentity, str | N
     identity = identity_from_claims(claims)
 
     logger.info(
-        "Entra OIDC verified %s (oid=%s)", identity.email, claims.get("oid", "?")
+        "Entra OIDC verified %s (oid=%s)", identity.email, identity.subject or "?"
     )
     return identity, txn["return_to"]

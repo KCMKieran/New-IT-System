@@ -1,6 +1,14 @@
 # MkDocs Material site config for the internal docs portal (OPT-0026).
 # Serves docs/ over Nginx at /docs/ behind Cloudflare Tunnel.
 # Ops notes: docs/operations/docs-portal.md
+#
+# ⚠ ACCESS CONTROL — this container has none of its own. Everything under
+# docs/ that is not excluded below is served to whoever can reach /docs/.
+# Since auth P3.5 that gate is Nginx's `auth_request` -> /api/v1/auth/verify
+# (a valid session cookie), which REPLACED the Cloudflare Access application
+# that used to wrap the whole hostname. Before adding a document with
+# credentials in it, note that neither layer redacts anything: the rule is
+# still that secrets live in backend/.env and docs only point at them.
 
 site_name: KCM IT System Docs
 site_description: 内部文档中心 — KCM Trade 风控与分析平台

@@ -7,7 +7,7 @@ import { LoginForm } from "@/components/login-form"
 import BlurText from "@/components/blur-text"
 import { PageLoader } from "@/components/LazyErrorBoundary"
 import { errorKeyFor } from "@/lib/auth-errors"
-import { sanitizeReturnTo } from "@/lib/auth-session"
+import { isNonSpaPath, sanitizeReturnTo } from "@/lib/auth-session"
 
 export default function LoginPage() {
   const { t } = useI18n()
@@ -23,7 +23,16 @@ export default function LoginPage() {
 
   if (status === "loading") return <PageLoader />
   // Already signed in (or the kill switch is thrown): nothing to do here.
-  if (status === "authenticated") return <Navigate to={returnTo || "/"} replace />
+  if (status === "authenticated") {
+    // The docs portal is Nginx's, not the router's — <Navigate> would look for
+    // a matching SPA route, find none, and show not-found instead of the page
+    // the user asked for. Hand those back to the browser.
+    if (returnTo && isNonSpaPath(returnTo)) {
+      window.location.replace(returnTo)
+      return <PageLoader />
+    }
+    return <Navigate to={returnTo || "/"} replace />
+  }
 
   function handleSignIn() {
     setBusy(true)

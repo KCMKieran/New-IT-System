@@ -119,11 +119,35 @@ def entra_env(tmp_path, monkeypatch, public_jwk):
     users_db.reset_connection_cache()
 
 
+def start_login_via_route(client, **params) -> tuple[str, str]:
+    """Start a login through the real /auth/login route, returning (state, nonce).
+
+    Route-level callback tests must come through here rather than calling the
+    provider directly: since auth P3.5 the callback requires the `state` to also
+    be present in a cookie that /auth/login sets, which is what proves the same
+    browser is finishing the round trip it started. Driving the route puts that
+    cookie in TestClient's jar exactly as a browser would hold it.
+    """
+    from urllib.parse import parse_qs, urlparse
+
+    r = client.get("/api/v1/auth/login", params=params)
+    assert r.status_code == 303, r.text
+    state = parse_qs(urlparse(r.headers["location"]).query)["state"][0]
+
+    from app.core.users_db import get_users_db
+
+    with get_users_db() as conn:
+        row = conn.execute(
+            "SELECT nonce FROM oidc_transactions WHERE state = ?", (state,)
+        ).fetchone()
+    return state, row["nonce"]
+
+
 def start_login(entra_oidc, **kwargs) -> tuple[str, str]:
     """Run authorize_url() and dig the state + nonce back out of the DB."""
     from urllib.parse import parse_qs, urlparse
 
-    url = entra_oidc.authorize_url(**kwargs)
+    url = entra_oidc.authorize_url(**kwargs).url
     params = parse_qs(urlparse(url).query)
     state = params["state"][0]
 
@@ -141,7 +165,7 @@ def start_login(entra_oidc, **kwargs) -> tuple[str, str]:
 def test_authorize_url_carries_pkce_and_a_stored_state(entra_env):
     from urllib.parse import parse_qs, urlparse
 
-    url = entra_env.authorize_url(return_to="/risk-monitor")
+    url = entra_env.authorize_url(return_to="/risk-monitor").url
     parsed = urlparse(url)
     params = {k: v[0] for k, v in parse_qs(parsed.query).items()}
 
@@ -174,7 +198,7 @@ def test_code_challenge_is_the_sha256_of_the_stored_verifier(entra_env):
     import hashlib
     from urllib.parse import parse_qs, urlparse
 
-    url = entra_env.authorize_url()
+    url = entra_env.authorize_url().url
     params = {k: v[0] for k, v in parse_qs(urlparse(url).query).items()}
 
     from app.core.users_db import get_users_db
@@ -513,7 +537,7 @@ def test_login_route_drops_a_hostile_return_to(client):
 def test_callback_sets_the_session_cookie_and_returns_to_the_app(
     client, entra_env, monkeypatch, rsa_key
 ):
-    state, nonce = start_login(entra_env, return_to="/risk-monitor")
+    state, nonce = start_login_via_route(client, return_to="/risk-monitor")
     _patch_token_endpoint(monkeypatch, entra_env, make_id_token(rsa_key, nonce=nonce))
 
     r = client.get(f"/api/v1/auth/callback?code=abc&state={state}")
@@ -527,7 +551,7 @@ def test_callback_sets_the_session_cookie_and_returns_to_the_app(
 
 
 def test_callback_defaults_to_the_app_root(client, entra_env, monkeypatch, rsa_key):
-    state, nonce = start_login(entra_env)
+    state, nonce = start_login_via_route(client)
     _patch_token_endpoint(monkeypatch, entra_env, make_id_token(rsa_key, nonce=nonce))
 
     r = client.get(f"/api/v1/auth/callback?code=abc&state={state}")
@@ -537,7 +561,7 @@ def test_callback_defaults_to_the_app_root(client, entra_env, monkeypatch, rsa_k
 def test_callback_creates_the_user_and_the_session(
     client, entra_env, monkeypatch, rsa_key
 ):
-    state, nonce = start_login(entra_env)
+    state, nonce = start_login_via_route(client)
     _patch_token_endpoint(monkeypatch, entra_env, make_id_token(rsa_key, nonce=nonce))
     client.get(f"/api/v1/auth/callback?code=abc&state={state}")
 
@@ -559,7 +583,7 @@ def test_callback_creates_the_user_and_the_session(
 def test_callback_bounces_an_outside_domain_to_the_login_page(
     client, entra_env, monkeypatch, rsa_key
 ):
-    state, nonce = start_login(entra_env)
+    state, nonce = start_login_via_route(client)
     _patch_token_endpoint(
         monkeypatch,
         entra_env,
@@ -569,14 +593,17 @@ def test_callback_bounces_an_outside_domain_to_the_login_page(
     r = client.get(f"/api/v1/auth/callback?code=abc&state={state}")
     assert r.status_code == 303
     assert r.headers["location"] == "/login?error=not_authorized"
-    assert "set-cookie" not in {k.lower() for k in r.headers}
+    # A refusal hands out no session. It DOES emit a Set-Cookie, but only the
+    # expiry that clears the one-shot state cookie (P3.5), so assert on the
+    # session cookie by name rather than on the header being absent.
+    assert "kcm_sid" not in r.cookies
 
 
 def test_callback_reports_a_provider_error_as_a_short_code(
     client, entra_env, monkeypatch, rsa_key
 ):
     """The browser gets a code; the detail stays in the log."""
-    state, _ = start_login(entra_env)
+    state, _ = start_login_via_route(client)
     _patch_token_endpoint(
         monkeypatch, entra_env, make_id_token(rsa_key, nonce="wrong-nonce")
     )
@@ -614,7 +641,7 @@ def test_the_session_from_a_callback_actually_authenticates(
     client, entra_env, monkeypatch, rsa_key
 ):
     """End to end: the cookie the callback sets resolves on the next request."""
-    state, nonce = start_login(entra_env)
+    state, nonce = start_login_via_route(client)
     _patch_token_endpoint(monkeypatch, entra_env, make_id_token(rsa_key, nonce=nonce))
     client.get(f"/api/v1/auth/callback?code=abc&state={state}")
 
@@ -624,3 +651,105 @@ def test_the_session_from_a_callback_actually_authenticates(
     assert me["role"] == "user"
 
 
+
+
+# ── the state must be bound to THIS browser, not just to the server (P3.5) ────
+
+def test_callback_without_the_state_cookie_is_refused(
+    client, entra_env, monkeypatch, rsa_key
+):
+    """The forced-sign-in case.
+
+    An attacker completes the Microsoft leg in their own browser, does not
+    follow the last redirect, and sends the callback URL to a colleague. The
+    colleague's browser holds no state cookie, so before P3.5 it would have been
+    handed the ATTACKER's session and would have worked under their identity.
+    """
+    state, nonce = start_login_via_route(client)
+    _patch_token_endpoint(monkeypatch, entra_env, make_id_token(rsa_key, nonce=nonce))
+
+    victim = TestClient(client.app, follow_redirects=False)  # a different browser
+    r = victim.get(f"/api/v1/auth/callback?code=abc&state={state}")
+
+    assert r.status_code == 303
+    assert r.headers["location"] == "/login?error=state_not_bound"
+    assert "kcm_sid" not in r.cookies
+
+    from app.core.users_db import get_users_db
+
+    with get_users_db() as conn:
+        assert conn.execute("SELECT COUNT(*) c FROM sessions").fetchone()["c"] == 0
+
+
+def test_callback_with_someone_elses_state_cookie_is_refused(
+    client, entra_env, monkeypatch, rsa_key
+):
+    state, nonce = start_login_via_route(client)
+    _patch_token_endpoint(monkeypatch, entra_env, make_id_token(rsa_key, nonce=nonce))
+
+    client.cookies.set("kcm_oidc_state", "a-different-login")
+    r = client.get(f"/api/v1/auth/callback?code=abc&state={state}")
+
+    assert r.headers["location"] == "/login?error=state_not_bound"
+
+
+def test_login_pins_the_state_into_a_cookie(client):
+    r = client.get("/api/v1/auth/login")
+    set_cookie = r.headers["set-cookie"].lower()
+
+    assert "kcm_oidc_state=" in set_cookie
+    assert "httponly" in set_cookie
+    # Lax, never Strict: the callback is a cross-site navigation from Microsoft
+    # and Strict would withhold exactly the cookie we are about to check.
+    assert "samesite=lax" in set_cookie
+
+
+def test_a_completed_login_clears_the_state_cookie(
+    client, entra_env, monkeypatch, rsa_key
+):
+    """One state, one use — the binding must not linger for the next attempt."""
+    state, nonce = start_login_via_route(client)
+    _patch_token_endpoint(monkeypatch, entra_env, make_id_token(rsa_key, nonce=nonce))
+
+    r = client.get(f"/api/v1/auth/callback?code=abc&state={state}")
+
+    assert r.status_code == 303
+    assert not client.cookies.get("kcm_oidc_state")
+
+
+def test_the_entra_oid_is_persisted_on_the_user_row(
+    client, entra_env, monkeypatch, rsa_key
+):
+    state, nonce = start_login_via_route(client)
+    _patch_token_endpoint(monkeypatch, entra_env, make_id_token(rsa_key, nonce=nonce))
+    client.get(f"/api/v1/auth/callback?code=abc&state={state}")
+
+    from app.core.users_db import get_users_db
+
+    with get_users_db() as conn:
+        user = conn.execute("SELECT * FROM users WHERE email = ?", (EMAIL,)).fetchone()
+    assert user["entra_oid"] == "some-object-id"
+
+
+# ── /auth/verify: the nginx auth_request probe that gates /docs/ (P3.5) ───────
+
+def test_verify_401s_without_a_session(client):
+    assert client.get("/api/v1/auth/verify").status_code == 401
+
+
+def test_verify_204s_with_a_live_session(client, entra_env, monkeypatch, rsa_key):
+    state, nonce = start_login_via_route(client)
+    _patch_token_endpoint(monkeypatch, entra_env, make_id_token(rsa_key, nonce=nonce))
+    client.get(f"/api/v1/auth/callback?code=abc&state={state}")
+
+    assert client.get("/api/v1/auth/verify").status_code == 204
+
+
+def test_verify_opens_up_when_auth_is_switched_off(client, monkeypatch):
+    """The 30-second kill switch must restore the docs portal too, or the
+    rollback path is only half a rollback."""
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    from app.core.config import get_settings
+
+    get_settings.cache_clear()
+    assert client.get("/api/v1/auth/verify").status_code == 204

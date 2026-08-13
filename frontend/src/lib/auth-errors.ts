@@ -23,6 +23,11 @@ const ERROR_KEYS: Record<string, string> = {
   state_expired: "auth.errors.expired",
   state_unknown: "auth.errors.expired",
   state_missing: "auth.errors.expired",
+  // The callback arrived in a browser that never started this login (auth
+  // P3.5). Usually innocent — a bookmarked callback URL, or finishing in a
+  // different browser than you began in — so it reads as "start again", not as
+  // an accusation. The suspicious case is logged and lands in auth_events.
+  state_not_bound: "auth.errors.expired",
   provider_disabled: "auth.errors.providerDisabled",
 }
 
