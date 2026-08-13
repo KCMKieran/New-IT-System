@@ -17,6 +17,7 @@ from __future__ import annotations
 import importlib.util
 import sqlite3
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -25,6 +26,14 @@ import pytest
 from app.core import burst_open_scheduler as sched
 from app.core import risk_monitor_db as rm_db
 from app.services.account_enrichment import get_user_id_map
+
+# append_scan_and_events purges rows older than _RETENTION_DAYS on every
+# call — a hardcoded scanned_at silently ages out of the window and the
+# freshly-inserted rows vanish (bit us on 2026-08-10 when "2026-07-11"
+# crossed the 30-day line). Always seed with a current timestamp.
+_SCANNED_AT = (
+    datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+)
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────
@@ -149,7 +158,7 @@ def test_append_persists_user_id(temp_db):
         _make_alert(login=200),  # no user_id → NULL
     ]
     rm_db.append_scan_and_events(
-        scanned_at="2026-07-11T00:00:00Z",
+        scanned_at=_SCANNED_AT,
         scan_interval_min=5,
         accounts_scanned=2,
         suspicious_count=2,
@@ -169,7 +178,7 @@ def test_same_client_multiple_accounts_share_user_id(temp_db):
         _make_alert(login=101, user_id=127582, server="MT5"),
     ]
     rm_db.append_scan_and_events(
-        scanned_at="2026-07-11T00:00:00Z",
+        scanned_at=_SCANNED_AT,
         scan_interval_min=5,
         accounts_scanned=2,
         suspicious_count=2,
@@ -257,7 +266,7 @@ def test_backfill_fail_open_on_connection_error(temp_db):
 
     # The write path still works with the NULL user_id.
     rm_db.append_scan_and_events(
-        scanned_at="2026-07-11T00:00:00Z",
+        scanned_at=_SCANNED_AT,
         scan_interval_min=5,
         accounts_scanned=1,
         suspicious_count=1,
@@ -299,7 +308,7 @@ def _seed_backfill_rows(temp_db):
                     client_userid=222),
     ]
     rm_db.append_scan_and_events(
-        scanned_at="2026-07-11T00:00:00Z",
+        scanned_at=_SCANNED_AT,
         scan_interval_min=5,
         accounts_scanned=3,
         suspicious_count=3,

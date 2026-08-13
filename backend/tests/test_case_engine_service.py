@@ -14,7 +14,7 @@ Tracks:
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 import pytest
@@ -275,10 +275,15 @@ def test_sync_end_to_end_multi_account_merge(temp_db):
     seventeen = ",".join(f"1-{9_000_000 + i}" for i in range(17))
     assert init_risk_cases_pg() is True
     try:
-        _persist([_alert(uid, scanned_at="2026-07-10T00:00:00Z",
-                         login_sids=seventeen)])
-        _persist([_alert(uid, scanned_at="2026-07-11T00:00:00Z",
-                         login_sids=seventeen)])
+        # Two distinct RECENT timestamps — append_scan_and_events purges
+        # rows older than _RETENTION_DAYS, so hardcoded dates silently age
+        # out of the window and the sync sees nothing (bit us 2026-08-10).
+        earlier = (
+            (datetime.now(timezone.utc) - timedelta(days=1))
+            .isoformat(timespec="seconds").replace("+00:00", "Z")
+        )
+        _persist([_alert(uid, scanned_at=earlier, login_sids=seventeen)])
+        _persist([_alert(uid, scanned_at=_NOW, login_sids=seventeen)])
 
         out = ces.sync_cases_from_alert_events()
         assert out["pg_ok"] is True

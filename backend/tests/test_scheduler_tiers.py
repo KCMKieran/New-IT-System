@@ -36,16 +36,32 @@ def reset_state(monkeypatch):
     fires a daemon thread that acquires it; if we release from the test
     main thread while that daemon is still mid-flight we trigger a
     'release unlocked lock' race when the daemon tries its own release.
+
+    Redis mirroring is stubbed out for the whole file: _run_scan publishes
+    every finished tick, and on a host where Redis is reachable the tests
+    would overwrite the SHARED latest-result key with fake alerts. The
+    publish contract has its own suite (test_burst_open_result_redis.py).
     """
     monkeypatch.setattr(bs, "_scheduler", None)
     monkeypatch.setattr(bs, "_latest_result", None)
     monkeypatch.setattr(bs, "_event_gated_last_scan_at", None)
+    monkeypatch.setattr(bs, "_startup_scan_thread", None)
+    monkeypatch.setattr(bs, "_publish_latest_result", lambda *a, **kw: None)
     yield
     if bs._scheduler is not None:
         try:
             bs._scheduler.shutdown(wait=True)  # wait so daemon finishes cleanly
         except Exception:
             pass
+    # start_burst_scheduler() also fires a raw first-scan thread that
+    # APScheduler's shutdown does NOT wait for. Join it BEFORE monkeypatch
+    # teardown restores the real _run_scan / _DB_PATH — a straggler thread
+    # used to clobber _latest_result mid-flight in later tests (the OPT-0053
+    # 1-in-N red) and write real-MySQL alerts into the real SQLite.
+    thread = bs._startup_scan_thread
+    if thread is not None:
+        thread.join(timeout=10)
+        assert not thread.is_alive(), "startup scan thread leaked past the test"
 
 
 # ── env flag wiring ───────────────────────────────────────────────────────
@@ -74,6 +90,10 @@ def test_start_scheduler_single_job_when_fast_tier_off(
     monkeypatch.delenv("BURST_FAST_TIER_ENABLED", raising=False)
     monkeypatch.setenv("BURST_SCAN_ENABLED", "true")
     monkeypatch.setenv("GAP_TRADE_SCAN_ENABLED", "false")  # skip Gap Trade job
+    # This test only asserts job WIRING — stub the scan body so the immediate
+    # first-scan thread doesn't run a real MySQL scan + SQLite write + mail
+    # dispatch from inside the test suite (nondeterministic ~1.5s of real IO).
+    monkeypatch.setattr(bs, "_run_scan", lambda **kw: None)
 
     bs.start_burst_scheduler()
 
@@ -89,6 +109,8 @@ def test_start_scheduler_adds_fast_tier_when_flag_on(
     monkeypatch.setenv("BURST_FAST_TIER_ENABLED", "true")
     monkeypatch.setenv("BURST_SCAN_ENABLED", "true")
     monkeypatch.setenv("GAP_TRADE_SCAN_ENABLED", "false")
+    # Wiring-only test — see the same stub above for why.
+    monkeypatch.setattr(bs, "_run_scan", lambda **kw: None)
 
     bs.start_burst_scheduler()
 

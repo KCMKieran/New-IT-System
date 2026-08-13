@@ -51,6 +51,11 @@ REBATE_ARB_INTERVAL_MIN = 10
 _scheduler: BackgroundScheduler | None = None
 _latest_result: dict[str, Any] | None = None
 _scan_lock = threading.Lock()
+# Handle to the immediate first-scan thread fired by start_burst_scheduler().
+# It is a raw thread APScheduler knows nothing about — shutdown(wait=True)
+# does NOT wait for it — so keep the handle to let stop/tests join it instead
+# of leaving a scan mutating _latest_result / SQLite after "shutdown".
+_startup_scan_thread: threading.Thread | None = None
 # OPT-0037 observability: a fast tick that finds the shared lock held (slow tier
 # mid-flight) skips itself. At scale, frequent skips mean the fast tier is
 # silently running below its 60s cadence — exactly when the settle-window blind
@@ -1168,7 +1173,7 @@ def trigger_rebate_arb_scan_now() -> None:
 
 def start_burst_scheduler() -> None:
     """Start the background scheduler. Runs first scan immediately on startup."""
-    global _scheduler
+    global _scheduler, _startup_scan_thread
     if _scheduler is not None:
         return
 
@@ -1288,7 +1293,8 @@ def start_burst_scheduler() -> None:
     logger.info("Burst scanner started: every %d minutes", interval_min)
 
     # Run first scan immediately in a background thread so startup isn't blocked
-    threading.Thread(target=_locked_scan, daemon=True).start()
+    _startup_scan_thread = threading.Thread(target=_locked_scan, daemon=True)
+    _startup_scan_thread.start()
 
 
 def stop_burst_scheduler() -> None:
