@@ -32,11 +32,8 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   // Navigation data with translations
   const data = React.useMemo(
     () => ({
-      user: {
-        name: "shadcn",
-        email: "m@example.com",
-        avatar: "/avatars/shadcn.jpg",
-      },
+      // The hardcoded shadcn/m@example.com placeholder is gone — <NavUser />
+      // reads the real session from useAuth() itself (auth P3).
       navSections: [
         {
           // Dashboard - direct link to home page
@@ -170,7 +167,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
         <NavSecondary items={data.navSecondary} className="mt-auto" />
       </SidebarContent>
       <SidebarFooter>
-        <NavUser user={data.user} />
+        <NavUser />
       </SidebarFooter>
     </Sidebar>
   );

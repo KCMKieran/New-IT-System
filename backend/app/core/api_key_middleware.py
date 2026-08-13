@@ -4,6 +4,12 @@ API Key Middleware
 Validates X-API-Key header on all /api/* requests.
 If API_KEY is not configured (None), validation is skipped (dev mode).
 OPTIONS requests are always allowed (CORS preflight never carries custom headers).
+Exempt: the SSE stream and the two OIDC navigations — requests a browser cannot
+attach a header to. They authenticate by session cookie instead (auth P3).
+
+Note what this key is and is not: it answers "is this caller our frontend?", and
+it is compiled into the JS bundle, so every visitor holds it. It is not identity.
+Identity is the session resolved by AuthMiddleware, one layer further in.
 """
 
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -14,6 +20,30 @@ from app.core.config import get_settings
 from app.core.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+# Server-Sent Events endpoints. Suffix-matched because each risk module mounts
+# its own stream under its own prefix.
+SSE_PATH_SUFFIXES: tuple[str, ...] = ("/alerts/stream",)
+
+# The two OIDC endpoints reached by BROWSER NAVIGATION rather than by fetch
+# (auth P3): the user clicking "Sign in with Microsoft", and Microsoft
+# redirecting back. A top-level navigation sets no custom headers, and the
+# callback is issued by Microsoft, which has never heard of our key — so
+# demanding one here makes login impossible, for everyone, always.
+#
+# The rest of /auth/* (me, logout, dev-login) is called by apiFetch and keeps
+# the key requirement.
+#
+# frontend/nginx.conf carries the mirror image of this list. Both are needed:
+# nginx guards the edge, this guards dev (vite proxy, no nginx) and anything
+# that reaches the container directly.
+NAVIGATION_PATHS: frozenset[str] = frozenset(
+    {"/api/v1/auth/login", "/api/v1/auth/callback"}
+)
+
+
+def _needs_no_api_key(path: str) -> bool:
+    return path.rstrip("/") in NAVIGATION_PATHS or path.endswith(SSE_PATH_SUFFIXES)
 
 
 class APIKeyMiddleware(BaseHTTPMiddleware):
@@ -31,13 +61,20 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
             if request.method == "OPTIONS":
                 return await call_next(request)
 
-            # EventSource (used by /risk-monitor/alerts/stream for SSE) cannot
-            # set custom headers, so we also accept the key as a query param on
-            # that one endpoint. Header path is still preferred for every other
-            # request — the query fallback is opt-in per path.
+            # Paths no browser can attach a header to (auth P3): the SSE stream
+            # and the two OIDC navigations. See the constants above.
+            #
+            # For SSE this replaces the old `?api_key=` query fallback, which
+            # put the key in URLs — and therefore in nginx logs (only the
+            # `$args_redacted` map kept it out of ours), in Cloudflare logs we
+            # do not control, and in every user's HAR. What EventSource DOES
+            # send is same-origin cookies, so the stream now authenticates as a
+            # PERSON via AuthMiddleware — strictly stronger than a shared key
+            # that every visitor can read out of the JS bundle anyway.
+            if _needs_no_api_key(request.url.path):
+                return await call_next(request)
+
             provided_key = request.headers.get("X-API-Key")
-            if not provided_key and request.url.path.endswith("/alerts/stream"):
-                provided_key = request.query_params.get("api_key")
             if provided_key != settings.API_KEY:
                 client_ip = request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
                 if not client_ip:

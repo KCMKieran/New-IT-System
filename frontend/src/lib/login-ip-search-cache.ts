@@ -2,12 +2,15 @@
  * Persists the last manual search (form + grid rows) for Login IP Monitor Tab 3.
  *
  * - Storage: `sessionStorage` (cleared when the browser tab closes; no cross-tabs).
- * - Key: includes `localStorage.auth_token` so a different OS user session uses a
- *   different key when your app issues distinct tokens. Demo mode uses a shared
- *   token; pair with `clearAllLoginIpSearchCaches` on logout to avoid carry-over.
+ * - Key: includes the signed-in email so two people sharing a machine never read
+ *   each other's rows. Before auth P3 this keyed off `localStorage.auth_token`,
+ *   which was the literal string "demo-token" for everybody — i.e. one shared
+ *   key. Still paired with `clearAllLoginIpSearchCaches` on logout, since the
+ *   key alone does not help if nobody signs in again.
  * - In-memory read memoization so `load()` is cheap on repeated `useState` inits.
  */
 
+import { getAuthSubject } from "@/lib/auth-session";
 import type { SearchResultRow, SearchType } from "@/pages/login-ip/types";
 
 const VERSION = 1;
@@ -22,11 +25,7 @@ export type LoginIpSearchCachePayload = {
 };
 
 function storageKey(): string {
-  if (typeof localStorage === "undefined") {
-    return `${KEY_PREFIX}:v${VERSION}:anon`;
-  }
-  const token = localStorage.getItem("auth_token");
-  return `${KEY_PREFIX}:v${VERSION}:${token ?? "anon"}`;
+  return `${KEY_PREFIX}:v${VERSION}:${getAuthSubject() ?? "anon"}`;
 }
 
 let _lastKey: string | null = null;

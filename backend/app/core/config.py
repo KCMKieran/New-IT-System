@@ -108,6 +108,14 @@ class Settings:
     AUTH_SESSION_RENEW_BELOW_HOURS: int
     AUTH_MANAGER_EMAILS: set[str]
 
+    # Entra ID OIDC provider (auth design P3)
+    ENTRA_TENANT_ID: str
+    ENTRA_CLIENT_ID: str
+    ENTRA_CLIENT_SECRET: str
+    ENTRA_REDIRECT_URI: str
+    ENTRA_ENABLED: bool
+    ENTRA_TRANSACTION_TTL_MINUTES: int
+
     def __init__(self) -> None:
         self.DB_HOST = os.environ.get("DB_HOST")
         self.DB_USER = os.environ.get("DB_USER")
@@ -381,6 +389,41 @@ class Settings:
             ).split(",")
             if e.strip()
         }
+
+        # ── Entra ID (Azure AD) OIDC provider (auth design P3) ───────────────
+        # App registration lives in tenant 11cf6a7b-… (design doc §8.1). The
+        # secret is in backend/.env and nowhere else; it expires ≈2028-08 and
+        # an expired secret means NOBODY can log in, with a 500 rather than a
+        # 401 as the symptom (§8.4).
+        self.ENTRA_TENANT_ID = (os.environ.get("ENTRA_TENANT_ID") or "").strip()
+        self.ENTRA_CLIENT_ID = (os.environ.get("ENTRA_CLIENT_ID") or "").strip()
+        self.ENTRA_CLIENT_SECRET = (os.environ.get("ENTRA_CLIENT_SECRET") or "").strip()
+
+        # Must byte-match a redirect URI registered on the app registration, so
+        # it is configured rather than derived from the request Host header —
+        # deriving it would both break on a mismatch and hand an attacker a
+        # Host-header injection lever into the OIDC flow.
+        #   prod: https://analysis.kohleservices.com/api/v1/auth/callback
+        #   dev : http://localhost:5173/api/v1/auth/callback  (Entra exempts
+        #         localhost from its https-only rule; reach the dev server via
+        #         `ssh -L 5173:127.0.0.1:5173`, since P2 bound it to loopback)
+        self.ENTRA_REDIRECT_URI = (os.environ.get("ENTRA_REDIRECT_URI") or "").strip()
+
+        # Derived, not configured: a half-configured provider should look absent
+        # rather than fail at the token exchange with the user already bounced
+        # through Microsoft.
+        self.ENTRA_ENABLED = bool(
+            self.ENTRA_TENANT_ID
+            and self.ENTRA_CLIENT_ID
+            and self.ENTRA_CLIENT_SECRET
+            and self.ENTRA_REDIRECT_URI
+        )
+
+        # How long a browser may sit on the Microsoft login page before the
+        # /auth/login transaction we stored for it goes stale.
+        self.ENTRA_TRANSACTION_TTL_MINUTES = int(
+            (os.environ.get("ENTRA_TRANSACTION_TTL_MINUTES") or "10").strip()
+        )
 
     @property
     def repo_root(self) -> Path:

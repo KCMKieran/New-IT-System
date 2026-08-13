@@ -46,9 +46,17 @@ const SettingsPage = lazyWithRetry(() => import("@/pages/Settings"))
 const SearchPage = lazyWithRetry(() => import("@/pages/Search"))
 
 function PrivateRoute({ children }: { children: React.ReactElement }) {
-  if (import.meta.env.VITE_DISABLE_AUTH === 'true') return children
-  const { isAuthenticated } = useAuth()
-  return isAuthenticated ? children : <Navigate to="/login" replace />
+  // useAuth() is called unconditionally. It used to sit BELOW an early return
+  // for VITE_DISABLE_AUTH, which is a conditional hook call — it only happened
+  // to work because Vite inlines that flag at compile time, so the branch was
+  // constant per build. The flag is gone (auth P3) and the hook must stay first.
+  const { status } = useAuth()
+
+  // Render nothing decisive until /auth/me has answered, otherwise a logged-in
+  // user sees the login page flash on every cold load.
+  if (status === "loading") return <PageLoader />
+
+  return status === "authenticated" ? children : <Navigate to="/login" replace />
 }
 
 function App() {

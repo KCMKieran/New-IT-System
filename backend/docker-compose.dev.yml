@@ -60,6 +60,23 @@ services:
       # `{sid}-{login}` — accounts here bypass the demo/test filter in all
       # non-Gap-Trade rules. 5-60000017 = risk team validation account.
       - RISK_MONITOR_FORCE_INCLUDE_LOGINSIDS=5-60000017
+      # Auth P3 — dev runs the REAL Microsoft sign-in, so the prod deploy is not
+      # the first time anyone exercises it. Same reason as every override above:
+      # dev and prod share backend/.env, and compose `environment:` wins.
+      #
+      # Reach dev at http://localhost:5173 via
+      #   ssh -L 5173:127.0.0.1:5173 -L 8001:127.0.0.1:8001 kcm-trade@10.6.20.138
+      # (P2 bound both ports to loopback). That URL is already registered on the
+      # app registration, and Entra exempts localhost from its https-only rule.
+      - AUTH_ENABLED=true
+      - AUTH_COOKIE_ENABLED=true
+      # http on localhost: a Secure cookie would simply not be stored.
+      - AUTH_COOKIE_SECURE=false
+      - ENTRA_REDIRECT_URI=http://localhost:5173/api/v1/auth/callback
+      # Password-free way back in if Entra is unreachable or the app
+      # registration is mid-change. Must never appear in prod's .env — main.py
+      # logs a warning about it, but that is a notice, not a guard.
+      - AUTH_DEV_LOGIN_EMAIL=kieran.xiang@kohleservices.com
     restart: unless-stopped
     depends_on:
       - redis

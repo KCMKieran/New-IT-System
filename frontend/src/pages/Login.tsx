@@ -1,26 +1,36 @@
 // src/pages/Login.tsx
-import { useNavigate } from "react-router-dom"
+import { useState } from "react"
+import { Navigate, useSearchParams } from "react-router-dom"
 import { useAuth } from "@/providers/auth-provider"
+import { useI18n } from "@/components/i18n-provider"
 import { LoginForm } from "@/components/login-form"
 import BlurText from "@/components/blur-text"
-
-
+import { PageLoader } from "@/components/LazyErrorBoundary"
+import { errorKeyFor } from "@/lib/auth-errors"
+import { sanitizeReturnTo } from "@/lib/auth-session"
 
 export default function LoginPage() {
-  const navigate = useNavigate()
-  const { login } = useAuth()
+  const { t } = useI18n()
+  const { status, loginWithMicrosoft } = useAuth()
+  const [searchParams] = useSearchParams()
+  // Clicking the button navigates the whole page away, so this only has to
+  // survive the moment in between — but in that moment a second click would
+  // start a second OIDC transaction and orphan the first.
+  const [busy, setBusy] = useState(false)
 
-  // Handle form submit from <LoginForm />
-  async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
-    e.preventDefault()
-    const data = new FormData(e.currentTarget)
-    const email = String(data.get("email") || "")
-    const password = String(data.get("password") || "")
-    await login(email, password)
-    navigate("/", { replace: true })
+  const errorKey = errorKeyFor(searchParams.get("error"))
+  const returnTo = sanitizeReturnTo(searchParams.get("return_to"))
+
+  if (status === "loading") return <PageLoader />
+  // Already signed in (or the kill switch is thrown): nothing to do here.
+  if (status === "authenticated") return <Navigate to={returnTo || "/"} replace />
+
+  function handleSignIn() {
+    setBusy(true)
+    loginWithMicrosoft(returnTo || undefined)
   }
 
-  // Add a hero image on the left; place image under /public/images/login-hero.png
+  // Hero image on the left; place image under /public/images/login-hero.png
   return (
     <div className="grid min-h-svh grid-cols-1 md:grid-cols-2">
       <div className="hidden md:block bg-muted">
@@ -43,7 +53,11 @@ export default function LoginPage() {
               repeatEveryMs={5000}
             />
           </div>
-          <LoginForm onSubmit={handleSubmit} />
+          <LoginForm
+            onSignIn={handleSignIn}
+            errorMessage={errorKey ? t(errorKey) : null}
+            busy={busy}
+          />
         </div>
       </div>
     </div>

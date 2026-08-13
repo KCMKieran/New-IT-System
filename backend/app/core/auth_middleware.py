@@ -21,10 +21,11 @@ outermost). Execution order:
 
 Credential transport
 --------------------
-Cookie first, then ``Authorization: Bearer <sid>``. The Bearer path is what
-makes P1 testable before P2 delivers a real domain + TLS: ``Secure`` is inert on
-bare-IP http and cookies ignore ports, so a cookie set for 10.6.20.138 leaks to
-every other service on this host. See ``AUTH_COOKIE_ENABLED`` in config.py.
+Cookie first, then ``Authorization: Bearer <sid>``. As of P3 the cookie is the
+real transport for browsers: P2 put everything behind https on a single domain,
+which is what makes ``Secure`` meaningful and stops a bare-IP cookie leaking to
+the four other services sharing this host. Bearer is retained for curl, tests
+and the dev back door — no browser path depends on it.
 
 Why a synchronous SQLite call inside `async def dispatch`  (MEASURED, not assumed)
 ---------------------------------------------------------------------------------
@@ -84,18 +85,24 @@ EXEMPT_PREFIXES: tuple[str, ...] = (
     "/api/v1/auth/",
 )
 
-# EventSource cannot set headers, so SSE currently authenticates with the
-# `?api_key=` query back door (api_key_middleware.py). Cookies WOULD be sent
-# automatically by EventSource, which is why the design doc calls SSE the one
-# thing cookies make better — but P1 does not issue cookies yet, so enforcing
-# here would kill the live alert stream for zero benefit. P3 removes this line
-# and the query back door together.
-EXEMPT_SUFFIXES: tuple[str, ...] = ("/alerts/stream",)
+# P3 removed the SSE exemption that used to live here. EventSource cannot set
+# headers — which is why the stream was authenticating with the `?api_key=`
+# query back door, putting the key in URLs, nginx logs and every user's HAR —
+# but it DOES send same-origin cookies automatically. Now that P2 gave us a real
+# https domain and cookies are on, the session cookie is the stream's credential
+# and the query back door in api_key_middleware.py is gone with it.
+#
+# Kept as an empty tuple rather than deleted: `_is_exempt` still consults it, and
+# a named, documented "nothing is exempt by suffix" is harder to re-add by
+# accident than a bare literal. test_app_assembly.py asserts it stays empty.
+EXEMPT_SUFFIXES: tuple[str, ...] = ()
 
 
 def _is_exempt(path: str) -> bool:
     if path.rstrip("/") == "/api/v1/auth":
         return True
+    # str.startswith/endswith against an empty tuple is False, so an empty
+    # EXEMPT_SUFFIXES simply exempts nothing.
     return path.startswith(EXEMPT_PREFIXES) or path.endswith(EXEMPT_SUFFIXES)
 
 

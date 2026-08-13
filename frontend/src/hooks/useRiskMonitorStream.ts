@@ -21,17 +21,13 @@
 import { useEffect, useRef, useState } from "react";
 import { apiFetch } from "@/lib/fetch";
 
-// EventSource cannot set custom headers, so when VITE_API_KEY is set we
-// fall back to passing the key as ?api_key=. The backend middleware
-// accepts the query param exclusively on /alerts/stream.
-const API_KEY = import.meta.env.VITE_API_KEY as string | undefined;
+// EventSource can set no custom headers, which is why this URL used to carry
+// `?api_key=<the real key>` — putting the secret in the address bar, in nginx
+// and Cloudflare logs, and in every user's HAR export. Auth P3 removed it:
+// EventSource DOES send same-origin cookies, so the session cookie authenticates
+// the stream, and the backend skips the API key check on this one path.
+// Do not re-add a query credential here.
 const STREAM_URL = "/api/v1/risk-monitor/alerts/stream";
-
-function streamUrlWithKey(): string {
-  if (!API_KEY) return STREAM_URL;
-  const sep = STREAM_URL.includes("?") ? "&" : "?";
-  return `${STREAM_URL}${sep}api_key=${encodeURIComponent(API_KEY)}`;
-}
 
 export type StreamStatus =
   | "idle"           // hook just mounted, no attempt yet
@@ -103,9 +99,10 @@ export function useRiskMonitorStream(
           return;
         }
         if (probe.status === 403 || probe.status === 401) {
-          // Wrong / missing key — treat as unavailable so we don't thrash
-          // the EventSource. Visible in the indicator tooltip via the
-          // "unavailable" message.
+          // 401 = no valid session (apiFetch has already told the auth
+          // provider, which redirects to /login); 403 = the API key layer.
+          // Either way, stop here rather than letting EventSource thrash on
+          // a request that cannot succeed.
           setStatus("unavailable");
           return;
         }
@@ -124,10 +121,9 @@ export function useRiskMonitorStream(
 
       if (cancelled) return;
       setStatus("connecting");
-      // streamUrlWithKey() adds ?api_key=... so the middleware passes us
-      // through. EventSource can't set headers — the query param is the
-      // only auth channel we have for SSE.
-      const es = new EventSource(streamUrlWithKey());
+      // Same-origin, so the browser attaches the session cookie by itself —
+      // that is the stream's credential now (see the note on STREAM_URL).
+      const es = new EventSource(STREAM_URL);
       esRef.current = es;
 
       es.onopen = () => {
