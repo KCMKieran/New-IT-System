@@ -79,15 +79,19 @@ def normalize_email(email: str) -> str:
 
 
 def is_allowed_domain(email: str) -> bool:
-    """True when the address sits in ALERT_MAIL_ALLOWED_DOMAINS.
+    """True when the address sits in AUTH_ALLOWED_EMAIL_DOMAINS.
 
-    Reuses the alert-mail allowlist rather than introducing a second list —
-    design doc §5.2. Both answer the same question ("is this one of ours?") and
-    two lists would drift.
+    P1 read ALERT_MAIL_ALLOWED_DOMAINS directly, on the reasoning that both
+    lists answer "is this one of ours?". They do not: one decides who may
+    RECEIVE a report, the other decides who may LOG IN. Sharing the variable
+    meant that adding an external auditor as a mail recipient also handed that
+    domain a login to a financial risk-control system, with nothing in the
+    variable's name or comment to warn you (auth P3.5). AUTH_ALLOWED_EMAIL_DOMAINS
+    still defaults to the mail list, so unset config behaves exactly as before.
     """
     settings = get_settings()
     _, _, domain = normalize_email(email).partition("@")
-    return bool(domain) and domain in settings.ALERT_MAIL_ALLOWED_DOMAINS
+    return bool(domain) and domain in settings.AUTH_ALLOWED_EMAIL_DOMAINS
 
 
 def default_role_for(email: str) -> str:
@@ -171,24 +175,85 @@ def upsert_user(
     *,
     display_name: str | None = None,
     source: str = "entra",
+    subject: str | None = None,
 ) -> sqlite3.Row:
     """JIT-provision on first login; refresh display_name on later ones.
 
     Deliberately does NOT reset ``role`` or ``status`` for an existing user — a
     manager demoted to user, or an account disabled after someone left, must not
     be silently restored by that person simply logging in again.
+
+    ``subject`` is the provider's immutable id (Entra's ``oid``) and, when
+    present, is the real key; email is only a label on the row. P1 keyed on
+    email alone, which broke two ways (auth P3.5):
+
+      * **rename** — IT changes john.smith@ to j.smith@ and the next login
+        creates a SECOND row: role silently resets to 'user', the old row keeps
+        a live session, and every past audit entry points at an orphan.
+      * **mailbox reuse** — a leaver's address is given to a new hire, who then
+        inherits the leaver's row, role and history.
+
+    Rename is now handled (the row follows the subject). Reuse is refused rather
+    than guessed at: two different subjects claiming one address is a fact only
+    a human can resolve, and picking either one silently is the actual bug.
     """
     email = normalize_email(email)
     with get_users_db() as conn:
+        by_subject = None
+        if subject:
+            by_subject = conn.execute(
+                "SELECT * FROM users WHERE entra_oid = ?", (subject,)
+            ).fetchone()
+
+        if by_subject is not None:
+            # Known person. Their address may have changed since last login.
+            conn.execute(
+                "UPDATE users SET display_name = COALESCE(?, display_name), email = ? "
+                "WHERE id = ?",
+                (display_name, email, by_subject["id"]),
+            )
+            if by_subject["email"] != email:
+                logger.warning(
+                    "Entra subject %s changed address %s -> %s; keeping the same "
+                    "account (role=%s)",
+                    subject, by_subject["email"], email, by_subject["role"],
+                )
+            return conn.execute(
+                "SELECT * FROM users WHERE id = ?", (by_subject["id"],)
+            ).fetchone()
+
+        by_email = conn.execute(
+            "SELECT * FROM users WHERE email = ?", (email,)
+        ).fetchone()
+
+        if by_email is not None:
+            if subject and by_email["entra_oid"] and by_email["entra_oid"] != subject:
+                # Same mailbox, different human. Refusing keeps a new joiner
+                # from inheriting a leaver's role and audit trail.
+                logger.error(
+                    "Refusing login: %s is already bound to Entra subject %s but "
+                    "the token carries %s — a reassigned mailbox needs a manual "
+                    "decision (rename the old row's email, or clear its entra_oid)",
+                    email, by_email["entra_oid"], subject,
+                )
+                raise AuthError("This address is bound to a different directory account")
+            # First login since entra_oid existed: adopt the subject onto the
+            # row that is already this person's.
+            conn.execute(
+                "UPDATE users SET display_name = COALESCE(?, display_name), "
+                "entra_oid = COALESCE(entra_oid, ?) WHERE id = ?",
+                (display_name, subject, by_email["id"]),
+            )
+            return conn.execute(
+                "SELECT * FROM users WHERE id = ?", (by_email["id"],)
+            ).fetchone()
+
         conn.execute(
-            "INSERT INTO users (email, display_name, role, status, source, created_by) "
-            "VALUES (?, ?, ?, 'active', ?, 'jit') "
-            "ON CONFLICT(email) DO UPDATE SET "
-            "  display_name = COALESCE(excluded.display_name, users.display_name)",
-            (email, display_name, default_role_for(email), source),
+            "INSERT INTO users (email, entra_oid, display_name, role, status, source, created_by) "
+            "VALUES (?, ?, ?, ?, 'active', ?, 'jit')",
+            (email, subject, display_name, default_role_for(email), source),
         )
-        row = conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
-    return row
+        return conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
 
 
 # ── sessions ─────────────────────────────────────────────────────────────────
@@ -198,6 +263,7 @@ def login(
     *,
     display_name: str | None = None,
     source: str = "entra",
+    subject: str | None = None,
     ip: str | None = None,
     user_agent: str | None = None,
     device_id: str | None = None,
@@ -218,7 +284,16 @@ def login(
         )
         raise AuthError("Email domain is not allowed")
 
-    user = upsert_user(email, display_name=display_name, source=source)
+    try:
+        user = upsert_user(
+            email, display_name=display_name, source=source, subject=subject
+        )
+    except AuthError:
+        record_auth_event(
+            "login_failure", email=email, detail="identity_conflict", ip=ip, ua=user_agent
+        )
+        raise
+
     if user["status"] != "active":
         record_auth_event(
             "login_failure", email=email, detail="account_disabled", ip=ip, ua=user_agent

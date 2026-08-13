@@ -86,6 +86,10 @@ _SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     email           TEXT NOT NULL UNIQUE,        -- always stored lowercase
+    entra_oid       TEXT,                        -- Entra's immutable subject (oid).
+                                                 -- The real identity key; email is
+                                                 -- mutable and gets reassigned. See
+                                                 -- idx_users_entra_oid below.
     display_name    TEXT,
     role            TEXT NOT NULL DEFAULT 'user'
                     CHECK (role IN ('manager', 'user')),
@@ -97,6 +101,11 @@ CREATE TABLE IF NOT EXISTS users (
     last_login_at   TEXT,
     created_by      TEXT
 );
+
+-- NOTE: idx_users_entra_oid is NOT declared here. On a database that predates
+-- the column, executescript(_SCHEMA) runs before the ALTER TABLE in
+-- init_users_db(), so an index over entra_oid would fail with "no such column"
+-- and abort startup. It is created in init_users_db() right after the ALTER.
 
 CREATE TABLE IF NOT EXISTS sessions (
     sid_hash            TEXT PRIMARY KEY,        -- sha256(sid); the raw sid never touches disk
@@ -165,13 +174,33 @@ CREATE INDEX IF NOT EXISTS idx_oidc_transactions_expiry ON oidc_transactions(exp
 """
 
 
+def _migrate_add_column(conn: sqlite3.Connection, table: str, column: str, decl: str) -> None:
+    """Add a column to an existing table if it is not there yet.
+
+    ``CREATE TABLE IF NOT EXISTS`` is a no-op once the table exists, so a column
+    added to _SCHEMA after a database has been created never appears in it.
+    Deployments carry a live users.db (it is a bind mount, not a build artefact),
+    so every post-P1 column needs a step here as well as a line in _SCHEMA.
+    """
+    cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+
 def init_users_db() -> None:
     """Create the auth schema (idempotent). Called once from app.main lifespan."""
     _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(str(_DB_PATH)) as conn:
+        conn.row_factory = sqlite3.Row
         _apply_pragmas(conn)
         conn.executescript(_SCHEMA)
-        # Future column additions go here as _migrate_xxx(conn) calls.
+        # Column additions for databases created before the column existed.
+        # ALTER must run before the index that references the new column.
+        _migrate_add_column(conn, "users", "entra_oid", "TEXT")
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_entra_oid "
+            "ON users(entra_oid) WHERE entra_oid IS NOT NULL"
+        )
         conn.commit()
 
 

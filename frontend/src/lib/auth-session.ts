@@ -56,6 +56,20 @@ export function sanitizeReturnTo(raw: string | null | undefined): string | null 
   return value
 }
 
+/**
+ * Paths served by Nginx rather than by the SPA router.
+ *
+ * `/docs/` is the MkDocs portal (a separate container behind an `auth_request`
+ * gate since auth P3.5). Reaching it with react-router's `<Navigate>` would
+ * match no route and render the SPA's not-found page instead of the document,
+ * so a return_to pointing there needs a real page load.
+ */
+const NON_SPA_PREFIXES = ["/docs/"]
+
+export function isNonSpaPath(path: string): boolean {
+  return NON_SPA_PREFIXES.some((prefix) => path.startsWith(prefix))
+}
+
 // ── "the server says we are not logged in" bus ──────────────────────────────
 
 type UnauthorizedListener = () => void;

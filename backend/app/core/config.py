@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from functools import lru_cache
 from pathlib import Path
 from typing import List
 
@@ -323,6 +324,17 @@ class Settings:
             if d.strip()
         }
 
+        # Which email domains may LOG IN. Separate knob from the alert-mail
+        # recipient allowlist above even though it defaults to the same value:
+        # those answer different questions, and sharing one variable means
+        # adding an external auditor as a report recipient silently grants that
+        # domain login rights to a risk-control system (auth P3.5).
+        self.AUTH_ALLOWED_EMAIL_DOMAINS = {
+            d.strip().lower().lstrip("@")
+            for d in os.environ.get("AUTH_ALLOWED_EMAIL_DOMAINS", "").split(",")
+            if d.strip()
+        } or set(self.ALERT_MAIL_ALLOWED_DOMAINS)
+
         # ── Auth session layer (auth design P1) ──────────────────────────────
         # Master kill switch. OFF means AuthMiddleware short-circuits before it
         # touches the DB, /auth/me answers "anonymous", and the product behaves
@@ -494,7 +506,23 @@ class Settings:
         )
 
 
+@lru_cache(maxsize=1)
 def get_settings() -> Settings:
+    """Build (once) and return the process-wide settings.
+
+    Cached because this sits on the per-request hot path: an authenticated
+    /api/* call reaches it four times (both middlewares, ``extract_sid``,
+    ``resolve_session``), and an uncached ``Settings()`` re-reads ~70 env vars
+    and rebuilds several sets each time — measured at 32.8 us a call, i.e. ~131
+    us per request, nearly triple the 45.6 us session lookup that
+    ``auth_middleware`` goes to such lengths to keep cheap. Worse, it grew with
+    every env var anyone added.
+
+    Env is read at process start and never changes at runtime, so a single
+    instance is also more honest than pretending otherwise. Tests that
+    monkeypatch env must call ``get_settings.cache_clear()`` — the autouse
+    fixture in ``tests/conftest.py`` does it for every test.
+    """
     return Settings()
 
 

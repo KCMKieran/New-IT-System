@@ -31,3 +31,11 @@ class AuthenticatedIdentity:
     email: str
     display_name: str | None
     source: str
+    # The provider's own immutable identifier for this person — Entra's `oid`.
+    # Email is what humans use but it is MUTABLE: directories rename people, and
+    # they hand a leaver's mailbox to a new hire. Keying accounts on email alone
+    # means a rename silently forks one person into two rows (losing their role
+    # and orphaning their audit trail) and a mailbox handover silently grants
+    # the newcomer the leaver's permissions. None for providers that have no
+    # such identifier (the dev back door, and email OTP in P6).
+    subject: str | None = None

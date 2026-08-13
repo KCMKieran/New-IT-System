@@ -26,6 +26,8 @@ docstring in ``core/auth_middleware.py``.)
 
 from __future__ import annotations
 
+import secrets
+
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, EmailStr
@@ -112,6 +114,48 @@ def _set_session_cookie(response: Response, sid: str) -> None:
     )
 
 
+# Holds the `state` of the in-flight login so /callback can prove the browser
+# finishing the round trip is the one that started it. Scoped to the auth paths
+# — nothing else has any use for it — and short-lived by max_age.
+_STATE_COOKIE_NAME = "kcm_oidc_state"
+_STATE_COOKIE_PATH = "/api/v1/auth"
+
+
+def _set_state_cookie(response: Response, state: str) -> None:
+    """Pin the OIDC ``state`` to this browser.
+
+    Without this, ``state`` is only a server-side single-use nonce, not a CSRF
+    token: /callback looked the transaction up by ``state`` alone, so ANY
+    browser presenting a valid (code, state) pair got the session. That is a
+    forced-sign-in: an insider starts a login, does not follow the final
+    redirect, and sends the callback URL to a colleague — whose browser then
+    silently receives the ATTACKER's session cookie and does the colleague's
+    work under the attacker's identity and audit trail (auth P3.5).
+
+    SameSite=Lax is mandatory here for the same reason as the session cookie:
+    the callback is a cross-site top-level navigation from Microsoft, and Strict
+    would withhold exactly the cookie we need.
+    """
+    settings = get_settings()
+    if not settings.AUTH_COOKIE_ENABLED:
+        return
+    response.set_cookie(
+        key=_STATE_COOKIE_NAME,
+        value=state,
+        max_age=settings.ENTRA_TRANSACTION_TTL_MINUTES * 60,
+        path=_STATE_COOKIE_PATH,
+        secure=settings.AUTH_COOKIE_SECURE,
+        httponly=True,
+        samesite="lax",
+    )
+
+
+def _clear_state_cookie(response: Response) -> None:
+    """Drop the state cookie. Always — a consumed or failed login must not
+    leave a stale binding behind for the next attempt to trip over."""
+    response.delete_cookie(key=_STATE_COOKIE_NAME, path=_STATE_COOKIE_PATH)
+
+
 def _clear_session_cookie(response: Response) -> None:
     """Always clear, regardless of AUTH_COOKIE_ENABLED.
 
@@ -156,6 +200,37 @@ def get_me(request: Request) -> MeResponse:
         role=user.role,
         status=user.status,
     )
+
+
+@router.get("/verify")
+def get_verify(request: Request) -> Response:
+    """Session probe for nginx ``auth_request``. 204 = let them through, 401 = no.
+
+    This is what puts the MkDocs portal at ``/docs/`` behind the same login as
+    the app. That portal is proxied straight to the mkdocs container and has no
+    authentication of its own; until now the only thing keeping ~150 internal
+    documents (runbooks, architecture, DB schemas) off the public internet was
+    the Cloudflare Access application in front of the whole hostname — which is
+    exactly what we are about to switch off.
+
+    Body-less on purpose: nginx discards an auth_request body anyway, and there
+    is nothing to say that the status code does not already say.
+
+    Honours AUTH_ENABLED so the 30-second kill switch (§7.1) keeps working — a
+    flip to false must restore the docs portal along with everything else,
+    otherwise the rollback path is only half a rollback.
+    """
+    settings = get_settings()
+    if not settings.AUTH_ENABLED:
+        return Response(status_code=204)
+
+    user = getattr(request.state, "user", None)
+    if user is None:
+        sid = extract_sid(request)
+        if sid:
+            user = auth_service.resolve_session(sid)
+
+    return Response(status_code=204 if user is not None else 401)
 
 
 @router.post("/logout")
@@ -275,7 +350,7 @@ def get_login(request: Request, return_to: str | None = None) -> RedirectRespons
         return _redirect_to_login_page("provider_disabled")
 
     try:
-        url = entra_oidc.authorize_url(
+        authorization = entra_oidc.authorize_url(
             return_to=sanitize_return_to(return_to),
             ip=client_ip(request),
             user_agent=request.headers.get("User-Agent"),
@@ -284,7 +359,9 @@ def get_login(request: Request, return_to: str | None = None) -> RedirectRespons
         logger.error(f"Could not start OIDC login: [{exc.code}] {exc}")
         return _redirect_to_login_page(exc.code)
 
-    return RedirectResponse(url, status_code=_SEE_OTHER)
+    response = RedirectResponse(authorization.url, status_code=_SEE_OTHER)
+    _set_state_cookie(response, authorization.state)
+    return response
 
 
 @router.get("/callback")
@@ -303,6 +380,13 @@ def get_callback(
     """
     settings = get_settings()
 
+    def _fail(error_code: str) -> RedirectResponse:
+        """Every callback failure clears the state cookie on its way out, so a
+        retry starts clean instead of carrying a dead binding."""
+        response = _redirect_to_login_page(error_code)
+        _clear_state_cookie(response)
+        return response
+
     # Microsoft itself refused (consent declined, user not assigned to the app,
     # …). Assignment-required=Yes makes "not assigned" the single most likely
     # cause here — see the §8.4 note about manually assigning new joiners.
@@ -314,10 +398,33 @@ def get_callback(
             ip=client_ip(request),
             ua=request.headers.get("User-Agent"),
         )
-        return _redirect_to_login_page("idp_refused")
+        return _fail("idp_refused")
 
     if not settings.ENTRA_ENABLED:
-        return _redirect_to_login_page("provider_disabled")
+        return _fail("provider_disabled")
+
+    # Prove this is the browser that started the login. `state` on its own is a
+    # server-side single-use nonce; only the cookie makes it a CSRF token. See
+    # _set_state_cookie for the attack this closes.
+    #
+    # Skipped when cookies are off, because then we never set one — but that
+    # configuration cannot complete a login anyway (there would be nowhere to
+    # put the session), so this relaxation grants nothing an attacker can use.
+    if settings.AUTH_COOKIE_ENABLED:
+        browser_state = request.cookies.get(_STATE_COOKIE_NAME) or ""
+        if not browser_state or not secrets.compare_digest(browser_state, state or ""):
+            logger.warning(
+                "OIDC callback state not bound to this browser (cookie %s) — "
+                "refusing; this is what a forced-sign-in attempt looks like",
+                "missing" if not browser_state else "mismatched",
+            )
+            auth_service.record_auth_event(
+                "login_failure",
+                detail="state_not_bound",
+                ip=client_ip(request),
+                ua=request.headers.get("User-Agent"),
+            )
+            return _fail("state_not_bound")
 
     try:
         identity, return_to = entra_oidc.exchange_code(code or "", state or "")
@@ -329,25 +436,27 @@ def get_callback(
             ip=client_ip(request),
             ua=request.headers.get("User-Agent"),
         )
-        return _redirect_to_login_page(exc.code)
+        return _fail(exc.code)
 
     try:
         sid, user = auth_service.login(
             identity.email,
             display_name=identity.display_name,
             source=identity.source,
+            subject=identity.subject,
             ip=client_ip(request),
             user_agent=request.headers.get("User-Agent"),
             device_id=request.headers.get("X-Device-ID"),
         )
     except auth_service.AuthError as exc:
-        # Domain allowlist or a disabled account. auth_service has already
-        # written the auth_event, so only the redirect is left to do.
+        # Domain allowlist, a disabled account, or a reassigned mailbox.
+        # auth_service has already written the auth_event.
         logger.warning(f"Login refused for {identity.email}: {exc}")
-        return _redirect_to_login_page("not_authorized")
+        return _fail("not_authorized")
 
     response = RedirectResponse(return_to or "/", status_code=_SEE_OTHER)
     _set_session_cookie(response, sid)
+    _clear_state_cookie(response)
     if not settings.AUTH_COOKIE_ENABLED:
         # Without a cookie the browser has no way to carry this session, so the
         # user would land back on the login page with no explanation. Fail loud
