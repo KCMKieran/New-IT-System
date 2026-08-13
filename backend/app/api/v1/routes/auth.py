@@ -1,34 +1,53 @@
-"""Authentication endpoints (auth design P1).
+"""Authentication endpoints (auth design P1 + P3).
 
     GET  /api/v1/auth/me          who am I
     POST /api/v1/auth/logout      revoke this session
     POST /api/v1/auth/dev-login   mint a session with no IdP  (dev back door)
+    GET  /api/v1/auth/login       302 to Entra ID              (P3)
+    GET  /api/v1/auth/callback    Entra redirects back here    (P3)
 
 These paths are exempt from AuthMiddleware — they are how you get a session in
-the first place. P3 adds ``/auth/login`` and ``/auth/callback`` alongside them
-for the real Entra ID OIDC round trip; ``dev-login`` then stays as the way to
-run dev without bouncing through Microsoft (design doc §8.2 decision 3).
+the first place. ``dev-login`` stays as the way to run dev without bouncing
+through Microsoft (design doc §8.2 decision 3).
+
+⚠ ``/login`` and ``/callback`` are reached by BROWSER NAVIGATION, not by fetch,
+so neither carries the ``X-API-Key`` header that ``frontend/nginx.conf`` demands
+of everything under ``location /api``. nginx therefore has two exact-match
+locations that skip that check for exactly these two paths — if a future edit
+drops them, login 403s at the edge and never reaches this file.
 
 Handlers are `def`, not `async def`, per CLAUDE.md: the service layer does
-synchronous SQLite, so FastAPI runs these in its threadpool instead of on the
-event loop. (The middleware is the deliberate exception — BaseHTTPMiddleware
-offers no sync hook, and the measured cost made offloading counter-productive.
-See the module docstring in ``core/auth_middleware.py``.)
+synchronous SQLite (and, for the OIDC exchange, a blocking ``requests`` call),
+so FastAPI runs these in its threadpool instead of on the event loop. (The
+middleware is the deliberate exception — BaseHTTPMiddleware offers no sync hook,
+and the measured cost made offloading counter-productive. See the module
+docstring in ``core/auth_middleware.py``.)
 """
 
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, EmailStr
 
 from app.core.auth_middleware import client_ip, extract_sid
 from app.core.config import get_settings
 from app.core.logging_config import get_logger
 from app.services import auth_service
+from app.services.auth.providers import entra_oidc
+from app.services.auth.providers.base import ProviderError
 
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/auth")
+
+# Where the SPA renders its login screen. Failures land here with a short,
+# non-revealing ?error= code that the page maps to a friendly message.
+LOGIN_PAGE = "/login"
+
+# 303 rather than 302 on the callback: the browser must switch to GET for the
+# app URL we send it to, and 303 says so unambiguously.
+_SEE_OTHER = 303
 
 
 # ── schemas ──────────────────────────────────────────────────────────────────
@@ -199,3 +218,143 @@ def post_dev_login(
     _set_session_cookie(response, sid)
     logger.warning(f"DEV LOGIN used for {user.email} from {client_ip(request)}")
     return LoginResponse(ok=True, email=user.email, role=user.role, session_id=sid)
+
+
+# ── Entra ID OIDC (P3) ───────────────────────────────────────────────────────
+
+# Longer than any real in-app path; a bookmark-sized string is all we ever need.
+_MAX_RETURN_TO = 512
+
+
+def sanitize_return_to(raw: str | None) -> str | None:
+    """Reduce a caller-supplied ``return_to`` to a safe same-origin path.
+
+    Returns None when the value cannot be trusted, and the caller then sends the
+    user to ``/``. This is an open-redirect guard: ``/auth/login`` is reachable
+    without a session, so anyone can hand a colleague a link to it, and without
+    this check ``?return_to=https://evil.example`` would turn our own login flow
+    into a redirector that carries our domain's credibility.
+
+    Rejected: anything not starting with a single ``/`` (absolute URLs), ``//``
+    and ``/\\`` (protocol-relative — browsers read both as "new host"), embedded
+    control characters (header/URL splitting), and overlong values.
+    """
+    if not raw:
+        return None
+    value = raw.strip()
+    if not value or len(value) > _MAX_RETURN_TO:
+        return None
+    if not value.startswith("/"):
+        return None
+    # Backslash is normalised to "/" by browsers, so "/\evil.example" is
+    # protocol-relative in practice even though it does not look like it.
+    if value.startswith("//") or value.startswith("/\\"):
+        return None
+    if any(ch in value for ch in ("\r", "\n", "\t", "\x00")):
+        return None
+    return value
+
+
+def _redirect_to_login_page(error_code: str) -> RedirectResponse:
+    """Bounce back to the SPA login screen with a short, non-revealing code."""
+    return RedirectResponse(f"{LOGIN_PAGE}?error={error_code}", status_code=_SEE_OTHER)
+
+
+@router.get("/login")
+def get_login(request: Request, return_to: str | None = None) -> RedirectResponse:
+    """Begin the OIDC round trip: 302 the browser to Microsoft.
+
+    Deliberately a redirect and not a JSON payload the SPA would follow: an
+    XHR to login.microsoftonline.com would fail CORS, and the IdP needs a real
+    top-level navigation to be able to show its own login UI and set its own
+    cookies.
+    """
+    settings = get_settings()
+    if not settings.ENTRA_ENABLED:
+        logger.error("GET /auth/login but Entra is not configured (ENTRA_* env)")
+        return _redirect_to_login_page("provider_disabled")
+
+    try:
+        url = entra_oidc.authorize_url(
+            return_to=sanitize_return_to(return_to),
+            ip=client_ip(request),
+            user_agent=request.headers.get("User-Agent"),
+        )
+    except ProviderError as exc:
+        logger.error(f"Could not start OIDC login: [{exc.code}] {exc}")
+        return _redirect_to_login_page(exc.code)
+
+    return RedirectResponse(url, status_code=_SEE_OTHER)
+
+
+@router.get("/callback")
+def get_callback(
+    request: Request,
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+    error_description: str | None = None,
+) -> RedirectResponse:
+    """Finish the OIDC round trip: verify, mint a session, set the cookie.
+
+    Every failure ends at ``/login?error=<code>``. The browser never sees
+    ``str(exc)``: those messages name tenants, claim contents and AADSTS codes,
+    which belong in backend.log and auth_events, not on screen.
+    """
+    settings = get_settings()
+
+    # Microsoft itself refused (consent declined, user not assigned to the app,
+    # …). Assignment-required=Yes makes "not assigned" the single most likely
+    # cause here — see the §8.4 note about manually assigning new joiners.
+    if error:
+        logger.warning(f"Entra returned error={error!r}: {error_description!r}")
+        auth_service.record_auth_event(
+            "login_failure",
+            detail=f"idp_error:{error}"[:200],
+            ip=client_ip(request),
+            ua=request.headers.get("User-Agent"),
+        )
+        return _redirect_to_login_page("idp_refused")
+
+    if not settings.ENTRA_ENABLED:
+        return _redirect_to_login_page("provider_disabled")
+
+    try:
+        identity, return_to = entra_oidc.exchange_code(code or "", state or "")
+    except ProviderError as exc:
+        logger.warning(f"OIDC callback rejected: [{exc.code}] {exc}")
+        auth_service.record_auth_event(
+            "login_failure",
+            detail=exc.code,
+            ip=client_ip(request),
+            ua=request.headers.get("User-Agent"),
+        )
+        return _redirect_to_login_page(exc.code)
+
+    try:
+        sid, user = auth_service.login(
+            identity.email,
+            display_name=identity.display_name,
+            source=identity.source,
+            ip=client_ip(request),
+            user_agent=request.headers.get("User-Agent"),
+            device_id=request.headers.get("X-Device-ID"),
+        )
+    except auth_service.AuthError as exc:
+        # Domain allowlist or a disabled account. auth_service has already
+        # written the auth_event, so only the redirect is left to do.
+        logger.warning(f"Login refused for {identity.email}: {exc}")
+        return _redirect_to_login_page("not_authorized")
+
+    response = RedirectResponse(return_to or "/", status_code=_SEE_OTHER)
+    _set_session_cookie(response, sid)
+    if not settings.AUTH_COOKIE_ENABLED:
+        # Without a cookie the browser has no way to carry this session, so the
+        # user would land back on the login page with no explanation. Fail loud
+        # in the log instead of silently looping.
+        logger.error(
+            "OIDC login succeeded for %s but AUTH_COOKIE_ENABLED is false — "
+            "the browser cannot keep this session",
+            user.email,
+        )
+    return response

@@ -209,4 +209,22 @@ export const zhCN = {
       completed: "刷新完成",
     },
   },
+
+  // Authentication (auth design P3 — Entra ID single sign-on)
+  auth: {
+    title: "登录",
+    subtitle: "使用公司 Microsoft 账户登录",
+    signInWithMicrosoft: "使用 Microsoft 账户登录",
+    accessNote: "仅限已获授权的 KCM 员工账户。如无法登录，请联系 IT。",
+    signOut: "退出登录",
+    account: "账户",
+    errors: {
+      notAuthorized: "该账户无权访问本系统。如需开通，请联系 IT。",
+      idpRefused: "Microsoft 拒绝了本次登录。通常是该账户尚未被指派到本应用，请联系 IT。",
+      noEmailClaim: "无法从 Microsoft 获取邮箱地址，这是目录配置问题，请联系 IT。",
+      expired: "登录已超时，请重新登录。",
+      providerDisabled: "登录服务未配置，请联系 IT。",
+      generic: "登录失败，请重试。若持续失败，请联系 IT。",
+    },
+  },
 } as const;

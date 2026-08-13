@@ -147,14 +147,100 @@ def test_dev_login_backdoor_is_off_by_default(app_main, monkeypatch):
 
 
 def test_cookies_are_not_issued_by_default(monkeypatch):
-    """P1 builds the cookie mechanism but leaves it off.
+    """The CODE default stays off; prod opts in via backend/.env.
 
-    Bare-IP http makes `Secure` inert and cookies ignore ports (RFC 6265), so a
-    session cookie for 10.6.20.138 would also reach :80/:7001/:7003/:8088/:19999
-    and be shared between dev(:5173) and prod(:3000). P2 (domain + TLS) is the
-    prerequisite for flipping AUTH_COOKIE_ENABLED on.
+    P1 wrote this because bare-IP http makes `Secure` inert and cookies ignore
+    ports (RFC 6265), so a session cookie for 10.6.20.138 would also reach
+    :80/:7001/:7003/:8088/:19999 and be shared between dev(:5173) and
+    prod(:3000). P2 removed those conditions (single https domain, bare-IP ports
+    bound to loopback) and P3 turned the switch on in the environment — but the
+    safe-by-default behaviour of an UNCONFIGURED deployment must not drift.
     """
     monkeypatch.delenv("AUTH_COOKIE_ENABLED", raising=False)
     from app.core.config import get_settings
 
     assert get_settings().AUTH_COOKIE_ENABLED is False
+
+
+# ── P3 removed two back doors; keep them removed ─────────────────────────────
+
+def test_sse_is_not_exempt_from_authentication():
+    """P1 exempted the SSE stream; P3 revoked that.
+
+    EventSource sends same-origin cookies, so the live alert stream is now
+    guarded like every other endpoint. Re-adding a suffix here would silently
+    reopen an unauthenticated window onto real-time risk alerts.
+    """
+    from app.core.auth_middleware import EXEMPT_SUFFIXES
+
+    assert EXEMPT_SUFFIXES == ()
+
+
+def test_api_key_is_not_accepted_from_the_query_string(app_main, monkeypatch):
+    """The `?api_key=` back door is gone (auth P3).
+
+    It existed only for EventSource and put the plaintext key into URLs — nginx
+    access logs (protected solely by the `$args_redacted` map), Cloudflare's
+    logs, and every user's HAR export. Measured before removal: 69 occurrences
+    of the full key in four hours of access log.
+    """
+    monkeypatch.setenv("API_KEY", "the-real-key")
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    client = TestClient(app_main.create_app())
+
+    # The correct key, in the place it is no longer read from.
+    assert client.get("/api/v1/aggregations?api_key=the-real-key").status_code == 403
+    # …and still accepted in the header, so this proves the key itself is right.
+    assert (
+        client.get(
+            "/api/v1/aggregations", headers={"X-API-Key": "the-real-key"}
+        ).status_code
+        != 403
+    )
+
+
+def test_oidc_navigations_need_no_api_key(app_main, monkeypatch, tmp_path):
+    """Login is a browser navigation, and navigations set no custom headers.
+
+    Requiring X-API-Key on these two makes signing in impossible for everyone,
+    and the failure is invisible from the backend side — nginx or this
+    middleware answers 403 and no handler ever runs. frontend/nginx.conf carries
+    the mirror of this exemption; both are load-bearing.
+    """
+    monkeypatch.setenv("API_KEY", "the-real-key")
+    monkeypatch.setenv("AUTH_ENABLED", "true")
+
+    # /auth/login writes an OIDC transaction row, so redirect users.db at a temp
+    # file — backend/data/users.db is a dev+prod shared bind mount.
+    from app.core import users_db
+
+    monkeypatch.setattr(users_db, "_DB_PATH", tmp_path / "users_test.db")
+    users_db.reset_connection_cache()
+    users_db.init_users_db()
+
+    client = TestClient(app_main.create_app(), follow_redirects=False)
+
+    for path in ("/api/v1/auth/login", "/api/v1/auth/callback"):
+        assert client.get(path).status_code != 403, path
+
+    # The rest of /auth/* is called by apiFetch and keeps the key requirement.
+    assert client.get("/api/v1/auth/me").status_code == 403
+
+
+def test_sse_needs_no_api_key_because_eventsource_cannot_send_one(
+    app_main, monkeypatch
+):
+    """The other half of the same change.
+
+    Having dropped the query fallback, the key check must not apply to SSE at
+    all — EventSource can present neither a header nor a query param, so any key
+    requirement on this path is simply "the live alert stream is off". Identity
+    on this path comes from the session cookie via AuthMiddleware; with
+    AUTH_ENABLED=false (the kill switch) it is open, exactly as it was pre-P3.
+    """
+    monkeypatch.setenv("API_KEY", "the-real-key")
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    client = TestClient(app_main.create_app())
+
+    r = client.get("/api/v1/risk-monitor/alerts/stream")
+    assert r.status_code != 403

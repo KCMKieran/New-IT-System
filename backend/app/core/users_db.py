@@ -1,11 +1,21 @@
-"""SQLite store for the authentication session layer (auth design P1).
+"""SQLite store for the authentication session layer (auth design P1/P3).
 
-Four tables, all in ``backend/data/users.db``:
+Five tables, all in ``backend/data/users.db``:
 
-  users        — one row per human, JIT-provisioned on first successful login
-  sessions     — opaque server-side sessions; only sha256(sid) is stored
-  auth_events  — append-only authentication audit trail
-  audit_log    — append-only business audit trail (actor comes from the session)
+  users              — one row per human, JIT-provisioned on first successful login
+  sessions           — opaque server-side sessions; only sha256(sid) is stored
+  auth_events        — append-only authentication audit trail
+  audit_log          — append-only business audit trail (actor comes from the session)
+  oidc_transactions  — in-flight OIDC round trips (P3); state/nonce/PKCE verifier
+
+Why the OIDC transaction lives in the DB and not in process memory (P3)
+-----------------------------------------------------------------------
+prod runs ``uvicorn --workers 4``. ``/auth/login`` and the ``/auth/callback``
+that Microsoft redirects back to are two separate requests and land on whichever
+worker the kernel picks — with a module-level dict the callback would fail
+roughly three times out of four, intermittently and unreproducibly. Redis is not
+an option for the same reason sessions avoid it (``allkeys-lru`` evicts under
+pressure), so the shared SQLite file is the only store all four workers agree on.
 
 Why SQLite and not Redis
 ------------------------
@@ -133,6 +143,25 @@ CREATE TABLE IF NOT EXISTS audit_log (
 
 CREATE INDEX IF NOT EXISTS idx_audit_log_at ON audit_log(at);
 CREATE INDEX IF NOT EXISTS idx_audit_log_actor ON audit_log(actor_email, at);
+
+-- P3: one row per in-flight OIDC round trip, created by /auth/login and
+-- consumed (deleted) by /auth/callback. Rows are short-lived (minutes) and
+-- single-use: deleting on read is what makes an authorization-code replay fail.
+CREATE TABLE IF NOT EXISTS oidc_transactions (
+    state         TEXT PRIMARY KEY,   -- also the CSRF token; echoed back by the IdP
+    nonce         TEXT NOT NULL,      -- must equal the id_token's nonce claim
+    code_verifier TEXT NOT NULL,      -- PKCE; proves the callback comes from the
+                                      -- same client that started the flow
+    redirect_uri  TEXT NOT NULL,      -- pinned here so the token exchange sends
+                                      -- back exactly what authorize was given
+    return_to     TEXT,               -- app-relative path, already validated
+    created_at    TEXT NOT NULL,
+    expires_at    TEXT NOT NULL,
+    ip            TEXT,
+    user_agent    TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_oidc_transactions_expiry ON oidc_transactions(expires_at);
 """
 
 

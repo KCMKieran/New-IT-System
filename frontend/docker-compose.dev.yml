@@ -16,12 +16,37 @@ services:
     environment:
       - CHOKIDAR_USEPOLLING=true
       - WATCHPACK_POLLING=true
-      - VITE_API_PROXY_TARGET=http://host.docker.internal:8001
-      - VITE_DISABLE_AUTH=true
-      # Dev uses direct IP access, no need for domain-based HMR
-      # HMR works automatically at http://10.6.20.138:5173
+      # Reach the dev backend by container name over a shared docker network.
+      #
+      # Was http://host.docker.internal:8001, which P2 broke: binding the
+      # backend to 127.0.0.1:8001 (correct — it must not be on the LAN) also put
+      # it out of reach of the docker bridge, so every proxied /api call from
+      # this container failed with ECONNREFUSED 172.17.0.1:8001. Container-to-
+      # container is the right answer anyway: it does not depend on which host
+      # interface the backend happens to publish on.
+      - VITE_API_PROXY_TARGET=http://new-it-backend-dev:8001
+      # VITE_DISABLE_AUTH removed in auth P3 — the login page is real now and
+      # the switch is the backend's AUTH_ENABLED (runtime, not compile time).
+      #
+      # Reaching this dev server: P2 bound :5173 to loopback, so from your own
+      # machine use `ssh -L 5173:127.0.0.1:5173 kcm-trade@10.6.20.138` and open
+      # http://localhost:5173. That host also matches the redirect URI already
+      # registered in Entra (http://localhost:5173/api/v1/auth/callback), so the
+      # real Microsoft sign-in works in dev — and Entra exempts localhost from
+      # its https-only rule, so no certificate is involved.
     restart: unless-stopped
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    networks:
+      - default
+      - backend_dev
+
+networks:
+  # The network backend/docker-compose.dev.yml creates (compose names it after
+  # its project directory). Declared external so this file joins it rather than
+  # trying to own it — bring the backend up first.
+  backend_dev:
+    external: true
+    name: backend_default
 
 

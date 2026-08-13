@@ -32,6 +32,11 @@ apscheduler
 # Explicit pin — previously only a transitive dep (via dash). Used by the
 # OPT-0032 CRM risk-tag client (crm_risk_tag_client.py).
 requests==2.31.0
+# Entra ID (Azure AD) OIDC id_token verification — auth design P3.
+# The [crypto] extra pulls in `cryptography`, which is what supplies RS256; plain
+# PyJWT can only do HMAC and would silently leave us unable to verify Microsoft's
+# signatures. Both ship manylinux wheels, so the slim image needs no build chain.
+PyJWT[crypto]==2.10.1
 # MaxMind GeoIP2 client — resolves the country appended to the last-close IP
 # pushed to the CRM (login_ip_geo_service.py). Pinned to the same version
 # Manager_Log_Monitor has been running against this MaxMind account.

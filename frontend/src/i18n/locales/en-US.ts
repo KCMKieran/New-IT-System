@@ -207,5 +207,25 @@ export const enUS = {
       completed: "Refresh Completed",
     },
   },
+
+  // Authentication (auth design P3 — Entra ID single sign-on)
+  auth: {
+    title: "Sign in",
+    subtitle: "Use your company Microsoft account",
+    signInWithMicrosoft: "Sign in with Microsoft",
+    accessNote: "Authorised KCM staff accounts only. Contact IT if you cannot sign in.",
+    signOut: "Log out",
+    account: "Account",
+    errors: {
+      notAuthorized: "This account is not authorised for this system. Contact IT for access.",
+      idpRefused:
+        "Microsoft refused the sign-in. Usually the account has not been assigned to this app — contact IT.",
+      noEmailClaim:
+        "Microsoft did not return an email address for this account. That is a directory configuration issue — contact IT.",
+      expired: "The sign-in timed out. Please try again.",
+      providerDisabled: "Sign-in is not configured. Contact IT.",
+      generic: "Sign-in failed. Please try again, and contact IT if it keeps failing.",
+    },
+  },
 } as const
 

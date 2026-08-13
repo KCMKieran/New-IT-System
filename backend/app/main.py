@@ -146,6 +146,33 @@ async def lifespan(app: FastAPI):
             _auth_settings.AUTH_DEV_LOGIN_EMAIL,
         )
 
+    # Entra ID provider (design P3). Enforcement without a working provider is
+    # the one combination nobody can recover from through the UI — every user,
+    # including whoever would turn it off, is bounced to a login page with no
+    # working button. Say so at boot rather than at 09:00 tomorrow.
+    if _auth_settings.ENTRA_ENABLED:
+        logger.info(
+            "Entra OIDC configured — redirect_uri=%s tenant=%s",
+            _auth_settings.ENTRA_REDIRECT_URI,
+            _auth_settings.ENTRA_TENANT_ID,
+        )
+    elif _auth_settings.AUTH_ENABLED:
+        logger.error(
+            "AUTH_ENABLED=true but Entra OIDC is NOT configured (need "
+            "ENTRA_TENANT_ID / ENTRA_CLIENT_ID / ENTRA_CLIENT_SECRET / "
+            "ENTRA_REDIRECT_URI). Nobody can sign in%s.",
+            " except via AUTH_DEV_LOGIN_EMAIL"
+            if _auth_settings.AUTH_DEV_LOGIN_EMAIL
+            else "",
+        )
+    if _auth_settings.AUTH_ENABLED and not _auth_settings.AUTH_COOKIE_ENABLED:
+        # A browser cannot hold a session without the cookie, so logins would
+        # succeed and then immediately appear to fail.
+        logger.error(
+            "AUTH_ENABLED=true but AUTH_COOKIE_ENABLED=false — browsers cannot "
+            "keep a session; sign-in will loop back to the login page."
+        )
+
     owns_scheduler = _try_acquire_scheduler_lock()
     if owns_scheduler:
         logger.info(

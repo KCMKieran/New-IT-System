@@ -11,9 +11,14 @@ RUN npm ci
 # Copy source code and build
 COPY . .
 
-# Vite embeds VITE_* env vars at compile time (not runtime)
-# Skip the app's built-in login page — Cloudflare Zero Trust handles auth
-ENV VITE_DISABLE_AUTH=true
+# Vite embeds VITE_* env vars at compile time (not runtime).
+#
+# VITE_DISABLE_AUTH is gone as of auth P3. It used to skip the login page
+# entirely on the theory that Cloudflare Zero Trust handled auth — which was
+# never true for /api/* (that Access application is a Bypass for Everyone), so
+# the app in fact had no authentication at all. The login page is now real and
+# the kill switch is the backend's AUTH_ENABLED env var, which is runtime and
+# therefore reversible without a rebuild.
 
 RUN npm run build
 # After this, compiled static files are in /app/dist/

@@ -1297,13 +1297,35 @@ def start_burst_scheduler() -> None:
     _startup_scan_thread.start()
 
 
+# A first scan can legitimately run tens of seconds (the rebate-arb tier pays a
+# ~30s trades-baseline rebuild on its first tick of an MT day). Bounded so a
+# wedged scan degrades shutdown to a warning instead of hanging the process.
+_STARTUP_SCAN_JOIN_TIMEOUT_S = 30
+
+
 def stop_burst_scheduler() -> None:
-    """Shut down the background scheduler."""
-    global _scheduler
+    """Shut down the background scheduler and wait out the first-scan thread."""
+    global _scheduler, _startup_scan_thread
+
     if _scheduler:
         _scheduler.shutdown(wait=False)
         _scheduler = None
         logger.info("Burst scanner stopped")
+
+    # APScheduler never knew about this thread, so shutdown() does not wait for
+    # it. Without the join, a scan started at boot keeps writing _latest_result
+    # and SQLite after we have announced the scanner is stopped — which in tests
+    # leaks state into the next case and in prod means a shutdown that is not one.
+    thread = _startup_scan_thread
+    if thread is not None and thread.is_alive():
+        thread.join(timeout=_STARTUP_SCAN_JOIN_TIMEOUT_S)
+        if thread.is_alive():
+            logger.warning(
+                "Startup scan thread still running after %ds — continuing shutdown "
+                "without it (it is a daemon and will not block process exit)",
+                _STARTUP_SCAN_JOIN_TIMEOUT_S,
+            )
+    _startup_scan_thread = None
 
 
 def reschedule_burst(new_interval_min: int) -> None:

@@ -10,6 +10,12 @@ node_modules
 .env.development
 .env.test
 .env.production
+# Hand-made backups before editing a .env (e.g. .env.bak-20260812-113336).
+# The bare `.env` rule above does NOT cover these, so a backup holding every
+# production secret would otherwise sit in `git status` as untracked and be
+# swept up by `git add -A`.
+.env.bak*
+*.env.bak*
 __pycache__
 *venv
 *.venv

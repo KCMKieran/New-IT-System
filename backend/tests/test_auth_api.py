@@ -25,6 +25,17 @@ def make_client(tmp_path, monkeypatch):
     def _build(**env: str) -> TestClient:
         monkeypatch.setenv("ALERT_MAIL_ALLOWED_DOMAINS", "kohleservices.com")
         monkeypatch.setenv("AUTH_MANAGER_EMAILS", "boss@kohleservices.com")
+        # Pin every auth switch this file cares about instead of inheriting
+        # backend/.env, which config.py load_dotenv()s and which now carries the
+        # production values (P3 turned AUTH_ENABLED / AUTH_COOKIE_* on). A test
+        # that silently depends on a deployment file is a test that changes
+        # meaning the next time someone edits prod config.
+        monkeypatch.setenv("AUTH_ENABLED", "false")
+        monkeypatch.setenv("AUTH_COOKIE_ENABLED", "false")
+        # TestClient speaks http://testserver, and httpx will not send a Secure
+        # cookie back over http — the session would look like it never stuck.
+        monkeypatch.setenv("AUTH_COOKIE_SECURE", "false")
+        monkeypatch.delenv("AUTH_DEV_LOGIN_EMAIL", raising=False)
         for key, value in env.items():
             monkeypatch.setenv(key, value)
 
@@ -164,10 +175,26 @@ def test_client_error_reporting_is_exempt(enforcing):
     assert enforcing.post("/api/v1/log/client-error").status_code == 204
 
 
-def test_sse_stream_is_exempt(enforcing):
-    """EventSource cannot set headers and P1 issues no cookies; enforcing here
-    would kill the live alert stream for no gain. Removed in P3."""
-    assert enforcing.get("/api/v1/risk-monitor/alerts/stream").status_code == 200
+def test_sse_stream_is_no_longer_exempt(enforcing):
+    """P3 reversed P1's SSE exemption.
+
+    P1 let the stream through because EventSource can set no headers and P1
+    issued no cookies, so enforcing would have killed live alerts for no gain.
+    P3 issues cookies, EventSource sends them automatically, and the `?api_key=`
+    query back door is gone — so the stream is guarded like everything else.
+    """
+    assert enforcing.get("/api/v1/risk-monitor/alerts/stream").status_code == 401
+
+
+def test_sse_stream_passes_with_a_session_cookie(make_client):
+    """The credential EventSource can actually present."""
+    client = make_client(
+        AUTH_ENABLED="true",
+        AUTH_DEV_LOGIN_EMAIL=DEV_EMAIL,
+        AUTH_COOKIE_ENABLED="true",
+    )
+    client.post("/api/v1/auth/dev-login", json={})
+    assert client.get("/api/v1/risk-monitor/alerts/stream").status_code == 200
 
 
 def test_auth_endpoints_are_exempt(enforcing):
@@ -201,9 +228,17 @@ def test_dev_login_grants_the_configured_role(make_client):
 
 # ── cookies ──────────────────────────────────────────────────────────────────
 
-def test_no_cookie_is_set_by_default(make_client):
-    """P1 builds the cookie mechanism but leaves it off — see config.py."""
-    client = make_client(AUTH_ENABLED="true", AUTH_DEV_LOGIN_EMAIL=DEV_EMAIL)
+def test_no_cookie_is_set_when_disabled(make_client):
+    """AUTH_COOKIE_ENABLED gates the cookie, independently of AUTH_ENABLED.
+
+    Was `test_no_cookie_is_set_by_default` in P1, when off was the shipped
+    default. P3 flips prod to on, so what still needs guarding is that the
+    switch actually switches — a cookie issued while it is off would be a
+    session travelling somewhere nobody signed off on.
+    """
+    client = make_client(
+        AUTH_ENABLED="true", AUTH_DEV_LOGIN_EMAIL=DEV_EMAIL, AUTH_COOKIE_ENABLED="false"
+    )
     r = client.post("/api/v1/auth/dev-login", json={})
     assert "set-cookie" not in {k.lower() for k in r.headers}
 

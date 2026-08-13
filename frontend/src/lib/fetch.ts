@@ -1,6 +1,8 @@
 /**
  * Wrapper around native fetch() for /api/* requests:
  *   - auto-injects X-API-Key header in production (VITE_API_KEY set)
+ *   - sends the session cookie (credentials: "include")
+ *   - reports 401s to the auth provider so a dead session redirects to /login
  *   - default 60s timeout (configurable per call)
  *   - one auto-retry on transient failures (network error / 5xx),
  *     with 1s backoff; 4xx and AbortError are not retried
@@ -9,9 +11,15 @@
  * In dev (no VITE_API_KEY), falls back to plain fetch + timeout/retry only.
  */
 
+import { notifyUnauthorized } from "@/lib/auth-session";
 import { getDeviceId } from "@/lib/view-profiles/device-id";
 
 const API_KEY = import.meta.env.VITE_API_KEY as string | undefined;
+
+// Endpoints that legitimately answer 401/anonymous as part of normal operation.
+// Reporting those would put the app in a redirect loop: /auth/me returning
+// "nobody is logged in" is the answer we asked for, not a session expiring.
+const AUTH_URL_PREFIX = "/api/v1/auth/";
 
 export interface ApiFetchOpts {
   /** Request timeout in ms. Default 60000. Set 0 to disable. */
@@ -100,7 +108,19 @@ export async function apiFetch(
     const { signal, cleanup } = makeCombinedSignal(externalSignal, timeoutMs);
 
     try {
-      const res = await fetch(input, { ...init, headers, signal });
+      // credentials: "include" so the session cookie rides along. Same-origin
+      // in both environments (nginx in prod, the vite proxy in dev), so this is
+      // explicit rather than strictly required — but being explicit is what
+      // stops a future absolute-URL call from silently dropping the session.
+      const res = await fetch(input, { credentials: "include", ...init, headers, signal });
+
+      // A 401 means the server no longer recognises our session (idle timeout,
+      // the 7d ceiling, or an admin revoking it). Tell the auth provider so it
+      // can send the user to the login page, then return the response so the
+      // caller's own error handling still runs.
+      if (res.status === 401 && url.startsWith("/api/") && !url.startsWith(AUTH_URL_PREFIX)) {
+        notifyUnauthorized();
+      }
 
       // Retry on 5xx; 4xx returns as-is for caller to handle
       if (isTransientStatus(res.status) && attempt < retries) {
