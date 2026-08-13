@@ -95,9 +95,8 @@ export const enUS = {
   },
 
   ibidLotsPage: {
-    description: "This tool is only reachable from the corporate network or VPN.",
-    note: "Use the button below to open the IBID lots lookup in a new tab.",
-    button: "Open Lookup",
+    description:
+      "Traded lots for an ibid / user id / MT trading account over a date range, split into holds ≥10s and <10s.",
   },
   
   // Configuration

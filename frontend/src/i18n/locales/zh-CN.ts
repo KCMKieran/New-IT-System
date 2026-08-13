@@ -97,9 +97,8 @@ export const zhCN = {
   },
 
   ibidLotsPage: {
-    description: "该功能仅支持公司内网或VPN访问，请提前确认网络环境。",
-    note: "点击下方按钮会在新标签中打开 IBID 手数查询系统。",
-    button: "打开查询系统",
+    description:
+      "按 ibid / 用户 id / 交易账户统计一段区间内的成交手数，并拆出「持仓 ≥10s / <10s」。",
   },
 
   // Configuration

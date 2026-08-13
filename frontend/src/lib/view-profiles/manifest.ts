@@ -41,6 +41,10 @@ export const FILTER_STATE_KEYS: readonly string[] = [
   // sids). The investigation context — the `anchor` timestamp and `symbol` —
   // stays in React state and is deliberately absent from this key's payload.
   "WINDOW_SCAN_FILTERS_V1",
+  // IBID Lots: query type / server / symbol mode are viewing preferences. The
+  // target ID and the absolute date range stay in React state (investigation
+  // context) and never reach localStorage.
+  "IBID_LOTS_FILTERS_V1",
 ];
 
 /**

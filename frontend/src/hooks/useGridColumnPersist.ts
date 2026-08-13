@@ -51,6 +51,8 @@ export const GRID_STORAGE_KEYS = {
   RISK_WATCHLIST_POSITIONS: "RISK_WATCHLIST_POSITIONS_GRID_STATE_V2",
   HOLD_BUCKET_REPORT: "HOLD_BUCKET_REPORT_GRID_STATE_V1",
   WINDOW_SCAN: "WINDOW_SCAN_GRID_STATE_V1",
+  // /ibid-lots · client breakdown of the For-Tobe-Global lots query.
+  IBID_LOTS_USERS: "IBID_LOTS_USERS_GRID_STATE_V1",
 } as const;
 
 export type GridStorageKey =
