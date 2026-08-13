@@ -51,7 +51,7 @@ supersedes: [[OPT-0029]]
 - **关键约束**：AG-Grid 实例**只在 `onGridReady` 读一次 localStorage**，挂载后改 localStorage 不会自动重读
   → 「切换档案/进出观摩」必须靠**重挂载**（页面/路由 `key` bump）触发 hook 重新注水。这是本 OPT 最大工程摩擦点。
 - **后端没有任何用户/登录体系**，全站一把共享 `X-API-Key`（`core/api_key_middleware.py`）。
-  `auth-provider.tsx` / `login-form.tsx` 是占位 demo（`VITE_DISABLE_AUTH`），**不要误当真实认证去接**。
+  ~~`auth-provider.tsx` / `login-form.tsx` 是占位 demo~~ —— **已于 auth P3（2026-08-13）换成真登录**。device-id 排他机制届时可按原计划迁移：`is_admin_device()` → `require_role("manager")`（P4）。
 - **没有 device-id / 浏览器指纹**，`apiFetch`（`@/lib/fetch`）今天不带任何身份标识。
 - 已有 **SQLite 应用库模式**（`core/*_db.py`，6 个 .db，裸 `sqlite3` + WAL，见 [[OPT-0014]]）→ 新表沿用。
 - 管理员授权可复用 IB Financial 的 `admin_whitelist` 模式（`backend/app/api/v1/routes/ib_financial.py`）。

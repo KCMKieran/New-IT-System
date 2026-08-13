@@ -42,7 +42,7 @@ localStorage 按「浏览器 + 机器」沙箱隔离，**数据永不出本机**
 - IB Financial 审计：`backend/app/api/v1/routes/ib_financial.py` 把前端传来的 `req.email` 当 `operator` 写进 `audit_log`。
 - 即「自报 email / 名字」——未经校验，但内网互信场景够用，且**项目已经在这么做**。
 - 本 OPT 沿用：进页面时让用户选 / 填一次自己的名字（存本地），之后请求自动带上当 `owner_label`。
-- ⚠ 现有 `login-form.tsx` / `auth-provider.tsx` 是**占位 demo**（随便输都能进 + `VITE_DISABLE_AUTH`），**不要**误当真实认证去接它。
+- ⚠ ~~现有 `login-form.tsx` / `auth-provider.tsx` 是**占位 demo**~~ —— **已于 auth P3（2026-08-13）换成真登录**（Entra ID OIDC + 服务端会话），后端可从 `request.state.user` 拿到可信身份。本条当时的告诫已作废。
 
 ### 落点候选
 
