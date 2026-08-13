@@ -152,12 +152,17 @@ const MAX_SPAN_DAYS = 366;
 // 「用户偏好」（怎么看数据：查询类型 / 服务器 / 产品口径）持久化；
 // 「调查上下文」（在追哪个 ibid、哪段绝对日期）留在 React state，绝不落盘。
 const FILTERS_KEY = "IBID_LOTS_FILTERS_V1";
-interface IbidLotsFilters {
+// `type`, not `interface`: useFilterPersist/readFilterState are generic over
+// `T extends Record<string, unknown>`, and a TS interface has no implicit index
+// signature (it can be reopened by declaration merging, so the compiler cannot
+// promise its shape). A type alias does, so this is what makes the persist
+// helpers accept it — and what keeps `persisted.*` typed instead of `unknown`.
+type IbidLotsFilters = {
   queryType: QueryType;
   serverSid: string;
   symbolMode: SymbolMode;
   customSymbols: string;
-}
+};
 const FILTER_DEFAULTS: IbidLotsFilters = {
   queryType: "ibid",
   serverSid: "1",
