@@ -84,6 +84,7 @@ export const enUS = {
     settings: "Settings",
     search: "Search",
     configuration: "Configuration",
+    viewProfiles: "View Profiles",
     ibidLots: "IBID Lots Lookup",
     clientReturnRate: "Client Return Rate",
     holdBucketReport: "Hold Duration Analysis",
@@ -106,6 +107,9 @@ export const enUS = {
     // entry reads the same as the page heading it navigates to — a label that
     // disagrees with the destination's title makes users doubt they arrived.
     managers: "Managers",
+    // Same reasoning as `managers`: English in both locales so the sidebar
+    // entry matches the "View Profiles" heading on the page it opens.
+    viewProfiles: "View Profiles",
     customGroups: "Custom Groups",
     reports: "Reports",
     financial: "Financial",

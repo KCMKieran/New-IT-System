@@ -36,6 +36,7 @@ const routeToKeyMap: Record<string, string> = {
   "/customer-pnl-monitor-v2": "pages.customerPnLMonitorV2",
   "/settings": "pages.settings",
   "/search": "pages.search",
+  "/cfg/view-profiles": "pages.viewProfiles",
   "/cs/ib-tree": "pages.ibTreeQuery",
 }
 
@@ -47,11 +48,14 @@ export function SiteHeader() {
     const path = location.pathname
     // Handle root path - show home page title
     if (path === "/") return t("pages.home")
+    // Exact matches win over the /cfg prefix fallback below, so a config route
+    // that has its own title (e.g. /cfg/view-profiles) shows it instead of the
+    // generic "Configuration".
+    const key = routeToKeyMap[path]
+    if (key) return t(key)
     // Handle configuration routes
     if (path.startsWith("/cfg")) return t("pages.configuration")
-    // Get translation key for current route
-    const key = routeToKeyMap[path]
-    return key ? t(key) : t("header.title")
+    return t("header.title")
   }, [location.pathname, t])
 
   const fullTitle = `${t("header.title")} | ${pageTitle}`
