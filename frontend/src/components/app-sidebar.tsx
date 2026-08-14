@@ -4,11 +4,10 @@ import {
   IconBook,
   IconDashboard,
   IconDatabase,
-  IconFileWord,
   IconHelp,
   IconHome,
+  IconLayoutColumns,
   IconListDetails,
-  IconReport,
   IconSearch,
   IconSettings,
   IconUsers,
@@ -145,23 +144,14 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
               },
             ]
           : []),
+        // The six placeholder entries (Custom Groups / Reports / Financial /
+        // Clients / Tasks / Marketing) were dropped from the sidebar — every one
+        // of them opened the same empty <ConfigPlaceholder />. Their routes are
+        // still registered in App.tsx, so old bookmarks keep working.
         {
-          name: t("config.customGroups"),
-          url: "/cfg/custom-groups",
-          icon: IconSettings,
-        },
-        { name: t("config.reports"), url: "/cfg/reports", icon: IconReport },
-        {
-          name: t("config.financial"),
-          url: "/cfg/financial",
-          icon: IconFileWord,
-        },
-        { name: t("config.clients"), url: "/cfg/clients", icon: IconDatabase },
-        { name: t("config.tasks"), url: "/cfg/tasks", icon: IconReport },
-        {
-          name: t("config.marketing"),
-          url: "/cfg/marketing",
-          icon: IconFileWord,
+          name: t("config.viewProfiles"),
+          url: "/cfg/view-profiles",
+          icon: IconLayoutColumns,
         },
       ],
     }),

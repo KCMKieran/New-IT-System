@@ -86,6 +86,7 @@ export const zhCN = {
     settings: "设置",
     search: "搜索",
     configuration: "配置",
+    viewProfiles: "View Profiles",
     ibidLots: "IBID 手数查询",
     clientReturnRate: "客户收益率",
     holdBucketReport: "持仓时间分析",
@@ -107,6 +108,8 @@ export const zhCN = {
     // Auth P4a: stays English in the zh-CN locale too (Kieran, 2026-08-14), so
     // the sidebar entry matches the "Managers" heading on the page it opens.
     managers: "Managers",
+    // English in zh-CN too, matching the page heading (same rule as `managers`).
+    viewProfiles: "View Profiles",
     customGroups: "自定义组别",
     reports: "Reports",
     financial: "Financial",

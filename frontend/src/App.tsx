@@ -49,6 +49,7 @@ const FundFlowMonitorPage = lazyWithRetry(() => import("@/pages/cs/FundFlowMonit
 const IBTreeQueryPage = lazyWithRetry(() => import("@/pages/cs/IBTreeQuery"))
 const SettingsPage = lazyWithRetry(() => import("@/pages/Settings"))
 const SearchPage = lazyWithRetry(() => import("@/pages/Search"))
+const ViewProfilesPage = lazyWithRetry(() => import("@/pages/ViewProfiles"))
 
 function PrivateRoute({ children }: { children: React.ReactElement }) {
   // useAuth() is called unconditionally. It used to sit BELOW an early return
@@ -132,6 +133,7 @@ function App() {
               <Route path="cfg">
                 <Route path=":" element={<ConfigPlaceholder />} />
                 <Route path="managers" element={<ManagersConfigPage />} />
+                <Route path="view-profiles" element={<ViewProfilesPage />} />
                 <Route path="custom-groups" element={<ConfigPlaceholder />} />
                 <Route path="reports" element={<ConfigPlaceholder />} />
                 <Route path="financial" element={<ConfigPlaceholder />} />
