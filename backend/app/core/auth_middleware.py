@@ -74,15 +74,37 @@ logger = get_logger(__name__)
 
 # Paths that must answer without a session even when auth is enforced.
 #
+# EXACT paths, not prefixes (auth P4.0). The prefix form used to end with
+# "/api/v1/auth/", which meant ANY route added to routes/auth.py — whose router
+# is APIRouter(prefix="/auth") — was born exempt from the session check. P4's
+# user-administration endpoints (change a role, disable an account, kill a
+# session) are the most privileged in the system and routes/auth.py is exactly
+# where they would naturally have been dropped: the one place where landing
+# there turns off authentication, with no test turning red. Hence two rules,
+# both pinned by test_app_assembly.py:
+#
+#   1. this set holds full paths and is matched by equality;
+#   2. administration lives under /api/v1/admin, never under /api/v1/auth.
+#
 #   /health           — container/uptime probes have no browser and no cookie
 #   /log/client-error — the frontend reports chunk-load failures here; that is
 #                       most likely to happen when something is already wrong,
 #                       and a 401 would destroy the only diagnostic we get
-#   /auth/*           — the endpoints that hand out and revoke sessions
-EXEMPT_PREFIXES: tuple[str, ...] = (
-    "/api/v1/health",
-    "/api/v1/log/client-error",
-    "/api/v1/auth/",
+#   /auth/{...}       — the six endpoints that hand out and revoke sessions.
+#                       A caller arriving at login/callback has no session yet
+#                       by definition; me/verify must be able to answer
+#                       "anonymous"; logout must work on an expired session.
+EXEMPT_PATHS: frozenset[str] = frozenset(
+    {
+        "/api/v1/health",
+        "/api/v1/log/client-error",
+        "/api/v1/auth/me",
+        "/api/v1/auth/verify",
+        "/api/v1/auth/login",
+        "/api/v1/auth/callback",
+        "/api/v1/auth/logout",
+        "/api/v1/auth/dev-login",
+    }
 )
 
 # P3 removed the SSE exemption that used to live here. EventSource cannot set
@@ -99,11 +121,14 @@ EXEMPT_SUFFIXES: tuple[str, ...] = ()
 
 
 def _is_exempt(path: str) -> bool:
-    if path.rstrip("/") == "/api/v1/auth":
-        return True
-    # str.startswith/endswith against an empty tuple is False, so an empty
-    # EXEMPT_SUFFIXES simply exempts nothing.
-    return path.startswith(EXEMPT_PREFIXES) or path.endswith(EXEMPT_SUFFIXES)
+    # Normalise the trailing slash HERE. This middleware runs before routing, so
+    # FastAPI's 307 redirect_slashes never gets a chance to canonicalise the URL
+    # for us — "/api/v1/auth/login/" would miss an exact-match set and get a 401
+    # in place of the redirect to Microsoft.
+    normalised = path.rstrip("/") or "/"
+    # str.endswith against an empty tuple is False, so an empty EXEMPT_SUFFIXES
+    # simply exempts nothing.
+    return normalised in EXEMPT_PATHS or path.endswith(EXEMPT_SUFFIXES)
 
 
 def extract_sid(request: Request) -> str | None:

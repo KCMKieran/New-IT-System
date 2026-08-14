@@ -101,7 +101,10 @@ export const enUS = {
   
   // Configuration
   config: {
-    docs: "Docs",
+    docs: "Documents",
+    // Auth P4a: kept in English in both locales on purpose, so the sidebar
+    // entry reads the same as the page heading it navigates to — a label that
+    // disagrees with the destination's title makes users doubt they arrived.
     managers: "Managers",
     customGroups: "Custom Groups",
     reports: "Reports",

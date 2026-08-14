@@ -202,9 +202,18 @@ def record_audit(
 ) -> None:
     """Append one row to audit_log. Never raises.
 
-    P1 only creates the table and this writer. P5 is what routes the existing
-    blind spots (view-profiles force-release, alert-mail subscription deletes,
-    risk-rule threshold edits) through it.
+    P1 only creates the table and this writer. P4a is its first caller and,
+    until P5 routes the existing blind spots (view-profiles force-release,
+    alert-mail subscription deletes, risk-rule threshold edits) through it, its
+    only one — which makes this table the sole record that a role was ever
+    granted.
+
+    That is why the swallowed error below is logged at CRITICAL with a grep
+    token, unlike record_auth_event's. Both are best-effort by design (an audit
+    failure must not roll back the privileged change the manager just
+    confirmed), but a lost audit row is indistinguishable from "nobody did
+    anything" when someone reads the log a year later, so the loss itself has
+    to be loud enough to notice on the day.
     """
     try:
         with get_users_db() as conn:
@@ -224,7 +233,14 @@ def record_audit(
                 ),
             )
     except sqlite3.Error:
-        logger.exception(f"Failed to record audit action {action!r}")
+        # AUDIT_WRITE_FAILED is a stable grep token: the change it describes
+        # already committed, so this line is the only trace left that it
+        # happened at all.
+        logger.critical(
+            f"AUDIT_WRITE_FAILED action={action!r} actor={actor_email!r} "
+            f"target={target!r} old={old_value!r} new={new_value!r}",
+            exc_info=True,
+        )
 
 
 # ── users ────────────────────────────────────────────────────────────────────
@@ -314,10 +330,30 @@ def upsert_user(
                 "SELECT * FROM users WHERE id = ?", (by_email["id"],)
             ).fetchone()
 
+        # Guardrail 5 (auth-p4-process.md §2.3) is a property of the ROW, not of
+        # one transition: an OTP-provisioned account may never hold manager.
+        # admin_service refuses the PATCH that would promote such a row, but
+        # that is only half the surface — this INSERT is the other half, and
+        # without the clause below the row can be BORN promoted:
+        # default_role_for() matches on the address alone, so a first OTP login
+        # by anyone listed in AUTH_MANAGER_EMAILS creates source='otp',
+        # role='manager' directly and nothing downstream ever flags it. OTP
+        # login skips Entra and therefore skips MFA, so that account's
+        # strongest credential is read access to a mailbox — precisely what the
+        # guardrail exists to keep out of the manager role.
+        seeded_role = default_role_for(email)
+        role = "user" if source == "otp" else seeded_role
+        if role != seeded_role:
+            logger.warning(
+                "Provisioning %s as 'user': it is in AUTH_MANAGER_EMAILS but the "
+                "account is OTP-provisioned, and OTP bypasses MFA. Promote via an "
+                "Entra login instead.",
+                email,
+            )
         conn.execute(
             "INSERT INTO users (email, entra_oid, display_name, role, status, source, created_by) "
             "VALUES (?, ?, ?, ?, 'active', ?, 'jit')",
-            (email, subject, display_name, default_role_for(email), source),
+            (email, subject, display_name, role, source),
         )
         return conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
 
@@ -510,8 +546,8 @@ def purge_expired_sessions() -> int:
     """Delete every session past its absolute ceiling. Returns rows removed.
 
     ``resolve_session`` already drops expired rows as it meets them, so this
-    only matters for sessions nobody ever comes back to. Cheap enough to call
-    from lifespan at startup instead of owning a scheduler job.
+    only matters for sessions nobody ever comes back to. Swept daily by the
+    scheduler's retention job and again at startup.
     """
     with get_users_db() as conn:
         return conn.execute(

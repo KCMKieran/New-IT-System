@@ -22,6 +22,7 @@ DIGEST_JOB_ID = "alert_mail_digest_dispatch"
 # OPT-0047 risk-V2 case layer jobs
 CASE_BASELINE_JOB_ID = "risk_cases_daily_baseline"
 USER_ID_REPAIR_JOB_ID = "alert_events_user_id_repair"
+RETENTION_JOB_ID = "users_db_retention_sweep"
 HKT = ZoneInfo("Asia/Hong_Kong")
 
 # Module-level singleton; initialised by start_scheduler()
@@ -112,6 +113,51 @@ def _user_id_repair_job() -> None:
         logger.error("user_id repair job failed (non-fatal)", exc_info=True)
 
 
+def _users_db_retention_job() -> None:
+    """Job function: enforce users.db retention on the three growing tables.
+
+    Retention used to be applied only in the lifespan startup block, which
+    means it was only ever applied on redeploy — and prod containers here stay
+    up for weeks. A 90-day window that nobody restarts past is a window that
+    never closes, so the stated retention has to be a recurring sweep to be
+    true. `auth_events` matters most of the three: unauthenticated callers can
+    write to it (throttled) through the /auth/callback failure paths.
+
+    Each table is fenced on its own rather than sharing one try: a failure on
+    one of them must not cost the other two a whole day of growth, and the
+    log line has to say which one broke.
+    """
+    try:
+        from ..services.auth_service import (
+            purge_expired_sessions,
+            purge_old_audit_log,
+            purge_old_auth_events,
+        )
+    except Exception:
+        logger.error(
+            "users.db retention sweep could not load auth_service (non-fatal)",
+            exc_info=True,
+        )
+        return
+
+    removed: dict[str, object] = {}
+    for table, purge in (
+        ("sessions", purge_expired_sessions),
+        ("auth_events", purge_old_auth_events),
+        ("audit_log", purge_old_audit_log),
+    ):
+        try:
+            removed[table] = purge()
+        except Exception:
+            removed[table] = "failed"
+            logger.error(
+                "users.db retention sweep failed on %s (non-fatal)",
+                table,
+                exc_info=True,
+            )
+    logger.info("users.db retention sweep removed: %s", removed)
+
+
 def start_scheduler() -> None:
     """Start the background scheduler using report_config from SQLite.
 
@@ -177,6 +223,24 @@ def start_scheduler() -> None:
             "Case-engine jobs scheduled: user_id repair 06:50 HKT, "
             "daily baseline 07:10 HKT"
         )
+    # users.db retention sweep. 04:00 HKT is the quiet hour for this box: HK
+    # staff are asleep so the DELETEs take users.db's write lock while almost
+    # nothing is logging in, and it sits clear of the MT 05:00 day roll and of
+    # the 06:50/07:10 risk jobs. Own kill switch because this is the only
+    # scheduled job that DELETEs from users.db, and backend/data is a bind
+    # mount shared with prod — an off switch here beats stopping the whole
+    # scheduler. Same SCHEDULER_ENABLED guard as everything above.
+    if os.getenv("AUTH_RETENTION_JOB_ENABLED", "true").lower() != "false":
+        _scheduler.add_job(
+            _users_db_retention_job,
+            CronTrigger(hour=4, minute=0, timezone=HKT),
+            id=RETENTION_JOB_ID,
+            replace_existing=True,
+            coalesce=True,
+            misfire_grace_time=3600,
+            max_instances=1,
+        )
+        logger.info("users.db retention sweep scheduled: 04:00 HKT daily")
     _scheduler.start()
     logger.info(f"Scheduler started: daily report at {hour:02d}:{minute:02d} HKT")
 

@@ -33,6 +33,11 @@ const SwapFreeControlPage = lazyWithRetry(() => import("@/pages/SwapFreeControl"
 const ClientPnLAnalysisPage = lazyWithRetry(() => import("@/pages/ClientPnLAnalysis"))
 const ClientReturnRatePage = lazyWithRetry(() => import("@/pages/ClientReturnRate"))
 const ConfigPlaceholder = lazyWithRetry(() => import("@/pages/ConfigPlaceholder"))
+// Auth P4a: /cfg/managers is the real user-management page now. It gates itself
+// on role (the sidebar hides it too), and every endpoint it calls is behind
+// require_manager server-side — the route stays inside PrivateRoute like the
+// rest, no separate router-level guard.
+const ManagersConfigPage = lazyWithRetry(() => import("@/pages/cfg/Managers"))
 // [REMOVED] IBReport page removed from frontend
 const HoldBucketReportPage = lazyWithRetry(() => import("@/pages/HoldBucketReport"))
 const IBFinancialMonitorPage = lazyWithRetry(() => import("@/pages/IBFinancialMonitor"))
@@ -126,7 +131,7 @@ function App() {
               {/* Configuration routes */}
               <Route path="cfg">
                 <Route path=":" element={<ConfigPlaceholder />} />
-                <Route path="managers" element={<ConfigPlaceholder />} />
+                <Route path="managers" element={<ManagersConfigPage />} />
                 <Route path="custom-groups" element={<ConfigPlaceholder />} />
                 <Route path="reports" element={<ConfigPlaceholder />} />
                 <Route path="financial" element={<ConfigPlaceholder />} />

@@ -12,6 +12,7 @@ import {
   IconSearch,
   IconSettings,
   IconUsers,
+  IconUsersGroup,
 } from "@tabler/icons-react";
 
 import { NavDocuments } from "@/components/nav-documents";
@@ -25,9 +26,19 @@ import {
   SidebarHeader,
 } from "@/components/ui/sidebar";
 import { useI18n } from "@/components/i18n-provider";
+import { useAuth } from "@/providers/auth-provider";
 
 export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   const { t } = useI18n();
+  const { user, authEnabled } = useAuth();
+
+  // Auth P4a: /cfg/managers is manager-only, so ordinary users should not even
+  // see the entry — the page itself and every /admin endpoint refuse them
+  // anyway, and a menu item that always errors is worse than no menu item.
+  // ⚠ `!authEnabled` has to pass: with the kill switch thrown the backend lets
+  // everyone through and /auth/me reports no user, so a bare role check would
+  // hide the page precisely when auth is off (kill switch in reverse).
+  const isManager = !authEnabled || user?.role === "manager";
 
   // Navigation data with translations
   const data = React.useMemo(
@@ -125,11 +136,15 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
           icon: IconBook,
           external: true,
         },
-        {
-          name: t("config.managers"),
-          url: "/cfg/managers",
-          icon: IconDatabase,
-        },
+        ...(isManager
+          ? [
+              {
+                name: t("config.managers"),
+                url: "/cfg/managers",
+                icon: IconUsersGroup,
+              },
+            ]
+          : []),
         {
           name: t("config.customGroups"),
           url: "/cfg/custom-groups",
@@ -150,7 +165,9 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
         },
       ],
     }),
-    [t],
+    // isManager belongs here: /auth/me resolves after first paint, so the menu
+    // has to be rebuilt when the role finally arrives.
+    [t, isManager],
   );
 
   return (

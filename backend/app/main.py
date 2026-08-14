@@ -178,10 +178,15 @@ async def lifespan(app: FastAPI):
         logger.info(
             f"Worker pid={os.getpid()} owns scheduler lock — starting schedulers"
         )
+        # NOT a leftover duplicate: the recurring 04:00 HKT job
+        # (core/scheduler.py _users_db_retention_job) is the primary mechanism
+        # now, and this startup pass is the complement to it — it covers the
+        # box having been off across a window boundary, which a cron trigger
+        # silently skips. Deleting the same rows twice costs nothing.
+        #
         # Sessions past their absolute ceiling. resolve_session() already drops
         # expired rows as it meets them, so this only collects the ones nobody
-        # returns to. One worker does it (it is a write) and it is cheap enough
-        # not to justify its own scheduler job.
+        # returns to. One worker does it (it is a write).
         from app.services.auth_service import (
             purge_expired_sessions,
             purge_old_audit_log,
