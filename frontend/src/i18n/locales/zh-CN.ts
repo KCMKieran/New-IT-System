@@ -103,7 +103,9 @@ export const zhCN = {
 
   // Configuration
   config: {
-    docs: "文档中心",
+    docs: "Documents",
+    // Auth P4a: stays English in the zh-CN locale too (Kieran, 2026-08-14), so
+    // the sidebar entry matches the "Managers" heading on the page it opens.
     managers: "Managers",
     customGroups: "自定义组别",
     reports: "Reports",

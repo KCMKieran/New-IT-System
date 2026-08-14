@@ -244,3 +244,157 @@ def test_sse_needs_no_api_key_because_eventsource_cannot_send_one(
 
     r = client.get("/api/v1/risk-monitor/alerts/stream")
     assert r.status_code != 403
+
+
+# ── P4.0: session exemptions are exact paths, not prefixes ───────────────────
+
+
+def _api_paths(app) -> set[str]:
+    """Every concrete path the assembled app serves under /api/."""
+    return {
+        route.path
+        for route in app.routes
+        if getattr(route, "path", "").startswith("/api/")
+    }
+
+
+def test_exempt_paths_is_the_reviewed_literal_set():
+    """Pin the set so growing it is always a deliberate, reviewed edit.
+
+    This is the whole point of P4.0. The old EXEMPT_PREFIXES ended with
+    "/api/v1/auth/", so every route added to routes/auth.py — APIRouter(
+    prefix="/auth") — skipped the session check the moment it was written, and
+    nothing anywhere turned red. P4's administration endpoints (change a role,
+    disable an account, revoke a session) are the most privileged in the system
+    and routes/auth.py is the obvious place to put them.
+
+    If this assertion fails you are adding an endpoint that answers without a
+    session. That is occasionally correct (P4c's OTP request-code/verify-code
+    are unauthenticated by definition). It is never correct for anything that
+    reads or writes user administration.
+    """
+    from app.core.auth_middleware import EXEMPT_PATHS
+
+    assert EXEMPT_PATHS == {
+        "/api/v1/health",
+        "/api/v1/log/client-error",
+        "/api/v1/auth/me",
+        "/api/v1/auth/verify",
+        "/api/v1/auth/login",
+        "/api/v1/auth/callback",
+        "/api/v1/auth/logout",
+        "/api/v1/auth/dev-login",
+    }
+
+
+def test_every_exempt_path_is_a_real_route(app_main):
+    """A typo'd or renamed exemption is an outage, not a harmless leftover.
+
+    A dead entry fails safe on its own, but the reason it went dead is usually
+    that the real path moved — and the real path is then NO LONGER EXEMPT.
+    For /auth/login and /auth/callback that means "nobody in the company can
+    sign in", and it is invisible from the backend logs (the middleware answers
+    before any handler runs).
+    """
+    from app.core.auth_middleware import EXEMPT_PATHS
+
+    served = _api_paths(app_main.create_app())
+    assert EXEMPT_PATHS <= served, EXEMPT_PATHS - served
+
+
+def test_no_administration_endpoint_is_exempt_from_the_session_check(app_main):
+    """Administration lives under /api/v1/admin and always needs a session.
+
+    Two independent guards, because P4a's endpoints can grant manager, disable
+    an account and kill sessions:
+      1. nothing under /api/v1/admin may appear in the exemption set;
+      2. nothing under /api/v1/auth other than the six session endpoints may
+         exist at all — if a seventh appears there it is almost certainly an
+         admin route that has been put in the one router whose prefix used to
+         mean "no authentication".
+    """
+    from app.core.auth_middleware import EXEMPT_PATHS
+
+    assert not {p for p in EXEMPT_PATHS if p.startswith("/api/v1/admin")}
+
+    auth_routes = {p for p in _api_paths(app_main.create_app()) if p.startswith("/api/v1/auth")}
+    assert auth_routes == {p for p in EXEMPT_PATHS if p.startswith("/api/v1/auth")}, (
+        "New route under /api/v1/auth. Session-exempt endpoints belong in "
+        "EXEMPT_PATHS with a reviewed reason; everything else belongs under "
+        "/api/v1/admin."
+    )
+
+
+def _dependency_calls(dependant) -> set:
+    """Every callable in a route's dependency tree, sub-dependencies included.
+
+    Flattened, because the gate may be declared on the router, on the
+    include_router() call, or in a handler signature — all three end up in this
+    tree, at different depths.
+    """
+    calls, stack = set(), list(dependant.dependencies)
+    while stack:
+        dep = stack.pop()
+        if dep.call is not None:
+            calls.add(dep.call)
+        stack.extend(dep.dependencies)
+    return calls
+
+
+def test_every_admin_route_carries_the_manager_gate(app_main):
+    """The positive half: /api/v1/admin implies Depends(require_manager).
+
+    Everything above asserts what must NOT be exempt. Nothing asserted that the
+    gate is actually on, and today it is structural within exactly one file —
+    ``APIRouter(prefix="/admin", dependencies=[Depends(require_manager)])`` in
+    routes/admin.py. A ninth admin route mounted from anywhere else (a second
+    APIRouter in that file, a routes/admin_modules.py added during P4b, an
+    extra include_router line) would be born unguarded, would serve staff PII
+    or write roles to any authenticated user, and nothing would turn red: the
+    module docstring warning is a comment, and test_admin_api.py's sweep is a
+    hand-maintained list of the eight endpoints that exist today, which simply
+    does not grow on its own.
+
+    This is the P4.0 lesson one level up — "the guard depends on where you put
+    the file" is not a guard.
+    """
+    from app.core.auth_deps import require_manager
+
+    app = app_main.create_app()
+    admin_routes = [
+        route
+        for route in app.routes
+        if getattr(route, "path", "").startswith("/api/v1/admin")
+        and getattr(route, "dependant", None) is not None
+    ]
+    # If this is ever 0 the assertion below passes vacuously, which would be the
+    # worst possible way for it to be green.
+    assert admin_routes, "no /api/v1/admin routes found — did the prefix change?"
+
+    ungated = [
+        f"{sorted(route.methods or [])} {route.path}"
+        for route in admin_routes
+        if require_manager not in _dependency_calls(route.dependant)
+    ]
+    assert not ungated, (
+        f"Admin routes without Depends(require_manager): {ungated}. Mount them on "
+        "the router in routes/admin.py, which carries the gate for every endpoint "
+        "under it."
+    )
+
+
+def test_a_new_route_under_auth_is_not_exempt_by_accident():
+    """The behavioural half of the guard above: matching is by equality.
+
+    Under the old prefix rule this path was exempt purely because of where its
+    router lives. It must now be treated like any other endpoint.
+    """
+    from app.core.auth_middleware import _is_exempt
+
+    assert not _is_exempt("/api/v1/auth/users/7/role")
+    assert not _is_exempt("/api/v1/admin/users")
+    # …while the real endpoints stay exempt, trailing slash or not. The
+    # middleware runs before routing, so redirect_slashes cannot help here.
+    assert _is_exempt("/api/v1/auth/login")
+    assert _is_exempt("/api/v1/auth/login/")
+    assert _is_exempt("/api/v1/health")
