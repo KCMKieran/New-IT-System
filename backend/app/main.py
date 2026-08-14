@@ -182,10 +182,24 @@ async def lifespan(app: FastAPI):
         # expired rows as it meets them, so this only collects the ones nobody
         # returns to. One worker does it (it is a write) and it is cheap enough
         # not to justify its own scheduler job.
-        from app.services.auth_service import purge_expired_sessions
+        from app.services.auth_service import (
+            purge_expired_sessions,
+            purge_old_audit_log,
+            purge_old_auth_events,
+        )
         purged = purge_expired_sessions()
         if purged:
             logger.info(f"Purged {purged} expired session(s) from users.db")
+        # Retention for the two append-only tables. Nothing deleted from them
+        # before this, and auth_events is writable (throttled) by unauthenticated
+        # callers via the /auth/callback failure paths.
+        events = purge_old_auth_events()
+        audits = purge_old_audit_log()
+        if events or audits:
+            logger.info(
+                f"Purged {events} auth_event(s) and {audits} audit_log row(s) "
+                "past their retention window"
+            )
         start_scheduler()
         start_burst_scheduler()
         start_login_ip_scheduler()
