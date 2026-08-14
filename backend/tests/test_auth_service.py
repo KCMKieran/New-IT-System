@@ -402,3 +402,122 @@ def test_adding_a_mail_recipient_domain_does_not_grant_login(auth, monkeypatch):
     get_settings.cache_clear()
     assert auth.is_allowed_domain("staff@kohleservices.com")
     assert not auth.is_allowed_domain("auditor@auditor-firm.com")
+
+
+# ── bounding what an unauthenticated caller can append (cold review S2) ──────
+#
+# /api/v1/auth/callback is exempt from BOTH the API key layer and the session
+# layer, so its failure paths are reachable with no credential at all. These
+# tests pin the two things that bound the damage: a per-IP throttle on
+# login_failure, and retention on the two append-only tables.
+
+@pytest.fixture
+def throttle(auth, monkeypatch):
+    """Reset the process-wide throttle state and hand back the service."""
+    from app.core.config import get_settings
+
+    auth._throttle_counts.clear()
+    yield auth
+    auth._throttle_counts.clear()
+    get_settings.cache_clear()
+
+
+def _set(monkeypatch, **env):
+    from app.core.config import get_settings
+
+    for k, v in env.items():
+        monkeypatch.setenv(k, str(v))
+    get_settings.cache_clear()
+
+
+def test_login_failure_events_are_throttled_per_ip(throttle, monkeypatch):
+    _set(monkeypatch, AUTH_FAILURE_EVENTS_PER_MINUTE=3)
+
+    for _ in range(50):
+        throttle.record_auth_event("login_failure", detail="x", ip="1.2.3.4")
+
+    assert len(_rows("auth_events")) == 3
+
+
+def test_the_throttle_budget_is_per_source_ip(throttle, monkeypatch):
+    _set(monkeypatch, AUTH_FAILURE_EVENTS_PER_MINUTE=2)
+
+    for ip in ("1.1.1.1", "2.2.2.2", "3.3.3.3"):
+        for _ in range(10):
+            throttle.record_auth_event("login_failure", detail="x", ip=ip)
+
+    rows = _rows("auth_events")
+    assert len(rows) == 6
+    assert {r["ip"] for r in rows} == {"1.1.1.1", "2.2.2.2", "3.3.3.3"}
+
+
+def test_events_that_require_a_real_session_are_never_throttled(throttle, monkeypatch):
+    """login_success / session_expired / logout all presuppose a real login,
+    which is what bounds them. Throttling those would lose real audit."""
+    _set(monkeypatch, AUTH_FAILURE_EVENTS_PER_MINUTE=1)
+
+    for _ in range(20):
+        throttle.record_auth_event("login_success", email="a@b.com", ip="1.2.3.4")
+        throttle.record_auth_event("session_expired", email="a@b.com", ip="1.2.3.4")
+
+    assert len(_rows("auth_events")) == 40
+
+
+def test_throttle_can_be_disabled(throttle, monkeypatch):
+    _set(monkeypatch, AUTH_FAILURE_EVENTS_PER_MINUTE=0)
+
+    for _ in range(25):
+        throttle.record_auth_event("login_failure", detail="x", ip="1.2.3.4")
+
+    assert len(_rows("auth_events")) == 25
+
+
+def _backdate(table: str, days: int) -> None:
+    """Rewrite every row's `at` to `days` ago, in the fixed-width UTC format."""
+    from datetime import datetime, timedelta, timezone
+
+    from app.core.users_db import get_users_db
+
+    old = (datetime.now(timezone.utc) - timedelta(days=days)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    with get_users_db() as conn:
+        conn.execute(f"UPDATE {table} SET at = ?", (old,))
+
+
+def test_purge_old_auth_events_drops_only_rows_past_retention(auth, monkeypatch):
+    _set(monkeypatch, AUTH_EVENTS_RETENTION_DAYS=90)
+
+    auth.record_auth_event("login_success", email="old@kohleservices.com")
+    _backdate("auth_events", 200)
+    auth.record_auth_event("login_success", email="fresh@kohleservices.com")
+
+    assert auth.purge_old_auth_events() == 1
+    remaining = _rows("auth_events")
+    assert [r["email"] for r in remaining] == ["fresh@kohleservices.com"]
+
+
+def test_purge_old_audit_log_drops_only_rows_past_retention(auth, monkeypatch):
+    _set(monkeypatch, AUDIT_LOG_RETENTION_DAYS=365)
+
+    auth.record_audit("old_action", actor_email="a@kohleservices.com")
+    _backdate("audit_log", 400)
+    auth.record_audit("fresh_action", actor_email="a@kohleservices.com")
+
+    assert auth.purge_old_audit_log() == 1
+    assert [r["action"] for r in _rows("audit_log")] == ["fresh_action"]
+
+
+def test_retention_of_zero_days_keeps_everything(auth, monkeypatch):
+    """0 is the explicit "keep forever" escape hatch, not "delete everything"."""
+    _set(monkeypatch, AUTH_EVENTS_RETENTION_DAYS=0, AUDIT_LOG_RETENTION_DAYS=0)
+
+    auth.record_auth_event("login_success", email="a@kohleservices.com")
+    auth.record_audit("something", actor_email="a@kohleservices.com")
+    _backdate("auth_events", 9999)
+    _backdate("audit_log", 9999)
+
+    assert auth.purge_old_auth_events() == 0
+    assert auth.purge_old_audit_log() == 0
+    assert len(_rows("auth_events")) == 1
+    assert len(_rows("audit_log")) == 1

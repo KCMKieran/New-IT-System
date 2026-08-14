@@ -18,6 +18,8 @@ from __future__ import annotations
 import hashlib
 import secrets
 import sqlite3
+import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -101,6 +103,64 @@ def default_role_for(email: str) -> str:
 
 # ── audit trails ─────────────────────────────────────────────────────────────
 
+# ── login_failure throttle ───────────────────────────────────────────────────
+# /api/v1/auth/callback is exempt from both the API key layer and the session
+# layer (a browser arriving from Microsoft can present neither), so its failure
+# paths — ``?error=``, ``state_not_bound`` — are reachable by anyone on the
+# internet with no credential at all. nginx allows 60 r/s per IP, so without a
+# cap one caller can append ~5.2M rows a day to a table that had no retention
+# policy, every insert contending for the same SQLite write lock as every real
+# request's resolve_session() and every /docs/ auth_request sub-request.
+#
+# The throttle keeps the forensic value rather than dropping the events: a
+# burst still leaves the first N rows, the suppression itself is logged, and
+# backend.log (which has logrotate behind it) still records every attempt.
+# Per process — prod runs 4 workers, so the real ceiling is 4x the setting.
+_THROTTLE_WINDOW_SECONDS = 60.0
+_THROTTLE_MAX_KEYS = 1024
+_throttle_lock = threading.Lock()
+_throttle_counts: dict[str, tuple[float, int]] = {}  # ip -> (window_start, count)
+
+
+def _failure_event_allowed(ip: str | None) -> bool:
+    """True if this IP may append another login_failure row this minute."""
+    limit = get_settings().AUTH_FAILURE_EVENTS_PER_MINUTE
+    if limit <= 0:  # explicitly disabled
+        return True
+
+    key = ip or "-"
+    now = time.monotonic()
+    with _throttle_lock:
+        if len(_throttle_counts) > _THROTTLE_MAX_KEYS:
+            # A scanner rotating source addresses must not grow this dict
+            # without bound either. Drop finished windows; if that is not
+            # enough, start over — recounting is cheaper than unbounded memory.
+            for k, (start, _) in list(_throttle_counts.items()):
+                if now - start >= _THROTTLE_WINDOW_SECONDS:
+                    del _throttle_counts[k]
+            if len(_throttle_counts) > _THROTTLE_MAX_KEYS:
+                _throttle_counts.clear()
+
+        start, count = _throttle_counts.get(key, (now, 0))
+        if now - start >= _THROTTLE_WINDOW_SECONDS:
+            start, count = now, 0
+        count += 1
+        _throttle_counts[key] = (start, count)
+        if count <= limit:
+            return True
+        first_over = count == limit + 1
+
+    if first_over:
+        logger.warning(
+            "Suppressing further login_failure auth_events from ip=%s — more "
+            "than %d in %ds. backend.log still records every attempt.",
+            key,
+            limit,
+            int(_THROTTLE_WINDOW_SECONDS),
+        )
+    return False
+
+
 def record_auth_event(
     event: str,
     *,
@@ -113,7 +173,13 @@ def record_auth_event(
 
     trace_id is pulled from the request-scoped context var so an auth event can
     be joined against backend.log and the nginx JSON access log.
+
+    ``login_failure`` is throttled per source IP (see _failure_event_allowed);
+    every other event requires a real session or a real login to have existed
+    first, which is what bounds them.
     """
+    if event == "login_failure" and not _failure_event_allowed(ip):
+        return
     try:
         with get_users_db() as conn:
             conn.execute(
@@ -451,3 +517,34 @@ def purge_expired_sessions() -> int:
         return conn.execute(
             "DELETE FROM sessions WHERE absolute_expires_at <= ?", (_fmt(_now()),)
         ).rowcount
+
+
+def purge_old_auth_events() -> int:
+    """Drop auth_events older than AUTH_EVENTS_RETENTION_DAYS. Rows removed.
+
+    Both append-only tables grew without any ceiling before this. The string
+    comparison on ``at`` is correct because the timestamp format is fixed-width
+    and lexicographically ordered (see the module docstring).
+    """
+    days = get_settings().AUTH_EVENTS_RETENTION_DAYS
+    if days <= 0:  # retention explicitly disabled — keep everything
+        return 0
+    cutoff = _fmt(_now() - timedelta(days=days))
+    with get_users_db() as conn:
+        return conn.execute(
+            "DELETE FROM auth_events WHERE at < ?", (cutoff,)
+        ).rowcount
+
+
+def purge_old_audit_log() -> int:
+    """Drop audit_log older than AUDIT_LOG_RETENTION_DAYS. Rows removed.
+
+    Longer default than auth_events: this is business audit, and it keeps the
+    365 days the remarks history tables already use.
+    """
+    days = get_settings().AUDIT_LOG_RETENTION_DAYS
+    if days <= 0:
+        return 0
+    cutoff = _fmt(_now() - timedelta(days=days))
+    with get_users_db() as conn:
+        return conn.execute("DELETE FROM audit_log WHERE at < ?", (cutoff,)).rowcount

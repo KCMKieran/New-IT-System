@@ -108,6 +108,9 @@ class Settings:
     AUTH_SESSION_ABSOLUTE_HOURS: int
     AUTH_SESSION_RENEW_BELOW_HOURS: int
     AUTH_MANAGER_EMAILS: set[str]
+    AUTH_FAILURE_EVENTS_PER_MINUTE: int
+    AUTH_EVENTS_RETENTION_DAYS: int
+    AUDIT_LOG_RETENTION_DAYS: int
 
     # Entra ID OIDC provider (auth design P3)
     ENTRA_TENANT_ID: str
@@ -401,6 +404,29 @@ class Settings:
             ).split(",")
             if e.strip()
         }
+
+        # Bound what an unauthenticated caller can write into users.db.
+        # /api/v1/auth/callback is exempt from both the API key and the session
+        # layer (a browser arriving from Microsoft can present neither), so its
+        # failure paths are reachable by anyone on the internet. nginx allows
+        # 60 r/s per IP; without a cap that is ~5.2M auth_events rows a day,
+        # every one of them contending for the same SQLite write lock as every
+        # real request's resolve_session(). Successful and session-derived
+        # events are NOT throttled — they all require a real session to exist.
+        self.AUTH_FAILURE_EVENTS_PER_MINUTE = int(
+            (os.environ.get("AUTH_FAILURE_EVENTS_PER_MINUTE") or "10").strip()
+        )
+        # Nothing has ever deleted from these two append-only tables. Retention
+        # runs from lifespan on the scheduler-owning worker, next to the
+        # expired-session purge. auth_events is operational (90d covers any
+        # "who logged in when" question); audit_log is business audit and keeps
+        # the 365d the remarks history tables already use.
+        self.AUTH_EVENTS_RETENTION_DAYS = int(
+            (os.environ.get("AUTH_EVENTS_RETENTION_DAYS") or "90").strip()
+        )
+        self.AUDIT_LOG_RETENTION_DAYS = int(
+            (os.environ.get("AUDIT_LOG_RETENTION_DAYS") or "365").strip()
+        )
 
         # ── Entra ID (Azure AD) OIDC provider (auth design P3) ───────────────
         # App registration lives in tenant 11cf6a7b-… (design doc §8.1). The
