@@ -123,8 +123,30 @@ WARNING 从 17 条降到 11 条真信号。
 
 ## Follow-up（未做，非本条 scope）
 
-1. **每 60 秒轮询的前端 tab**（P2）——`/api/v1/xauusd-positions/history` 全天 1041 次，
-   占降噪后日志的三分之一。改 SSE 或降频，或给该端点单独静音。
+1. ~~**每 60 秒轮询的前端 tab**（P2）~~ —— **已做，2026-08-17**。
+
+   `XauusdPositionChart.tsx` 的 60s `setInterval` 不看标签页可见性，一个挂着不关的
+   tab 全天打 **1041 次** `/api/v1/xauusd-positions/history`（单一客户端 IP），
+   占当日后端日志 **12.7%**，是 OPT-0058 之后剩下的最大单一来源。
+
+   **没选 SSE / 降频，选了「隐藏时不轮询」**：60s 这个周期本身是对的——快照就是
+   每分钟写一次，有人在看时就该 60s 刷。错的是**给没人看的图轮询**：那 1041 次里
+   过夜时段的部分按定义零观看者，每次还是一发 ~100ms 的阻塞 SQLite 读。SSE 改不动
+   这一点（连接照样挂着），降频则会伤害真正在看图的人。
+
+   实现照抄房内既有 idiom（`useClientRemarks` / `useAccountRemarks`）：tick 里
+   `document.visibilityState !== "visible"` 直接 return，另挂 `visibilitychange`
+   在切回来时**立刻补一次**——否则用户回到 tab 要干等最多 60s 才看到新数据。
+
+   闸门：`tsc -b` 0 / `vitest` 226 passed。**没加测试**：前端无 jsdom /
+   testing-library（vitest 跑在 node env，只测纯函数），两个同款 idiom 的现有 hook
+   也都没有测试——为这 3 行引入一整套 DOM 测试基建不成比例。约定改为写进
+   `CLAUDE.md`（`setInterval` 轮询必须看 `visibilityState`）。
+
+   ⚠ **遗留**：`RiskMonitor.tsx` 里 6 个 `setInterval(() => fetchAlerts(), ...)`
+   仍是无条件轮询。这次没动——它们没出现在 08-14 的日志分析里（当时没人开着那些
+   tab），且风控告警页「隐藏时要不要继续拉」牵涉产品判断（虽然隐藏时同样没人看得到
+   告警），不该顺手改。要做的话是独立一条 OPT。
 2. **logrotate 没开压缩**（P3）——`deploy/logrotate/new-it-backend` 是 `nocompress`，
    30 天纯文本，prod 67M + dev 44M。加 `compress` + `delaycompress` 能压掉约 90%。
    ⚠ **绝不能改成 `copytruncate`**（inode 不变 → `WatchedFileHandler` 检测不到 → 日志停写）。
