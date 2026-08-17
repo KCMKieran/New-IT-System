@@ -22,6 +22,24 @@ if str(_BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR))
 
 
+def pytest_configure(config):
+    """Register the ``slow`` marker.
+
+    Registered here rather than in a pytest.ini so the repo keeps its current
+    rootdir resolution — there is no pytest config file today, and adding one
+    would change how every existing invocation resolves paths.
+
+    ``slow`` means: talks to a live cloud database AND costs minutes, not
+    seconds. ``verify.sh`` deselects it by default and says so in its output;
+    run ``./verify.sh --full`` (or ``pytest -m slow``) to include it.
+    """
+    config.addinivalue_line(
+        "markers",
+        "slow: live cloud-DB integration test measured in minutes; "
+        "deselected by verify.sh unless --full is passed",
+    )
+
+
 @pytest.fixture(autouse=True)
 def _clear_settings_cache():
     """Drop the cached Settings around every test.

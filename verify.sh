@@ -9,7 +9,7 @@
 # `VERIFY: PASS` or `VERIFY: FAIL` for easy grepping.
 #
 # Hard gates (must pass — they gate the exit code):
-#   1. backend  pytest   — 131 tests, the strongest correctness signal here
+#   1. backend  pytest   — ~1349 tests, the strongest correctness signal here
 #   2. frontend tsc -b   — type check (build was silently broken before this)
 #   3. frontend vitest   — unit tests (commission math, filter persistence)
 #
@@ -19,15 +19,39 @@
 #       turn this into a *delta* gate (fail only if the current diff ADDS new
 #       lint errors vs the base branch) — that's the right autonomy guardrail.
 #
+# Speed: tests marked `slow` are deselected by default (2026-08-17). One test —
+# case_metrics' idempotency check — runs the real nightly batch job twice over
+# the live ~1,050-client roster and takes ~11 minutes, which is 88% of the whole
+# gate and made people avoid running verify.sh at all. Pass --full to include
+# it. The deselection is announced in the output on every run: a gate that
+# quietly covers less than it used to is worse than a slow one.
+#
 # Usage:
-#   ./verify.sh            # run every gate
-#   ./verify.sh --quiet    # only print the per-gate PASS/FAIL + final verdict
+#   ./verify.sh            # every gate, minus `slow` tests
+#   ./verify.sh --full     # every gate, including `slow` tests (adds ~11 min)
+#   ./verify.sh --quiet    # only the per-gate PASS/FAIL + final verdict
 #
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 QUIET=0
-[[ "${1:-}" == "--quiet" ]] && QUIET=1
+FULL=0
+for arg in "$@"; do
+  case "$arg" in
+    --quiet) QUIET=1 ;;
+    --full)  FULL=1 ;;
+    *) printf 'unknown option: %s\n' "$arg" >&2; exit 2 ;;
+  esac
+done
+
+# Deselect by marker, not by --ignore path: a mistyped --ignore path is accepted
+# silently by pytest and ignores nothing, which is exactly how an 11-minute run
+# got mistaken for a 90-second one on 2026-08-17.
+if [[ $FULL -eq 1 ]]; then
+  PYTEST_SELECT=()
+else
+  PYTEST_SELECT=(-m "not slow")
+fi
 
 # Pick the backend python: prefer the project venv, fall back to PATH.
 PYTEST="$ROOT/backend/.venv/bin/pytest"
@@ -57,7 +81,7 @@ run_gate() {
 }
 
 # ── Hard gates ─────────────────────────────────────────────────────────────
-run_gate "backend pytest"  "$ROOT/backend"  "$PYTEST" tests/ -q
+run_gate "backend pytest"  "$ROOT/backend"  "$PYTEST" tests/ -q "${PYTEST_SELECT[@]}"
 run_gate "frontend tsc"    "$ROOT/frontend" npx tsc -b
 run_gate "frontend vitest" "$ROOT/frontend" npm test --silent
 
@@ -83,8 +107,20 @@ if [[ -f "$FXBO_INDEX" ]]; then
   fi
 fi
 
-# ── Verdict ──────────────────────────────────────────────────────────────────
+# ── Coverage disclosure ──────────────────────────────────────────────────────
+# Printed on EVERY run, including --quiet. An autonomous loop trusts this
+# script's exit code as an oracle; if the default run covers less than the
+# full suite, that has to be visible in the same breath as the verdict rather
+# than buried in a comment nobody reads.
 printf '\n────────────────────────────────────────\n'
+if [[ $FULL -eq 1 ]]; then
+  printf '\033[32mcoverage: FULL\033[0m — `slow` tests included\n'
+else
+  printf '\033[33mcoverage: tests marked `slow` were NOT run\033[0m (live cloud-DB, ~11 min)\n'
+  printf '           run \033[1m./verify.sh --full\033[0m before trusting this as a release gate\n'
+fi
+
+# ── Verdict ──────────────────────────────────────────────────────────────────
 if [[ ${#FAILED_GATES[@]} -eq 0 ]]; then
   printf '\033[32mVERIFY: PASS\033[0m\n'
   exit 0
