@@ -243,5 +243,11 @@ def test_baseline_rerun_same_day_does_not_duplicate_rows():
     finally:
         with risk_cases_conn() as conn:
             with conn.cursor() as cur:
-                cur.execute("DELETE FROM case_metrics_daily WHERE user_id = %s", (uid,))
+                # Clean the WHOLE metric_date band, not just the fixture user.
+                # run_daily_baseline() above writes one row per roster member, so
+                # deleting by user_id alone left ~1,050 synthetic rows behind in
+                # prod PG on every run (found and purged 2026-08-17). `md` is a
+                # date this test owns exclusively — real snapshots start
+                # 2026-07-13, when OPT-0047 shipped — so this cannot touch them.
+                cur.execute("DELETE FROM case_metrics_daily WHERE metric_date = %s", (md,))
                 cur.execute("DELETE FROM risk_cases WHERE user_id = %s", (uid,))
