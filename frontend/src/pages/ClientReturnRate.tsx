@@ -43,6 +43,7 @@ import {
   X,
   Trash2,
   Download,
+  Loader2,
 } from "lucide-react";
 import { AgGridReact } from "ag-grid-react";
 import { ColDef } from "ag-grid-community";
@@ -266,10 +267,70 @@ export default function ClientReturnRate() {
       d.setMonth(now.getMonth() - 1);
       return { from: d, to: now };
     }
+    // Wide ranges stay on the day-level stats_trading path (no close_time_start),
+    // so cost scales with active-client count, not with window width.
+    if (timeRange === "90d") {
+      const d = new Date(now);
+      d.setDate(now.getDate() - 90);
+      return { from: d, to: now };
+    }
+    if (timeRange === "180d") {
+      const d = new Date(now);
+      d.setDate(now.getDate() - 180);
+      return { from: d, to: now };
+    }
+    if (timeRange === "365d") {
+      const d = new Date(now);
+      d.setDate(now.getDate() - 365);
+      return { from: d, to: now };
+    }
     const d = new Date(now);
     d.setDate(now.getDate() - 7);
     return { from: d, to: now };
   }, [timeRange, date]);
+
+  // ── Search status ────────────────────────────────────────────────────────
+  // A 365-day query sits for 8-20s while the grid still shows the PREVIOUS
+  // result set, so without this the page is indistinguishable from a hung one.
+  // Honest signals only — real elapsed time and a measured expectation, never a
+  // fabricated percentage (same rule as HoldBucketReport's loading overlay).
+  const [elapsedMs, setElapsedMs] = useState(0);
+
+  useEffect(() => {
+    if (!loading) {
+      setElapsedMs(0);
+      return;
+    }
+    const startedAt = Date.now();
+    // Bounded UI timer, not a data poll: it exists only while a request is in
+    // flight and is torn down when it settles, so the visibilityState guard
+    // that CLAUDE.md requires for periodic polling does not apply here.
+    const id = window.setInterval(() => {
+      setElapsedMs(Date.now() - startedAt);
+    }, 100);
+    return () => window.clearInterval(id);
+  }, [loading]);
+
+  // Width of the active window in days — derived from getDateRange so a custom
+  // date-picker span gets the same warning as the wide quick-select presets.
+  const rangeDays = useMemo(() => {
+    const dr = getDateRange();
+    if (!dr?.from || !dr?.to) return 0;
+    return Math.max(
+      0,
+      Math.round((dr.to.getTime() - dr.from.getTime()) / 86_400_000),
+    );
+  }, [getDateRange]);
+
+  // Expectations measured against the replica on 2026-08-17 (warm buffer pool;
+  // a cold 365d run roughly doubles). Cost tracks ACTIVE CLIENT COUNT, not
+  // window width, which is why these are not linear in days.
+  const searchHint = useMemo(() => {
+    if (rangeDays > 180) return "该范围逾 1 万位客户，通常需要 8-20 秒";
+    if (rangeDays > 90) return "该范围约 6-7 千位客户，通常需要 5 秒左右";
+    if (rangeDays > 31) return "该范围约 4-5 千位客户，通常需要 3-4 秒";
+    return "通常 1-2 秒";
+  }, [rangeDays]);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -280,7 +341,11 @@ export default function ClientReturnRate() {
       const dr = getDateRange();
       const p = new URLSearchParams({
         page: "1",
-        page_size: "5000",
+        // Must stay >= the widest range's active-client count (365d ≈ 11.2k as of
+        // 2026-08) or rows are silently dropped: the grid filters and paginates
+        // client-side, so anything not in this one response is invisible.
+        // Backend ceiling is 20000 (routes/client_return_rate.py).
+        page_size: "20000",
         sort_by: "month_trade_profit",
         sort_order: "desc",
         include_avg_equity: "true",
@@ -856,6 +921,9 @@ export default function ClientReturnRate() {
                   <SelectItem value="1w">过去 7 天</SelectItem>
                   <SelectItem value="this_month">本月</SelectItem>
                   <SelectItem value="1m">过去 30 天</SelectItem>
+                  <SelectItem value="90d">过去 90 天</SelectItem>
+                  <SelectItem value="180d">过去 180 天</SelectItem>
+                  <SelectItem value="365d">过去 365 天</SelectItem>
                 </SelectContent>
               </Select>
 
@@ -985,6 +1053,15 @@ export default function ClientReturnRate() {
                   ? `共 ${filteredRows.length.toLocaleString()} / ${total.toLocaleString()} 位客户`
                   : `共 ${total.toLocaleString()} 位客户有交易记录`}
               </span>
+              {/* Truncation is NOT the same as filtering, but the counter above
+                  renders both as "N / M". Call it out explicitly, otherwise a
+                  capped result set looks like an active filter. */}
+              {rows.length < total && (
+                <span className="px-2 py-1 rounded font-medium bg-amber-100 dark:bg-amber-900/20 text-amber-700 dark:text-amber-300">
+                  仅返回前 {rows.length.toLocaleString()} 位，结果已截断 —
+                  请缩小时间范围或用导出 CSV 取全量
+                </span>
+              )}
               {queryTime !== null && (
                 <span
                   className={cn(
@@ -1093,6 +1170,38 @@ export default function ClientReturnRate() {
             getRowId={(p) => String(p.data.client_id)}
           />
         </div>
+
+        {/* Overlay rather than unmounting the grid: keeps column widths and
+            scroll position stable, and the translucent backdrop makes it read
+            as "these rows are stale" instead of a layout jump. */}
+        {loading && (
+          <div
+            role="status"
+            aria-live="polite"
+            className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-1.5 rounded-xl bg-background/70 backdrop-blur-[1px]"
+          >
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+              <span>正在查询客户收益率…</span>
+              <span className="tabular-nums">
+                {(elapsedMs / 1000).toFixed(1)}s
+              </span>
+            </div>
+            <span className="text-xs text-muted-foreground/80">
+              {searchHint}
+            </span>
+            {/* Past every measured expectation — say so rather than let the
+                spinner imply everything is fine. Deliberately quotes no deadline:
+                the ceiling is per-statement (MAX_EXECUTION_TIME 45s, and Phase 1
+                and Phase 2 each get their own), so any single figure would be a
+                promise the backend does not actually make. */}
+            {elapsedMs > 25_000 && (
+              <span className="text-xs text-amber-600 dark:text-amber-400">
+                比预期久，仍在等待数据库返回；若超时会自动提示
+              </span>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
