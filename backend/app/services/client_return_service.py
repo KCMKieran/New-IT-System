@@ -78,10 +78,24 @@ def _json_default(obj: Any) -> Any:
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 
+# Server-side statement kill switch, deliberately BELOW read_timeout so the
+# server gives up before the client does. A client-side read_timeout only
+# abandons the socket — the server thread keeps running (e.g. queued behind an
+# MDL lock) as a zombie, which is exactly how the 2026-08-09 / 08-15 replica
+# incidents piled up. MAX_EXECUTION_TIME applies to read-only SELECTs, which is
+# every statement this module runs.
+#
+# Sized for the widest range the UI offers (365 days): measured end-to-end 7.6s
+# warm / ~15-20s cold on the replica, so 45s leaves headroom for a cold buffer
+# pool without letting a genuinely stuck query outlive the request.
+_MAX_EXECUTION_TIME_MS = 45000
+_READ_TIMEOUT_SEC = 60
+
+
 def _get_mysql_connection():
     """Create a MySQL connection to fxbackoffice slave DB."""
     settings = get_settings()
-    return pymysql.connect(
+    conn = pymysql.connect(
         host=settings.MYSQL_HOST_PRIMARY,
         user=settings.MYSQL_USER,
         password=settings.MYSQL_PASSWORD,
@@ -90,8 +104,15 @@ def _get_mysql_connection():
         charset="utf8mb4",
         cursorclass=pymysql.cursors.DictCursor,
         connect_timeout=10,
-        read_timeout=30,
+        read_timeout=_READ_TIMEOUT_SEC,
     )
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"SET SESSION MAX_EXECUTION_TIME = {_MAX_EXECUTION_TIME_MS}")
+    except Exception:
+        conn.close()
+        raise
+    return conn
 
 
 # ---------------------------------------------------------------------------

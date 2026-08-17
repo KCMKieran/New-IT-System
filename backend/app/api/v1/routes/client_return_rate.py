@@ -53,7 +53,11 @@ def _get_client_ip(request: Request) -> str:
 @router.get("/query", response_model=ClientReturnRateResponse)
 def query_client_return_rate(
     page: int = Query(1, ge=1, description="Page number"),
-    page_size: int = Query(50, ge=1, le=10000, description="Items per page"),
+    # Ceiling is "one full result set in one response", not a UI page size: the
+    # frontend pulls everything and paginates/filters client-side. The widest
+    # range the UI offers (365 days) resolves to ~11.2k active clients, so 10000
+    # would have silently truncated it. 20000 leaves room for organic growth.
+    page_size: int = Query(50, ge=1, le=20000, description="Items per page"),
     sort_by: Optional[str] = Query("month_trade_profit", description="Column to sort by"),
     sort_order: str = Query("desc", pattern="^(asc|desc)$", description="Sort direction"),
     search: Optional[str] = Query(None, description="Search by client_id"),
@@ -90,9 +94,13 @@ def query_client_return_rate(
         # Surface 400 with the (Claude-authored) validation message; safe to expose.
         raise HTTPException(status_code=400, detail=str(e))
     except OperationalError as e:
-        # MySQL error 2013 = Lost connection (read timeout), 1028 = Sort aborted
+        # 2013 = Lost connection (client read_timeout fired), 1028 = Sort aborted,
+        # 3024 = ER_QUERY_TIMEOUT (server-side MAX_EXECUTION_TIME fired). 3024 is
+        # now the one we expect to see first: the service caps statements at 45s
+        # while read_timeout is 60s, so the server aborts before the client walks
+        # away and leaves a zombie thread on the replica.
         err_code = e.args[0] if e.args else 0
-        if err_code in (2013, 1028):
+        if err_code in (2013, 1028, 3024):
             logger.warning(f"Query timeout for client return rate: {e}")
             raise HTTPException(status_code=504, detail="查询超时，请缩小时间范围后重试")
         logger.exception("MySQL error querying client return rate")
