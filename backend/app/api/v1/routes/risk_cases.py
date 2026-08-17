@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Optional
+from typing import Any, Optional
 
-from fastapi import APIRouter, Header, HTTPException, Path, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, status
 
+from ....core.audit import Auditor, get_auditor, history_author
 from ....core.logging_config import trace_id_var
 from ....core.risk_cases_pg import RiskCasesUnavailable
 from ....schemas.risk_cases import (
@@ -338,6 +339,15 @@ def crm_tag_dict():
 #   R6/R7 — server-generated trace id + best-effort, client-supplied
 #   X-Device-ID (no auth binding) captured into the audit trail.
 #
+# Two trails, on purpose, and they answer different questions:
+#   * client_remarks_history (PG, unchanged here) is the RECOVERY trail — it
+#     keeps every note version so a delete can be undone. Its `author` /
+#     `device_id` are client-supplied and therefore NOT identity.
+#   * audit_log (users.db) is the ACCOUNTABILITY trail — who did it, resolved
+#     server-side from the session cookie. That is why the routes below pass
+#     `body.author` on to the history row exactly as before but never let it
+#     near the audit row: Auditor reads request.state.user and nothing else.
+#
 # All three are declared BEFORE the /{user_id} route below so the literal
 # /remarks path is never captured as a user_id.
 
@@ -379,6 +389,7 @@ def upsert_client_remark(
     body: ClientRemarkUpsert,
     user_id: int = Path(...),
     x_device_id: Optional[str] = Header(default=None),
+    audit: Auditor = Depends(get_auditor),
 ):
     """Create or update a client remark.
 
@@ -387,16 +398,32 @@ def upsert_client_remark(
     non-positive user_id → 422 here. R6/R7: the server-generated trace id
     (not a client-settable header) plus the best-effort, client-supplied
     X-Device-ID are recorded into the append-only audit trail.
+
+    Also writes one audit_log row per save that CHANGED the note, attributed to
+    the session user (never to `body.author`, which any caller can type). A save
+    that re-posts the same text writes no row (§D2.3②) — the history table still
+    gets its version, because that one is the recovery trail.
+
+    `client_remarks_history.author` is taken from the same session subject via
+    `history_author()`. The body field is still accepted — the frontend sends
+    it and rejecting it would break saving — but it is only used when there is
+    no session at all (AUTH_ENABLED=false), and it never reaches
+    `audit_log.actor_email`.
     """
     _validate_remark_user_id(user_id)
+    # The note as it stood before this write only exists inside the service
+    # transaction; asking for it back here beats re-reading PG, which would
+    # both cost a round trip and race this very write.
+    prev: dict[str, Any] = {}
     try:
         row = remarks_svc.upsert_remark(
             user_id=user_id,
             note=body.note,
-            author=body.author,
+            author=history_author(audit, body.author),
             device_id=x_device_id,
             trace_id=trace_id_var.get(),
             expected_updated_at=body.expected_updated_at,
+            audit_sink=prev,
         )
     except remarks_svc.RemarkConflict as exc:
         raise HTTPException(
@@ -413,6 +440,30 @@ def upsert_client_remark(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="internal error while saving client remark",
         ) from exc
+    # After the write, never before: a 409/503 above means nothing changed,
+    # and an audit row for a change that never happened is worse than none.
+    # target has no third "human readable" segment because the client's name
+    # is not on this request — buying one would mean another PG query on a
+    # write path, and user_id is already the id the whole watchlist uses.
+    old_note = prev.get("old_note")  # None on a brand-new note
+    if old_note == body.note:
+        # §D2.3②: an unchanged value is not an event. Opening a client note to
+        # read it and pressing Save is the commonest way this endpoint is hit,
+        # and remarks are already the largest single source of audit rows —
+        # recording no-ops would bury the real edits under them. A log line
+        # instead, exactly as record_diff() does on its own no-op path.
+        logger.info(
+            "No-op save: action=%s target=%s (the note is unchanged)",
+            "risk_cases.remark.upsert",
+            f"client:{user_id}",
+        )
+    else:
+        audit.record(
+            "risk_cases.remark.upsert",
+            target=f"client:{user_id}",
+            old_value=old_note,
+            new_value=body.note,
+        )
     return ClientRemark(**row)
 
 
@@ -423,21 +474,29 @@ def delete_client_remark(
     # author string would land verbatim in the append-only audit table.
     author: str = Query(default="", max_length=120),
     x_device_id: Optional[str] = Header(default=None),
+    audit: Auditor = Depends(get_auditor),
 ):
     """Delete a client remark. The live row is removed but the old note
     survives in the append-only audit trail (R7), so deletion is recoverable.
     Deleting a non-existent remark is a no-op (`deleted: false`).
 
-    `author` (F6) is forwarded so delete history rows are attributable like
-    upsert rows. The trace id is the server-generated one (F9); X-Device-ID
-    is best-effort, client-supplied attribution (no auth binding)."""
+    The delete history row stays attributable (F6), but the name on it comes
+    from the session (`history_author`); the `author` query parameter is only
+    the AUTH_ENABLED=false fallback. The trace id is the server-generated one
+    (F9); X-Device-ID is best-effort, client-supplied attribution (no auth
+    binding).
+
+    An audit_log row is written only when a remark actually existed —
+    `deleted: false` changed no state, so it records nothing."""
     _validate_remark_user_id(user_id)
+    prev: dict[str, Any] = {}
     try:
         deleted = remarks_svc.delete_remark(
             user_id=user_id,
-            author=author,
+            author=history_author(audit, author),
             device_id=x_device_id,
             trace_id=trace_id_var.get(),
+            audit_sink=prev,
         )
     except RiskCasesUnavailable as exc:
         raise HTTPException(
@@ -450,6 +509,13 @@ def delete_client_remark(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="internal error while deleting client remark",
         ) from exc
+    if deleted:
+        # new_value stays NULL — that is how "deleted" reads in the trail.
+        audit.record(
+            "risk_cases.remark.delete",
+            target=f"client:{user_id}",
+            old_value=prev.get("old_note"),
+        )
     return {"deleted": deleted}
 
 

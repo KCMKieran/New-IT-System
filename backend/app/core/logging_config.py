@@ -28,18 +28,36 @@ from pathlib import Path
 # even when multiple requests are processed concurrently
 trace_id_var: ContextVar[Optional[str]] = ContextVar("trace_id", default=None)
 
+# Email of the person behind the current request. Set by AuthMiddleware the
+# moment a session resolves, stamped onto every log line by TraceIDFilter.
+#
+# Why the email string and not the SessionUser object: the log format only needs
+# a short string, and holding an auth object here would make the logging module
+# depend on the auth module — a circular import, since auth logs.
+#
+# Stays None for: requests before AuthMiddleware runs (the Trace middleware's own
+# start/end pair), AUTH_ENABLED=false, and scheduler jobs — none of which have an
+# operator, and inventing one would be worse than printing "-".
+user_email_var: ContextVar[Optional[str]] = ContextVar("user_email", default=None)
+
 
 class TraceIDFilter(logging.Filter):
     """
-    Logging filter that injects trace_id into log records.
-    
-    Fresh grad note: 
+    Stamps request context — trace_id and operator email — onto every log record.
+
+    The name is kept (it is already attached to both handlers and referenced in
+    docs) but the job is now "request-context injector" rather than trace_id only.
+
+    Fresh grad note:
     - Filter allows adding custom fields to every log message
     - This enables request tracing across all log entries
+    - Both lookups use `or "-"`, so this filter cannot raise; a raising filter
+      would swallow the log line it was supposed to decorate.
     """
     def filter(self, record: logging.LogRecord) -> bool:
         # Get trace_id from context, use "-" if not set (e.g., startup logs)
         record.trace_id = trace_id_var.get() or "-"
+        record.user = user_email_var.get() or "-"
         return True
 
 
@@ -60,9 +78,14 @@ def setup_logging(log_level: str = "INFO") -> None:
     level = getattr(logging, log_level.upper(), logging.INFO)
     
     # Define log format
-    # Format: [timestamp] [LEVEL] [trace_id] [module:lineno] - message
+    # Format: [timestamp] [LEVEL] [trace_id] [user] [module:lineno] - message
+    #
+    # The user column turns "the user says it was slow" into `grep their.email`
+    # across EVERY log line, including the ones that will never carry an audit
+    # row (queries, errors, timeouts). "-" means no authenticated subject —
+    # see user_email_var for the three ways that happens.
     log_format = (
-        "[%(asctime)s] [%(levelname)s] [%(trace_id)s] "
+        "[%(asctime)s] [%(levelname)s] [%(trace_id)s] [%(user)s] "
         "[%(name)s:%(lineno)d] - %(message)s"
     )
     date_format = "%Y-%m-%d %H:%M:%S"

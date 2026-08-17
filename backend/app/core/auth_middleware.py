@@ -67,7 +67,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from app.core.config import get_settings
-from app.core.logging_config import get_logger
+from app.core.logging_config import get_logger, user_email_var
 from app.services.auth_service import resolve_session
 
 logger = get_logger(__name__)
@@ -198,4 +198,16 @@ class AuthMiddleware(BaseHTTPMiddleware):
             return JSONResponse(status_code=401, content={"detail": "Not authenticated"})
 
         request.state.user = user
-        return await call_next(request)
+        # Stamp the operator onto every log line this request produces, the same
+        # way TraceIDMiddleware stamps the trace id. Set here rather than
+        # anywhere earlier because this is the first point at which a verified
+        # identity exists at all.
+        user_email_var.set(user.email)
+        try:
+            return await call_next(request)
+        finally:
+            # Not optional. ContextVars are isolated per execution chain, but
+            # uvicorn reuses worker threads — an unset value leaks one user's
+            # email onto the NEXT request's log lines, which is worse than no
+            # user column at all because it is confidently wrong.
+            user_email_var.set(None)

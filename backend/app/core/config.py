@@ -111,6 +111,7 @@ class Settings:
     AUTH_FAILURE_EVENTS_PER_MINUTE: int
     AUTH_EVENTS_RETENTION_DAYS: int
     AUDIT_LOG_RETENTION_DAYS: int
+    AUDIT_MISSING_ALERT_ENABLED: bool
 
     # Entra ID OIDC provider (auth design P3)
     ENTRA_TENANT_ID: str
@@ -341,8 +342,14 @@ class Settings:
         # ── Auth session layer (auth design P1) ──────────────────────────────
         # Master kill switch. OFF means AuthMiddleware short-circuits before it
         # touches the DB, /auth/me answers "anonymous", and the product behaves
-        # exactly as it did before P1 — that is the rollback plan (§7.1: flip to
-        # false, `docker compose restart`, back in 30 seconds).
+        # exactly as it did before P1 — that is the rollback plan: flip to false
+        # in backend/.env, then `docker compose -f docker-compose.prod.yml up -d api`.
+        #
+        # NOT `docker compose restart`. That restarts the process inside the
+        # existing container; env is resolved once when the container is CREATED,
+        # so the flip is silently ignored and nothing errors. Measured 2026-08-17:
+        # after `restart` the container id and the value are both unchanged;
+        # `up -d` prints "Recreated" and the new value takes effect.
         self.AUTH_ENABLED = _env_flag("AUTH_ENABLED", False)
 
         # Dev back door: POST /api/v1/auth/dev-login mints a session for this
@@ -427,6 +434,12 @@ class Settings:
         self.AUDIT_LOG_RETENTION_DAYS = int(
             (os.environ.get("AUDIT_LOG_RETENTION_DAYS") or "365").strip()
         )
+        # AuditMissingMiddleware: warn (AUDIT_MISSING) when a successful write
+        # produced no audit row. Default ON — the point of a fallback alarm is
+        # that nobody has to remember to switch it on; the escape hatch exists
+        # only for the case where one noisy known-unaudited endpoint would
+        # otherwise drown the token the health check greps for.
+        self.AUDIT_MISSING_ALERT_ENABLED = _env_flag("AUDIT_MISSING_ALERT_ENABLED", True)
 
         # ── Entra ID (Azure AD) OIDC provider (auth design P3) ───────────────
         # App registration lives in tenant 11cf6a7b-… (design doc §8.1). The

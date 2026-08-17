@@ -25,9 +25,10 @@ from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import quote
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 
+from ....core.audit import Auditor, get_auditor
 from ....core.fund_flow_monitor_db import (
     get_latest_scan,
     list_recent_scans,
@@ -141,7 +142,7 @@ async def list_scans(limit: int = Query(default=20, ge=1, le=100)):
 
 
 @router.post("/scan-now", response_model=FundFlowSnapshot)
-async def scan_now():
+async def scan_now(audit: Auditor = Depends(get_auditor)):
     """Run an immediate ad-hoc scan and return the resulting snapshot."""
     try:
         result = trigger_scan_now()
@@ -156,6 +157,22 @@ async def scan_now():
             status_code=status.HTTP_409_CONFLICT,
             detail="Another scan is already running; try again in a moment.",
         )
+
+    # Same detection code the Monday cron runs; the difference that matters here
+    # is who started it. The cron path has no actor and stays in the app log —
+    # this one is a person, so it gets a row. The alert list is deliberately not
+    # copied in: the scan batch is persisted and joinable by id.
+    batch = result.get("batch") or {}
+    audit.record(
+        "fund_flow.scan.run_now",
+        target=f"fund_flow_scan:{batch.get('id')}:manual",
+        new_value={
+            "batch_id": batch.get("id"),
+            "window_start": batch.get("window_start"),
+            "window_end": batch.get("window_end"),
+            "total_alerts": len(result.get("alerts") or []),
+        },
+    )
     return _snapshot_to_model(result)
 
 
@@ -165,6 +182,8 @@ async def scan_now():
 async def ad_hoc_query(req: FundFlowQueryRequest):
     """Ad-hoc detection query. Layered concurrency protection:
     Redis cache → SingleFlight dedup → Semaphore for MySQL.
+
+    Not audited: POST carries the filter payload, and nothing here changes state.
     """
     start_iso = _parse_iso(req.start, "start")
     end_iso = _parse_iso(req.end, "end")
@@ -325,16 +344,56 @@ async def get_config():
     return FundFlowConfig(rules=[FundFlowRule(**r) for r in rules])
 
 
+# Columns that save_rules() reassigns on every save. It DELETEs the whole table
+# and re-INSERTs, so ids and sort_order shift whenever any rule is added or
+# reordered — comparing them would report a change on rules nobody touched.
+_AUDIT_VOLATILE_RULE_KEYS = frozenset({"id", "sort_order"})
+
+
+def _rules_by_name(rules: list[dict]) -> dict[str, dict]:
+    """Key the rule list by name, so a diff reads "which rule moved", not "row 3".
+
+    Names are not unique by schema, so a repeat gets its index appended instead
+    of silently swallowing the earlier rule — a diff that loses a rule is worse
+    than one with an odd-looking key.
+    """
+    out: dict[str, dict] = {}
+    for i, rule in enumerate(rules):
+        key = str(rule.get("name") or f"rule#{i}")
+        if key in out:
+            key = f"{key}#{i}"
+        out[key] = {
+            k: v for k, v in rule.items() if k not in _AUDIT_VOLATILE_RULE_KEYS
+        }
+    return out
+
+
 @router.post("/config", response_model=FundFlowConfig)
-async def update_config(config: FundFlowConfig):
+async def update_config(
+    config: FundFlowConfig,
+    audit: Auditor = Depends(get_auditor),
+):
     if len(config.rules) > MAX_RULES:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Maximum {MAX_RULES} rules allowed.",
         )
+    before = _rules_by_name(load_rules())  # gone the instant save_rules() runs
     rule_dicts = [r.model_dump(exclude={"id"}) for r in config.rules]
     save_rules(rule_dicts)
-    return FundFlowConfig(rules=[FundFlowRule(**r) for r in load_rules()])
+    after = load_rules()
+
+    # The form posts every rule back on every save. Without the diff, nudging
+    # one threshold writes a row per rule; with it, one row naming the rule that
+    # actually changed. Both sides are read through load_rules() so the two
+    # dicts are shaped identically and cannot differ by serialisation alone.
+    audit.record_diff(
+        "fund_flow.config.update",
+        target="fund_flow_rules",
+        old=before,
+        new=_rules_by_name(after),
+    )
+    return FundFlowConfig(rules=[FundFlowRule(**r) for r in after])
 
 
 # ── CSV export ───────────────────────────────────────────

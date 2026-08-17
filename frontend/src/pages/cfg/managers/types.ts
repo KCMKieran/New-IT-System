@@ -78,16 +78,33 @@ export type AuthEvent = {
   trace_id?: string | null;
 };
 
+/**
+ * One row of `audit_log`.
+ *
+ * Unlike AuthEvent above, this one mirrors the backend model field for field:
+ * `schemas/admin.py::AuditEntry` declares `id` / `at` / `action` as required
+ * non-nullable, and Pydantic will 500 rather than serialise a row without them.
+ * Typing them optional here bought nothing and cost something: every consumer
+ * grew a branch for a shape the API cannot produce, and those branches are
+ * untestable and therefore untested. If the backend ever does relax a field,
+ * the change belongs in both files at once — that is what makes this a contract.
+ */
 export type AuditLogEntry = {
-  id?: number;
-  at?: string | null;
+  id: number;
+  at: string;
   actor_email?: string | null;
   actor_user_id?: number | null;
-  action?: string | null;
+  action: string;
   target?: string | null;
   old_value?: string | null;
   new_value?: string | null;
+  /** The key back into the application log: `grep <trace_id> backend.log`
+   *  returns every line this one action produced. Null for rows written before
+   *  the request-context wiring existed. */
   trace_id?: string | null;
+  /** Where the action was performed from. Null for rows written before the
+   *  column existed, or when the IP could not be determined. */
+  ip?: string | null;
 };
 
 /** Body of `PATCH /admin/users/{id}`. Every field is optional; only the ones
