@@ -694,10 +694,10 @@ def test_the_operator_email_reaches_route_level_log_records(logging_probe):
     assert _users_of(handler, "route line") == [MANAGER]
 
 
-def test_the_request_completed_line_carries_the_operator(logging_probe):
-    """The two lines EVERY request produces used to be the two that could not
-    name anybody: Trace is the outermost middleware, so its pair brackets
-    AuthMiddleware's set/clear entirely.
+def test_the_request_line_carries_the_operator(logging_probe):
+    """The line EVERY request produces used to be one that could not name
+    anybody: Trace is the outermost middleware, so it brackets AuthMiddleware's
+    set/clear entirely.
 
     That made `grep <email> backend.log` — the use case the user column was
     added for — return nothing at all for any endpoint whose route and service
@@ -707,9 +707,28 @@ def test_the_request_completed_line_carries_the_operator(logging_probe):
     client, handler = logging_probe
     sid = _mint()
     assert client.get("/api/v1/quiet", headers=_bearer(sid)).status_code == 200
-    assert _users_of(handler, "Request completed") == [MANAGER]
-    # "Request started" genuinely cannot know: no session has been resolved yet.
-    assert _users_of(handler, "Request started") == ["-"]
+    assert _users_of(handler, "Request:") == [MANAGER]
+
+
+def test_the_request_line_is_self_contained(logging_probe):
+    """One INFO line per request, and it stands alone.
+
+    The start/end pair this replaced cost two lines to say one thing, and the
+    completion half carried neither method nor path — reading it meant grepping
+    its trace_id to find the partner line. Anything that drops method, path,
+    status, duration or client from this line puts that join back.
+
+    The probe fixture pins the root logger at INFO, so this also asserts the
+    start line no longer reaches INFO: exactly one record matches.
+    """
+    client, handler = logging_probe
+    sid = _mint()
+    assert client.get("/api/v1/quiet", headers=_bearer(sid)).status_code == 200
+
+    lines = [r.getMessage() for r in handler.records if "Request" in r.getMessage()]
+    assert len(lines) == 1, lines
+    for fragment in ("GET", "/api/v1/quiet", "status=200", "duration=", "client="):
+        assert fragment in lines[0], (fragment, lines[0])
 
 
 def test_the_operator_does_not_leak_onto_the_next_request(logging_probe):

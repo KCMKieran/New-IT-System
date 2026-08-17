@@ -59,8 +59,27 @@ _startup_scan_thread: threading.Thread | None = None
 # OPT-0037 observability: a fast tick that finds the shared lock held (slow tier
 # mid-flight) skips itself. At scale, frequent skips mean the fast tier is
 # silently running below its 60s cadence — exactly when the settle-window blind
-# spot reopens — so we count + log them at INFO instead of swallowing at DEBUG.
+# spot reopens — so we count them.
+#
+# The per-skip line is DEBUG, not INFO. A single skip is the documented,
+# expected consequence of the two tiers sharing _scan_lock (roughly one per
+# ~10 min, measured at 287 lines on 2026-08-14) — logging an expected event
+# every time trains people to filter out the module. What is NOT expected is
+# skips arriving back-to-back: that means the slow tier is holding the lock
+# across multiple fast cadences and the fast tier really has stopped running at
+# 60s. That case escalates to WARNING via _consecutive_fast_skips below, which
+# is the signal the counter was added for in the first place.
 _fast_tier_skip_count = 0
+_consecutive_fast_skips = 0
+# Consecutive skips before the run of skips is treated as a stall. 3 = the fast
+# tier has been blocked for ~3 minutes; a healthy slow tick does not hold the
+# lock that long.
+FAST_SKIP_STALL_THRESHOLD = 3
+# Last time each tier's "scan complete" reached INFO, keyed by tier name.
+# See _should_log_scan_complete().
+_last_scan_complete_log: dict[str, datetime] = {}
+# How long a quiet tier may go without an INFO line before one is forced.
+SCAN_HEARTBEAT_MIN = 60
 # OPT-0038 R2: adaptive look-back for the two event-gated rules on the fast tier.
 # We remember when the event-gated section last ran; the next tick's opens
 # look-back = (now − last_scan) + buffer, so a skipped/late/long tick widens the
@@ -116,6 +135,32 @@ _LATEST_RESULT_TTL_FLOOR_SEC = 600
 # and pool connections internally).
 _result_redis: redis.Redis | None = None
 _result_redis_lock = threading.Lock()
+
+
+def _should_log_scan_complete(tier: str, new_alerts: int, now: datetime) -> bool:
+    """Is this tick's completion line worth an INFO line?
+
+    Yes whenever the tick produced new alerts — that is the event this whole
+    scheduler exists to produce, and it must never be demoted. Yes also once an
+    hour per tier, so a tier going silent stays diagnosable.
+
+    Otherwise no. Both tiers together emitted 1440 completion lines on
+    2026-08-14 (14.8% of the day's log bytes) and 749 of them — 52% — reported
+    `0 new`: a scan that found nothing, which is the normal state of a risk
+    scanner and carries no information at this cadence. Every tick is still
+    logged at DEBUG.
+
+    Not locked: both tiers hold _scan_lock while scanning, so the two callers
+    are already serialised against each other.
+    """
+    if new_alerts > 0:
+        _last_scan_complete_log[tier] = now
+        return True
+    last = _last_scan_complete_log.get(tier)
+    if last is None or (now - last).total_seconds() >= SCAN_HEARTBEAT_MIN * 60:
+        _last_scan_complete_log[tier] = now
+        return True
+    return False
 
 
 def _get_result_redis() -> redis.Redis | None:
@@ -724,7 +769,16 @@ def _run_scan(*, tier: str = "all", dispatch_mail: bool = False) -> None:
             except Exception:
                 logger.exception("SSE publish failed (non-fatal)")
 
-        logger.info(
+        # Ticks that found something always reach INFO; quiet ticks are DEBUG
+        # with an hourly liveness beat. See _should_log_scan_complete().
+        _log_scan = (
+            logger.info
+            if _should_log_scan_complete(
+                tier, len(this_tick_alerts), datetime.now(timezone.utc)
+            )
+            else logger.debug
+        )
+        _log_scan(
             "Scan complete [%s]: %d new (%d cached), %d scanned, %dms",
             tier,
             len(this_tick_alerts),
@@ -763,18 +817,33 @@ def _locked_fast_burst_scan() -> None:
     query + margin/position snapshot every 60s) — the accepted cost of
     closing the settle-window blind spot.
     """
-    global _fast_tier_skip_count
+    global _fast_tier_skip_count, _consecutive_fast_skips
     if not _fast_tier_enabled():
         return
     acquired = _scan_lock.acquire(blocking=False)
     if not acquired:
         _fast_tier_skip_count += 1
-        logger.info(
+        _consecutive_fast_skips += 1
+        logger.debug(
             "Fast tier: scan_lock held by slow tier, skipping this tick "
             "(cumulative skips=%d)",
             _fast_tier_skip_count,
         )
+        # A run of skips is the actual fault condition — see the comment on
+        # _fast_tier_skip_count. Logged on every tick past the threshold rather
+        # than only on the crossing tick: while this is true the fast tier is
+        # not scanning, and how long it stays true is what matters.
+        if _consecutive_fast_skips >= FAST_SKIP_STALL_THRESHOLD:
+            logger.warning(
+                "Fast tier has skipped %d consecutive ticks — slow tier is "
+                "holding scan_lock for >%ds and the 60s cadence is not being "
+                "met (cumulative skips=%d)",
+                _consecutive_fast_skips,
+                _consecutive_fast_skips * 60,
+                _fast_tier_skip_count,
+            )
         return
+    _consecutive_fast_skips = 0
     try:
         _run_scan(tier="fast_burst")
     finally:

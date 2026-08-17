@@ -251,6 +251,58 @@ def test_stale_ladder_skipped_when_snapshot_behind_gate():
     assert rule_martingale_detect([c], [_rule()]) == []
 
 
+def test_gate_skips_log_one_aggregate_line_not_one_per_ladder(caplog):
+    """The per-ladder line was the largest single thing in the prod log —
+    1712 lines, 32.6% of a weekday's bytes (2026-08-14), against 17
+    WARNING+ERROR lines the same day. It is also the most repetitive: the
+    overlap window re-evaluates the same unchanged candidate every 60s, so one
+    ladder logged the identical sentence three minutes running.
+
+    A skip is not an error (the candidate is retried next tick by design), so
+    what INFO owes the reader is the aggregate — is the snapshot keeping up,
+    and across how many ladders. Per-ladder detail stays at DEBUG.
+    """
+    import logging
+
+    stale = [
+        _candidate(login=1000 + i, latest_open=BASE,
+                   gate_latest_open_dt=BASE + timedelta(seconds=30))
+        for i in range(3)
+    ]
+    with caplog.at_level(logging.INFO, logger="app.services.rule_martingale_service"):
+        assert rule_martingale_detect(stale, [_rule()]) == []
+
+    lines = [r.getMessage() for r in caplog.records if "gate" in r.getMessage()]
+    assert len(lines) == 1, lines
+    assert "3 candidate(s)" in lines[0]
+    assert "3 ladder(s)" in lines[0]
+
+
+def test_a_single_stuck_ladder_names_itself_without_debug(caplog):
+    """286 of the 647 affected ticks on 2026-08-14 had exactly one skip. That
+    case is common enough that having to switch to DEBUG to learn WHICH ladder
+    would just push people back to reading the old per-ladder stream."""
+    import logging
+
+    c = _candidate(latest_open=BASE, gate_latest_open_dt=BASE + timedelta(seconds=30))
+    with caplog.at_level(logging.INFO, logger="app.services.rule_martingale_service"):
+        assert rule_martingale_detect([c], [_rule()]) == []
+
+    line = next(r.getMessage() for r in caplog.records if "gate" in r.getMessage())
+    assert str(c["login"]) in line
+
+
+def test_no_gate_line_at_all_when_nothing_is_behind(caplog):
+    """A healthy tick must be silent here, or the aggregate just replaces one
+    per-minute stream with another."""
+    import logging
+
+    fresh = _candidate(latest_open=BASE, gate_latest_open_dt=BASE)
+    with caplog.at_level(logging.INFO, logger="app.services.rule_martingale_service"):
+        rule_martingale_detect([fresh], [_rule()])
+    assert [r for r in caplog.records if "behind snapshot gate" in r.getMessage()] == []
+
+
 def test_fresh_ladder_at_exact_boundary_fires():
     # snapshot latest leg == gated open → the gated add IS present (>=) → fires.
     open_dt = BASE + timedelta(seconds=30)
