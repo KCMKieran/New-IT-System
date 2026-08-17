@@ -27,9 +27,10 @@ from __future__ import annotations
 
 import time
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
 from app.core.auth_deps import require_manager
+from app.core.auth_middleware import client_ip
 from app.schemas.admin import (
     MODULE_CATALOGUE,
     AdminSession,
@@ -94,6 +95,7 @@ def get_users() -> dict:
 def patch_user(
     user_id: int,
     payload: UpdateUserRequest,
+    request: Request,
     actor: SessionUser | None = Depends(require_manager),
 ) -> AdminUser:
     """Change role / status / allowed_modules. Guardrails live in the service.
@@ -116,6 +118,11 @@ def patch_user(
                 payload.allowed_modules if payload.touches("allowed_modules") else svc.UNSET
             ),
             actor=actor,
+            # The audit rows for these three endpoints are written inside the
+            # service, so the caller's address has to travel with the call —
+            # client_ip() is the one shared implementation (the same one the
+            # Auditor uses), so every row in the table means the same thing.
+            ip=client_ip(request),
         )
     except svc.AdminError as exc:
         raise _http(exc) from exc
@@ -136,21 +143,31 @@ def get_user_sessions(user_id: int) -> dict:
 
 @router.delete("/users/{user_id}/sessions")
 def delete_user_sessions(
-    user_id: int, actor: SessionUser | None = Depends(require_manager)
+    user_id: int,
+    request: Request,
+    actor: SessionUser | None = Depends(require_manager),
 ) -> dict:
     """Sign one user out of every device."""
     try:
-        return {"revoked": svc.revoke_user_sessions(user_id, actor=actor)}
+        return {
+            "revoked": svc.revoke_user_sessions(
+                user_id, actor=actor, ip=client_ip(request)
+            )
+        }
     except svc.AdminError as exc:
         raise _http(exc) from exc
 
 
 @router.delete("/sessions/{sid_hash}")
 def delete_session(
-    sid_hash: str, actor: SessionUser | None = Depends(require_manager)
+    sid_hash: str,
+    request: Request,
+    actor: SessionUser | None = Depends(require_manager),
 ) -> dict:
     """Sign one device out. ``sid_hash`` is the sha256 the list endpoint gave."""
-    return {"revoked": svc.revoke_session(sid_hash, actor=actor)}
+    return {
+        "revoked": svc.revoke_session(sid_hash, actor=actor, ip=client_ip(request))
+    }
 
 
 # ── catalogues and logs ──────────────────────────────────────────────────────
@@ -181,12 +198,35 @@ def get_auth_events(
     return _envelope(data, t0, page=page, page_size=page_size, total=total)
 
 
+# ``at`` is stored as a fixed-width UTC ISO8601 string, and the filter compares
+# strings. Pinning the shape here means a malformed bound is a 422 the caller can
+# read, rather than a lexicographic comparison that silently returns the wrong
+# window (``"2026-8-1" > "2026-12-31"`` as text). The time half is optional so a
+# plain date works as a day boundary.
+_ISO_BOUND = r"^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2}Z?)?$"
+
+
 @router.get("/audit-log")
 def get_audit_log(
     page: int = Query(1, ge=1),
     page_size: int = Query(svc.DEFAULT_PAGE_SIZE, ge=1, le=svc.MAX_PAGE_SIZE),
+    actor_email: str | None = Query(None, description="Exact match, normalised."),
+    action_prefix: str | None = Query(
+        None,
+        max_length=64,
+        description="Prefix of the dotted action name, e.g. 'risk_monitor.'.",
+    ),
+    start: str | None = Query(None, pattern=_ISO_BOUND, description="UTC, inclusive."),
+    end: str | None = Query(None, pattern=_ISO_BOUND, description="UTC, exclusive."),
 ) -> dict:
     t0 = time.time()
-    rows, total = svc.list_audit_log(page=page, page_size=page_size)
+    rows, total = svc.list_audit_log(
+        page=page,
+        page_size=page_size,
+        actor_email=actor_email,
+        action_prefix=action_prefix,
+        start=start,
+        end=end,
+    )
     data = [AuditEntry(**r).model_dump() for r in rows]
     return _envelope(data, t0, page=page, page_size=page_size, total=total)

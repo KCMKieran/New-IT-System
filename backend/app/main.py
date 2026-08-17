@@ -33,6 +33,7 @@ from app.core.config import get_settings
 from app.core.trace_middleware import TraceIDMiddleware
 from app.core.api_key_middleware import APIKeyMiddleware
 from app.core.auth_middleware import AuthMiddleware
+from app.core.audit_missing_middleware import AuditMissingMiddleware
 from app.core.users_db import init_users_db
 from app.core.database import init_db
 from app.core.risk_monitor_db import init_risk_monitor_db
@@ -246,7 +247,7 @@ def create_app() -> FastAPI:
     Target execution order (outer -> inner):
 
         TraceIDMiddleware -> CORSMiddleware -> APIKeyMiddleware
-            -> AuthMiddleware -> routes
+            -> AuthMiddleware -> AuditMissingMiddleware -> routes
 
     - Trace outermost: it must see EVERY request, including ones short-circuited
       by a rejection further in. Previously it sat innermost, so an API-key 403
@@ -260,6 +261,9 @@ def create_app() -> FastAPI:
       cheaper check, so a caller carrying neither credential is turned away
       before the session store is ever touched. It is also the layer that
       attaches request.state.user, which only route handlers consume.
+    - AuditMissingMiddleware innermost of all: it asks "did this successful
+      write leave an audit row", which is only a meaningful question for a
+      request that got past both credential layers and reached a route.
 
     Honest scope note: today both dev (vite proxy) and prod (nginx reverse
     proxy) serve the frontend same-origin, so CORSMiddleware is effectively
@@ -272,8 +276,16 @@ def create_app() -> FastAPI:
 
     # --- Registered in REVERSE of execution order (see docstring) -------------
 
-    # Session auth — registered FIRST so it ends up INNERMOST, closest to the
-    # routes. Inert (one attribute read, no DB) while AUTH_ENABLED is false.
+    # AUDIT_MISSING fallback alarm — registered FIRST so it ends up INNERMOST,
+    # BELOW AuthMiddleware. That position is the point: it must only judge
+    # requests that actually reached a route, and it must read
+    # request.state.audit_records after the route has written it. A rejected
+    # request (401/403) is not a missing audit row.
+    app.add_middleware(AuditMissingMiddleware)
+
+    # Session auth — registered next so it sits just above the alarm and
+    # INNERMOST of the three credential layers. Inert (one attribute read, no
+    # DB) while AUTH_ENABLED is false.
     app.add_middleware(AuthMiddleware)
 
     # API Key validation — sits directly above Auth.

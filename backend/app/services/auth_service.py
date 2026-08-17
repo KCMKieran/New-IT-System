@@ -199,6 +199,7 @@ def record_audit(
     target: str | None = None,
     old_value: str | None = None,
     new_value: str | None = None,
+    ip: str | None = None,
 ) -> None:
     """Append one row to audit_log. Never raises.
 
@@ -207,6 +208,11 @@ def record_audit(
     alert-mail subscription deletes, risk-rule threshold edits) through it, its
     only one — which makes this table the sole record that a role was ever
     granted.
+
+    ``ip`` is keyword-only with a default so the callers that predate it keep
+    working unchanged. Business callers should not pass it by hand: go through
+    ``app.core.audit.Auditor``, which fills it (and the actor) from the request
+    instead of from anything the client could have typed.
 
     That is why the swallowed error below is logged at CRITICAL with a grep
     token, unlike record_auth_event's. Both are best-effort by design (an audit
@@ -219,8 +225,9 @@ def record_audit(
         with get_users_db() as conn:
             conn.execute(
                 "INSERT INTO audit_log "
-                "(at, actor_email, actor_user_id, action, target, old_value, new_value, trace_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "(at, actor_email, actor_user_id, action, target, old_value, new_value, "
+                " trace_id, ip) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     _fmt(_now()),
                     actor_email,
@@ -230,6 +237,7 @@ def record_audit(
                     old_value,
                     new_value,
                     trace_id_var.get(),
+                    ip,
                 ),
             )
     except sqlite3.Error:
@@ -238,7 +246,7 @@ def record_audit(
         # happened at all.
         logger.critical(
             f"AUDIT_WRITE_FAILED action={action!r} actor={actor_email!r} "
-            f"target={target!r} old={old_value!r} new={new_value!r}",
+            f"target={target!r} old={old_value!r} new={new_value!r} ip={ip!r}",
             exc_info=True,
         )
 

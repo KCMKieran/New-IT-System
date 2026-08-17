@@ -147,11 +147,20 @@ CREATE TABLE IF NOT EXISTS audit_log (
     target        TEXT,
     old_value     TEXT,
     new_value     TEXT,
-    trace_id      TEXT
+    trace_id      TEXT,
+    ip            TEXT                         -- where it was done from. Added
+                                               -- after the table existed, so a
+                                               -- live database only gets it via
+                                               -- _migrate_add_column() below.
 );
 
 CREATE INDEX IF NOT EXISTS idx_audit_log_at ON audit_log(at);
 CREATE INDEX IF NOT EXISTS idx_audit_log_actor ON audit_log(actor_email, at);
+-- Safe to declare here: `action` has existed since the table was created, so
+-- this index never references a column a live database might not have yet.
+-- ⚠ An index over `ip` MUST NOT be added here for exactly that reason — see
+-- the idx_users_entra_oid note above and init_users_db() below.
+CREATE INDEX IF NOT EXISTS idx_audit_log_action ON audit_log(action, at);
 
 -- P3: one row per in-flight OIDC round trip, created by /auth/login and
 -- consumed (deleted) by /auth/callback. Rows are short-lived (minutes) and
@@ -181,10 +190,23 @@ def _migrate_add_column(conn: sqlite3.Connection, table: str, column: str, decl:
     added to _SCHEMA after a database has been created never appears in it.
     Deployments carry a live users.db (it is a bind mount, not a build artefact),
     so every post-P1 column needs a step here as well as a line in _SCHEMA.
+
+    The read (PRAGMA) and the write (ALTER) are two statements, not one atomic
+    step, and prod starts FOUR uvicorn workers at once — all four run
+    init_users_db() concurrently, so more than one can see "column missing"
+    before any of them has added it. The loser of that race gets
+    ``duplicate column name``, which would abort startup for a migration that
+    has in fact already succeeded. Swallowing exactly that message (and nothing
+    else) makes the function idempotent under concurrency; any other
+    OperationalError — a locked database, a typo'd declaration — still raises.
     """
     cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
     if column not in cols:
-        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column" not in str(exc).lower():
+                raise
 
 
 def init_users_db() -> None:
@@ -197,6 +219,11 @@ def init_users_db() -> None:
         # Column additions for databases created before the column existed.
         # ALTER must run before the index that references the new column.
         _migrate_add_column(conn, "users", "entra_oid", "TEXT")
+        # Audit log gained an `ip` column with the audit-log rollout. No index
+        # over it on purpose: nobody queries the audit trail by IP, and every
+        # index on a post-hoc column is one more thing that has to be created
+        # AFTER the ALTER rather than in _SCHEMA.
+        _migrate_add_column(conn, "audit_log", "ip", "TEXT")
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_entra_oid "
             "ON users(entra_oid) WHERE entra_oid IS NOT NULL"

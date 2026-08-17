@@ -7,8 +7,9 @@ frontend `apiFetch`); it is the unit of exclusivity for claim/release.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 
+from app.core.audit import Auditor, get_auditor
 from app.schemas.view_profiles import (
     ClaimRequest,
     CreateProfileRequest,
@@ -74,16 +75,49 @@ def release_profile(name: str, x_device_id: str | None = Header(default=None)):
 
 
 @router.post("/{name}/force-release")
-def force_release_profile(name: str, x_device_id: str | None = Header(default=None)):
-    """Admin escape hatch for a lock stuck on a lost device-id."""
+def force_release_profile(
+    name: str,
+    x_device_id: str | None = Header(default=None),
+    audit: Auditor = Depends(get_auditor),
+):
+    """Admin escape hatch for a lock stuck on a lost device-id.
+
+    The one write in this router that is audited. claim / release / save-state
+    are not: save-state alone is 59% of every non-GET request this backend sees
+    (a dragged column width is one PUT), so recording it would bury the trail in
+    noise. force-release is different on all three counts — a person chose it,
+    it is rare, and it takes something away from somebody else.
+    """
     device = _require_device(x_device_id)
+    # Read the holder BEFORE the write; force_release() NULLs these columns and
+    # "whose lock was taken" is then gone. Only the ownership fields — the
+    # profile's `state` blob is somebody's grid layout, not audit material.
+    before = svc.get_profile(name)
     try:
         svc.force_release(name, device)
-        return {"ok": True}
     except svc.ProfileAdminError:
         raise HTTPException(status_code=403, detail="not authorised to force-release")
     except svc.ProfileNotFound:
         raise HTTPException(status_code=404, detail=f"{name} not found")
+
+    audit.record(
+        "view_profiles.profile.force_release",
+        target=f"profile:{name}",
+        old_value=(
+            {
+                "owner_device": before.get("owner_device"),
+                "owner_label": before.get("owner_label"),
+                "claimed_at": before.get("claimed_at"),
+            }
+            if before
+            else None
+        ),
+        # new_value stays NULL: the lock is gone, and NULL is how this table
+        # spells "no longer there". The X-Device-ID that authorised the call is
+        # deliberately absent — it is a browser, not a person, and the person is
+        # already in actor_email.
+    )
+    return {"ok": True}
 
 
 @router.put("/{name}/state")

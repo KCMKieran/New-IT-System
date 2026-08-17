@@ -128,6 +128,33 @@ export function revokeSession(
   );
 }
 
+/**
+ * Filters accepted by `GET /admin/audit-log`. Mirrors the Query parameters on
+ * `routes/admin.py::get_audit_log`; the names are the wire contract, so they
+ * are snake_case here and not camelCase.
+ *
+ * `start` / `end` are a half-open `[start, end)` window over the `at` column,
+ * expressed in **UTC** (`YYYY-MM-DDTHH:MM:SSZ`, or a bare date). The backend
+ * compares them as strings — which is exact, because `at` is fixed-width UTC
+ * ISO8601 — and answers 422 on any other shape rather than silently comparing
+ * "2026-8-1" against "2026-12-31" and returning the wrong window.
+ *
+ * `action_prefix` is a prefix of the dotted `<module>.<object>.<verb>` action
+ * name (`"risk_monitor."`), not a free-text search.
+ */
+export type AuditLogFilters = {
+  actor_email?: string;
+  action_prefix?: string;
+  start?: string;
+  end?: string;
+};
+
+/**
+ * Both log tabs share one paged GET. Supported filters differ by path:
+ * `auth-events` takes `email` / `event`, `audit-log` takes `AuditLogFilters`.
+ * Empty strings are dropped rather than sent, so an emptied filter box means
+ * "no filter" instead of "match the empty string".
+ */
 export function fetchPagedLog<T>(
   path: "auth-events" | "audit-log",
   params: Record<string, string | number | undefined>,

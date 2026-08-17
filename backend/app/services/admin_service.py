@@ -213,20 +213,78 @@ def list_auth_events(
     return [dict(r) for r in rows], total
 
 
-def list_audit_log(*, page: int = 1, page_size: int = DEFAULT_PAGE_SIZE) -> tuple[list[dict], int]:
+def _like_prefix(prefix: str) -> str:
+    """Turn a literal string into a LIKE pattern that matches it as a prefix.
+
+    ``%`` and ``_`` are wildcards to LIKE, and every action name in this system
+    contains at least one underscore (``risk_monitor.``, ``alert_mail.``,
+    ``fund_flow.``). Left unescaped, ``risk_monitor.%`` would also match a
+    hypothetical ``riskXmonitorY.…`` — harmless today, but a filter that
+    quietly matches more than it says is the wrong thing to leave in an audit
+    UI. Paired with ``ESCAPE '\\'`` at the call site.
+    """
+    escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"{escaped}%"
+
+
+def list_audit_log(
+    *,
+    page: int = 1,
+    page_size: int = DEFAULT_PAGE_SIZE,
+    actor_email: str | None = None,
+    action_prefix: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
+) -> tuple[list[dict], int]:
     """Operations log, newest first. Returns ``(rows, total)``.
 
-    Until P5 reroutes the existing business writers (view-profiles force
-    release, alert-mail subscription deletes, risk-rule threshold edits) this
-    table contains administration actions only — the ones this module writes.
+    Four optional filters, each one chosen to land on an existing index rather
+    than to be maximally flexible:
+
+    ``actor_email``
+        Exact match on the normalised address (idx_audit_log_actor). Not a
+        substring search: ``actor_email`` is written from the session subject,
+        so a full address is always what the caller has.
+    ``action_prefix``
+        ``LIKE '<prefix>%'`` (idx_audit_log_action). This is the entire payoff
+        of the three-segment ``<module>.<object>.<verb>`` naming — "show me
+        every risk-control change" is one prefix, not a checklist of verbs.
+    ``start`` / ``end``
+        Half-open ``[start, end)`` on ``at`` (idx_audit_log_at). ``at`` is a
+        fixed-width UTC ISO8601 string, so a lexicographic comparison IS a
+        chronological one; the same property the retention sweep relies on.
+        The caller supplies UTC — localising to Asia/Hong_Kong is the
+        frontend's job, per the project timezone convention.
+
+    All four narrow ``total`` as well as the page, so the pager reports the
+    size of the filtered result and not of the table.
     """
+    where: list[str] = []
+    params: list[Any] = []
+    if actor_email:
+        where.append("actor_email = ?")
+        params.append(auth_service.normalize_email(actor_email))
+    if action_prefix:
+        where.append("action LIKE ? ESCAPE '\\'")
+        params.append(_like_prefix(action_prefix))
+    if start:
+        where.append("at >= ?")
+        params.append(start)
+    if end:
+        where.append("at < ?")
+        params.append(end)
+    clause = f" WHERE {' AND '.join(where)}" if where else ""
+
     with get_users_db() as conn:
-        total = conn.execute("SELECT COUNT(*) AS n FROM audit_log").fetchone()["n"]
+        total = conn.execute(
+            f"SELECT COUNT(*) AS n FROM audit_log{clause}", params
+        ).fetchone()["n"]
         rows = conn.execute(
             "SELECT id, at, actor_email, actor_user_id, action, target, "
-            "       old_value, new_value, trace_id "
-            "  FROM audit_log ORDER BY at DESC, id DESC LIMIT ? OFFSET ?",
-            (page_size, (page - 1) * page_size),
+            "       old_value, new_value, trace_id, ip "
+            f"  FROM audit_log{clause} "
+            " ORDER BY at DESC, id DESC LIMIT ? OFFSET ?",
+            (*params, page_size, (page - 1) * page_size),
         ).fetchall()
     return [dict(r) for r in rows], total
 
@@ -328,8 +386,16 @@ def update_user(
     status: Any = UNSET,
     allowed_modules: Any = UNSET,
     actor: SessionUser | None = None,
+    ip: str | None = None,
 ) -> dict:
     """Change a user's role / status / modules. Returns the updated AdminUser.
+
+    ``ip`` is handed down from the route (``client_ip(request)``) instead of
+    being looked up here: the service layer must not import Request, and the
+    audit column has to be filled from the SAME one implementation the rest of
+    the trail uses. Without it these rows — the most privileged ones in the
+    table — were the only ones landing with ip NULL, while every route-level
+    Auditor row carried one.
 
     Implements §2.3 guardrails 1-5. ``actor`` is the manager performing the
     change. It is still typed optional because this function is callable from
@@ -392,6 +458,7 @@ def update_user(
             target=target,
             old_value=row["role"],
             new_value=updated["role"],
+            ip=ip,
         )
         auth_service.record_auth_event(
             "role_change",
@@ -406,6 +473,7 @@ def update_user(
             target=target,
             old_value=row["status"],
             new_value=updated["status"],
+            ip=ip,
         )
         auth_service.record_auth_event(
             "account_disabled" if updated["status"] != "active" else "account_enabled",
@@ -423,6 +491,7 @@ def update_user(
             # everything" must not read identically a year from now.
             old_value=row["allowed_modules"],
             new_value=updated["allowed_modules"],
+            ip=ip,
         )
 
     # Guardrail 1 — role and status changes drop every session immediately.
@@ -439,6 +508,7 @@ def update_user(
                 actor_user_id=actor_id,
                 target=target,
                 new_value=str(revoked),
+                ip=ip,
             )
 
     return get_user(user_id)
@@ -446,8 +516,13 @@ def update_user(
 
 # ── session revocation ───────────────────────────────────────────────────────
 
-def revoke_user_sessions(user_id: int, *, actor: SessionUser | None = None) -> int:
-    """Kick one user off every device. Returns the number of sessions killed."""
+def revoke_user_sessions(
+    user_id: int, *, actor: SessionUser | None = None, ip: str | None = None
+) -> int:
+    """Kick one user off every device. Returns the number of sessions killed.
+
+    ``ip`` is the caller's address, passed down from the route — see
+    update_user() for why it is a parameter rather than something read here."""
     with get_users_db() as conn:
         row = conn.execute("SELECT email FROM users WHERE id = ?", (user_id,)).fetchone()
         if row is None:
@@ -460,11 +535,14 @@ def revoke_user_sessions(user_id: int, *, actor: SessionUser | None = None) -> i
         actor_user_id=actor.user_id if actor else None,
         target=f"user:{user_id}:{row['email']}",
         new_value=str(revoked),
+        ip=ip,
     )
     return revoked
 
 
-def revoke_session(sid_hash: str, *, actor: SessionUser | None = None) -> int:
+def revoke_session(
+    sid_hash: str, *, actor: SessionUser | None = None, ip: str | None = None
+) -> int:
     """Kick one device. Returns 1 when a session was removed, 0 when it was not.
 
     Takes the sha256, which is the only form of a session id that exists on
@@ -492,5 +570,6 @@ def revoke_session(sid_hash: str, *, actor: SessionUser | None = None) -> int:
             actor_user_id=actor.user_id if actor else None,
             target=f"user:{row['user_id']}:{row['email']}" if row else "session",
             old_value=sid_hash,
+            ip=ip,
         )
     return revoked

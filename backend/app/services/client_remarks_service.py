@@ -96,6 +96,7 @@ def upsert_remark(
     device_id: Optional[str] = None,
     trace_id: Optional[str] = None,
     expected_updated_at: Optional[str] = None,
+    audit_sink: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Create or update the remark for user_id. Returns the new row.
 
@@ -119,6 +120,14 @@ def upsert_remark(
     INSERT all run in one PG transaction (see module docstring for why that
     replaces SQLite's BEGIN IMMEDIATE); on RemarkConflict the transaction
     rolls back, so the loser's history row never lands.
+
+    `audit_sink` (optional) is filled with `{"old_note": <note before this
+    write>}`. The route needs the previous note for its audit_log row, and
+    that value only exists INSIDE this transaction: re-reading it from the
+    route would cost a second round trip AND race this very write, so the
+    caller is handed the value the transaction actually saw. It is written
+    before the guarded write, so a RemarkConflict leaves it populated but
+    unused — the route records nothing when the write raised.
     """
     with risk_cases_conn() as conn:
         with conn.cursor() as cur:
@@ -128,6 +137,8 @@ def upsert_remark(
             )
             existing = cur.fetchone()
             old_note = existing["note"] if existing else None
+            if audit_sink is not None:
+                audit_sink["old_note"] = old_note
 
             # R1 cheap pre-check: if the client sent a token but it already
             # doesn't match the live row, fail fast (the atomic UPDATE below
@@ -216,6 +227,7 @@ def delete_remark(
     author: str = "",
     device_id: Optional[str] = None,
     trace_id: Optional[str] = None,
+    audit_sink: Optional[dict[str, Any]] = None,
 ) -> bool:
     """Remove the live remark for user_id. Returns True if a row existed.
 
@@ -228,6 +240,11 @@ def delete_remark(
     cannot both claim the deletion, and old_note is exactly the note this
     statement removed (never a stale pre-concurrent-write read). The delete +
     history INSERT run in one PG transaction (commit at context exit).
+
+    `audit_sink` (optional) is filled with `{"old_note": <the note this
+    statement removed>}` so the route can put the deleted content into its
+    audit_log row. A no-op delete leaves it untouched — there is no old value
+    because nothing was deleted, and the route records nothing either.
     """
     with risk_cases_conn() as conn:
         with conn.cursor() as cur:
@@ -240,6 +257,8 @@ def delete_remark(
                 return False
 
             old_note = deleted["note"]
+            if audit_sink is not None:
+                audit_sink["old_note"] = old_note
             cur.execute(
                 "INSERT INTO client_remarks_history "
                 "(user_id, action, old_note, new_note, author, device_id, "

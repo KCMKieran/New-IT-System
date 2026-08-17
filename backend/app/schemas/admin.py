@@ -105,6 +105,7 @@ class AuditEntry(BaseModel):
     old_value: Optional[str] = None
     new_value: Optional[str] = None
     trace_id: Optional[str] = None
+    ip: Optional[str] = None
 
 
 # ── requests ─────────────────────────────────────────────────────────────────

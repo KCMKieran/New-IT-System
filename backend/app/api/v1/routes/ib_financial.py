@@ -22,6 +22,8 @@ from datetime import date
 import redis
 from fastapi import APIRouter, Depends, HTTPException, status
 
+from ....core.audit import Auditor, get_auditor
+
 from ....core.config import Settings, get_settings
 from ....schemas.ib_financial import (
     AddIBRequest,
@@ -179,8 +181,20 @@ async def verify_action(req: VerifyActionRequest):
 async def send_report(
     target_date: date | None = None,
     settings: Settings = Depends(get_settings),
+    audit: Auditor = Depends(get_auditor),
 ):
-    """Manually trigger the IB financial report email."""
+    """Manually trigger the IB financial report email.
+
+    Audited (design §D3.6 `ib_financial.report.send`, third phase: "做 —— 是对外
+    发出去的东西"). A report leaves the building with client financial figures in
+    it, so "who mailed this, to whom, for which date" has to survive the click.
+
+    Like alert-mail's test-send, a DELIVERY failure is recorded too: by then SMTP
+    has already been handed the message and it may well have arrived, with only
+    the acknowledgement lost. `new_value` carries `sent:` / `failed:` so the two
+    stay distinguishable. The 400 above writes nothing — no recipients means
+    nothing was sent.
+    """
     cfg = svc.get_report_config()
     if not cfg.get("mail_to"):
         raise HTTPException(
@@ -193,13 +207,31 @@ async def send_report(
     # Build simple HTML table for email body
     html = _build_report_html(date_str, records)
 
-    send_email(
-        subject=f"CS Report - IB Financial - {date_str}",
-        body=html,
-        to=cfg["mail_to"],
-        cc=cfg.get("mail_cc"),
+    recipients = cfg["mail_to"]
+    cc = cfg.get("mail_cc")
+    try:
+        send_email(
+            subject=f"CS Report - IB Financial - {date_str}",
+            body=html,
+            to=recipients,
+            cc=cc,
+        )
+    except Exception as exc:
+        logger.exception("IB financial manual report send failed for %s", date_str)
+        audit.record(
+            "ib_financial.report.send",
+            target=f"report:{date_str}:IB financial",
+            new_value=f"failed:{recipients}:{exc}",
+        )
+        raise
+    audit.record(
+        "ib_financial.report.send",
+        # Third segment is the human-readable label §D3.7 asks for: the date
+        # alone stops meaning anything once the config it was sent under changes.
+        target=f"report:{date_str}:IB financial",
+        new_value=f"sent:{recipients}" + (f" cc:{cc}" if cc else ""),
     )
-    return {"message": f"Report sent for {date_str}", "recipients": cfg["mail_to"]}
+    return {"message": f"Report sent for {date_str}", "recipients": recipients}
 
 
 # ── Audit Log ─────────────────────────────────────────────

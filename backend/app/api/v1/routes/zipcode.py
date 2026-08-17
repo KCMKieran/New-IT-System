@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Query, HTTPException
+from fastapi import APIRouter, Depends, Query, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from app.core.audit import Auditor, get_auditor
 from app.services.zipcode_service import (
 	get_zipcode_distribution,
 	get_zipcode_changes,
@@ -62,16 +63,43 @@ def zipcode_exclusions(
 
 
 @router.post("/exclusions")
-def create_zipcode_exclusion(payload: ManualExclusionCreate):
+def create_zipcode_exclusion(
+	payload: ManualExclusionCreate,
+	request: Request,
+	audit: Auditor = Depends(get_auditor),
+):
 	note = payload.note.strip()
 	if not note:
 		raise HTTPException(status_code=400, detail="Reason must not be empty")
+	# `added_by` used to be the literal string "WebUser" on every row, which made
+	# the column look like attribution while carrying none at all. The session
+	# subject is the only identity a caller cannot type; when auth is switched
+	# off there is no subject, so the old placeholder stands rather than a name
+	# being invented. The audit row's actor comes from the same place — the
+	# business column is a convenience for people reading swapfree_exclusions
+	# directly, not the record of who did it.
+	user = getattr(request.state, "user", None)
+	added_by = getattr(user, "email", None) or "WebUser"
 	try:
-		row = add_manual_exclusion(client_id=payload.client_id, note=note, added_by="WebUser")
-		return {"ok": True, "data": row}
+		row = add_manual_exclusion(client_id=payload.client_id, note=note, added_by=added_by)
 	except Exception as e:
 		logger.exception("zipcode manual exclusion insert failed")
 		raise HTTPException(status_code=500, detail="internal error while adding exclusion") from e
+
+	audit.record(
+		"zipcode.exclusion.create",
+		target=f"exclusion:{row.get('id')}:client-{payload.client_id}",
+		# No old_value: this upsert may retire an existing PERM_LOSS row, but the
+		# service does not hand that row back and reading it would mean a second
+		# round trip to Postgres on a write path. Noted rather than faked.
+		new_value={
+			"client_id": payload.client_id,
+			"reason_code": row.get("reason_code"),
+			"note": note,
+			"added_by": added_by,
+		},
+	)
+	return {"ok": True, "data": row}
 
 
 @router.get("/change-frequency")

@@ -24,10 +24,21 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncIterator, Iterator, Optional
 from urllib.parse import quote
 
-from fastapi import APIRouter, Header, HTTPException, Path, Query, Request, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    Header,
+    HTTPException,
+    Path,
+    Query,
+    Request,
+    status,
+)
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 
 from ....core.alerts_pubsub import subscribe as sse_subscribe
+from ....core.audit import Auditor, get_auditor, history_author
 from ....core.burst_open_scheduler import (
     get_latest_result,
     reschedule_burst,
@@ -286,6 +297,127 @@ def burst_open_latest():
     )
 
 
+# ── Audit helpers (docs/architecture/audit-log-design.md §D) ──
+#
+# The seven threshold forms all post their WHOLE config back on save, so the
+# audit rule "record what actually moved" is the difference between one useful
+# row and a dozen restatements of values nobody touched. record_diff() does that
+# comparison, but only over the top level of the two dicts — and six of the seven
+# configs are shaped {"enabled": bool, "rules": [ {...}, {...} ]}, whose entire
+# story lives inside that one list. Hence the flattening below.
+
+
+def _config_audit_view(model_cls: type[BaseModel], raw: dict) -> dict[str, Any]:
+    """Normalise a stored config through its Pydantic model, then flatten it.
+
+    Normalising matters because the loaders return what is IN the store, and for
+    gap-trade that is ``{}`` until the first save (defaults live in the model).
+    Diffing the raw dicts would then report every field as "nothing -> value" on
+    that first save — a dozen rows saying only "the defaults got written down".
+    Running both sides through the model compares EFFECTIVE config to EFFECTIVE
+    config, so the row that appears is the knob the operator actually turned.
+
+    Falls back to the raw dict when validation fails: a legacy row the model no
+    longer accepts must not turn a working save into a 500 over bookkeeping.
+    """
+    try:
+        return _flatten_config(model_cls(**raw).model_dump())
+    except Exception:  # pragma: no cover — legacy/corrupt stored config only
+        logger.warning(
+            "Audit snapshot fell back to the raw %s config (validation failed)",
+            model_cls.__name__,
+            exc_info=True,
+        )
+        return _flatten_config(raw)
+
+
+# Keys inside a rule dict that every save REGENERATES. save_*_config() deletes
+# the rule rows and re-inserts them from id 1, so `id` is a rule's current
+# POSITION dressed up as an identity — diffing it reports a change on every rule
+# that happens to sit after a deleted one. Mirrors _AUDIT_VOLATILE_RULE_KEYS in
+# fund_flow_monitor.py, which solved the same problem for the same reason.
+_AUDIT_VOLATILE_RULE_KEYS = frozenset({"id"})
+
+
+def _rule_identity_keys(items: list[Any]) -> Optional[list[str]]:
+    """Position-independent keys for a list of rule dicts, or None if there are none.
+
+    ⚠ This is the whole reason the flattener is not a five-line function. Keying
+    rule list items by their POSITION makes the audit trail LIE: delete rule #2
+    of five and every later rule shifts up one slot, so a diff reports four
+    thresholds "changing" to the values of their neighbours plus one rule
+    "deleted" at the end. None of that happened. In an audit trail a fabricated
+    row is worse than a missing one — a missing row reads as "not found", a
+    fabricated one reads as evidence.
+
+    Three of the seven config forms (hedge-open, leverage-abuse, martingale)
+    give each rule a required free-text `name`, which survives insertion,
+    deletion and reordering. Those get keyed by name, so a delete produces rows
+    only for the rule that went away.
+
+    The other three (burst-open, quick-open-close, quick-profit) have nothing
+    but `id`, and `id` is positional. Returning None there tells the flattener
+    to keep the whole list as ONE value — coarser ("the rule list changed, here
+    it is before and after") but never false. Same answer for duplicate names,
+    where keying would silently merge two rules into one.
+    """
+    keys: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            return None
+        name = item.get("name")
+        if not isinstance(name, str) or not name.strip():
+            return None
+        keys.append(name.strip())
+    if len(set(keys)) != len(keys):
+        return None
+    return keys
+
+
+def _flatten_config(config: dict) -> dict[str, Any]:
+    """Flatten a nested config into ``{dotted.path: leaf}`` for ``record_diff``.
+
+    Why flatten instead of diffing the top level: one row per knob is what a
+    reader needs three months later ("rules.高频对冲.min_total_lots: 0.01 -> 0.5"),
+    not "the config was saved".
+
+    Rule lists are keyed by a STABLE business identifier (the rule's name) when
+    they have one, and kept whole when they do not — see `_rule_identity_keys`
+    for why position is never allowed to be that key.
+
+    Lists of scalars (``gap_trade.sid_list``) stay one leaf: "the sid list
+    changed" is the story there, not "element 3 changed".
+    """
+    flat: dict[str, Any] = {}
+
+    def walk(node: Any, path: str) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                walk(value, f"{path}.{key}" if path else str(key))
+        elif isinstance(node, list) and any(isinstance(item, dict) for item in node):
+            items = [
+                {k: v for k, v in item.items() if k not in _AUDIT_VOLATILE_RULE_KEYS}
+                if isinstance(item, dict)
+                else item
+                for item in node
+            ]
+            keys = _rule_identity_keys(items)
+            if keys is None:
+                # No stable identity: one leaf for the whole list. Rather coarse
+                # than wrong. record_diff() compares values in full (it stores a
+                # truncated copy but never compares one), so a change deep in a
+                # long list still writes its row.
+                flat[path] = items
+            else:
+                for key, item in zip(keys, items):
+                    walk(item, f"{path}.{key}")
+        else:
+            flat[path] = node
+
+    walk(config, "")
+    return flat
+
+
 # ── GET /burst-open/config — read current config ─────────
 
 @router.get("/burst-open/config", response_model=BurstOpenConfig)
@@ -305,7 +437,10 @@ async def burst_open_get_config():
 # ── POST /burst-open/config — update config ──────────────
 
 @router.post("/burst-open/config", response_model=BurstOpenConfig)
-async def burst_open_update_config(config: BurstOpenConfig):
+async def burst_open_update_config(
+    config: BurstOpenConfig,
+    audit: Auditor = Depends(get_auditor),
+):
     """Update rules and scan interval. Takes effect immediately."""
     if len(config.rules) > MAX_RULES:
         raise HTTPException(
@@ -318,12 +453,19 @@ async def burst_open_update_config(config: BurstOpenConfig):
             detail="At least one rule is required.",
         )
     try:
+        # Read the OLD config before save_config() overwrites it. Not a style
+        # choice: save_config() DELETEs the rule rows, so the previous
+        # thresholds cease to exist at that statement and "3 -> 10" can never
+        # be reconstructed afterwards.
+        before = load_config()
         rules_dicts = [r.model_dump(exclude={"id"}) for r in config.rules]
         save_config(config.scan_interval_min, rules_dicts)
         reschedule_burst(config.scan_interval_min)
 
-        # Return the saved config (with auto-generated IDs)
-        return BurstOpenConfig(**load_config())
+        # Re-read (with auto-generated IDs) — this is both the response and the
+        # "after" side of the diff, so the audit trail describes what was
+        # actually persisted rather than what was requested.
+        after = load_config()
     except Exception as exc:
         logger.error("Failed to update burst-open config: %s", exc, exc_info=True)
         raise HTTPException(
@@ -331,17 +473,32 @@ async def burst_open_update_config(config: BurstOpenConfig):
             detail="internal error while updating burst-open config",
         ) from exc
 
+    # After the write succeeded — a row written before it would document a
+    # change that the 500 above then prevented.
+    audit.record_diff(
+        "risk_monitor.burst_open.config_change",
+        target="burst_open:config",
+        old=_config_audit_view(BurstOpenConfig, before),
+        new=_config_audit_view(BurstOpenConfig, after),
+    )
+    return BurstOpenConfig(**after)
+
 
 # ── POST /burst-open/scan-now — immediate scan ───────────
 
 @router.post("/burst-open/scan-now", response_model=BurstOpenScanResult)
-def burst_open_scan_now():
+def burst_open_scan_now(audit: Auditor = Depends(get_auditor)):
     """Trigger an immediate burst-open scan. Blocks until complete.
 
     Plain `def` (OPT-0055 convention): trigger_scan_now() is seconds of
     synchronous MySQL + SQLite + Redis IO — under `async def` it would
     freeze the whole event loop for the duration; in the threadpool it
     only occupies one worker thread.
+
+    Audited (`risk_monitor.scan.run_now`) because a PERSON pressed it. The
+    scheduler runs this very same scan every few minutes and is NOT audited:
+    the audit trail answers "who did this", and a cron tick has no who. The
+    distinction is the trigger, not the work.
     """
     try:
         result = trigger_scan_now()
@@ -352,7 +509,7 @@ def burst_open_scan_now():
             )
         burst_alerts = [a for a in result["alerts"] if int(a.get("rule_id", 0)) <= BURST_RULE_MAX_ID]
         summary = result.get("burst_summary", result["summary"])
-        return BurstOpenScanResult(
+        response = BurstOpenScanResult(
             alerts=[BurstOpenAlert(**a) for a in burst_alerts],
             summary=BurstOpenSummary(**summary),
             config=BurstOpenConfig(**result["config"]),
@@ -367,6 +524,18 @@ def burst_open_scan_now():
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="internal error while running burst-open scan",
         ) from exc
+
+    # new_value carries the outcome so the row says what the scan produced;
+    # there is no old_value because a scan replaces nothing.
+    audit.record(
+        "risk_monitor.scan.run_now",
+        target="scan:burst_open",
+        new_value={
+            "alerts": len(burst_alerts),
+            "scan_time_ms": result["scan_time_ms"],
+        },
+    )
+    return response
 
 
 # Upper bound on one page — caps memory / payload per request.
@@ -863,7 +1032,10 @@ async def quick_open_close_get_config():
 
 
 @router.post("/quick-open-close/config", response_model=QuickOpenCloseConfig)
-async def quick_open_close_update_config(config: QuickOpenCloseConfig):
+async def quick_open_close_update_config(
+    config: QuickOpenCloseConfig,
+    audit: Auditor = Depends(get_auditor),
+):
     if len(config.rules) > MAX_RULES:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -875,15 +1047,24 @@ async def quick_open_close_update_config(config: QuickOpenCloseConfig):
             detail="At least one rule is required.",
         )
     try:
+        before = load_quick_open_close_config()  # old values die at save()
         rules_dicts = [r.model_dump(exclude={"id"}) for r in config.rules]
         save_quick_open_close_config(config.enabled, rules_dicts)
-        return QuickOpenCloseConfig(**load_quick_open_close_config())
+        after = load_quick_open_close_config()
     except Exception as exc:
         logger.error("Failed to update quick-open-close config: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="internal error while updating quick-open-close config",
         ) from exc
+
+    audit.record_diff(
+        "risk_monitor.quick_open_close.config_change",
+        target="quick_open_close:config",
+        old=_config_audit_view(QuickOpenCloseConfig, before),
+        new=_config_audit_view(QuickOpenCloseConfig, after),
+    )
+    return QuickOpenCloseConfig(**after)
 
 
 @router.get("/quick-open-close/alerts", response_model=AlertsResponse)
@@ -1093,7 +1274,10 @@ async def quick_profit_get_config():
 
 
 @router.post("/quick-profit/config", response_model=QuickProfitConfig)
-async def quick_profit_update_config(config: QuickProfitConfig):
+async def quick_profit_update_config(
+    config: QuickProfitConfig,
+    audit: Auditor = Depends(get_auditor),
+):
     if len(config.rules) > MAX_RULES:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1105,15 +1289,24 @@ async def quick_profit_update_config(config: QuickProfitConfig):
             detail="At least one rule is required.",
         )
     try:
+        before = load_quick_profit_config()  # old values die at save()
         rules_dicts = [r.model_dump(exclude={"id"}) for r in config.rules]
         save_quick_profit_config(config.enabled, rules_dicts)
-        return QuickProfitConfig(**load_quick_profit_config())
+        after = load_quick_profit_config()
     except Exception as exc:
         logger.error("Failed to update quick-profit config: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="internal error while updating quick-profit config",
         ) from exc
+
+    audit.record_diff(
+        "risk_monitor.quick_profit.config_change",
+        target="quick_profit:config",
+        old=_config_audit_view(QuickProfitConfig, before),
+        new=_config_audit_view(QuickProfitConfig, after),
+    )
+    return QuickProfitConfig(**after)
 
 
 @router.get("/quick-profit/alerts", response_model=AlertsResponse)
@@ -1350,7 +1543,10 @@ async def gap_trade_get_config():
 
 
 @router.post("/gap-trade/config", response_model=GapTradeConfig)
-async def gap_trade_update_config(config: GapTradeConfig):
+async def gap_trade_update_config(
+    config: GapTradeConfig,
+    audit: Auditor = Depends(get_auditor),
+):
     """Persist new Gap Trade config. Takes effect from the next cron tick.
 
     No scheduler reschedule call here because the cron firing time is fixed
@@ -1372,14 +1568,25 @@ async def gap_trade_update_config(config: GapTradeConfig):
             detail="so_ab.min_lot_ratio must be <= so_ab.max_lot_ratio.",
         )
     try:
+        before = load_gap_trade_config()  # old values die at save()
         save_gap_trade_config(config.model_dump())
-        return GapTradeConfig(**load_gap_trade_config())
+        after = load_gap_trade_config()
     except Exception as exc:
         logger.error("Failed to update gap-trade config: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="internal error while updating gap-trade config",
         ) from exc
+
+    # Nested config: the flattened keys read as field paths, so a row lands on
+    # `gap_trade:config.so_ab.min_lot_ratio` rather than on "the whole config".
+    audit.record_diff(
+        "risk_monitor.gap_trade.config_change",
+        target="gap_trade:config",
+        old=_config_audit_view(GapTradeConfig, before),
+        new=_config_audit_view(GapTradeConfig, after),
+    )
+    return GapTradeConfig(**after)
 
 
 @router.get("/gap-trade/alerts", response_model=AlertsResponse)
@@ -1643,7 +1850,10 @@ async def hedge_open_get_config():
 
 
 @router.post("/hedge-open/config", response_model=HedgeOpenConfig)
-async def hedge_open_update_config(config: HedgeOpenConfig):
+async def hedge_open_update_config(
+    config: HedgeOpenConfig,
+    audit: Auditor = Depends(get_auditor),
+):
     if len(config.rules) > MAX_RULES:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1655,15 +1865,24 @@ async def hedge_open_update_config(config: HedgeOpenConfig):
             detail="At least one rule is required.",
         )
     try:
+        before = load_hedge_open_config()  # old values die at save()
         rules_dicts = [r.model_dump(exclude={"id"}) for r in config.rules]
         save_hedge_open_config(config.enabled, rules_dicts)
-        return HedgeOpenConfig(**load_hedge_open_config())
+        after = load_hedge_open_config()
     except Exception as exc:
         logger.error("Failed to update hedge-open config: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="internal error while updating hedge-open config",
         ) from exc
+
+    audit.record_diff(
+        "risk_monitor.hedge_open.config_change",
+        target="hedge_open:config",
+        old=_config_audit_view(HedgeOpenConfig, before),
+        new=_config_audit_view(HedgeOpenConfig, after),
+    )
+    return HedgeOpenConfig(**after)
 
 
 @router.get("/hedge-open/alerts", response_model=AlertsResponse)
@@ -1880,7 +2099,10 @@ async def hedge_open_alerts_aggregated(
 # ── Hedge mail alert test-send (OPT-0042) ──────────────────
 
 @router.post("/hedge-mail/test-send", response_model=HedgeMailTestSendResponse)
-def hedge_mail_test_send(payload: HedgeMailTestSendRequest):
+def hedge_mail_test_send(
+    payload: HedgeMailTestSendRequest,
+    audit: Auditor = Depends(get_auditor),
+):
     """Send a [TEST] copy of the hedge-open digest to one recipient.
 
     Deliberately a plain `def` (NOT async): send_test_email does a blocking
@@ -1893,24 +2115,56 @@ def hedge_mail_test_send(payload: HedgeMailTestSendRequest):
     case — never a live DB row, which the retention purge would delete)
     and sends it to `payload.recipient` — defaulting to the subscription's
     own mail_to. Pure preview: no outbox row, no cursor movement.
+
+    Audited on a DELIVERY failure too — the one documented exception to "only
+    record what succeeded" (audit-log-design.md §D2.3①). Sending is an action on
+    the outside world: by the time an SMTP call errors the mail may already be in
+    flight, and "someone tried to mail a copy of a risk alert to <address>" is
+    itself the thing an auditor came looking for. `new_value` carries
+    sent:/failed: so the two never read alike.
+
+    The 404 path records NOTHING, and that is the same exception read correctly.
+    Every ValueError out of send_test_email — no hedge_open subscription, module
+    not in MAIL_SOURCES, no renderable alert — is raised BEFORE send_fn is ever
+    called, so no mail exists to have half-happened. Nothing left the building
+    and nothing changed; the row would be a report of an attempt that the code
+    refused to make. Mirrors alert_mail.py, where 404/409 write nothing and only
+    MailSendFailed (SMTP already called) records.
     """
     from ....services.alert_mail_dispatcher import send_test_email
+
+    target = f"hedge_mail:{payload.recipient or 'subscription-default'}"
 
     t0 = time.time()
     try:
         result = send_test_email(recipient=payload.recipient)
     except ValueError as exc:
-        # No subscription / no renderable alert — a data problem, not a bug.
+        # No subscription / no renderable alert — a data problem, not a bug, and
+        # raised before SMTP was touched. No audit row: see the docstring.
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(exc),
         ) from exc
     except Exception as exc:
         logger.error("Hedge mail test-send failed: %s", exc, exc_info=True)
+        audit.record(
+            "risk_monitor.hedge_mail.test_send",
+            target=target,
+            new_value=f"failed:{type(exc).__name__}",
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="internal error while sending hedge test mail",
         ) from exc
+
+    # The resolved recipient, not the requested one: an empty request body means
+    # "the subscription's own mail_to", and the audit row has to name the address
+    # that actually received a copy.
+    audit.record(
+        "risk_monitor.hedge_mail.test_send",
+        target=target,
+        new_value=f"sent:{result['recipient']}",
+    )
 
     return HedgeMailTestSendResponse(
         data=HedgeMailTestSendData(
@@ -1993,7 +2247,10 @@ async def leverage_abuse_get_config():
 
 
 @router.post("/leverage-abuse/config", response_model=LeverageAbuseConfig)
-async def leverage_abuse_update_config(config: LeverageAbuseConfig):
+async def leverage_abuse_update_config(
+    config: LeverageAbuseConfig,
+    audit: Auditor = Depends(get_auditor),
+):
     if len(config.rules) > MAX_RULES:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -2005,15 +2262,24 @@ async def leverage_abuse_update_config(config: LeverageAbuseConfig):
             detail="At least one rule is required.",
         )
     try:
+        before = load_leverage_abuse_config()  # old values die at save()
         rules_dicts = [r.model_dump(exclude={"id"}) for r in config.rules]
         save_leverage_abuse_config(config.enabled, rules_dicts)
-        return LeverageAbuseConfig(**load_leverage_abuse_config())
+        after = load_leverage_abuse_config()
     except Exception as exc:
         logger.error("Failed to update leverage-abuse config: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="internal error while updating leverage-abuse config",
         ) from exc
+
+    audit.record_diff(
+        "risk_monitor.leverage_abuse.config_change",
+        target="leverage_abuse:config",
+        old=_config_audit_view(LeverageAbuseConfig, before),
+        new=_config_audit_view(LeverageAbuseConfig, after),
+    )
+    return LeverageAbuseConfig(**after)
 
 
 @router.get("/leverage-abuse/alerts", response_model=AlertsResponse)
@@ -2231,7 +2497,10 @@ async def martingale_get_config():
 
 
 @router.post("/martingale/config", response_model=MartingaleConfig)
-async def martingale_update_config(config: MartingaleConfig):
+async def martingale_update_config(
+    config: MartingaleConfig,
+    audit: Auditor = Depends(get_auditor),
+):
     if len(config.rules) > MAX_RULES:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -2243,15 +2512,24 @@ async def martingale_update_config(config: MartingaleConfig):
             detail="At least one rule is required.",
         )
     try:
+        before = load_martingale_config()  # old values die at save()
         rules_dicts = [r.model_dump(exclude={"id"}) for r in config.rules]
         save_martingale_config(config.enabled, rules_dicts)
-        return MartingaleConfig(**load_martingale_config())
+        after = load_martingale_config()
     except Exception as exc:
         logger.error("Failed to update martingale config: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="internal error while updating martingale config",
         ) from exc
+
+    audit.record_diff(
+        "risk_monitor.martingale.config_change",
+        target="martingale:config",
+        old=_config_audit_view(MartingaleConfig, before),
+        new=_config_audit_view(MartingaleConfig, after),
+    )
+    return MartingaleConfig(**after)
 
 
 @router.get("/martingale/alerts", response_model=AlertsResponse)
@@ -2440,6 +2718,7 @@ def upsert_account_remark(
     server: str = Path(...),
     login: int = Path(...),
     x_device_id: str | None = Header(default=None),
+    audit: Auditor = Depends(get_auditor),
 ):
     """Create or update an account remark.
 
@@ -2448,20 +2727,65 @@ def upsert_account_remark(
     (note via Pydantic, server|login here). R6/R7: the server-generated trace id
     (not a client-settable header) plus the best-effort, client-supplied
     X-Device-ID are recorded into the append-only audit trail.
+
+    Two trails, on purpose, and they are not redundant:
+
+      * `account_remarks_history` (unchanged) keeps every note version keyed by
+        account: old note, new note, device id, trace id. That is the recovery
+        trail — it is what makes a deletion reversible.
+      * `audit_log` gets one row attributed to the SESSION subject — but only
+        when the note actually moved (§D2.3②). The history table keeps every
+        save because it is the recovery trail; the audit trail keeps changes.
+
+    Both now name the same person: `author` is taken from the session via
+    `history_author()`, not from `body.author`, which any `curl` can type. The
+    body field is still accepted (the frontend sends it and a 422 would break
+    saving) but it is only used when no session exists at all — see
+    `history_author`. X-Device-ID stays what it always was: best-effort,
+    client-supplied attribution that never becomes identity.
     """
     _validate_remark_path(server, login)
+    # Read before the write: upsert_remark() returns only the new row, and the
+    # previous note is gone from account_remarks the moment the UPDATE lands.
+    previous = remarks_svc.get_remark(server, login)
     try:
         row = remarks_svc.upsert_remark(
             server=server,
             login=login,
             note=body.note,
-            author=body.author,
+            author=history_author(audit, body.author),
             device_id=x_device_id,
             trace_id=trace_id_var.get(),
             expected_updated_at=body.expected_updated_at,
         )
     except remarks_svc.RemarkConflict as exc:
+        # 409 = nothing was written. A row here would claim a change that the
+        # optimistic lock specifically prevented.
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    # None (no remark existed) vs "" would be different stories; _stringify keeps
+    # NULL as NULL so "created" and "blanked" stay distinguishable — which is
+    # also why the no-op check below compares to None rather than to "".
+    old_note = previous["note"] if previous else None
+    if old_note == row["note"]:
+        # §D2.3②: a value that did not move is not an event. Remarks are the
+        # single largest audit source on this system (~43 saves in 28 days), and
+        # opening a note to read it and pressing Save is the most common way to
+        # touch one. Recording that would fill the trail with non-events.
+        # No row, but a log line — the same trade record_diff() makes, and for
+        # the same reason: "did they even press Save" is a real triage question.
+        logger.info(
+            "No-op save: action=%s target=%s (the note is unchanged)",
+            "risk_monitor.remark.upsert",
+            f"account:{server}:{login}",
+        )
+    else:
+        audit.record(
+            "risk_monitor.remark.upsert",
+            target=f"account:{server}:{login}",
+            old_value=old_note,
+            new_value=row["note"],
+        )
     return AccountRemark(**row)
 
 
@@ -2471,20 +2795,35 @@ def delete_account_remark(
     login: int = Path(...),
     author: str = Query(default=""),
     x_device_id: str | None = Header(default=None),
+    audit: Auditor = Depends(get_auditor),
 ):
     """Delete a remark (R8-validated). The live row is removed but the old note
     survives in the append-only audit trail (R7), so deletion is recoverable.
     Deleting a non-existent remark is a no-op (`deleted: false`).
 
-    `author` (F6) is forwarded so delete history rows are attributable like
-    upsert rows. The trace id is the server-generated one (F9); X-Device-ID is
-    best-effort, client-supplied attribution (no auth binding)."""
+    The delete history row is attributable like an upsert row (F6), but the
+    name written there now comes from the session (`history_author`), not from
+    the `author` query parameter — that parameter is only a fallback for the
+    AUTH_ENABLED=false case. The trace id is the server-generated one (F9);
+    X-Device-ID stays best-effort client-supplied attribution."""
     _validate_remark_path(server, login)
+    # Read before the delete: delete_remark() returns a bare bool, and the note
+    # is gone from the live table afterwards.
+    previous = remarks_svc.get_remark(server, login)
     deleted = remarks_svc.delete_remark(
         server=server,
         login=login,
-        author=author,
+        author=history_author(audit, author),
         device_id=x_device_id,
         trace_id=trace_id_var.get(),
     )
+    if deleted:
+        # Only when a row actually went away. Deleting a non-existent remark is
+        # a no-op (deleted: false) — no state changed, so nothing to record.
+        audit.record(
+            "risk_monitor.remark.delete",
+            target=f"account:{server}:{login}",
+            old_value=previous["note"] if previous else None,
+            # new_value stays NULL — that IS the "deleted" signal.
+        )
     return {"ok": True, "deleted": deleted}
