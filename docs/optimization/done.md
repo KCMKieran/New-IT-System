@@ -10,6 +10,7 @@ Append-only 日志。最新的写在最上面。
 
 | 日期 | ID | Commit | 标题 |
 |------|----|--------|------|
+| 2026-08-17 | [OPT-0058](./items/OPT-0058-prod-log-noise.md) | — | prod 日志降噪：6 种模板消息占 95% 字节（周末零用户仍 3331 行），行数 −61% / 字节 −65%，+15 条防回退测试 |
 | 2026-07-22 | [OPT-0054](./items/OPT-0054-open-positions-ttl-cache.md) | — | open-positions 加 30s Redis TTL 缓存 + singleflight（N viewer 不再 ×N 打 PG），含冷审 4 项硬化 |
 | 2026-07-24 | [OPT-0056](./items/OPT-0056-route-exception-detail-leak.md) | — | 全站路由 500/502 异常原文泄漏清理：60 处跨 13 文件 str(exc)→logger.exception+泛化 detail（多抓到 ib_report/etl/client_pnl_analysis 5 处 grep 漏网 f-string 泄漏）+ 补 5 文件 logger；4xx 校验全保留；alert_mail 502 泛化；Docker 实跑 45 测试绿 + 13 模块导入冒烟；Stage 1 用户选不 review |
 | 2026-07-13 | [OPT-0047](./items/OPT-0047-case-engine-watchlist.md) | — | 风控V2 归集引擎+观察清单（Phase A 收官）：云 PG 四表幂等 DDL + 契约 API（watchlist/detail，503 语义）+ 信号→case upsert（游标护栏 fail-open）+ 日基线/NULL 修复双 cron + /risk-watchlist AG-Grid 页（§4 列/column group/全套持久化；范围变更=纯展示+filter）；50 后端新测+tsc/vitest 绿、冒烟 12 fixture 案卷 e2e 通过（17 账户归并验证）；冷审 11 yellow 全部打包 [[OPT-0048]] hardening；∆1 与真信号归并两 AC 待管道通补验 |

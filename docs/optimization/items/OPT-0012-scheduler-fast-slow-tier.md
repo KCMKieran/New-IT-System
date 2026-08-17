@@ -86,6 +86,11 @@ merged to main as `ceb21c4` on 2026-05-17.
 - `BURST_FAST_TIER_ENABLED=true` 已写进 `docker-compose.prod.yml` + 容器 restart
 - 实际跑双 job：60s fast tier 只跑 burst，原 10min slow tier 跑 quick OC + quick profit
 - 日志格式：fast tick → `Scan complete [fast_burst]: ...`，slow tick → `Scan complete [slow]: ...`
+  - ⚠ **2026-08-17 起这行不再每 tick 打 INFO**：有新告警才 INFO，否则降 DEBUG + 每 tier 每小时一条心跳。
+    （两个 tier 合计 1440 行/天，其中 52% 是 `0 new`，占当日日志字节 14.8%。）
+    要看每一 tick 用 `LOG_LEVEL=DEBUG`。同时 `Fast tier: scan_lock held by slow tier` 也降了
+    DEBUG，**连续 3 次**才升 WARNING——单次 skip 本来就是两 tier 共用 `_scan_lock` 的设计内后果。
+    口径见 [logging-system.md §2.2.1](../../architecture/logging-system.md)。
 - Dev 端 `BURST_FAST_TIER_ENABLED` **故意不设**（dev compose 注释明写："Do NOT enable BURST_FAST_TIER_ENABLED here — dev shares SQLite with prod"），防止 dev + prod 两个 scheduler 同时写 `alert_events`
 
 **周末上线的玄机**（719eb66 commit message 备忘）：选周末跑是因为外汇市场 Sat 05:00 → Mon 05:00 HKT 休市 —— fast tier 60s 节拍整周末扫到 0 单，不会写 SQLite，但 scheduler 持续跑可以验证 SSE 推送链路（前端 "N 次推送" 计数每 60s 跳 1）。

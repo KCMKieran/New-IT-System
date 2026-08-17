@@ -55,12 +55,25 @@ class TraceIDMiddleware(BaseHTTPMiddleware):
         # hole. See the docstring on client_ip().
         peer_ip = client_ip(request)
 
-        # Log incoming request
-        logger.info(
+        # The start line is DEBUG, not INFO. It used to be INFO, which made
+        # every request cost two log lines — measured at 30.4% of a weekday's
+        # prod log bytes (1445 started + 1445 completed on 2026-08-14) for one
+        # request's worth of information, split across two lines that could
+        # only be rejoined via trace_id. The completion line below now carries
+        # method/path/client itself, so the pair is redundant.
+        #
+        # It is kept (rather than deleted) for the one case the completion line
+        # structurally cannot cover: a request that never returns. If a hung
+        # request has to be diagnosed, LOG_LEVEL=DEBUG restores the old
+        # behaviour and the start line reappears with no code change. Note that
+        # nginx also records the abandoned request as a 499 in access.log for
+        # anything arriving through the domain — this only matters for the ~4%
+        # of traffic that reaches :8001 directly and bypasses nginx.
+        logger.debug(
             f"Request started: {request.method} {request.url.path} "
             f"client={peer_ip}"
         )
-        
+
         try:
             # Process the request through the application
             response = await call_next(request)
@@ -86,17 +99,23 @@ class TraceIDMiddleware(BaseHTTPMiddleware):
             # below it in a separate task, and sets there do not propagate up.
             #
             # "Request started" above genuinely cannot carry a user — no session
-            # has been resolved yet at that point — and that is left alone.
+            # has been resolved yet at that point — and that is why the identity
+            # has to be re-attached here rather than logged once up front.
             user = getattr(request.state, "user", None)
             if user is not None:
                 user_email_var.set(getattr(user, "email", None))
 
-            # Log response with timing
+            # One self-contained line per request: method, path and client are
+            # repeated here so this line stands alone and no longer needs its
+            # start-line partner to be readable. `grep POST /api/v1/admin`, or
+            # `grep their.email`, now returns lines that already say what
+            # happened and how long it took.
             logger.info(
-                f"Request completed: status={response.status_code} "
-                f"duration={duration_ms:.2f}ms"
+                f"Request: {request.method} {request.url.path} "
+                f"status={response.status_code} duration={duration_ms:.2f}ms "
+                f"client={peer_ip}"
             )
-            
+
             # Add trace ID to response headers for frontend correlation
             response.headers["X-Trace-ID"] = trace_id
             return response

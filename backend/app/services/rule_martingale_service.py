@@ -365,13 +365,28 @@ def rule_martingale_detect(
     # ladder and bumps on margin-recompute independently of trade replication, so
     # it could pass on a partial ladder — OPT-0038 outsider-review #1.) Candidates
     # without gate metadata (pure-engine threshold tests) bypass the guard.
+    #
+    # Logging shape: one aggregate INFO per tick, per-ladder detail at DEBUG.
+    # The per-ladder line used to be INFO and was the single largest thing in
+    # the production log — 1712 lines, 32.6% of a weekday's bytes (2026-08-14),
+    # against 17 WARNING+ERROR lines the same day. It is also the most
+    # repetitive: 1712 lines held only 1253 distinct messages, because the
+    # overlap window re-evaluates the same unchanged candidate every 60s (one
+    # ladder logged the identical sentence at 11:14:53, 11:15:53 and 11:16:53).
+    #
+    # Nothing observable is lost. The aggregate still says, every tick where it
+    # happens, that replication lag blocked N ladders — which is the question
+    # this log answers ("is the snapshot keeping up?"). Which ladders is a
+    # LOG_LEVEL=DEBUG away, and a skip is not an error in the first place: the
+    # candidate is retried on the next tick by design.
     fresh_candidates: List[Dict[str, Any]] = []
+    behind_gate: List[str] = []
     for g in candidates:
         gate_open = g.get("gate_latest_open_dt")
         if gate_open is not None:
             snap_latest = g.get("latest_open_dt")
             if snap_latest is None or snap_latest < gate_open:
-                logger.info(
+                logger.debug(
                     "Martingale: snapshot ladder behind gate for %s-%s %s/%s "
                     "(snapshot latest=%s < gated open=%s) — skip, retry next tick",
                     g.get("server"), g.get("login"), g.get("symbol"),
@@ -379,8 +394,26 @@ def rule_martingale_detect(
                     _iso(snap_latest) if snap_latest else None,
                     _iso(gate_open),
                 )
+                behind_gate.append(
+                    f"{g.get('server')}-{g.get('login')} "
+                    f"{g.get('symbol')}/{g.get('direction')}"
+                )
                 continue
         fresh_candidates.append(g)
+
+    if behind_gate:
+        # Distinct-vs-total matters: 6 skips across 6 ladders is ordinary
+        # replication lag, 6 skips across 1 ladder is one ladder wedged behind
+        # a gate that is not advancing. The sample makes the common
+        # single-ladder case (286 of 647 affected ticks on 2026-08-14) fully
+        # self-describing without needing DEBUG at all.
+        distinct = sorted(set(behind_gate))
+        logger.info(
+            "Martingale: %d candidate(s) behind snapshot gate across %d "
+            "ladder(s) — skipped, retry next tick%s",
+            len(behind_gate), len(distinct),
+            f" [{distinct[0]}]" if len(distinct) == 1 else "",
+        )
 
     alerts: List[Dict[str, Any]] = []
     for rule_idx, rule in enumerate(rules):

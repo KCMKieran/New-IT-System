@@ -25,8 +25,46 @@ logger = logging.getLogger(__name__)
 JOB_ID = "xauusd_position_snapshot"
 INTERVAL_MIN = 1
 
+# How often the success heartbeat is allowed to reach INFO when nothing about
+# it has changed. See _should_log_write() for why this exists.
+HEARTBEAT_INTERVAL_MIN = 60
+
 _scheduler: Optional[BackgroundScheduler] = None
 _scan_lock = threading.Lock()
+
+# Last (row_count, minute-of-day) actually logged at INFO by _should_log_write().
+_last_logged_rows: Optional[int] = None
+_last_logged_at: Optional[datetime] = None
+
+
+def _should_log_write(written: int, now: datetime) -> bool:
+    """Is this minute's successful write worth an INFO line?
+
+    Yes when the row count changed, or when an hour has passed since the last
+    INFO. Otherwise no: this job fires every 60s, so at INFO it emitted 1440
+    identical-shaped lines a day (14.1% of a weekday's prod log bytes), and
+    1307 of the 1440 on 2026-08-14 said the same thing — "wrote 9 rows".
+
+    Row-count changes are the part that carries information (a position opened
+    or closed on some server), and they still log immediately. The hourly floor
+    keeps a positive "this job is alive" signal in the file so silence stays
+    diagnostic: an hour with no line from this module means the job is not
+    running, which the old every-minute stream could not distinguish from noise
+    anyone had learned to skip over.
+
+    Failures are unaffected — the error/warning paths above this never pass
+    through here.
+    """
+    global _last_logged_rows, _last_logged_at
+    stale = (
+        _last_logged_at is None
+        or (now - _last_logged_at).total_seconds() >= HEARTBEAT_INTERVAL_MIN * 60
+    )
+    if written == _last_logged_rows and not stale:
+        return False
+    _last_logged_rows = written
+    _last_logged_at = now
+    return True
 
 
 def _run_snapshot_once() -> int:
@@ -64,15 +102,18 @@ def _run_snapshot_once() -> int:
             )
             return 0
 
+        now = datetime.now(timezone.utc)
         captured_at = (
-            datetime.now(timezone.utc)
-            .isoformat(timespec="seconds")
-            .replace("+00:00", "Z")
+            now.isoformat(timespec="seconds").replace("+00:00", "Z")
         )
         written = append_xauusd_snapshots(captured_at, rows)
-        logger.info(
-            "XAUUSD snapshot: wrote %d rows @ %s", written, captured_at
-        )
+        # Every tick is still visible at DEBUG; INFO gets the ones that changed
+        # something or the hourly liveness beat. See _should_log_write().
+        logger.debug("XAUUSD snapshot: wrote %d rows @ %s", written, captured_at)
+        if _should_log_write(written, now):
+            logger.info(
+                "XAUUSD snapshot: wrote %d rows @ %s", written, captured_at
+            )
         return written
     except Exception:
         logger.error("XAUUSD snapshot tick failed", exc_info=True)
