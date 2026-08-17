@@ -200,6 +200,18 @@ def _pg_and_mysql_available() -> bool:
     )
 
 
+# ~11 minutes: run_daily_baseline() is executed TWICE (that is the idempotency
+# assertion) over the real ~1,050-client roster. Measured 2026-08-17, per
+# 300-user chunk: TRADES_WINDOWS 67.5s + REBATE_WINDOWS 36.1s + SYMBOLS_30D
+# 26.1s, times 4 chunks, times 2 runs; plus ~51s per run of row-at-a-time PG
+# upserts (cloud PG round-trip is 48.9ms vs MySQL's 4.6ms). Re-running warm does
+# not help — the second pass measured 67.54s against the first's 67.50s.
+#
+# NOTE the skipif below has never actually skipped anything: importing this
+# module pulls in app.core.config, whose module-level load_dotenv() populates
+# os.environ from backend/.env, so the guard reads True even under `env -i`.
+# The `slow` marker is what really keeps this out of the default gate.
+@pytest.mark.slow
 @pytest.mark.skipif(not _pg_and_mysql_available(), reason="PG/MySQL env not set")
 def test_baseline_rerun_same_day_does_not_duplicate_rows():
     """AC5: re-running the baseline for the same metric_date overwrites the
