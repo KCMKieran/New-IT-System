@@ -143,15 +143,34 @@ export default function XauusdPositionChart() {
   // Poll every 60s so the chart + "recording" badge stay live (snapshots are
   // written once a minute). Hold the controller so we can abort the previous
   // in-flight poll before each tick and any in-flight poll on cleanup.
+  //
+  // Hidden tabs skip the tick, plus a refresh the moment the tab comes back so
+  // a returning viewer doesn't stare at a stale chart for up to a minute. Same
+  // idiom as useClientRemarks / useAccountRemarks.
+  //
+  // Why this matters here more than the cadence suggests: this chart is the
+  // kind of thing people leave open. A single tab left running produced 1041
+  // requests on 2026-08-14 — 12.7% of ALL backend log lines that day and the
+  // largest remaining source after OPT-0058 — and every one of them was a
+  // ~100ms blocking SQLite read served to nobody, since the overnight hours
+  // have no viewer by definition. The 60s cadence is right for a chart someone
+  // is watching; the bug was polling for a chart nobody is watching.
   React.useEffect(() => {
     let controller: AbortController | null = null;
-    const id = setInterval(() => {
+    const poll = () => {
+      if (document.visibilityState !== "visible") return;
       controller?.abort();
       controller = new AbortController();
       fetchHistory(controller.signal, { background: true });
-    }, 60_000);
+    };
+    const id = setInterval(poll, 60_000);
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") poll();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
     return () => {
       clearInterval(id);
+      document.removeEventListener("visibilitychange", onVisibility);
       controller?.abort();
     };
   }, [fetchHistory]);
