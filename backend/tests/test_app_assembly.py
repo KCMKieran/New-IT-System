@@ -146,6 +146,23 @@ def test_dev_login_backdoor_is_off_by_default(app_main, monkeypatch):
     assert client.post("/api/v1/auth/dev-login", json={}).status_code == 404
 
 
+def test_api_docs_are_off_by_default(app_main, monkeypatch):
+    """No API_DOCS_ENABLED -> Swagger/ReDoc/openapi.json 404 as if absent.
+
+    They sit at the app root, outside the /api/ scope both credential
+    middlewares guard, so an accidentally-enabled docs surface is an
+    unauthenticated dump of every route and schema. Fail safe: the code
+    default is off; dev opts in via backend/.env.
+    """
+    monkeypatch.delenv("API_DOCS_ENABLED", raising=False)
+    monkeypatch.delenv("API_KEY", raising=False)
+
+    client = TestClient(app_main.create_app())
+    assert client.get("/openapi.json").status_code == 404
+    assert client.get("/docs").status_code == 404
+    assert client.get("/redoc").status_code == 404
+
+
 def test_cookies_are_not_issued_by_default(monkeypatch):
     """The CODE default stays off; prod opts in via backend/.env.
 

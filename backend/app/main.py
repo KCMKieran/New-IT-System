@@ -323,7 +323,20 @@ def create_app() -> FastAPI:
     """
     logger.info("Creating FastAPI application...")
 
-    app = FastAPI(title="New IT System API", version="v1", lifespan=lifespan)
+    # Swagger/ReDoc/openapi.json live at the app root, outside the /api/ scope
+    # the credential middlewares guard, so an enabled docs surface is an
+    # unauthenticated dump of every route and schema. Off unless a dev
+    # explicitly opts in (API_DOCS_ENABLED). None disables each route entirely
+    # — the paths 404 as if they never existed, rather than 401/403.
+    _docs_on = get_settings().API_DOCS_ENABLED
+    app = FastAPI(
+        title="New IT System API",
+        version="v1",
+        lifespan=lifespan,
+        docs_url="/docs" if _docs_on else None,
+        redoc_url="/redoc" if _docs_on else None,
+        openapi_url="/openapi.json" if _docs_on else None,
+    )
 
     # --- Registered in REVERSE of execution order (see docstring) -------------
 

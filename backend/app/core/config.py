@@ -116,6 +116,9 @@ class Settings:
     AUDIT_LOG_RETENTION_DAYS: int
     AUDIT_MISSING_ALERT_ENABLED: bool
 
+    # Interactive API docs surface (Swagger /docs, ReDoc /redoc, /openapi.json)
+    API_DOCS_ENABLED: bool
+
     # Entra ID OIDC provider (auth design P3)
     ENTRA_TENANT_ID: str
     ENTRA_CLIENT_ID: str
@@ -364,6 +367,16 @@ class Settings:
         # after `restart` the container id and the value are both unchanged;
         # `up -d` prints "Recreated" and the new value takes effect.
         self.AUTH_ENABLED = _env_flag("AUTH_ENABLED", False)
+
+        # Interactive API docs (Swagger /docs, ReDoc /redoc, /openapi.json).
+        # These sit at the app root, OUTSIDE the /api/ scope both credential
+        # middlewares guard, so when on they expose the whole route+schema
+        # surface with no auth. Prod nginx does not route them (they fall
+        # through to the SPA), but the backend still serves them on loopback
+        # and inside the docker network. Default OFF so a missing env line
+        # fails safe — dev opts in via backend/.env, same shape as the
+        # AUTH_DEV_LOGIN_EMAIL back door above.
+        self.API_DOCS_ENABLED = _env_flag("API_DOCS_ENABLED", False)
 
         # Dev back door: POST /api/v1/auth/dev-login mints a session for this
         # address with no IdP. Refuses to work unless the address is set AND
