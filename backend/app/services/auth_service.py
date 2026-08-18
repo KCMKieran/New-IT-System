@@ -16,6 +16,7 @@ format is fixed-width and lexicographically ordered.
 from __future__ import annotations
 
 import hashlib
+import json
 import secrets
 import sqlite3
 import threading
@@ -50,6 +51,14 @@ class SessionUser:
     role: str
     status: str
     sid_hash: str
+    # Auth P4b. THREE-STATE, and the three states are not interchangeable:
+    #   None -> every module, including modules that do not exist yet
+    #   []   -> no module at all; only the always-open common layer
+    #   [..] -> exactly these modules
+    # Defaulted last so the field is additive, but never rely on the default in
+    # production code: a construction that forgets to pass it silently grants
+    # everything. Both real construction sites below pass it explicitly.
+    allowed_modules: list[str] | None = None
 
     @property
     def is_manager(self) -> bool:
@@ -99,6 +108,38 @@ def is_allowed_domain(email: str) -> bool:
 def default_role_for(email: str) -> str:
     """Seed managers come from config; everyone else is JIT-provisioned as 'user'."""
     return "manager" if normalize_email(email) in get_settings().AUTH_MANAGER_EMAILS else "user"
+
+
+# ── module grants (auth P4b) ─────────────────────────────────────────────────
+
+def parse_allowed_modules(raw: str | None) -> list[str] | None:
+    """Decode ``users.allowed_modules``. SQL NULL stays None (= every module).
+
+    Single implementation on purpose: P4a wrote the same decode in
+    ``admin_service._parse_modules`` for the administration page, and P4b needs
+    it on the per-request session path. Two copies of a function whose only job
+    is to keep ``[]`` and ``NULL`` apart is how they eventually stop agreeing —
+    and the direction they would disagree in ("empty means unset means all") is
+    the one that turns *revoking* someone's access into *granting* them
+    everything. ``admin_service`` imports this one; it already depends on this
+    module, so sharing costs no new edge in the import graph.
+
+    A row that is neither NULL nor valid JSON fails CLOSED to ``[]`` rather than
+    to ``None``. Corrupt data must not read as "may see everything": an
+    over-restricted account is a support ticket, an over-permitted one is an
+    incident.
+    """
+    if raw is None:
+        return None
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        logger.error("Unparseable users.allowed_modules %r — failing closed to []", raw)
+        return []
+    if not isinstance(value, list):
+        logger.error("users.allowed_modules is not a list (%r) — failing closed to []", raw)
+        return []
+    return [str(m) for m in value]
 
 
 # ── audit trails ─────────────────────────────────────────────────────────────
@@ -446,6 +487,10 @@ def login(
         role=user["role"],
         status=user["status"],
         sid_hash=sid_hash,
+        # upsert_user() returns SELECT *, so the column is already in hand — no
+        # extra query. Passed explicitly rather than left to the dataclass
+        # default, which would read as "all modules" for every fresh login.
+        allowed_modules=parse_allowed_modules(user["allowed_modules"]),
     )
 
 
@@ -470,7 +515,7 @@ def resolve_session(sid: str) -> SessionUser | None:
     with get_users_db() as conn:
         row = conn.execute(
             "SELECT s.sid_hash, s.user_id, s.expires_at, s.absolute_expires_at, "
-            "       u.email, u.display_name, u.role, u.status "
+            "       u.email, u.display_name, u.role, u.status, u.allowed_modules "
             "FROM sessions s JOIN users u ON u.id = s.user_id "
             "WHERE s.sid_hash = ?",
             (sid_hash,),
@@ -512,6 +557,10 @@ def resolve_session(sid: str) -> SessionUser | None:
         role=row["role"],
         status=row["status"],
         sid_hash=sid_hash,
+        # An extra COLUMN on the SELECT above, never a second query: this runs
+        # on every request (measured at ~46us; see auth_middleware's docstring)
+        # and a second point lookup would double that for one small string.
+        allowed_modules=parse_allowed_modules(row["allowed_modules"]),
     )
 
 

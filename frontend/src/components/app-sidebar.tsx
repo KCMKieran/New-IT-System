@@ -26,6 +26,7 @@ import {
 } from "@/components/ui/sidebar";
 import { useI18n } from "@/components/i18n-provider";
 import { useAuth } from "@/providers/auth-provider";
+import { canAccessPath, type ModuleAccess } from "@/lib/modules";
 
 export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   const { t } = useI18n();
@@ -38,6 +39,25 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   // everyone through and /auth/me reports no user, so a bare role check would
   // hide the page precisely when auth is off (kill switch in reverse).
   const isManager = !authEnabled || user?.role === "manager";
+
+  // Auth P4b: what this user may open. Same shape the route guard uses, and the
+  // same shared predicate — written twice, a sidebar filter and a route guard
+  // drift, and the symptom is either a menu entry that leads straight to a 403
+  // or a page reachable only through an entry that was hidden.
+  //
+  // ⚠ `allowedModules` passed through untouched: `[]` (nothing) and `null`
+  // (everything) are opposite grants, and `??`/`||` cannot tell them apart.
+  // `authEnabled` is inside the predicate for the same reason `isManager`
+  // handles it above — with the kill switch thrown /auth/me reports no user,
+  // and a bare grant check would empty the sidebar precisely when auth is off.
+  const access = React.useMemo<ModuleAccess>(
+    () => ({
+      authEnabled,
+      isManager,
+      allowedModules: user ? user.allowedModules : null,
+    }),
+    [authEnabled, isManager, user],
+  );
 
   // Navigation data with translations
   const data = React.useMemo(
@@ -134,6 +154,13 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
             : "/docs/",
           icon: IconBook,
           external: true,
+          // Auth P4b: manager-only, enforced by nginx's auth_request
+          // (?require=manager) — this flag only stops the click. Shown rather
+          // than hidden because the portal has been linked to internally for
+          // months; a vanished entry reads as "the docs were deleted", a greyed
+          // one reads as "I need access", which is the true statement.
+          disabled: !isManager,
+          disabledReason: t("nav.docsManagerOnly"),
         },
         ...(isManager
           ? [
@@ -156,8 +183,36 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
       ],
     }),
     // isManager belongs here: /auth/me resolves after first paint, so the menu
-    // has to be rebuilt when the role finally arrives.
+    // has to be rebuilt when the role finally arrives. The module grant lands in
+    // the same response but is not a dependency of THIS memo — it filters the
+    // finished list below rather than changing what is built.
     [t, isManager],
+  );
+
+  // Auth P4b: drop what this user cannot open.
+  //
+  // Filtered per CHILD rather than per group, even though every group happens
+  // to be single-module today: the table in lib/modules.ts is per page, so a
+  // group that later mixes modules (or gains one page that is manager-only)
+  // filters correctly without anyone remembering to revisit this.
+  //
+  // ⚠ A group whose children all disappear is removed entirely, heading and
+  // all. Leaving the title behind renders a department name that expands into
+  // nothing, which looks like a loading bug rather than a permission.
+  const visibleNavSections = React.useMemo(
+    () =>
+      data.navSections
+        .map((section) =>
+          section.children
+            ? { ...section, children: section.children.filter((c) => canAccessPath(access, c.url)) }
+            : section,
+        )
+        .filter((section) =>
+          section.children
+            ? section.children.length > 0
+            : !section.url || canAccessPath(access, section.url),
+        ),
+    [data.navSections, access],
   );
 
   return (
@@ -169,7 +224,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
         </Link>
       </SidebarHeader>
       <SidebarContent>
-        <NavMain items={data.navSections} />
+        <NavMain items={visibleNavSections} />
         <NavDocuments items={data.documents} />
         <NavSecondary items={data.navSecondary} className="mt-auto" />
       </SidebarContent>

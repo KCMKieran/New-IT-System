@@ -29,6 +29,16 @@ export type AuthUser = {
   displayName: string | null
   role: string
   status: string
+  /**
+   * Module grants (auth P4b). THREE-STATE — `null` means every module,
+   * including ones added later; `[]` means no module at all, only the
+   * always-open pages; a list means exactly those.
+   *
+   * ⚠ Do not "simplify" this to `string[]`. Collapsing `null` into `[]` locks
+   * everyone out of everything; collapsing `[]` into `null` turns revoking
+   * someone's access into granting them the whole application.
+   */
+  allowedModules: string[] | null
 }
 
 /**
@@ -56,6 +66,7 @@ type MeResponse = {
   display_name: string | null
   role: string | null
   status: string | null
+  allowed_modules?: string[] | null
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null)
@@ -71,6 +82,15 @@ function toUser(me: MeResponse): AuthUser | null {
     displayName: me.display_name,
     role: me.role ?? "user",
     status: me.status ?? "active",
+    // ⚠ NOT `me.allowed_modules ?? null` and definitely not `?? []`, even
+    // though both compile. `??` and `||` cannot tell "the field is absent"
+    // (an older backend, or a response shape that changed) from "the value is
+    // the empty array" — and those two are opposite grants here. So the two
+    // cases are separated explicitly: absent -> null (all modules, the
+    // pre-P4b behaviour every existing account already has), present -> used
+    // verbatim, empty array included.
+    allowedModules:
+      me.allowed_modules === undefined ? null : me.allowed_modules,
   }
 }
 

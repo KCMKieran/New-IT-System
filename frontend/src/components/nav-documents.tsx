@@ -34,6 +34,15 @@ type NavDocItem = {
   // External URLs (e.g. the docs portal at /docs/) need a real <a> so the
   // browser does a full navigation instead of the SPA router catching it.
   external?: boolean
+  // Auth P4b: shown but not clickable. Used for /docs/, which is manager-only
+  // now — hiding it outright would make a portal people have been linked to for
+  // months look deleted, and would leave a non-manager who follows an old link
+  // with no idea why nginx refused them.
+  //
+  // ⚠ Cosmetic only. The enforcement is nginx's auth_request
+  // (?require=manager); anyone can still type the URL.
+  disabled?: boolean
+  disabledReason?: string
 }
 
 // SidebarMenuButton's asChild path uses Radix Slot, which forwards a ref to
@@ -43,6 +52,25 @@ const NavLink = React.forwardRef<
   HTMLAnchorElement,
   { item: NavDocItem; children: React.ReactNode }
 >(({ item, children, ...rest }, ref) => {
+  if (item.disabled) {
+    // A <span>, not an <a href> with onClick preventDefault: a disabled entry
+    // must not be middle-clickable, keyboard-activatable or copyable as a link.
+    // ⚠ Still forwardRef'd (the ref is typed for an anchor and lands on a span,
+    // which is fine at runtime) — SidebarMenuButton's asChild path goes through
+    // Radix Slot, and Slot hands a ref to whatever child it clones. A branch
+    // that drops it breaks the handoff silently, with no error anywhere.
+    return (
+      <span
+        ref={ref as unknown as React.Ref<HTMLSpanElement>}
+        aria-disabled="true"
+        title={item.disabledReason}
+        className="cursor-not-allowed opacity-50"
+        {...rest}
+      >
+        {children}
+      </span>
+    )
+  }
   if (item.external) {
     return (
       <a

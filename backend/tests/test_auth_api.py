@@ -114,6 +114,10 @@ def test_me_reports_anonymous_when_auth_is_off(make_client):
         "display_name": None,
         "role": None,
         "status": None,
+        # P4b. Present-and-null for an anonymous answer, not absent: the SPA
+        # reads this field to decide which sidebar groups to render, and
+        # "absent" and "null" have to keep meaning the same thing there.
+        "allowed_modules": None,
     }
 
 
@@ -283,3 +287,75 @@ def test_logout_without_a_session_is_still_200(enforcing):
     r = enforcing.post("/api/v1/auth/logout")
     assert r.status_code == 200
     assert r.json() == {"ok": True, "revoked": False}
+
+
+# ── /auth/verify?require= — the nginx probe for /docs/ (auth P4b) ────────────
+#
+# nginx maps this endpoint's status codes onto three different outcomes for the
+# MkDocs portal, so each one is a separate contract:
+#   204 -> serve the docs
+#   401 -> @docs_login  (redirect; signing in fixes it)
+#   403 -> @docs_forbidden (terminal page; signing in does NOT fix it)
+# Answering 403 where 401 belongs strands a signed-out reader on an explanation
+# page; answering 401 where 403 belongs puts a signed-in non-manager into an
+# endless login bounce.
+
+def test_verify_without_a_requirement_only_asks_for_a_session(enforcing):
+    """The pre-P4b contract, unchanged for any other caller."""
+    assert enforcing.get("/api/v1/auth/verify").status_code == 401
+    sid = _login(enforcing)
+    assert enforcing.get("/api/v1/auth/verify", headers=_bearer(sid)).status_code == 204
+
+
+def test_verify_require_manager_refuses_a_signed_in_user_with_403(make_client):
+    """Signed in, wrong role. Must NOT be 401 — see the block comment above."""
+    client = make_client(AUTH_ENABLED="true", AUTH_DEV_LOGIN_EMAIL=DEV_EMAIL)
+    sid = _login(client)  # DEV_EMAIL is not in AUTH_MANAGER_EMAILS
+
+    r = client.get("/api/v1/auth/verify?require=manager", headers=_bearer(sid))
+    assert r.status_code == 403
+
+
+def test_verify_require_manager_still_401s_an_anonymous_visitor(enforcing):
+    """No session is still 401, so the login redirect keeps working."""
+    assert enforcing.get("/api/v1/auth/verify?require=manager").status_code == 401
+
+
+def test_verify_require_manager_admits_a_manager(make_client):
+    client = make_client(
+        AUTH_ENABLED="true", AUTH_DEV_LOGIN_EMAIL="boss@kohleservices.com"
+    )
+    r = client.post("/api/v1/auth/dev-login", json={})
+    sid = r.json()["session_id"]
+
+    assert client.get(
+        "/api/v1/auth/verify?require=manager", headers=_bearer(sid)
+    ).status_code == 204
+
+
+def test_verify_rejects_an_unknown_requirement(enforcing):
+    """Whitelisted, not compared to user.role.
+
+    The value arrives from an nginx config file. Comparing it to the role string
+    would mean `?require=Manager` silently refuses everyone and a future role
+    rename silently admits everyone. 400 (which nginx turns into a 500) is the
+    loud failure a typo in nginx.conf deserves — and it is deliberately not 403,
+    which nginx would read as a legitimate permission decision.
+    """
+    sid = _login(enforcing)
+    for bad in ("Manager", "admin", "user", "manager;", ""):
+        r = enforcing.get(f"/api/v1/auth/verify?require={bad}", headers=_bearer(sid))
+        assert r.status_code == 400, bad
+
+
+def test_verify_kill_switch_opens_the_docs_too(make_client):
+    """Pre-existing behaviour (cold review O3), left alone deliberately.
+
+    AUTH_ENABLED=false short-circuits before the role check, so the kill switch
+    opens the docs portal to everyone — a wider gap than before P4b, when the
+    portal was open to every signed-in user rather than to managers only. A
+    kill switch that only half-restores the site is not a kill switch, so this
+    stays; the test exists so the gap is a recorded decision, not a surprise.
+    """
+    client = make_client(AUTH_ENABLED="false")
+    assert client.get("/api/v1/auth/verify?require=manager").status_code == 204

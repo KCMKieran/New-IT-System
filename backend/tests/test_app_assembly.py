@@ -398,3 +398,236 @@ def test_a_new_route_under_auth_is_not_exempt_by_accident():
     assert _is_exempt("/api/v1/auth/login")
     assert _is_exempt("/api/v1/auth/login/")
     assert _is_exempt("/api/v1/health")
+
+
+# ── the /docs/ session gate lives in nginx, so guard it from here (O6) ───────
+
+def _nginx_conf() -> str:
+    return (
+        Path(__file__).resolve().parents[2] / "frontend" / "nginx.conf"
+    ).read_text(encoding="utf-8")
+
+
+def test_docs_gate_maps_its_two_denials_to_two_different_places():
+    """/docs/ has no auth of its own — the auth_request subrequest is all of it.
+
+    Auth P4b made the portal manager-only, which gave 403 a second meaning and
+    broke the previous mapping. Before P4b the only way to get a 403 out of the
+    subrequest was a stale API key (nginx.conf is COPY+sed'd at image build, so
+    a key rotation without a `web` rebuild leaves the old one baked in), and
+    sending those to the login page was what made the symptom recognisable.
+
+    Now "signed in but not a manager" produces 403 as well, and for that reader
+    the login page is an infinite loop: sign in, come back, 403, bounce, sign
+    in. So the two codes must part company —
+
+      401 (no session)          -> @docs_login,     signing in fixes it
+      403 (session, wrong role) -> @docs_forbidden, a terminal explanation
+
+    — and 403 must not be mapped back to @docs_login by anyone tidying up.
+    """
+    conf = _nginx_conf()
+    docs_block = conf.split("location /docs/ {", 1)[1].split("\n    }", 1)[0]
+    assert "auth_request /internal/auth-verify;" in docs_block
+    assert "error_page 401 = @docs_login;" in docs_block
+    assert "error_page 403 = @docs_forbidden;" in docs_block
+    assert "error_page 403 = @docs_login;" not in docs_block
+
+
+def test_docs_subrequest_asks_for_manager():
+    """The greyed-out sidebar entry is cosmetic; this line is the enforcement.
+
+    Without ``?require=manager`` the probe answers 204 for any signed-in user
+    and every colleague still reads all 150+ internal documents — including
+    this design doc and the database schemas — while the UI claims otherwise.
+    """
+    conf = _nginx_conf()
+    block = conf.split("location = /internal/auth-verify {", 1)[1].split("\n    }", 1)[0]
+    assert "proxy_pass http://api:8001/api/v1/auth/verify?require=manager;" in block
+
+
+def test_docs_forbidden_explains_instead_of_redirecting():
+    """The 403 page must be terminal, and must keep the stale-key diagnostic.
+
+    Terminal: a `return 302` here would recreate exactly the loop this location
+    exists to break. Diagnostic: the reason 403 used to go to the login page was
+    that a stale API key is indistinguishable from a permission problem from the
+    outside, so the page has to name that possibility for the one reader who IS
+    a manager and is looking at a Forbidden page anyway.
+    """
+    conf = _nginx_conf()
+    block = conf.split("location @docs_forbidden {", 1)[1].split("\n    }", 1)[0]
+    assert "return 403" in block
+    assert "return 30" not in block, "the forbidden page must not redirect"
+    assert "stale API key" in block
+    # Bilingual, because the two readers it serves are not the same person.
+    assert "管理员" in block and "API key" in block
+
+
+def test_docs_login_redirect_stays_relative():
+    """absolute_redirect off is load-bearing: the tunnel terminates TLS at
+    Cloudflare and speaks http to this origin, so an expanded Location would
+    send https visitors to an http URL."""
+    conf = _nginx_conf()
+    block = conf.split("location @docs_login {", 1)[1].split("\n    }", 1)[0]
+    assert "absolute_redirect off;" in block
+    assert "return 302 /login?return_to=$uri;" in block
+
+
+# ── P4b: every API path is classified into exactly one module ────────────────
+#
+# These two are the highest-value part of the module gate, because the gate
+# itself is one line in routers.py and the thing that actually goes wrong is
+# the TABLE. Both failure directions are silent in production and both are
+# caught here:
+#
+#   * a new route nobody classified -> fails closed at runtime (403 + an ERROR
+#     log), which presents to the user as "the page is broken for everyone".
+#     Test 1 turns that into a red suite before it ships.
+#   * a router that was deleted or renamed, leaving its table entry behind ->
+#     never fails at all, it just quietly stops meaning anything, and the next
+#     person reads the stale entry as documentation. Test 2 catches that.
+
+
+def _module_map():
+    from app.core.auth_deps import MODULE_MAP
+
+    return MODULE_MAP
+
+
+def _v1_route_paths() -> list[str]:
+    """Every flattened route path on api_v1_router, mount prefix not included."""
+    from app.api.v1.routers import api_v1_router
+
+    return [r.path for r in api_v1_router.routes if getattr(r, "path", None)]
+
+
+def test_every_api_path_resolves_to_exactly_one_longest_match():
+    """Coverage. An unclassified path is a 403 for everybody, including managers.
+
+    Also pins that matching is by SEGMENT, not by string prefix: the assertion
+    below runs through ``classify_path``, and "/risk" is a string prefix of both
+    "/risk-monitor" and "/risk-cases". A startswith()-based lookup that reached
+    ("risk",) first would classify 52 routes as the window-scan endpoint and
+    still pass a naive "is it classified?" check — so this test asserts the
+    winning key is the LONGEST matching one, which is the property that makes
+    the two exact-path carve-outs work at all.
+    """
+    from app.core.auth_deps import classify_path
+
+    module_map = _module_map()
+    paths = _v1_route_paths()
+    assert len(paths) > 100, f"only {len(paths)} routes found — did the import break?"
+
+    unmapped = []
+    for path in paths:
+        segments = tuple(s for s in path.split("/") if s)
+        matches = [k for k in module_map if segments[: len(k)] == k]
+        if not matches:
+            unmapped.append(path)
+            continue
+        longest = max(matches, key=len)
+        # Ties are impossible (dict keys are unique) but a same-length pair of
+        # different tuples matching the same path is not, so check it.
+        assert sum(1 for k in matches if len(k) == len(longest)) == 1, path
+        assert classify_path(path) == module_map[longest], path
+
+    assert not unmapped, (
+        f"{len(unmapped)} API path(s) are not in MODULE_MAP (core/auth_deps.py): "
+        f"{sorted(unmapped)}. Every route has to be classified — as a module, as "
+        "COMMON (open to every signed-in user), as INFRA (no gate) or as MANAGER. "
+        "Unclassified fails closed at runtime, i.e. 403 for everyone."
+    )
+
+
+def test_no_module_map_entry_is_an_orphan():
+    """No orphans. A stale entry never fails — it just stops being true.
+
+    When a router is deleted or its prefix renamed, its MODULE_MAP line keeps
+    matching nothing, in silence, and reads to the next person as a statement
+    about a route that no longer exists. `other` is the one deliberate
+    exception and is asserted explicitly rather than skipped, so that its
+    absence from the map stays a decision instead of an oversight.
+    """
+    from app.schemas.admin import MODULE_KEYS
+
+    module_map = _module_map()
+    all_segments = [tuple(s for s in p.split("/") if s) for p in _v1_route_paths()]
+
+    orphans = [
+        "/" + "/".join(key)
+        for key in module_map
+        if not any(segments[: len(key)] == key for segments in all_segments)
+    ]
+    assert not orphans, (
+        f"MODULE_MAP entries that match no live route: {sorted(orphans)}. Either "
+        "the router moved and the gate now classifies nothing, or the entry is "
+        "left over from a deleted feature and should go."
+    )
+
+    # 'other' is a real, grantable module with zero backend routes (/template is
+    # a frontend-only page). It must stay grantable — /cfg/managers renders a
+    # checkbox per MODULE_KEYS — and it must stay absent from MODULE_MAP.
+    assert "other" in MODULE_KEYS
+    assert "other" not in set(module_map.values())
+
+
+def test_the_two_exact_path_carve_outs_stay_common():
+    """The home page is open to everyone, so its data sources must be too.
+
+    Both of these sit under a prefix that is otherwise gated, and both feed a
+    widget on a page that every signed-in user is guaranteed to see (§4.3.2).
+    Fold either back into its prefix and a user with `allowed_modules = []`
+    gets a home page with a broken tile and a 403 in the console — the exact
+    symptom that reads as "the app is down" rather than "I lack a permission".
+    """
+    from app.core.auth_deps import COMMON, classify_path
+
+    assert classify_path("/open-positions/symbol-summary") == COMMON
+    assert classify_path("/client-return-rate/query") == COMMON
+    # …while the rest of each prefix keeps its real module.
+    assert classify_path("/open-positions/today") == "data"
+    assert classify_path("/client-return-rate/cache") == "risk"
+
+
+def test_the_module_gate_is_mounted_on_every_v1_route():
+    """One mount on the parent router, so router number 30 is gated by default.
+
+    Asserting the effect rather than the spelling: hung on `api_v1_router`,
+    added to each `include_router`, or written into a handler signature, it
+    ends up in the same flattened dependency tree. What must not happen is a
+    route that has none of them.
+    """
+    from app.core.auth_deps import enforce_module_access
+    from app.api.v1.routers import api_v1_router
+
+    ungated = [
+        r.path
+        for r in api_v1_router.routes
+        if getattr(r, "dependant", None) is not None
+        and enforce_module_access not in _dependency_calls(r.dependant)
+    ]
+    assert not ungated, f"routes without the module gate: {sorted(ungated)}"
+
+
+def test_router_level_dependencies_merge_rather_than_override():
+    """The precedent P4b relies on: ib_report keeps its own ClickHouse guard.
+
+    `routes/ib_report.py` declares `dependencies=[Depends(require_clickhouse_routes)]`
+    on its own APIRouter. If FastAPI overrode instead of merging, mounting the
+    module gate on the parent would silently drop that guard — and the symptom
+    would be a ClickHouse query fired on a deployment where ClickHouse is off,
+    not an error anyone would trace back to this change.
+    """
+    from app.core.auth_deps import enforce_module_access
+    from app.api.v1.routers import api_v1_router
+    from app.core.feature_gates import require_clickhouse_routes
+
+    ib_report_routes = [
+        r for r in api_v1_router.routes if getattr(r, "path", "").startswith("/ib-report")
+    ]
+    assert ib_report_routes, "no /ib-report routes — did the router move?"
+    for route in ib_report_routes:
+        calls = _dependency_calls(route.dependant)
+        assert require_clickhouse_routes in calls, route.path
+        assert enforce_module_access in calls, route.path

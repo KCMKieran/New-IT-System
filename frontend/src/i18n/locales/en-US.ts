@@ -56,6 +56,23 @@ export const enUS = {
     riskWatchlist: "Client Activity Monitor",
     windowScan: "Entry Window Scan",
     home: "Home",
+    docsManagerOnly: "The documentation portal is manager-only — ask a manager for access",
+  },
+
+  modules: {
+    cs: "CS Department",
+    data: "Data Query",
+    risk: "Risk Control",
+    other: "Other",
+  },
+
+  forbidden: {
+    title: "You do not have access to this page",
+    moduleBody: "This page belongs to the \"{module}\" module, which has not been granted to your account.",
+    managerBody: "This page is visible to managers only.",
+    genericBody: "Your account does not have permission to open this page.",
+    askManager: "Ask a manager to tick the matching permission for you on the Managers page — page access is granted per person.",
+    backHome: "Back to home",
   },
   
   // Page titles

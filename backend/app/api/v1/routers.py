@@ -1,4 +1,6 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+
+from app.core.auth_deps import enforce_module_access
 
 from .routes.health import router as health_router
 from .routes.auth import router as auth_router
@@ -32,7 +34,24 @@ from .routes.window_scan import router as window_scan_router
 from .routes.ibid_lots import router as ibid_lots_router
 
 
-api_v1_router = APIRouter()
+# The page-level permission gate (auth P4b) is mounted ONCE, here, on the
+# parent router — not on the 29 include_router() calls below, and not on
+# individual routes.
+#
+# FastAPI merges dependencies down the tree rather than overriding them
+# (``add_api_route`` composes ``self.dependencies + dependencies + route
+# dependencies``), so routers that carry their own — ``routes/ib_report.py``
+# and ``routes/client_pnl_analysis.py`` both declare
+# ``dependencies=[Depends(require_clickhouse_routes)]`` — keep working and end
+# up with both gates in their dependency tree.
+#
+# Mounting it on the parent is the difference between "router number 30 is
+# gated by default and its author has to classify its paths" and "router number
+# 30 was added without the extra argument and nobody noticed". The classifier
+# fails closed on an unknown path and ``test_app_assembly.py`` asserts that
+# every live route resolves to exactly one entry, so the omission is a red
+# test, not a silent hole.
+api_v1_router = APIRouter(dependencies=[Depends(enforce_module_access)])
 api_v1_router.include_router(health_router, tags=["health"])
 api_v1_router.include_router(auth_router, tags=["auth"])
 # /api/v1/admin — manager-only administration (auth P4a). Deliberately its own

@@ -122,6 +122,28 @@ export async function apiFetch(
         notifyUnauthorized();
       }
 
+      // 403 is the OTHER thing entirely, and the distinction is the whole
+      // reason the backend never answers 401 for a permission problem: "we
+      // don't know who you are" (401) versus "we know exactly who you are and
+      // the answer is no" (403).
+      //
+      // ⚠ Deliberately does NOT call notifyUnauthorized(). That would drop the
+      // client to anonymous and redirect to /login for someone whose session is
+      // perfectly valid — click a page you lack, get logged out, log back in,
+      // click again, forever, with no error message anywhere in the loop.
+      //
+      // Nothing global happens here on purpose. A 403 can come from the module
+      // gate (auth P4b), from require_manager on /admin, or from nginx when the
+      // baked-in API key is stale after a rotation, and only the caller knows
+      // which of those makes sense for the request it made. So the response is
+      // returned untouched and the page renders its own error; this branch just
+      // makes the event greppable in a console log people do paste into tickets.
+      if (res.status === 403 && url.startsWith("/api/") && !url.startsWith(AUTH_URL_PREFIX)) {
+        console.warn(`[apiFetch] 403 Forbidden: ${url} — session is valid, permission is not`);
+        cleanup();
+        return res;
+      }
+
       // Retry on 5xx; 4xx returns as-is for caller to handle
       if (isTransientStatus(res.status) && attempt < retries) {
         attempt += 1;
