@@ -399,10 +399,43 @@ def upsert_user(
                 "Entra login instead.",
                 email,
             )
+        # allowed_modules is written EXPLICITLY as '[]' rather than left to the
+        # column default (auth P4b follow-up, 2026-08-18).
+        #
+        # The column has no DEFAULT, so omitting it stored SQL NULL — and NULL
+        # does not mean "unset", it means "every module, including ones added
+        # later". A brand-new account therefore arrived with full visibility of
+        # risk control, client P&L and the alert-mail centre, which is the
+        # opposite of what provisioning a new joiner should do.
+        #
+        # Nothing announced it, either: JIT creation emits no distinct
+        # auth_event (the five events are login_success / session_expired /
+        # logout / login_failure / role_change), so a first-ever login is
+        # indistinguishable from a returning user's fiftieth. The only way to
+        # notice was for somebody to open /cfg/managers and read the list.
+        #
+        # '[]' inverts that: a new joiner sees the always-open layer and nothing
+        # else, and asks a manager to grant modules — which is a more reliable
+        # notification than any alert we could send. Forbidden.tsx tells them
+        # who to ask.
+        #
+        # ⚠ Do not overstate what this buys. The home page is deliberately open
+        # to every signed-in user (2026-08-14 decision), and its widgets carry
+        # firm-wide open positions and 24h client P&L. '[]' gates the module
+        # PAGES, not the summary on the front page.
+        #
+        # ⚠ This is the INSERT branch only. The two UPDATE branches above must
+        # never touch allowed_modules, for the same reason they never reset role
+        # or status: re-logging in is not a request to change a grant.
         conn.execute(
-            "INSERT INTO users (email, entra_oid, display_name, role, status, source, created_by) "
-            "VALUES (?, ?, ?, ?, 'active', ?, 'jit')",
+            "INSERT INTO users (email, entra_oid, display_name, role, status, source, created_by, allowed_modules) "
+            "VALUES (?, ?, ?, ?, 'active', ?, 'jit', '[]')",
             (email, subject, display_name, role, source),
+        )
+        logger.info(
+            "JIT-provisioned %s (role=%s source=%s) with NO modules granted; "
+            "a manager must grant them on /cfg/managers",
+            email, role, source,
         )
         return conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
 

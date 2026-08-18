@@ -899,7 +899,11 @@ def test_every_write_leaves_an_audit_row(client):
     uid = _user_id(STAFF)
 
     client.patch(f"{ADMIN}/users/{uid}", json={"role": "manager"}, headers=_bearer(sid))
-    client.patch(f"{ADMIN}/users/{uid}", json={"allowed_modules": []}, headers=_bearer(sid))
+    # ["cs"] rather than []: since the P4b follow-up a JIT-provisioned row is
+    # BORN with '[]', so patching it to [] changes nothing and record_diff()
+    # correctly declines to log a field that did not move. The point of this
+    # test is that a real write is audited, so make it a real write.
+    client.patch(f"{ADMIN}/users/{uid}", json={"allowed_modules": ["cs"]}, headers=_bearer(sid))
     client.patch(f"{ADMIN}/users/{uid}", json={"status": "disabled"}, headers=_bearer(sid))
     client.delete(f"{ADMIN}/users/{uid}/sessions", headers=_bearer(sid))
     assert staff_sid
@@ -938,8 +942,11 @@ def test_module_audit_keeps_null_and_empty_distinguishable(client):
     _mint(STAFF)
     uid = _user_id(STAFF)
 
-    client.patch(f"{ADMIN}/users/{uid}", json={"allowed_modules": []}, headers=_bearer(sid))
+    # A new row starts at '[]' (P4b follow-up), so go []->None->[] to exercise
+    # both directions. Starting with a []->[] patch would be a no-op and log
+    # nothing, which is record_diff() behaving correctly, not a missing audit.
     client.patch(f"{ADMIN}/users/{uid}", json={"allowed_modules": None}, headers=_bearer(sid))
+    client.patch(f"{ADMIN}/users/{uid}", json={"allowed_modules": []}, headers=_bearer(sid))
 
     rows = [r for r in client.get(f"{ADMIN}/audit-log", headers=_bearer(sid)).json()["data"]
             if r["action"] == "admin.user.modules_change"]
