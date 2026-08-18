@@ -23,6 +23,10 @@ services:
       - PYTHONUNBUFFERED=1
       - REDIS_HOST=new-it-redis
       - REDIS_PORT=6379
+      # Interactive API docs (Swagger/ReDoc/openapi.json). Code default is OFF
+      # (fail-safe); dev opts in here rather than in backend/.env, which is
+      # shared with prod and would leak. Prod compose sets this to false.
+      - API_DOCS_ENABLED=true
       - SCHEDULER_ENABLED=false
       # Container system time = HKT so log timestamps and date folders match ops
       - TZ=Asia/Hong_Kong
