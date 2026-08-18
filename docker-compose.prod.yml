@@ -75,6 +75,10 @@ services:
       - PYTHONUNBUFFERED=1
       - REDIS_HOST=redis-prod
       - REDIS_PORT=6379
+      # Interactive API docs (Swagger/ReDoc/openapi.json) OFF in prod. Explicit
+      # rather than relying on the code default, so it can't be silently
+      # re-enabled by a stray line in the shared backend/.env. Dev sets true.
+      - API_DOCS_ENABLED=false
       # Container system time = HKT so log timestamps & YYYYMMDD folder names
       # match what the business sees; APScheduler explicitly uses ZoneInfo anyway.
       - TZ=Asia/Hong_Kong
