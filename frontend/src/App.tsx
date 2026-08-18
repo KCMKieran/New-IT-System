@@ -2,6 +2,7 @@ import { Suspense, useEffect } from "react"
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom"
 import { AuthProvider, useAuth } from "@/providers/auth-provider"
 import { LazyErrorBoundary, PageLoader, lazyWithRetry } from "@/components/LazyErrorBoundary"
+import ModuleRoute from "@/components/ModuleRoute"
 import { pruneStaleGridKeys } from "@/hooks/useGridColumnPersist"
 import { ensureDeviceId } from "@/lib/view-profiles/device-id"
 import { Toaster } from "@/components/ui/sonner"
@@ -91,6 +92,17 @@ function App() {
                 </PrivateRoute>
               }
             >
+              {/*
+                Auth P4b: one pathless layout route carries the module guard for
+                every page below it. Pathless so it adds no segment to any URL,
+                and INSIDE DashboardLayout so a refusal renders in the app shell
+                (sidebar intact) rather than as a bare page.
+
+                A guard per <Route> would be 35 wrappers and 35 chances to forget
+                one — and a forgotten one is invisible, because the page still
+                loads and merely 403s every request it makes.
+              */}
+              <Route element={<ModuleRoute />}>
               {/* Default route: show home page */}
               <Route index element={<HomePage />} />
               <Route path="home" element={<HomePage />} />
@@ -131,7 +143,6 @@ function App() {
               <Route path="search" element={<SearchPage />} />
               {/* Configuration routes */}
               <Route path="cfg">
-                <Route path=":" element={<ConfigPlaceholder />} />
                 <Route path="managers" element={<ManagersConfigPage />} />
                 <Route path="view-profiles" element={<ViewProfilesPage />} />
                 <Route path="custom-groups" element={<ConfigPlaceholder />} />
@@ -140,6 +151,7 @@ function App() {
                 <Route path="clients" element={<ConfigPlaceholder />} />
                 <Route path="tasks" element={<ConfigPlaceholder />} />
                 <Route path="marketing" element={<ConfigPlaceholder />} />
+              </Route>
               </Route>
             </Route>
             <Route path="*" element={<Navigate to="/" replace />} />

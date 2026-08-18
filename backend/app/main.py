@@ -125,6 +125,49 @@ async def lifespan(app: FastAPI):
         logger.info("AUTH_ENABLED=true — session enforcement is ON for /api/*")
     else:
         logger.info("AUTH_ENABLED=false — session layer is present but NOT enforcing")
+    # Which domains may sign in, and whether that answer was actually chosen.
+    # Printed unconditionally because the value is a security boundary that
+    # lives only in env — the log is the only place an operator can read back
+    # what the running process believes.
+    if _auth_settings.AUTH_ALLOWED_EMAIL_DOMAINS_EXPLICIT:
+        logger.info(
+            "AUTH_ALLOWED_EMAIL_DOMAINS=%s",
+            ",".join(sorted(_auth_settings.AUTH_ALLOWED_EMAIL_DOMAINS)),
+        )
+    else:
+        # Not fatal — the fallback is a sane value — but the P3.5 split between
+        # "who may receive reports" and "who may log in" does not exist on this
+        # box until the line is written. Adding an external auditor as a mail
+        # recipient would grant that domain login rights to a risk-control
+        # system, silently.
+        logger.warning(
+            "AUTH_ALLOWED_EMAIL_DOMAINS is not set — falling back to "
+            "ALERT_MAIL_ALLOWED_DOMAINS (%s). Login rights and report-recipient "
+            "rights are the same list on this box; set AUTH_ALLOWED_EMAIL_DOMAINS "
+            "explicitly in backend/.env to separate them.",
+            ",".join(sorted(_auth_settings.AUTH_ALLOWED_EMAIL_DOMAINS)),
+        )
+
+    # SameSite is the only CSRF defence in the app, so say which value is in
+    # force — and shout if the env asked for one we refused (config.py clamps
+    # anything outside lax/strict, notably `none`, which would disable it).
+    if (
+        _auth_settings.AUTH_COOKIE_SAMESITE_RAW
+        != _auth_settings.AUTH_COOKIE_SAMESITE
+    ):
+        logger.error(
+            "AUTH_COOKIE_SAMESITE=%r is not allowed (only 'lax' or 'strict') — "
+            "using %r instead. 'none' would remove the only CSRF protection "
+            "this app has; fix backend/.env.",
+            _auth_settings.AUTH_COOKIE_SAMESITE_RAW,
+            _auth_settings.AUTH_COOKIE_SAMESITE,
+        )
+    else:
+        logger.info(
+            "AUTH_COOKIE_SAMESITE=%s (CSRF defence)",
+            _auth_settings.AUTH_COOKIE_SAMESITE,
+        )
+
     if _auth_settings.AUTH_DEV_LOGIN_EMAIL:
         # A dev back door that reached prod would be a complete auth bypass, so
         # it announces itself loudly rather than sitting silently in the env.

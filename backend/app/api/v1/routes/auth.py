@@ -68,6 +68,17 @@ class MeResponse(BaseModel):
     display_name: str | None = None
     role: str | None = None
     status: str | None = None
+    # Auth P4b. This is the ONLY place the SPA can learn its own module grants:
+    # /admin/users carries the same data but is manager-only, so an ordinary
+    # user could never read it — and the sidebar filter and route guard both
+    # need it on every page load.
+    #
+    # ⚠ Three-state, and JSON keeps the three apart only if nothing collapses
+    # them: `null` = every module (including ones added later), `[]` = none,
+    # a list = exactly those. Pydantic emits the field either way, so `null`
+    # here always means NULL in the database and never "the backend is too old
+    # to send this".
+    allowed_modules: list[str] | None = None
 
 
 class DevLoginRequest(BaseModel):
@@ -199,11 +210,21 @@ def get_me(request: Request) -> MeResponse:
         display_name=user.display_name,
         role=user.role,
         status=user.status,
+        allowed_modules=user.allowed_modules,
     )
 
 
+# What ``?require=`` will accept. A whitelist, not a free-form role string:
+# this parameter arrives from an nginx config file, and "compare it to
+# user.role" would mean a typo (`?require=Manager`) silently refuses everyone,
+# while a future role rename silently admits everyone. Adding a value here is a
+# deliberate edit; sending an unknown one is a 400 nobody can mistake for a
+# permission decision.
+_VERIFY_REQUIREMENTS: frozenset[str] = frozenset({"manager"})
+
+
 @router.get("/verify")
-def get_verify(request: Request) -> Response:
+def get_verify(request: Request, require: str | None = None) -> Response:
     """Session probe for nginx ``auth_request``. 204 = let them through, 401 = no.
 
     This is what puts the MkDocs portal at ``/docs/`` behind the same login as
@@ -216,13 +237,42 @@ def get_verify(request: Request) -> Response:
     Body-less on purpose: nginx discards an auth_request body anyway, and there
     is nothing to say that the status code does not already say.
 
+    ``?require=manager`` (auth P4b) narrows the question from "is anyone signed
+    in?" to "is a manager signed in?", which is what puts /docs/ behind the same
+    manager check as /cfg/managers. The two denials are deliberately DIFFERENT
+    status codes and nginx maps them to different places:
+
+      * **401 — no session.** nginx sends these to the login page. Signing in
+        fixes it.
+      * **403 — signed in, wrong role.** nginx must NOT send these to the login
+        page. That was the shape before P4b, when a stale API key was the only
+        way to get a 403 here; with a role check in play, bouncing an ordinary
+        user to /login gives them a loop — sign in, come back, 403, bounce,
+        sign in — with nothing to read. They get an explanatory page instead.
+
+    Answering 401 for the role failure would be the same bug one layer down, so
+    the split is the point rather than an implementation detail.
+
     Honours AUTH_ENABLED so the 30-second kill switch (§7.1) keeps working — a
     flip to false must restore the docs portal along with everything else,
     otherwise the rollback path is only half a rollback.
+    ⚠ That short-circuit now opens MORE than it used to: before P4b it meant
+    "any signed-in reader can reach /docs/ during the window", now it means
+    "anyone at all can, manager or not, and the docs contain this design doc and
+    the database schemas". Pre-existing behaviour (cold review O3) and left
+    alone on purpose — a kill switch that only half-restores the site is not a
+    kill switch — but the gap is wider than when O3 was written.
     """
     settings = get_settings()
     if not settings.AUTH_ENABLED:
         return Response(status_code=204)
+
+    if require is not None and require not in _VERIFY_REQUIREMENTS:
+        # Not 403: this is a malformed probe, not a refused person. nginx turns
+        # an unexpected auth_request status into a 500, which is the loud,
+        # unmistakable failure a typo in nginx.conf deserves.
+        logger.warning("Unknown /auth/verify requirement %r — refusing to guess", require)
+        return Response(status_code=400)
 
     user = getattr(request.state, "user", None)
     if user is None:
@@ -230,7 +280,13 @@ def get_verify(request: Request) -> Response:
         if sid:
             user = auth_service.resolve_session(sid)
 
-    return Response(status_code=204 if user is not None else 401)
+    if user is None:
+        return Response(status_code=401)
+
+    if require == "manager" and not user.is_manager:
+        return Response(status_code=403)
+
+    return Response(status_code=204)
 
 
 @router.post("/logout")

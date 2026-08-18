@@ -76,22 +76,13 @@ def _now() -> str:
 def _parse_modules(raw: str | None) -> list[str] | None:
     """Decode the stored allowed_modules JSON. NULL stays None (= all modules).
 
-    A row that is neither NULL nor valid JSON fails CLOSED to ``[]`` rather
-    than to ``None``. Corrupt data must not read as "this person may see
-    everything"; an over-restricted account is a support ticket, an
-    over-permitted one is an incident.
+    Auth P4b moved the body to ``auth_service.parse_allowed_modules`` because
+    the per-request session path needs the identical decode, and two copies of
+    the one function whose job is to keep ``[]`` (revoked) apart from ``NULL``
+    (everything) is exactly how they eventually stop agreeing. Kept as a local
+    name so the reads in this module still say what they mean.
     """
-    if raw is None:
-        return None
-    try:
-        value = json.loads(raw)
-    except (TypeError, ValueError):
-        logger.error("Unparseable users.allowed_modules %r — failing closed to []", raw)
-        return []
-    if not isinstance(value, list):
-        logger.error("users.allowed_modules is not a list (%r) — failing closed to []", raw)
-        return []
-    return [str(m) for m in value]
+    return auth_service.parse_allowed_modules(raw)
 
 
 def _encode_modules(modules: list[str] | None) -> str | None:

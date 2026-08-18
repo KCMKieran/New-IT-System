@@ -94,6 +94,8 @@ class Settings:
 
     # Alert mail center (OPT-0042/0043): recipient domain allowlist
     ALERT_MAIL_ALLOWED_DOMAINS: set[str]
+    AUTH_ALLOWED_EMAIL_DOMAINS: set[str]
+    AUTH_ALLOWED_EMAIL_DOMAINS_EXPLICIT: bool
 
     # Auth session layer (auth design P1)
     AUTH_ENABLED: bool
@@ -102,6 +104,7 @@ class Settings:
     AUTH_COOKIE_ENABLED: bool
     AUTH_COOKIE_SECURE: bool
     AUTH_COOKIE_SAMESITE: str
+    AUTH_COOKIE_SAMESITE_RAW: str
     AUTH_COOKIE_PATH: str
     AUTH_COOKIE_DOMAIN: str | None
     AUTH_SESSION_IDLE_HOURS: int
@@ -338,6 +341,16 @@ class Settings:
             for d in os.environ.get("AUTH_ALLOWED_EMAIL_DOMAINS", "").split(",")
             if d.strip()
         } or set(self.ALERT_MAIL_ALLOWED_DOMAINS)
+        # Whether the split above is real or only nominal. The fallback keeps a
+        # box that never set the variable working, but it also means the P3.5
+        # separation silently does not exist there: adding an external auditor
+        # to ALERT_MAIL_ALLOWED_DOMAINS would hand that domain login rights,
+        # which is exactly what splitting the two knobs was meant to prevent.
+        # Surfaced at boot (main.py) rather than enforced, so a missing line
+        # cannot lock everyone out.
+        self.AUTH_ALLOWED_EMAIL_DOMAINS_EXPLICIT = bool(
+            os.environ.get("AUTH_ALLOWED_EMAIL_DOMAINS", "").strip()
+        )
 
         # ── Auth session layer (auth design P1) ──────────────────────────────
         # Master kill switch. OFF means AuthMiddleware short-circuits before it
@@ -375,9 +388,21 @@ class Settings:
         # Lax, not Strict: the OIDC callback (P3) is a cross-site navigation
         # back from login.microsoftonline.com, and Strict withholds the cookie
         # on exactly that request.
-        self.AUTH_COOKIE_SAMESITE = (
+        #
+        # Whitelisted, because `none` is a valid cookie attribute that browsers
+        # accept happily and that removes the ONLY CSRF defence this app has
+        # (there is no synchronizer token anywhere) — one env typo would make
+        # every state-changing endpoint reachable from any origin, with no error
+        # and no visible symptom. Anything outside the set falls back to `lax`;
+        # main.py prints the effective value at boot so a rejected typo is
+        # visible rather than merely harmless.
+        _samesite = (
             os.environ.get("AUTH_COOKIE_SAMESITE") or "lax"
         ).strip().lower()
+        self.AUTH_COOKIE_SAMESITE_RAW = _samesite
+        self.AUTH_COOKIE_SAMESITE = (
+            _samesite if _samesite in ("lax", "strict") else "lax"
+        )
         self.AUTH_COOKIE_PATH = (os.environ.get("AUTH_COOKIE_PATH") or "/").strip()
         # Empty -> host-only cookie (no Domain attribute), which is the tighter
         # of the two and what we want unless a subdomain ever needs to share.

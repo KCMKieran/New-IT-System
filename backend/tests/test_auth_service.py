@@ -404,6 +404,55 @@ def test_adding_a_mail_recipient_domain_does_not_grant_login(auth, monkeypatch):
     assert not auth.is_allowed_domain("auditor@auditor-firm.com")
 
 
+def test_the_fallback_announces_itself(monkeypatch):
+    """The split above is only real if the deployment actually sets the
+    variable. It did not, for four days (cold review M2), and nothing said so.
+    This flag is what main.py turns into a boot-time WARNING."""
+    from app.core.config import get_settings
+
+    monkeypatch.delenv("AUTH_ALLOWED_EMAIL_DOMAINS", raising=False)
+    get_settings.cache_clear()
+    assert get_settings().AUTH_ALLOWED_EMAIL_DOMAINS_EXPLICIT is False
+
+    monkeypatch.setenv("AUTH_ALLOWED_EMAIL_DOMAINS", "kohleservices.com")
+    get_settings.cache_clear()
+    assert get_settings().AUTH_ALLOWED_EMAIL_DOMAINS_EXPLICIT is True
+
+    # Whitespace-only is not a choice either — it lands on the same fallback.
+    monkeypatch.setenv("AUTH_ALLOWED_EMAIL_DOMAINS", "   ")
+    get_settings.cache_clear()
+    assert get_settings().AUTH_ALLOWED_EMAIL_DOMAINS_EXPLICIT is False
+
+
+# ── SameSite is the only CSRF defence, so env cannot switch it off (O1) ──────
+
+def test_samesite_none_is_refused(monkeypatch):
+    """`none` is a valid cookie attribute browsers accept without complaint,
+    and it removes the app's only CSRF protection. A typo (or a well-meant
+    'fix' for an embedding problem) must not be able to do that silently."""
+    from app.core.config import get_settings
+
+    for bad in ("none", "None", "NONE", "lx", "true", "0"):
+        monkeypatch.setenv("AUTH_COOKIE_SAMESITE", bad)
+        get_settings.cache_clear()
+        s = get_settings()
+        assert s.AUTH_COOKIE_SAMESITE == "lax", bad
+        # The rejected value is kept so boot logging can name it; a clamp
+        # nobody can see is indistinguishable from a value nobody set.
+        assert s.AUTH_COOKIE_SAMESITE_RAW == bad.strip().lower(), bad
+
+
+@pytest.mark.parametrize("good", ["lax", "strict", "Lax", " STRICT "])
+def test_samesite_keeps_the_two_allowed_values(monkeypatch, good):
+    from app.core.config import get_settings
+
+    monkeypatch.setenv("AUTH_COOKIE_SAMESITE", good)
+    get_settings.cache_clear()
+    s = get_settings()
+    assert s.AUTH_COOKIE_SAMESITE == good.strip().lower()
+    assert s.AUTH_COOKIE_SAMESITE_RAW == s.AUTH_COOKIE_SAMESITE
+
+
 # ── bounding what an unauthenticated caller can append (cold review S2) ──────
 #
 # /api/v1/auth/callback is exempt from BOTH the API key layer and the session

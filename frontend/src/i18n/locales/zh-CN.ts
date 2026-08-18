@@ -58,6 +58,30 @@ export const zhCN = {
     riskWatchlist: "Client Activity Monitor",
     windowScan: "Entry Window Scan",
     home: "首页",
+    // Auth P4b: tooltip on the greyed-out /docs/ entry. The entry stays visible
+    // for everyone — a vanished link reads as "the docs were deleted".
+    docsManagerOnly: "文档站仅管理员可访问，请联系管理员开通",
+  },
+
+  // Auth P4b — module names, as shown on the 403 page. Must match the labels
+  // managers tick in /cfg/managers, or the person asking for access and the
+  // person granting it are talking about different things.
+  modules: {
+    cs: "CS Department（客服部）",
+    data: "Data Query（数据查询）",
+    risk: "Risk Control（风险控制）",
+    other: "Other（其他）",
+  },
+
+  // Auth P4b — the 403 page. Written for someone whose next action is to ask
+  // for access, so it names what is missing and who grants it.
+  forbidden: {
+    title: "无权访问此页面",
+    moduleBody: "这个页面属于「{module}」模块，你的账号还没有获得该模块的权限。",
+    managerBody: "这个页面仅管理员（manager）可见。",
+    genericBody: "你的账号没有访问这个页面的权限。",
+    askManager: "请联系管理员在「Managers」页面为你勾选相应权限；页面权限由管理员逐人分配。",
+    backHome: "返回首页",
   },
 
   // Page titles
