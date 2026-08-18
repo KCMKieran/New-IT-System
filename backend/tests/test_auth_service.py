@@ -570,3 +570,63 @@ def test_retention_of_zero_days_keeps_everything(auth, monkeypatch):
     assert auth.purge_old_audit_log() == 0
     assert len(_rows("auth_events")) == 1
     assert len(_rows("audit_log")) == 1
+
+
+# ── a new joiner is provisioned with NO modules (auth P4b follow-up) ─────────
+
+def test_a_brand_new_account_gets_no_modules(auth):
+    """NULL would mean "every module, including ones added later".
+
+    The column has no DEFAULT, so an INSERT that omits it hands a first-time
+    user full visibility of risk control, client P&L and the alert-mail centre
+    — and nothing announces it, because JIT creation emits no distinct
+    auth_event. '[]' is the deny-by-default the cold review asked for (O5).
+    """
+    row = auth.upsert_user("newjoiner@kohleservices.com", display_name="New Joiner")
+    assert row["allowed_modules"] == "[]"
+    assert auth.parse_allowed_modules(row["allowed_modules"]) == []
+    # …and it must be [] rather than NULL, which is the opposite grant.
+    assert auth.parse_allowed_modules(row["allowed_modules"]) is not None
+
+
+def test_relogin_does_not_reset_an_existing_grant(auth):
+    """Same property role and status already have: logging in again is not a
+    request to change your permissions. Both UPDATE branches must leave
+    allowed_modules alone — including the one that adopts an entra_oid."""
+    auth.upsert_user("grantee@kohleservices.com", subject="oid-grantee")
+    with auth.get_users_db() as conn:
+        conn.execute(
+            "UPDATE users SET allowed_modules = ? WHERE email = ?",
+            ('["cs"]', "grantee@kohleservices.com"),
+        )
+
+    # by_subject branch
+    again = auth.upsert_user("grantee@kohleservices.com", subject="oid-grantee")
+    assert again["allowed_modules"] == '["cs"]'
+
+    # by_email branch (first login after entra_oid existed): provision without a
+    # subject, grant, then arrive with one.
+    auth.upsert_user("adopted@kohleservices.com")
+    with auth.get_users_db() as conn:
+        conn.execute(
+            "UPDATE users SET allowed_modules = ? WHERE email = ?",
+            ('["risk"]', "adopted@kohleservices.com"),
+        )
+    adopted = auth.upsert_user("adopted@kohleservices.com", subject="oid-adopted")
+    assert adopted["entra_oid"] == "oid-adopted"
+    assert adopted["allowed_modules"] == '["risk"]'
+
+
+def test_a_new_manager_also_starts_with_no_modules(auth, monkeypatch):
+    """Managers pass every module gate by role, so the empty grant costs them
+    nothing — but the row must still be born deny-by-default. If they are ever
+    demoted, the grant is what remains, and inheriting "everything forever"
+    from a role they no longer hold is exactly the silent-escalation shape the
+    rest of this module guards against."""
+    monkeypatch.setenv("AUTH_MANAGER_EMAILS", "boss2@kohleservices.com")
+    from app.core.config import get_settings
+
+    get_settings.cache_clear()
+    row = auth.upsert_user("boss2@kohleservices.com")
+    assert row["role"] == "manager"
+    assert row["allowed_modules"] == "[]"
