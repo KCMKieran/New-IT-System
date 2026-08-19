@@ -395,11 +395,7 @@ def test_export_task_creation_is_recorded(client, auth, patch):
 
 # ── view-profiles ────────────────────────────────────────────────────────────
 
-def test_force_release_records_who_lost_the_lock(client, auth, patch):
-    from app.services import view_profiles_service as svc
-
-    patch.setattr(svc, "ADMIN_DEVICE_WHITELIST", {"admin-device"})
-
+def test_force_release_records_who_lost_the_lock(client, auth):
     client.post("/api/v1/view-profiles", json={"name": "Teresa"}, headers=auth)
     client.post(
         "/api/v1/view-profiles/Teresa/claim",
@@ -409,7 +405,7 @@ def test_force_release_records_who_lost_the_lock(client, auth, patch):
 
     resp = client.post(
         "/api/v1/view-profiles/Teresa/force-release",
-        headers={**auth, "X-Device-ID": "admin-device"},
+        headers=auth,  # a manager session; no device-id is read any more (M4)
     )
     assert resp.status_code == 200
 
@@ -424,16 +420,22 @@ def test_force_release_records_who_lost_the_lock(client, auth, patch):
     assert rows[0]["new_value"] is None
 
 
-def test_a_refused_force_release_writes_nothing(client, auth, patch):
-    """Reverse case: 403 changed nothing, so there is nothing to record."""
-    from app.services import view_profiles_service as svc
+def test_a_refused_force_release_writes_nothing(client, auth):
+    """Reverse case: 403 changed nothing, so there is nothing to record.
 
-    patch.setattr(svc, "ADMIN_DEVICE_WHITELIST", {"admin-device"})
+    The refusal now comes from require_manager reading a signed-in NON-manager,
+    which is also the regression this pins for cold review M4: an ordinary
+    employee cannot take somebody's lock, and cannot leave an audit row
+    claiming they did.
+    """
+    from app.services import auth_service
+
     client.post("/api/v1/view-profiles", json={"name": "Teresa"}, headers=auth)
 
+    staff_sid, _ = auth_service.login("staff@kohleservices.com", source="dev")
     resp = client.post(
         "/api/v1/view-profiles/Teresa/force-release",
-        headers={**auth, "X-Device-ID": "not-an-admin"},
+        headers=_headers(staff_sid),
     )
     assert resp.status_code == 403
     assert _rows("view_profiles.profile.force_release") == []
@@ -661,22 +663,35 @@ def test_fund_flow_ad_hoc_query_is_never_audited(client, auth, patch):
 
 # ── the actor can never come from the client ─────────────────────────────────
 
-def test_a_forged_device_header_never_becomes_the_actor(client, auth, patch):
-    """X-Device-ID authorises the force-release; it does not identify anyone.
+def test_a_forged_device_header_is_neither_actor_nor_authorisation(client, auth):
+    """X-Device-ID identifies nobody AND now authorises nothing.
 
-    Anyone can curl it. The person is resolved from the session cookie, which is
-    why the two must never be confused — the whole reason this router's existing
-    "admin device" check is an authorisation input and not an identity.
+    Anyone can curl it: it is generated in the browser, kept in localStorage and
+    printed on the Settings page. Until cold review M4 (2026-08-19) it was still
+    the authorisation input for force-release, which meant the one privileged
+    act in this router was gated on a value the caller typed. Both halves are
+    asserted here because the failure modes differ — a forged header that
+    authorises is an escalation, a forged header that becomes the actor is a
+    lie in the audit trail.
     """
-    from app.services import view_profiles_service as svc
+    from app.services import auth_service
 
-    patch.setattr(svc, "ADMIN_DEVICE_WHITELIST", {"admin-device"})
     client.post("/api/v1/view-profiles", json={"name": "Teresa"}, headers=auth)
+
+    # The exact value that used to buy admin rights buys nothing now.
+    staff_sid, _ = auth_service.login("staff@kohleservices.com", source="dev")
+    refused = client.post(
+        "/api/v1/view-profiles/Teresa/force-release",
+        headers=_headers(staff_sid, **{"X-Device-ID": "admin-device"}),
+    )
+    assert refused.status_code == 403
+    assert _rows("view_profiles.profile.force_release") == []
+
+    # And when a real manager acts, the row names the manager, not the browser.
     client.post(
         "/api/v1/view-profiles/Teresa/force-release",
         headers={**auth, "X-Device-ID": "admin-device"},
     )
-
     row = _rows("view_profiles.profile.force_release")[0]
     assert row["actor_email"] == MANAGER
     assert "admin-device" not in (row["actor_email"] or "")

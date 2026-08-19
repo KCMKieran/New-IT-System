@@ -211,25 +211,6 @@ async def lifespan(app: FastAPI):
             f"Worker pid={os.getpid()} owns scheduler lock — starting schedulers"
         )
 
-        # OPT-0035: an empty admin whitelist silently disables force-release —
-        # the only escape hatch for a profile lock stuck on a lost/changed
-        # device-id. Don't crash (internal tool), but warn so it doesn't ship
-        # unnoticed.
-        #
-        # Behind the scheduler election purely to say it ONCE. Prod runs
-        # `uvicorn --workers 4`, so every worker ran this check and the single
-        # boot-time fact arrived as 4 identical WARNING lines (8 on 2026-08-14,
-        # a two-deploy day) — 47% of that day's entire WARNING+ERROR volume, in
-        # the one channel that has to stay scannable. The condition is process
-        # -independent, so any one worker reporting it is the whole truth.
-        from app.services.view_profiles_service import ADMIN_DEVICE_WHITELIST
-        if not ADMIN_DEVICE_WHITELIST:
-            logger.warning(
-                "VIEW_PROFILES_ADMIN_DEVICES is empty — force-release is "
-                "DISABLED. A view-profile lock stuck on a lost device-id cannot "
-                "be cleared. Set VIEW_PROFILES_ADMIN_DEVICES (comma-separated "
-                "device-ids) to enable the admin escape hatch."
-            )
         # NOT a leftover duplicate: the recurring 04:00 HKT job
         # (core/scheduler.py _users_db_retention_job) is the primary mechanism
         # now, and this startup pass is the complement to it — it covers the

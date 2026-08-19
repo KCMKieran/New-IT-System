@@ -88,10 +88,6 @@ class Settings:
     CLIENT_ROACE_REFRESH_HOUR: int
     CLIENT_ROACE_REFRESH_MINUTE: int
 
-    # View profiles (OPT-0035): device-ids allowed to force-release a stuck claim
-    VIEW_PROFILES_ADMIN_DEVICES: set[str]
-
-
     # Alert mail center (OPT-0042/0043): recipient domain allowlist
     ALERT_MAIL_ALLOWED_DOMAINS: set[str]
     AUTH_ALLOWED_EMAIL_DOMAINS: set[str]
@@ -309,16 +305,6 @@ class Settings:
             os.environ.get("LAST_CLOSE_IP_GEO_FAIL_ABORT_RATIO", "0.2")
         )
 
-        # View profiles (OPT-0035): comma-separated device-ids allowed to
-        # force-release a claim stuck on a lost device-id. The device-id is shown
-        # (and copyable) on the Settings page. Empty = nobody can force-release.
-        self.VIEW_PROFILES_ADMIN_DEVICES = {
-            d.strip()
-            for d in os.environ.get("VIEW_PROFILES_ADMIN_DEVICES", "").split(",")
-            if d.strip()
-        }
-
-
         # Alert mail center (OPT-0042/0043): server-side recipient domain
         # allowlist. Subscription mail_to/mail_cc and test-send recipients may
         # only target mailboxes in these domains — anyone holding the frontend
@@ -366,7 +352,18 @@ class Settings:
         # so the flip is silently ignored and nothing errors. Measured 2026-08-17:
         # after `restart` the container id and the value are both unchanged;
         # `up -d` prints "Recreated" and the new value takes effect.
-        self.AUTH_ENABLED = _env_flag("AUTH_ENABLED", False)
+        #
+        # ⚠ The DEFAULT is True (changed 2026-08-19; it was False from P1 until
+        # then, when auth was opt-in and its absence meant "nothing has shipped
+        # yet"). Auth has been the only lock on this API since P3, so a missing
+        # env line must not be able to remove it: with the old default, dropping
+        # one line from backend/.env put the whole system into an unauthenticated
+        # state with no error, no warning and no failed request — the app simply
+        # let everybody in. Disabling auth is now something you have to write
+        # down, which is the right cost for an action whose blast radius is
+        # "every endpoint, for the entire internet" once CF Access is retired
+        # (design doc §4.2.2, prerequisite 1).
+        self.AUTH_ENABLED = _env_flag("AUTH_ENABLED", True)
 
         # Interactive API docs (Swagger /docs, ReDoc /redoc, /openapi.json).
         # These sit at the app root, OUTSIDE the /api/ scope both credential
@@ -458,6 +455,15 @@ class Settings:
         # every one of them contending for the same SQLite write lock as every
         # real request's resolve_session(). Successful and session-derived
         # events are NOT throttled — they all require a real session to exist.
+        #
+        # ⚠ Despite the name, this budget now covers BOTH refusal events:
+        # login_failure (keyed by source IP) and, since auth P4b's module gate,
+        # permission_denied (keyed by the refused subject). The name was left
+        # alone deliberately — renaming it would mean an env change on a
+        # deployment where nobody has ever set it, to buy a word. What the two
+        # share is the property the cap exists for: they are written once per
+        # REQUEST, at a rate the caller picks, unlike every other event kind
+        # which fires once per thing that happened to an account.
         self.AUTH_FAILURE_EVENTS_PER_MINUTE = int(
             (os.environ.get("AUTH_FAILURE_EVENTS_PER_MINUTE") or "10").strip()
         )

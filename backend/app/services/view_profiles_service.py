@@ -17,7 +17,6 @@ import json
 import sqlite3
 from typing import Any
 
-from app.core.config import get_settings
 from app.core.view_profiles_db import get_view_profiles_db
 from app.schemas.view_profiles import validate_state_blob
 
@@ -30,10 +29,6 @@ _COLUMNS = "name, state_json, owner_device, owner_label, claimed_at, updated_at"
 
 class ProfileClaimConflict(Exception):
     """Raised when a claim/release/save loses (or never held) the exclusive lock."""
-
-
-class ProfileAdminError(Exception):
-    """Raised when a non-whitelisted device attempts an admin-only action."""
 
 
 class ProfileNotFound(Exception):
@@ -53,14 +48,15 @@ class ProfileStateInvalid(Exception):
     """
 
 
-# Device-ids allowed to force-release a stuck claim (the lost-device-id escape
-# hatch), sourced from the VIEW_PROFILES_ADMIN_DEVICES env var (OPT-0035, option A).
-# Read once at import; tests monkeypatch this attribute directly.
-ADMIN_DEVICE_WHITELIST: set[str] = set(get_settings().VIEW_PROFILES_ADMIN_DEVICES)
-
-
-def is_admin_device(device_id: str) -> bool:
-    return device_id in ADMIN_DEVICE_WHITELIST
+# NOTE: force-release used to be authorised HERE, by matching the caller's
+# X-Device-ID against a VIEW_PROFILES_ADMIN_DEVICES whitelist (OPT-0035 option
+# A). That check is gone (cold review M4, 2026-08-19): a device-id is typed by
+# the client on every request and shown to the user on the Settings page, so it
+# authenticated nothing — and because the env var was never set in prod, the
+# whole escape hatch had been switched off since the day it shipped.
+# Authorisation now lives on the route as Depends(require_manager), which reads
+# a server-resolved session. The service layer no longer decides who may call
+# it, exactly like every other function in this file.
 
 
 def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
@@ -178,14 +174,14 @@ def release_profile(name: str, device_id: str) -> None:
             _raise_for_failed_owner_write(conn, name)
 
 
-def force_release(name: str, admin_device: str) -> None:
-    """Admin escape hatch: clear `owner_device` regardless of who holds it.
+def force_release(name: str) -> None:
+    """Manager escape hatch: clear `owner_device` regardless of who holds it.
 
-    Raises ProfileAdminError if `admin_device` is not whitelisted, ProfileNotFound
-    if the profile is absent.
+    Raises ProfileNotFound if the profile is absent. Deliberately takes NO
+    caller identity: the route's Depends(require_manager) has already decided
+    that question from the session, and re-deciding it here from a parameter
+    would put the answer back within reach of whatever the client sent.
     """
-    if not is_admin_device(admin_device):
-        raise ProfileAdminError(f"{admin_device} is not authorised to force-release")
     with get_view_profiles_db() as conn:
         cur = conn.execute(
             f"UPDATE view_profiles "

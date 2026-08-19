@@ -144,32 +144,63 @@ def parse_allowed_modules(raw: str | None) -> list[str] | None:
 
 # ── audit trails ─────────────────────────────────────────────────────────────
 
-# ── login_failure throttle ───────────────────────────────────────────────────
-# /api/v1/auth/callback is exempt from both the API key layer and the session
-# layer (a browser arriving from Microsoft can present neither), so its failure
-# paths — ``?error=``, ``state_not_bound`` — are reachable by anyone on the
-# internet with no credential at all. nginx allows 60 r/s per IP, so without a
-# cap one caller can append ~5.2M rows a day to a table that had no retention
-# policy, every insert contending for the same SQLite write lock as every real
-# request's resolve_session() and every /docs/ auth_request sub-request.
+# ── refusal-event throttle ───────────────────────────────────────────────────
+# Two of the five write-heavy event kinds are refusals, and refusals are the
+# only ones whose rate is set by the caller rather than by a person's login
+# lifecycle. Both are throttled per source; everything else is left alone.
+#
+# ``login_failure`` — /api/v1/auth/callback is exempt from both the API key
+# layer and the session layer (a browser arriving from Microsoft can present
+# neither), so its failure paths — ``?error=``, ``state_not_bound`` — are
+# reachable by anyone on the internet with no credential at all. nginx allows
+# 60 r/s per IP, so without a cap one caller can append ~5.2M rows a day.
+#
+# ``permission_denied`` — added when auth P4b started refusing module access
+# (2026-08-19). The original reasoning for throttling nothing else was "every
+# other event requires a real session, which is what bounds them", and for
+# login_success / logout / session_expired that holds: one row per lifecycle
+# event. It does NOT hold for a permission refusal, which is one row per
+# REQUEST. A signed-in user whose grant no longer covers a page they still have
+# open — the tab that was fine until a manager unticked a module, /profit's
+# /trading half for a risk-only user, any script polling an endpoint it lost —
+# writes one row per poll, all day, all of them saying the same thing.
+#
+# Every one of those inserts contends for the same SQLite write lock as every
+# real request's resolve_session() and every /docs/ auth_request sub-request,
+# which is why the cost is not "a bigger table".
 #
 # The throttle keeps the forensic value rather than dropping the events: a
 # burst still leaves the first N rows, the suppression itself is logged, and
 # backend.log (which has logrotate behind it) still records every attempt.
 # Per process — prod runs 4 workers, so the real ceiling is 4x the setting.
+_THROTTLED_EVENTS: frozenset[str] = frozenset({"login_failure", "permission_denied"})
 _THROTTLE_WINDOW_SECONDS = 60.0
 _THROTTLE_MAX_KEYS = 1024
 _throttle_lock = threading.Lock()
 _throttle_counts: dict[str, tuple[float, int]] = {}  # ip -> (window_start, count)
 
 
-def _failure_event_allowed(ip: str | None) -> bool:
-    """True if this IP may append another login_failure row this minute."""
+def _throttle_key(event: str, email: str | None, ip: str | None) -> str:
+    """Which caller's budget this event spends.
+
+    ``login_failure`` has no authenticated subject by definition, so the source
+    address is the only handle there is. ``permission_denied`` does have one,
+    and the subject is the better key: keying it by IP would let one refused
+    person exhaust the budget of everybody else behind the same office NAT, and
+    the suppressed rows would be the ones nobody was looking for.
+    """
+    if event == "login_failure":
+        return f"{event}:{ip or '-'}"
+    return f"{event}:{email or ip or '-'}"
+
+
+def _refusal_event_allowed(event: str, email: str | None, ip: str | None) -> bool:
+    """True if this caller may append another row of this refusal kind this minute."""
     limit = get_settings().AUTH_FAILURE_EVENTS_PER_MINUTE
     if limit <= 0:  # explicitly disabled
         return True
 
-    key = ip or "-"
+    key = _throttle_key(event, email, ip)
     now = time.monotonic()
     with _throttle_lock:
         if len(_throttle_counts) > _THROTTLE_MAX_KEYS:
@@ -193,8 +224,9 @@ def _failure_event_allowed(ip: str | None) -> bool:
 
     if first_over:
         logger.warning(
-            "Suppressing further login_failure auth_events from ip=%s — more "
-            "than %d in %ds. backend.log still records every attempt.",
+            "Suppressing further %s auth_events for %s — more than %d in %ds. "
+            "backend.log still records every one of them.",
+            event,
             key,
             limit,
             int(_THROTTLE_WINDOW_SECONDS),
@@ -215,11 +247,14 @@ def record_auth_event(
     trace_id is pulled from the request-scoped context var so an auth event can
     be joined against backend.log and the nginx JSON access log.
 
-    ``login_failure`` is throttled per source IP (see _failure_event_allowed);
-    every other event requires a real session or a real login to have existed
-    first, which is what bounds them.
+    The two refusal events — ``login_failure`` and ``permission_denied`` — are
+    throttled per caller (see _refusal_event_allowed). The rest
+    (``login_success`` / ``logout`` / ``session_expired`` / ``role_change`` /
+    ``account_disabled`` / ``account_enabled``) are bounded by the login
+    lifecycle itself: one row per thing that actually happened to an account,
+    and throttling those would only lose real audit.
     """
-    if event == "login_failure" and not _failure_event_allowed(ip):
+    if event in _THROTTLED_EVENTS and not _refusal_event_allowed(event, email, ip):
         return
     try:
         with get_users_db() as conn:

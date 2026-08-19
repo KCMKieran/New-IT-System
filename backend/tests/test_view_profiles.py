@@ -85,25 +85,25 @@ def test_release_only_by_owner(temp_db):
     assert _owner_of("Kieran") is None
 
 
-# ── Admin force-release (lost device-id escape hatch) ─────────────────────────
+# ── force-release (lost device-id escape hatch) ───────────────────────────────
+#
+# Who may call this is NOT tested here any more, and that is the point of cold
+# review M4 (2026-08-19): the service used to answer it from a device-id the
+# client typed, so the check lived in the wrong layer and — with
+# VIEW_PROFILES_ADMIN_DEVICES unset in prod — was permanently False on top of
+# that. Authorisation is now Depends(require_manager) on the route; the
+# behaviour tests for it live in test_view_profiles_api.py.
 
-def test_admin_devices_parsed_from_env(monkeypatch):
-    """Option A: VIEW_PROFILES_ADMIN_DEVICES env → trimmed, empties dropped, set."""
-    monkeypatch.setenv("VIEW_PROFILES_ADMIN_DEVICES", "dev-1, dev-2 ,, dev-1 ")
-    from app.core.config import Settings
-    assert Settings().VIEW_PROFILES_ADMIN_DEVICES == {"dev-1", "dev-2"}
-
-
-def test_force_release_requires_admin(temp_db, monkeypatch):
+def test_force_release_clears_whoever_holds_it(temp_db):
     _seed_unclaimed("Kieran")
     svc.claim_profile("Kieran", "device-A")
-    # Non-admin cannot force release.
-    with pytest.raises(svc.ProfileAdminError):
-        svc.force_release("Kieran", "device-B")
-    # Whitelisted admin can.
-    monkeypatch.setattr(svc, "ADMIN_DEVICE_WHITELIST", {"admin-device"})
-    svc.force_release("Kieran", "admin-device")
+    svc.force_release("Kieran")
     assert _owner_of("Kieran") is None
+
+
+def test_force_release_on_a_missing_profile_raises(temp_db):
+    with pytest.raises(svc.ProfileNotFound):
+        svc.force_release("nobody-made-this")
 
 
 # ── save_state ownership ──────────────────────────────────────────────────────

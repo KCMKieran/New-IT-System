@@ -267,6 +267,39 @@ def classify_path(path: str) -> str | None:
     return None
 
 
+def caller_has_module(request: Request, module: str) -> bool:
+    """Would ``enforce_module_access`` let this caller into ``module``?
+
+    Exported so a handler can narrow WHAT it returns on a path the gate itself
+    lets through. There is exactly one such path today and it is not an
+    exception to the model, it is the model's edge: ``/client-return-rate/query``
+    is classified COMMON because the always-open home page draws a widget from
+    it, yet it is also the sole data source of the risk-module page of the same
+    name — the same endpoint, the same parameters. Path-level classification
+    cannot express "everyone may have the widget's slice of this, only the risk
+    module may have the rest", so the handler asks.
+
+    Mirrors the gate's precedence exactly (kill switch, manager, NULL = all,
+    membership) and deliberately shares the membership step with it — two
+    implementations of "may they?" drift, and the direction they drift in is
+    the one where the narrow answer says yes.
+
+    ⚠ Answers about a GRANT, not about a page. Passing COMMON or INFRA here is
+    meaningless: they are not grantable and would simply return False.
+    """
+    if not get_settings().AUTH_ENABLED:
+        return True
+
+    user: SessionUser | None = getattr(request.state, "user", None)
+    if user is None:
+        return False
+    if user.is_manager:
+        return True
+    if user.allowed_modules is None:
+        return True
+    return module in user.allowed_modules
+
+
 def enforce_module_access(request: Request) -> None:
     """Refuse callers who were not granted the module this path belongs to.
 
@@ -310,11 +343,14 @@ def enforce_module_access(request: Request) -> None:
     5. **manager -> pass**, per §4.3.3. Managers grant modules; needing to grant
        themselves one first is a footgun with no upside.
     6. **COMMON -> pass**, for a user with ``allowed_modules == []`` too.
-    7. **``allowed_modules is None`` -> pass.** ``None`` is SQL NULL and means
-       "every module, including ones added later". ``[]`` is the opposite and
-       must fall through to the membership test below. ⚠ Never write this as a
-       falsy check: ``if not user.allowed_modules`` reads ``[]`` as ``None`` and
-       turns "revoke this person's access" into "give this person everything".
+    7. **The grant test itself is ``caller_has_module`` above**, shared with the
+       one handler that has to ask the same question about its own parameters.
+       It is where ``allowed_modules is None`` -> pass lives: ``None`` is SQL
+       NULL and means "every module, including ones added later", while ``[]``
+       is the opposite and falls through to the membership test. ⚠ Never write
+       that as a falsy check — ``if not user.allowed_modules`` reads ``[]`` as
+       ``None`` and turns "revoke this person's access" into "give this person
+       everything".
     8. **Not granted -> 403.** Never 401: ``frontend/src/lib/fetch.ts`` reacts
        to 401 by calling ``notifyUnauthorized()``, which drops the client to
        anonymous and redirects to /login. Answering 401 for "logged in but not
@@ -362,10 +398,7 @@ def enforce_module_access(request: Request) -> None:
     if module == COMMON:
         return
 
-    if user.allowed_modules is None:
-        return
-
-    if module not in user.allowed_modules:
+    if not caller_has_module(request, module):
         logger.warning(
             "Module '%s' refused: %s %s email=%s granted=%s client=%s",
             module,
