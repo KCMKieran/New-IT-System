@@ -469,11 +469,16 @@ class Settings:
         )
         # Nothing has ever deleted from these two append-only tables. Retention
         # runs from lifespan on the scheduler-owning worker, next to the
-        # expired-session purge. auth_events is operational (90d covers any
-        # "who logged in when" question); audit_log is business audit and keeps
-        # the 365d the remarks history tables already use.
+        # expired-session purge. audit_log is business audit and keeps the 365d
+        # the remarks history tables already use; auth_events was 90d as an
+        # operational log, raised to the same 365d on 2026-08-19 (user call) —
+        # "who logged in when" turns out to be asked with the same lag as
+        # "who changed this", and the measured volume (~25 rows/day, ~2k rows
+        # at 90d) never made the shorter window worth the lost year. The cap
+        # that actually bounds this table is AUTH_FAILURE_EVENTS_PER_MINUTE
+        # above, not the retention window.
         self.AUTH_EVENTS_RETENTION_DAYS = int(
-            (os.environ.get("AUTH_EVENTS_RETENTION_DAYS") or "90").strip()
+            (os.environ.get("AUTH_EVENTS_RETENTION_DAYS") or "365").strip()
         )
         self.AUDIT_LOG_RETENTION_DAYS = int(
             (os.environ.get("AUDIT_LOG_RETENTION_DAYS") or "365").strip()
