@@ -14,6 +14,7 @@
 | [OPT-0002](./items/OPT-0002-browser-cache-pattern-doc.md) | opt/browser-cache-pattern-doc | 2026-07-06 | 与 0041 并行（docs-only） |
 | [OPT-0028](./items/OPT-0028-risk-monitor-aggregator-hardening.md) | opt/aggregator-hardening | 2026-07-06 | 等 0041 merge 后开工（依赖测试转绿） |
 | [OPT-0057](./items/OPT-0057-risk-watchlist-copy-rewrite.md) | opt/risk-watchlist-copy-rewrite | 2026-07-25 | 阻塞：待用户在 items/OPT-0057-...-copy-review.md 填新文案后实施 |
+| [OPT-0059](./items/OPT-0059-fund-flow-blocking-async-routes.md) | opt/fund-flow-blocking-async-routes | 2026-08-19 | 8 个 async def → def；该模块零测试，验收靠手测 8 个端点 |
 ## ✅ 待领取（Ready）
 
 > AC 已经在 item 文件里定义好了。按 priority + effort + 你的当前心智状态挑一个。
@@ -39,4 +40,3 @@
 | [OPT-0018](./items/OPT-0018-cache-layer-audit.md) | mixed | 全链路缓存审计与硬化（HTTP / 应用 / Redis / DB） | 已扫描出 5 条真问题（Redis 无 maxmemory、匿名 volume、PnL/IB hit rate 异常等），audit 完成后拆 3-5 个子 OPT |
 | [OPT-0020](./items/OPT-0020-client-return-rate-risk-signals.md) | mixed | Client Return Rate 加 4 个风控判断列（过夜 / ~~USDT~~ / Sharpe / Consistency） | 剩余 7 列分两 Drop 上线（USDT 已拆到 OPT-0022），复用 OPT-0006 的夜间预计算 SQLite 模式；claim 前需用户审 AC、回答 4 个开放问题 + 先跑过夜 SQL 的预飞行实测 |
 | [OPT-0052](./items/OPT-0052-ibdata-trading-net-deposit-split.md) | mixed | IBData / IB Report 净入金拆出「交易净入金」（不含 ib withdrawal） | 2026-07-15 口径审计剩余项（RiskMonitor/ClientReturn/IBData 三个高危已修）；全站 7/9 实现都含 ibw 且有业务确认背书，更像"更精细视角"而非修 bug —— 是否值得做待用户判断 |
-| [OPT-0059](./items/OPT-0059-fund-flow-blocking-async-routes.md) | backend | fund_flow_monitor 8 个路由 `async def` 包同步 DB 调用 | 违反 CLAUDE.md「阻塞 IO 必须 def」；scan-now 跑全量 MySQL 扫描最危险；该模块零测试，改完只能手验（见 item §开放问题 1） |

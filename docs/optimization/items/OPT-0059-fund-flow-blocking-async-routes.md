@@ -1,7 +1,7 @@
 ---
 id: OPT-0059
 title: fund_flow_monitor 8 个路由全是 async def 但内部是阻塞 SQLite/MySQL 调用
-status: idea
+status: wip
 priority: P2
 area: backend
 effort: S
