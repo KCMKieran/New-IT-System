@@ -9,7 +9,11 @@
  *     pushes your view there); release it; create a new profile.
  *  2. 观摩他人 — read-only preview of someone else's view (exit restores yours).
  *
- * Plus an admin force-release escape hatch for a lock stuck on a lost device-id.
+ * Plus a manager-only force-release escape hatch for a lock stuck on a lost
+ * device-id. ⚠ It is manager-only on the SERVER (require_manager, cold review
+ * M4 2026-08-19); hiding the button from everyone else is courtesy, not the
+ * gate. Before M4 the right came from matching this page's own device-id
+ * against an env whitelist — a value printed two paragraphs above the button.
  */
 import { useCallback, useEffect, useState } from "react";
 import { Copy, Eye, LockKeyhole, Plus, ShieldAlert, UserCheck } from "lucide-react";
@@ -41,12 +45,21 @@ import { getDeviceId } from "@/lib/view-profiles/device-id";
 import { clearClaimedName, getClaimedName, setClaimedName } from "@/lib/view-profiles/identity";
 import { enterObserve, getObservingName } from "@/lib/view-profiles/observe";
 import { captureSnapshot } from "@/lib/view-profiles/snapshot";
+import { useAuth } from "@/providers/auth-provider";
 
 export default function ViewProfilesPage() {
   const [profiles, setProfiles] = useState<ProfileDTO[]>([]);
   const [loading, setLoading] = useState(true);
   const [newName, setNewName] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
+
+  // ⚠ Cosmetic only — the server refuses a non-manager force-release with 403
+  // whatever the UI renders. `authEnabled` mirrors the kill switch: with auth
+  // off /auth/me reports no user, and hiding the escape hatch during an auth
+  // outage is exactly when somebody might need to see it (they will still get
+  // a 403 and the explanation, which beats an invisible button).
+  const { user, authEnabled } = useAuth();
+  const isManager = !authEnabled || user?.role === "manager";
 
   const deviceId = getDeviceId();
   const claimedName = getClaimedName();
@@ -139,7 +152,7 @@ export default function ViewProfilesPage() {
       toast.success(`已强制解绑 ${name}`);
       await load();
     } catch (e) {
-      if (e instanceof ProfileForbiddenError) toast.error("本设备没有强制解绑权限");
+      if (e instanceof ProfileForbiddenError) toast.error("只有管理员可以强制解绑");
       else toast.error(`强制解绑 ${name} 失败`);
     } finally {
       setBusy(null);
@@ -163,7 +176,7 @@ export default function ViewProfilesPage() {
               size="icon"
               variant="ghost"
               className="size-6"
-              title="复制完整 device-id（管理员把它加进 VIEW_PROFILES_ADMIN_DEVICES 即可获得强制解绑权限）"
+              title="复制完整 device-id（用于排查「档案锁在哪台机器上」；强制解绑认的是 manager 角色，与这个 id 无关）"
               onClick={() => {
                 void navigator.clipboard?.writeText(deviceId);
                 toast.success("已复制 device-id");
@@ -233,7 +246,7 @@ export default function ViewProfilesPage() {
                           认领
                         </Button>
                       )}
-                      {claimedBySomeone && !claimedByMe && (
+                      {claimedBySomeone && !claimedByMe && isManager && (
                         <Button
                           size="sm"
                           variant="ghost"

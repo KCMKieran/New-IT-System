@@ -92,19 +92,63 @@ def test_release_only_owner(client):
     assert client.get("/api/v1/view-profiles/Kieran").json()["data"]["owner_device"] is None
 
 
-# ── Admin force-release ──────────────────────────────────────────────────────
+# ── force-release (manager-only since cold review M4, 2026-08-19) ────────────
 
-def test_force_release_authz(client, monkeypatch):
+def _manager():
+    from app.services.auth_service import SessionUser
+
+    return SessionUser(
+        user_id=1,
+        email="boss@kohleservices.com",
+        display_name="Boss",
+        role="manager",
+        status="active",
+        sid_hash="x" * 64,
+        allowed_modules=[],  # irrelevant: a manager passes every module gate
+    )
+
+
+def test_force_release_needs_a_manager_session(client):
+    """The right to force-release comes from the session, not from a header.
+
+    Before M4 it came from matching X-Device-ID against a whitelist — a value
+    the browser generates, stores in localStorage and displays on the Settings
+    page, i.e. one any colleague could copy. The regression this pins is
+    someone reinstating a device-id check "because it is simpler".
+    """
+    from app.core.auth_deps import require_manager
+
     _create(client, "Kieran")
     client.post("/api/v1/view-profiles/Kieran/claim", json={}, headers=DEV_A)
-    # Non-admin device → 403
-    assert client.post("/api/v1/view-profiles/Kieran/force-release", headers=DEV_B).status_code == 403
-    # Whitelisted admin → 200, lock cleared
-    from app.services import view_profiles_service as svc
-    monkeypatch.setattr(svc, "ADMIN_DEVICE_WHITELIST", {"admin-device"})
-    r = client.post("/api/v1/view-profiles/Kieran/force-release", headers={"X-Device-ID": "admin-device"})
-    assert r.status_code == 200
+
+    # No session -> 403, and the lock survives. Note this app mounts no
+    # AuthMiddleware, so request.state.user is absent exactly as it is for an
+    # unauthenticated caller.
+    assert client.post(
+        "/api/v1/view-profiles/Kieran/force-release", headers=DEV_B
+    ).status_code == 403
+    assert client.get("/api/v1/view-profiles/Kieran").json()["data"]["owner_device"] == "device-A"
+
+    # A manager gets through WITHOUT sending any device-id at all — the route
+    # no longer reads one.
+    client.app.dependency_overrides[require_manager] = _manager
+    try:
+        r = client.post("/api/v1/view-profiles/Kieran/force-release")
+        assert r.status_code == 200, r.text
+    finally:
+        client.app.dependency_overrides.clear()
     assert client.get("/api/v1/view-profiles/Kieran").json()["data"]["owner_device"] is None
+
+
+def test_force_release_of_a_missing_profile_is_404_not_200(client):
+    from app.core.auth_deps import require_manager
+
+    client.app.dependency_overrides[require_manager] = _manager
+    try:
+        r = client.post("/api/v1/view-profiles/nope/force-release")
+        assert r.status_code == 404
+    finally:
+        client.app.dependency_overrides.clear()
 
 
 # ── save-state ───────────────────────────────────────────────────────────────

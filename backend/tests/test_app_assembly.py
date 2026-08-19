@@ -121,16 +121,36 @@ def test_rejected_api_key_response_carries_trace_id(app_main, monkeypatch):
 
 # ── auth layer ships OFF ─────────────────────────────────────────────────────
 
-def test_auth_is_disabled_by_default(app_main, monkeypatch):
-    """AUTH_ENABLED must default to false: P1 delivers zero user-visible change.
+def test_auth_is_enabled_by_default(app_main, monkeypatch):
+    """AUTH_ENABLED must default to TRUE — turning auth off has to be written down.
 
-    If this ever goes green-by-default without an explicit env flag, everyone
-    is locked out of every page the moment the container restarts.
+    ⚠ This assertion was inverted on 2026-08-19, and the inversion is the whole
+    point of the test rather than a detail of it. From P1 until then it read
+    "must default to false", for a reason that was true at the time and expired
+    without anybody noticing: during P1 auth shipped dark, so absent config
+    meant "this feature has not been turned on yet". Since P3 auth is the ONLY
+    lock on /api/* (the API key is compiled into the public JS bundle and has
+    never been a secret), so absent config now means "the lock is gone" — and
+    it fails open silently: no error, no warning, no rejected request, just
+    every endpoint answering everybody.
+
+    A default is a decision about what happens when somebody forgets. Forgetting
+    a line should not be able to unlock the building. The failure this direction
+    buys instead — nobody can sign in because Entra config is missing too — is
+    loud, immediate and reversible.
+
+    Prerequisite 1 of retiring Cloudflare Access (design doc §4.2.2).
     """
     monkeypatch.delenv("AUTH_ENABLED", raising=False)
     monkeypatch.delenv("API_KEY", raising=False)
     from app.core.config import get_settings
 
+    assert get_settings().AUTH_ENABLED is True
+
+    # Still explicitly disable-able: the kill switch has to keep working, and
+    # "false" must be the only way to reach that state.
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    get_settings.cache_clear()
     assert get_settings().AUTH_ENABLED is False
 
     client = TestClient(app_main.create_app())

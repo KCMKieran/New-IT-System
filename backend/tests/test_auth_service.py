@@ -512,6 +512,56 @@ def test_events_that_require_a_real_session_are_never_throttled(throttle, monkey
     assert len(_rows("auth_events")) == 40
 
 
+def test_permission_denied_is_throttled_too(throttle, monkeypatch):
+    """One row per REQUEST, not one per login — so the session does not bound it.
+
+    Auth P4b's module gate writes this on every refused call. A signed-in user
+    whose grant stopped covering a page they still have open (a manager
+    unticked a module; a polling tab; a script) repeats the same refusal
+    indefinitely, and each row takes the users.db write lock away from real
+    resolve_session() traffic.
+    """
+    _set(monkeypatch, AUTH_FAILURE_EVENTS_PER_MINUTE=3)
+
+    for _ in range(50):
+        throttle.record_auth_event(
+            "permission_denied", email="a@b.com", detail="module_required:risk", ip="1.2.3.4"
+        )
+
+    assert len(_rows("auth_events")) == 3
+
+
+def test_permission_denied_is_budgeted_per_person_not_per_ip(throttle, monkeypatch):
+    """Everyone in the office shares one egress IP.
+
+    Keying this refusal by address would let one user with a stuck tab spend
+    the whole floor's budget, and the rows that got dropped would be the ones
+    somebody was actually looking for.
+    """
+    _set(monkeypatch, AUTH_FAILURE_EVENTS_PER_MINUTE=2)
+
+    for email in ("a@b.com", "c@b.com", "d@b.com"):
+        for _ in range(10):
+            throttle.record_auth_event("permission_denied", email=email, ip="10.6.20.55")
+
+    rows = _rows("auth_events")
+    assert len(rows) == 6
+    assert {r["email"] for r in rows} == {"a@b.com", "c@b.com", "d@b.com"}
+
+
+def test_the_two_refusal_events_do_not_share_one_budget(throttle, monkeypatch):
+    """Same caller, two kinds of refusal — spending one must not silence the other."""
+    _set(monkeypatch, AUTH_FAILURE_EVENTS_PER_MINUTE=2)
+
+    for _ in range(10):
+        throttle.record_auth_event("login_failure", detail="x", ip="9.9.9.9")
+        throttle.record_auth_event("permission_denied", email="a@b.com", ip="9.9.9.9")
+
+    rows = _rows("auth_events")
+    assert len([r for r in rows if r["event"] == "login_failure"]) == 2
+    assert len([r for r in rows if r["event"] == "permission_denied"]) == 2
+
+
 def test_throttle_can_be_disabled(throttle, monkeypatch):
     _set(monkeypatch, AUTH_FAILURE_EVENTS_PER_MINUTE=0)
 
