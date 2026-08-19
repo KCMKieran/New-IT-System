@@ -59,22 +59,34 @@ def cors_kwargs(app_main):
 
 # ── middleware order ─────────────────────────────────────────────────────────
 
-def test_all_four_middlewares_registered(middleware_classes):
+def test_all_five_middlewares_registered(middleware_classes):
+    """⚠ Renamed from ...four... on 2026-08-19. The audit layer made it five.
+
+    The stale name was not harmless: two separate documents copied "4 层" out of
+    it and described a middleware chain that had not existed since the audit log
+    shipped. A test name is read far more often than a test body.
+    """
     for name in (
         "TraceIDMiddleware",
         "CORSMiddleware",
         "APIKeyMiddleware",
         "AuthMiddleware",
+        "AuditMissingMiddleware",
     ):
         assert name in middleware_classes, middleware_classes
 
 
 def test_execution_order_is_trace_cors_apikey_auth(middleware_classes):
-    """user_middleware is outermost-first: Trace -> CORS -> APIKey -> Auth -> routes.
+    """Outermost-first: Trace -> CORS -> APIKey -> Auth -> AuditMissing -> routes.
 
-    Auth last so that (a) a 401 still gets an X-Trace-ID and CORS headers from
-    the layers above it, and (b) a caller with no API key is rejected by the
-    cheaper check before the session store is touched.
+    Auth before AuditMissing so that (a) a 401 still gets an X-Trace-ID and CORS
+    headers from the layers above it, and (b) a caller with no API key is
+    rejected by the cheaper check before the session store is touched.
+
+    Only the first four are ordered here. AuditMissing's position — innermost,
+    strictly after Auth — is asserted in test_audit_followups.py against the
+    same real app, because the reason it must be innermost is a property of the
+    audit layer ("a 401 is not a missing audit row"), not of this chain.
     """
     trace = middleware_classes.index("TraceIDMiddleware")
     cors = middleware_classes.index("CORSMiddleware")
