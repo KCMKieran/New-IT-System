@@ -81,6 +81,7 @@ function SnapshotSection({
   const [scanning, setScanning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [downloading, setDownloading] = useState(false);
 
   const load = useCallback(() => {
     const controller = new AbortController();
@@ -119,6 +120,33 @@ function SnapshotSection({
     }
   };
 
+  // CSV download must go through apiFetch, NOT a plain <a href download>.
+  // A top-level navigation sets no custom headers, and frontend/nginx.conf's
+  // `location /api` answers 403 to anything without X-API-Key — so the link
+  // form was dead in prod (verified: curl without the header -> 403) while
+  // working fine in dev, where vite proxies straight to the backend.
+  const downloadCsv = async () => {
+    setDownloading(true);
+    setError(null);
+    try {
+      const res = await apiFetch("/api/v1/cs/fund-flow/export");
+      if (!res.ok) throw new Error(`导出失败 ${res.status}`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "fund_flow_snapshot.csv";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setDownloading(false);
+    }
+  };
+
   const batch = snapshot?.batch;
 
   return (
@@ -148,10 +176,13 @@ function SnapshotSection({
             <RefreshCw className={cn("h-4 w-4 mr-1", scanning && "animate-spin")} />
             {scanning ? "扫描中…" : "立即重扫"}
           </Button>
-          <Button size="sm" variant="outline" asChild>
-            <a href="/api/v1/cs/fund-flow/export" download>
-              <Download className="h-4 w-4 mr-1" /> CSV
-            </a>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={downloadCsv}
+            disabled={downloading}
+          >
+            <Download className="h-4 w-4 mr-1" /> {downloading ? "导出中…" : "CSV"}
           </Button>
         </div>
       </div>
