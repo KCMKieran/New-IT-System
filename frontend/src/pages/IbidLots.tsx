@@ -23,7 +23,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import type { ColDef, ICellRendererParams } from "ag-grid-community";
 import { AgGridReact } from "ag-grid-react";
-import { Calendar as CalendarIcon, Loader2, Search, SearchX, X } from "lucide-react";
+import {
+  Calendar as CalendarIcon,
+  Download,
+  Loader2,
+  Search,
+  SearchX,
+  X,
+} from "lucide-react";
 
 import { useI18n } from "@/components/i18n-provider";
 import { useTheme } from "@/components/theme-provider";
@@ -588,6 +595,39 @@ export default function IbidLotsPage() {
     [],
   );
 
+  // ── CSV export (client-side) ─────────────────────────────────────────────
+  //
+  // Deliberately client-side: `/ibid-lots/query` is NOT paginated, so the grid
+  // already holds the complete result set. Exporting therefore costs zero
+  // backend work — in particular it does not re-run the slave query, which
+  // takes tens of seconds for a large IB. AG-Grid's own exporter also honours
+  // the live column model, so the file matches the columns the user actually
+  // sees (ColumnVisibilityMenu / drag-reorder included), and it prepends a
+  // UTF-8 BOM, so Excel opens the Chinese headers without mojibake.
+  const handleExportCsv = useCallback(() => {
+    const api = columnPersist.gridApiRef.current;
+    // A destroyed grid api no-ops and returns undefined instead of throwing,
+    // so this has to be an explicit guard (grid-column-persist.md §5.6).
+    if (!api || api.isDestroyed() || !result) return;
+    api.exportDataAsCsv({
+      fileName: `ibid-lots_${submitted?.query_type ?? "query"}_${
+        submitted?.target_id ?? result.query_target
+      }_${result.start_date}_${result.end_date}.csv`,
+      // Defining processCellCallback bypasses each column's valueFormatter for
+      // the export, which is the point: numbers land as raw `1234.567`, not as
+      // the on-screen `1,234.567`. A thousand-separated cell arrives in Excel
+      // as TEXT and can no longer be summed — and summing is the main reason
+      // anyone exports this table. The CEN flag is the one column that needs
+      // the opposite treatment: its display comes from a cellRenderer, so the
+      // raw boolean would export as "true"/"false".
+      processCellCallback: (p) => {
+        const v = p.value;
+        if (typeof v === "boolean") return v ? "CEN" : "";
+        return v ?? "";
+      },
+    });
+  }, [columnPersist.gridApiRef, result, submitted]);
+
   const defaultColDef = useMemo<ColDef>(
     () => ({
       sortable: true,
@@ -920,11 +960,22 @@ export default function IbidLotsPage() {
                     ? " · 点用户 ID 打开 CRM 客户页"
                     : " · 交易账户模式下这一列是 loginSid，不是 CRM 用户 ID"}
                 </span>
-                <ColumnVisibilityMenu
-                  persist={columnPersist}
-                  columnDefs={columnDefs as ColDef<unknown>[]}
-                  size="sm"
-                />
+                <div className="flex items-center gap-2">
+                  <ColumnVisibilityMenu
+                    persist={columnPersist}
+                    columnDefs={columnDefs as ColDef<unknown>[]}
+                    size="sm"
+                  />
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={handleExportCsv}
+                    disabled={result.user_stats.length === 0}
+                  >
+                    <Download className="mr-1 h-4 w-4" />
+                    导出 CSV
+                  </Button>
+                </div>
               </div>
 
               <div
