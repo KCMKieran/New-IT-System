@@ -400,6 +400,10 @@ async def update_config(
 
 def _alerts_to_csv(alerts: list[dict]) -> io.StringIO:
     buf = io.StringIO()
+    # BOM first: country/name columns carry Chinese, and Excel decodes a
+    # BOM-less UTF-8 CSV as the system codepage -> mojibake. Same purpose as
+    # the `utf-8-sig` encoding used by login_ip_export_service.py.
+    buf.write("\ufeff")
     writer = csv.writer(buf)
     writer.writerow([
         "user_id", "country", "name", "email", "phone", "mt_logins",
