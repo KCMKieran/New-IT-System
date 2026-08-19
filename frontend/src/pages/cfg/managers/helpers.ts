@@ -48,6 +48,7 @@ export const FALLBACK_MODULES: Module[] = [
   // Labels mirror backend/app/schemas/admin.py so a failed catalogue request
   // degrades to stale-but-identical wording rather than to different names for
   // the same grant.
+  { key: "dashboard", label_en: "Dashboard", label_zh: "首页" },
   { key: "cs", label_en: "CS Department", label_zh: "客服部" },
   { key: "data", label_en: "Data Query", label_zh: "数据查询" },
   { key: "risk", label_en: "Risk Control", label_zh: "风险控制" },

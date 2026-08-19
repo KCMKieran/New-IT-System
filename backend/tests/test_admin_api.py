@@ -657,11 +657,17 @@ def test_empty_patch_is_422(client):
 
 
 def test_modules_endpoint_is_the_catalogue_the_checkboxes_render_from(client):
-    """Dashboard must never appear here — the home page is permanently open."""
+    """The frontend renders one checkbox per entry, in this order.
+
+    `dashboard` joined the list on 2026-08-19 (the home page stopped being
+    permanently open) and is deliberately first — it is the page every other
+    grant is compared against, and a manager reading the popover should meet it
+    before the departments.
+    """
     sid = _mint(MANAGER)
 
     data = client.get(f"{ADMIN}/modules", headers=_bearer(sid)).json()["data"]
-    assert [m["key"] for m in data] == ["cs", "data", "risk", "other"]
+    assert [m["key"] for m in data] == ["dashboard", "cs", "data", "risk", "other"]
     assert all(m["label_en"] and m["label_zh"] for m in data)
 
 

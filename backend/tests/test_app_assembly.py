@@ -617,26 +617,40 @@ def test_no_module_map_entry_is_an_orphan():
     # 'other' is a real, grantable module with zero backend routes (/template is
     # a frontend-only page). It must stay grantable — /cfg/managers renders a
     # checkbox per MODULE_KEYS — and it must stay absent from MODULE_MAP.
+    from app.core.auth_deps import module_names
+
+    granted_by_the_map = {m for v in module_map.values() for m in module_names(v)}
     assert "other" in MODULE_KEYS
-    assert "other" not in set(module_map.values())
+    assert "other" not in granted_by_the_map
+    # Every OTHER key is expected to be reachable, `dashboard` included — a
+    # grantable module that classifies nothing is a checkbox that does nothing.
+    assert set(MODULE_KEYS) - {"other"} <= granted_by_the_map
 
 
-def test_the_two_exact_path_carve_outs_stay_common():
-    """The home page is open to everyone, so its data sources must be too.
+def test_the_two_exact_path_carve_outs_serve_both_of_their_modules():
+    """Each carve-out feeds a home-page widget AND a gated page of its own.
 
-    Both of these sit under a prefix that is otherwise gated, and both feed a
-    widget on a page that every signed-in user is guaranteed to see (§4.3.2).
-    Fold either back into its prefix and a user with `allowed_modules = []`
-    gets a home page with a broken tile and a 403 in the console — the exact
-    symptom that reads as "the app is down" rather than "I lack a permission".
+    Both sit under a prefix that belongs to a different module, so folding
+    either back into its prefix breaks a tile on the home page for everyone who
+    was granted `dashboard` but not `data`/`risk` — a 403 in the console and a
+    blank card, which reads as "the app is down" rather than "I lack a
+    permission". Dropping the other half of the pair is just as wrong and much
+    quieter: `/position` and `/client-return-rate` would keep rendering while
+    one panel inside them stopped answering.
+
+    Before 2026-08-19 both were COMMON, because the home page was open to
+    everyone. The any-of set is what replaced that, and it is narrower: a user
+    with no modules at all now reaches neither.
     """
-    from app.core.auth_deps import COMMON, classify_path
+    from app.core.auth_deps import classify_path
 
-    assert classify_path("/open-positions/symbol-summary") == COMMON
-    assert classify_path("/client-return-rate/query") == COMMON
-    # …while the rest of each prefix keeps its real module.
+    assert classify_path("/open-positions/symbol-summary") == frozenset({"dashboard", "data"})
+    assert classify_path("/client-return-rate/query") == frozenset({"dashboard", "risk"})
+    # …while the rest of each prefix keeps its single real module.
     assert classify_path("/open-positions/today") == "data"
     assert classify_path("/client-return-rate/cache") == "risk"
+    # …and the home page's own router is the plain module, not a set.
+    assert classify_path("/dashboard/pnl-history") == "dashboard"
 
 
 def test_the_module_gate_is_mounted_on_every_v1_route():

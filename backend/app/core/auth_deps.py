@@ -160,13 +160,18 @@ would need to be logged in to log in.
 COMMON = "__common__"
 """Open to every signed-in user, and NOT a grantable module.
 
-Deliberately not a fifth checkbox: these are the paths that must work for a
-person whose `allowed_modules` is `[]`, i.e. someone with no modules at all.
+Deliberately not a checkbox: these are the paths that must work for a person
+whose `allowed_modules` is `[]`, i.e. someone with no modules at all.
 `/view-profiles` because DashboardLayout calls useProfileAutoSave()
-unconditionally, so *every* page in the app hits it; `/dashboard` plus the two
-exact carve-outs because the home page is permanently open to everyone
-(§4.3.2 — an accepted trade-off, not an oversight: signing in means seeing the
-company position and client-PnL summaries).
+unconditionally, so *every* page in the app hits it — including the "no modules
+granted yet" screen that such a person now lands on.
+
+⚠ Down to a single entry since 2026-08-19. `/dashboard` and the two widget
+carve-outs used to live here, from when the home page was permanently open to
+everyone (§4.3.2); they belong to the `dashboard` module now. What is left is
+only what the app SHELL needs, which is the right bar for this list: a path
+belongs here when a user with nothing granted would otherwise see a broken
+frame, not merely a page they are not allowed to see.
 """
 
 MANAGER = "__manager__"
@@ -178,7 +183,22 @@ somebody is wrongly refused — and the module gate would answer "which module i
 """
 
 # Path -> policy. Keys are SEGMENT TUPLES relative to the /api/v1 mount, matched
-# longest-first.
+# longest-first. A value is one of:
+#
+#   * a pseudo-module above (INFRA / COMMON / MANAGER),
+#   * a module key            -> that one grant is required,
+#   * a frozenset of module keys -> ANY ONE of them is enough.
+#
+# The any-of form (2026-08-19, added with the `dashboard` module) is for an
+# endpoint that is genuinely the data source of two pages in two modules. Both
+# of today's cases are home-page widgets that call a gated page's own endpoint
+# instead of a summary of their own.
+#
+# ⚠ Any-of WIDENS, so it is the right shape only when one path really does serve
+# two audiences — never as a way of not deciding. And the gate can only answer
+# the union: when the two callers should see different AMOUNTS of data,
+# narrowing the answer is the handler's job, via `caller_has_module` (see the
+# ceiling in routes/client_return_rate.py).
 #
 # ⚠ Segments, not string prefixes, and this is the entire reason the table is
 # shaped this way: "/risk" (window-scan, risk module) is a string PREFIX of
@@ -188,21 +208,24 @@ somebody is wrongly refused — and the module gate would answer "which module i
 # not "remember to sort the table", it is "the mistake is unrepresentable".
 #
 # Two prefixes need an exact-path carve-out (the longer tuple simply wins):
-#   /open-positions/symbol-summary  -> home-page PositionSummary widget
-#   /client-return-rate/query       -> home-page ReturnRateSummary widget
-# Both feed the always-open home page while the rest of their prefix is a
-# gated page, so the carve-out is what stops "no risk module" from blanking a
-# widget on a page everyone is supposed to see.
-MODULE_MAP: dict[tuple[str, ...], str] = {
+#   /open-positions/symbol-summary  -> home-page PositionSummary widget + /position
+#   /client-return-rate/query       -> home-page ReturnRateSummary widget + /client-return-rate
+# Each feeds a home-page widget while the rest of its prefix is a different
+# module's page, so the carve-out is what stops "dashboard but not data" (or
+# "data but not dashboard") from blanking one of them.
+ModulePolicy = str | frozenset[str]
+
+MODULE_MAP: dict[tuple[str, ...], ModulePolicy] = {
     # ── infra ────────────────────────────────────────────────────────────────
     ("health",): INFRA,
     ("auth",): INFRA,
     ("log",): INFRA,
     # ── common ───────────────────────────────────────────────────────────────
     ("view-profiles",): COMMON,
-    ("dashboard",): COMMON,
-    ("open-positions", "symbol-summary"): COMMON,
-    ("client-return-rate", "query"): COMMON,
+    # ── dashboard (the home page — a grantable module since 2026-08-19) ──────
+    ("dashboard",): "dashboard",
+    ("open-positions", "symbol-summary"): frozenset({"dashboard", "data"}),
+    ("client-return-rate", "query"): frozenset({"dashboard", "risk"}),
     # ── manager (require_manager owns these) ─────────────────────────────────
     ("admin",): MANAGER,
     # ── cs ───────────────────────────────────────────────────────────────────
@@ -237,7 +260,20 @@ MODULE_MAP: dict[tuple[str, ...], str] = {
 # frontend-only page. The key still has to exist because /cfg/managers renders
 # a checkbox per MODULE_KEYS and a granted module that maps to nothing would
 # otherwise look like a bug. Asserted at import so the two lists cannot drift.
-_MODULES_IN_MAP = {v for v in MODULE_MAP.values() if not v.startswith("__")}
+def module_names(policy: ModulePolicy) -> tuple[str, ...]:
+    """The module keys a policy requires, sorted. Empty for the pseudo-modules.
+
+    One place to unpack `str | frozenset`, shared by the import-time assertion
+    below, the gate, and the tests — three copies of `isinstance(..., frozenset)`
+    is exactly how the any-of form would come to mean something slightly
+    different in each of them.
+    """
+    if isinstance(policy, frozenset):
+        return tuple(sorted(policy))
+    return () if policy.startswith("__") else (policy,)
+
+
+_MODULES_IN_MAP = {m for v in MODULE_MAP.values() for m in module_names(v)}
 assert _MODULES_IN_MAP <= set(MODULE_KEYS), (
     f"MODULE_MAP references modules that /cfg/managers cannot grant: "
     f"{sorted(_MODULES_IN_MAP - set(MODULE_KEYS))}"
@@ -248,8 +284,12 @@ assert _MODULES_IN_MAP <= set(MODULE_KEYS), (
 API_PREFIX = "/api/v1"
 
 
-def classify_path(path: str) -> str | None:
+def classify_path(path: str) -> ModulePolicy | None:
     """Longest-segment-match lookup. ``None`` means nobody classified it.
+
+    Returns whatever the table holds: a pseudo-module, one module key, or a
+    frozenset of keys meaning "any one of these". Unpack it with
+    ``module_names()`` rather than by hand.
 
     Accepts either a router-relative path ("/risk-monitor/alerts") or a fully
     mounted one ("/api/v1/risk-monitor/alerts"), so the anti-drift test can walk
@@ -343,6 +383,10 @@ def enforce_module_access(request: Request) -> None:
     5. **manager -> pass**, per §4.3.3. Managers grant modules; needing to grant
        themselves one first is a footgun with no upside.
     6. **COMMON -> pass**, for a user with ``allowed_modules == []`` too.
+    6b. **A frozenset policy passes on ANY of its modules.** Both of today's
+       are home-page widgets sharing a gated page's endpoint, so the union is
+       the only answer path classification can give; where the two audiences
+       should see different amounts of data the handler narrows it further.
     7. **The grant test itself is ``caller_has_module`` above**, shared with the
        one handler that has to ask the same question about its own parameters.
        It is where ``allowed_modules is None`` -> pass lives: ``None`` is SQL
@@ -360,12 +404,12 @@ def enforce_module_access(request: Request) -> None:
     if not get_settings().AUTH_ENABLED:
         return
 
-    module = classify_path(request.url.path)
+    policy = classify_path(request.url.path)
 
-    if module in (INFRA, MANAGER):
+    if policy in (INFRA, MANAGER):
         return
 
-    if module is None:
+    if policy is None:
         logger.error(
             "Unclassified API path %s %s — refusing (fail closed). Add it to "
             "MODULE_MAP in core/auth_deps.py; test_app_assembly.py's coverage "
@@ -395,13 +439,16 @@ def enforce_module_access(request: Request) -> None:
     if user.is_manager:
         return
 
-    if module == COMMON:
+    if policy == COMMON:
         return
 
-    if not caller_has_module(request, module):
+    required = module_names(policy)
+
+    if not any(caller_has_module(request, m) for m in required):
+        wanted = "|".join(required)
         logger.warning(
             "Module '%s' refused: %s %s email=%s granted=%s client=%s",
-            module,
+            wanted,
             request.method,
             request.url.path,
             user.email,
@@ -411,11 +458,16 @@ def enforce_module_access(request: Request) -> None:
         record_auth_event(
             "permission_denied",
             email=user.email,
-            detail=f"module_required:{module}:{request.url.path}"[:200],
+            detail=f"module_required:{wanted}:{request.url.path}"[:200],
             ip=client_ip(request),
             ua=request.headers.get("User-Agent"),
         )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Access to the '{module}' module is not granted",
+            detail=(
+                f"Access to the '{required[0]}' module is not granted"
+                if len(required) == 1
+                else "This endpoint requires one of these modules: "
+                + ", ".join(f"'{m}'" for m in required)
+            ),
         )

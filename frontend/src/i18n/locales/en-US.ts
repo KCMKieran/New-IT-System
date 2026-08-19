@@ -60,6 +60,7 @@ export const enUS = {
   },
 
   modules: {
+    dashboard: "Dashboard",
     cs: "CS Department",
     data: "Data Query",
     risk: "Risk Control",

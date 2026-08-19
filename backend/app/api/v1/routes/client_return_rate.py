@@ -38,31 +38,32 @@ router = APIRouter(prefix="/client-return-rate")
 
 # ── the home-page carve-out, and its ceiling ─────────────────────────────────
 #
-# /client-return-rate/query is the ONE path in MODULE_MAP that is classified
-# COMMON while the rest of its prefix is gated `risk`, because the permanently
-# open home page draws its ReturnRateSummary widget from it. That carve-out is
-# necessary and it is also the widest hole in the module gate, because the
-# widget does not call a summary endpoint — it calls THIS one, the same
-# endpoint the risk-module page calls, with the same parameter surface.
+# /client-return-rate/query is classified `{dashboard, risk}` in MODULE_MAP —
+# any-of — while the rest of its prefix is gated `risk`, because the home page
+# draws its ReturnRateSummary widget from it. That carve-out is necessary and it
+# is also the widest hole in the module gate, because the widget does not call a
+# summary endpoint — it calls THIS one, the same endpoint the risk-module page
+# calls, with the same parameter surface.
 #
-# Left alone, "everybody can see the home page" therefore meant "everybody —
-# a new joiner whose grant is [], and after P4c an external OTP user — can pull
-# up to 20,000 rows of per-client profit, deposits and equity for any 365-day
-# window, and look up a named client by id". That is not what was decided when
-# the home page was made permanently open; what was decided was the widget.
+# So "granted the home page" would otherwise mean "may pull up to 20,000 rows of
+# per-client profit, deposits and equity for any 365-day window, and look up a
+# named client by id". That is not what granting somebody the dashboard is meant
+# to hand over; what it hands over is the widget.
 #
-# So the path stays COMMON and the HANDLER narrows the answer to the widget's
-# own envelope for callers without the risk module. Three parameters, each
-# refused rather than silently clamped — a filter that quietly does something
-# else is how people end up trusting a number that is not the one they asked
-# for:
+# ⚠ Path classification can only answer the UNION of the two audiences (2026-08-19:
+# before the dashboard module existed the same line read COMMON, and the reasoning
+# below is unchanged by that — only the set of callers who reach it at all is
+# smaller now). So the HANDLER narrows the answer to the widget's own envelope for
+# callers without the risk module. Three parameters, each refused rather than
+# silently clamped — a filter that quietly does something else is how people end up
+# trusting a number that is not the one they asked for:
 #
 #   search               — turns a dashboard into a lookup tool for one client
 #   include_avg_equity   — extra columns AND a materially heavier query
 #   page_size > 5000     — the widget's own ask; above it this is bulk export
 #
 # ⚠ Keep COMMON_MAX_PAGE_SIZE >= whatever ReturnRateSummary.tsx sends, or the
-# home page 403s for everyone who is not in the risk module.
+# home page 403s for every dashboard user who is not also in the risk module.
 COMMON_MAX_PAGE_SIZE = 5000
 
 
