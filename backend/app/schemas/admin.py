@@ -17,11 +17,18 @@ from pydantic import BaseModel, Field, model_validator
 # GET /admin/modules exists): the frontend renders one checkbox per entry it is
 # given rather than carrying its own copy that can drift.
 #
-# Dashboard is deliberately NOT here. The 2026-08-14 decision is that the home
-# page is permanently open to every signed-in user — all six widgets — so it is
-# not a grantable module and must never appear as a checkbox. `ai` joins this
-# list when the AI Agent page ships.
-MODULE_KEYS: tuple[str, ...] = ("cs", "data", "risk", "other")
+# `dashboard` was NOT here until 2026-08-19. The original P4b decision made the
+# home page permanently open to every signed-in user; the reversal makes it a
+# module like any other, so a colleague can be given CS pages without also being
+# given the company-wide position and client-PnL widgets the home page draws.
+#
+# ⚠ Adding a key here changes what EXISTING accounts can reach, and in the
+# direction that takes access away: `allowed_modules = NULL` means "every
+# module, including ones added later" and is unaffected, but every non-NULL row
+# loses the new module until somebody ticks it. The 2026-08-19 rollout
+# backfilled `dashboard` into all six non-NULL rows before deploying, which is
+# the step to repeat when `ai` joins this list.
+MODULE_KEYS: tuple[str, ...] = ("dashboard", "cs", "data", "risk", "other")
 
 
 class Module(BaseModel):
@@ -31,6 +38,7 @@ class Module(BaseModel):
 
 
 MODULE_CATALOGUE: list[Module] = [
+    Module(key="dashboard", label_en="Dashboard", label_zh="首页"),
     Module(key="cs", label_en="CS Department", label_zh="客服部"),
     Module(key="data", label_en="Data Query", label_zh="数据查询"),
     Module(key="risk", label_en="Risk Control", label_zh="风险控制"),

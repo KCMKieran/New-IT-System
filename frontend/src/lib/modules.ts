@@ -24,14 +24,21 @@
  * if `App.tsx` grows a route that is not in it.
  */
 
-/** The four grantable modules. Mirrors MODULE_KEYS in backend schemas/admin.py. */
-export const MODULE_KEYS = ["cs", "data", "risk", "other"] as const
+/** The five grantable modules. Mirrors MODULE_KEYS in backend schemas/admin.py. */
+export const MODULE_KEYS = ["dashboard", "cs", "data", "risk", "other"] as const
 export type ModuleKey = (typeof MODULE_KEYS)[number]
 
 /**
- * Open to every signed-in user. Not a grantable module and deliberately not a
- * fifth checkbox: these are the pages that must work for somebody whose
- * `allowedModules` is `[]`, i.e. who has been granted nothing at all.
+ * Open to every signed-in user. Not a grantable module: these are the pages
+ * that must work for somebody whose `allowedModules` is `[]`, i.e. who has
+ * been granted nothing at all.
+ *
+ * ⚠ The home page LEFT this list on 2026-08-19 — it is the `dashboard` module
+ * now. What stays here is the app's own furniture (settings, search, view
+ * profiles): pages that answer "who am I / how do I see my data", not pages
+ * that show business data. Anything added back here is open to every account
+ * forever, including a brand-new joiner's, so the bar is that its absence
+ * would leave the shell broken rather than merely restricted.
  */
 export const COMMON = "common"
 
@@ -53,19 +60,26 @@ export type PagePolicy = ModuleKey | typeof COMMON | typeof MANAGER
  * and removes the whole class of bug where `/risk` swallows `/risk-monitor`.
  */
 export const PAGE_POLICIES: Record<string, PagePolicy> = {
+  // ── dashboard ──────────────────────────────────────────────────────────────
+  // The home page and its company-PnL history. COMMON until 2026-08-19, when
+  // the 2026-08-14 "the front page is open to everyone" decision was reversed:
+  // its widgets carry firm-wide open positions and 24h client P&L, and a
+  // colleague who needs one CS page should not get those with it.
+  //
+  // ⚠ Order matters here, not just membership: `LANDING_CANDIDATES` below is
+  // derived from this object's key order, so "/" must stay the first module
+  // page in the table or people stop landing on the home page.
+  "/": "dashboard",
+  "/home": "dashboard",
+  "/dashboard/pnl-history": "dashboard",
+
   // ── always open ────────────────────────────────────────────────────────────
-  "/": COMMON,
-  "/home": COMMON,
   "/settings": COMMON,
   "/search": COMMON,
   // ⚠ NOT manager-only despite the /cfg/ prefix. This is view profiles, the
   // device id and the user's own sessions; a blanket `/cfg/*` rule would 403
   // every non-manager on the one config page they all need.
   "/cfg/view-profiles": COMMON,
-  // Company PnL history. Open to everyone by explicit decision (§4.3.2): the
-  // home page is permanently open and splitting this one page out of Dashboard
-  // was considered and rejected. The consequence is accepted, not overlooked.
-  "/dashboard/pnl-history": COMMON,
 
   // ── cs ─────────────────────────────────────────────────────────────────────
   "/login-ips": "cs",
@@ -179,4 +193,49 @@ export function canAccessPath(access: ModuleAccess, pathname: string): boolean {
   const policy = policyForPath(pathname)
   if (policy === undefined) return false
   return canAccess(access, policy)
+}
+
+/**
+ * Where to send somebody who cannot open the page they asked for.
+ *
+ * Derived from `PAGE_POLICIES`' key order rather than hand-listed, so a page
+ * added to the table is a landing candidate automatically and the two lists
+ * cannot drift. Only MODULE pages qualify: the COMMON entries (settings,
+ * search, view profiles) are reachable by everyone, so including them would
+ * mean a user with no grants at all lands on the settings page and is left to
+ * work out for themselves that they have no access — instead of being told.
+ * MANAGER pages are excluded for the same reason in reverse.
+ */
+export const LANDING_CANDIDATES: string[] = Object.entries(PAGE_POLICIES)
+  .filter(([, policy]) => (MODULE_KEYS as readonly string[]).includes(policy))
+  .map(([path]) => path)
+
+/**
+ * The first page this user can actually open, or `null` if there is none.
+ *
+ * Needed because `/` stopped being open to everyone (2026-08-19). Before that
+ * the router could send anybody home and be sure it worked; now a `["cs"]` user
+ * bounced to `/` would meet a 403 wall on every login and after every
+ * unauthorised deep link — a permission error dressed up as a broken app.
+ *
+ * ⚠ Must only ever return a path that `canAccessPath` accepts, since the caller
+ * redirects to it: returning an inaccessible path is an infinite redirect.
+ */
+export function firstAccessiblePath(access: ModuleAccess): string | null {
+  return LANDING_CANDIDATES.find((path) => canAccessPath(access, path)) ?? null
+}
+
+/**
+ * Is this the path the app sends people to when it has nowhere better?
+ *
+ * `/` is both the home page and the router's fallback (`<Route path="*">`
+ * redirects there, the sidebar logo links there, login returns there). So a
+ * refusal on `/` means "you were sent here by the app", which deserves a
+ * redirect onwards or the no-access screen — while a refusal on `/risk-monitor`
+ * means "you asked for this specific page" and deserves the 403 that names the
+ * module you are missing.
+ */
+export function isLandingPath(pathname: string): boolean {
+  const path = normalizePath(pathname)
+  return path === "/" || path === "/home"
 }

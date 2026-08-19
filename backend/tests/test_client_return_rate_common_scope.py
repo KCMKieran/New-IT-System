@@ -1,16 +1,24 @@
 """The home-page carve-out has a ceiling (cold review C, 2026-08-19).
 
-``/client-return-rate/query`` is the one path classified COMMON while the rest
-of its prefix is gated ``risk``, because the permanently open home page draws
-the ReturnRateSummary widget from it. The widget does not call a summary
-endpoint — it calls the risk page's own endpoint, with the risk page's own
-parameters — so "everybody can see the home page" silently meant "everybody can
-pull 20,000 rows of per-client profit, deposits and equity for any 365-day
-window, and look up a named client by id".
+``/client-return-rate/query`` is classified ``{dashboard, risk}`` — any one of
+the two — while the rest of its prefix is gated ``risk``, because the home page
+draws the ReturnRateSummary widget from it. The widget does not call a summary
+endpoint; it calls the risk page's own endpoint, with the risk page's own
+parameters. So "granted the home page" would silently mean "may pull 20,000
+rows of per-client profit, deposits and equity for any 365-day window, and look
+up a named client by id".
 
-That was never the decision. The decision (2026-08-14, restated 2026-08-18) was
-that the home page is open. These tests pin the difference: the widget's
-envelope stays open to all, everything past it needs the ``risk`` module.
+That was never what granting the dashboard was meant to hand over. These tests
+pin the difference: the widget's envelope comes with the ``dashboard`` grant,
+everything past it needs ``risk``.
+
+⚠ Scope. The app under test here carries the ROUTER only, not
+``enforce_module_access`` — this file is about the handler's own narrowing. Who
+reaches the handler at all is test_module_gate.py's subject, and since
+2026-08-19 an account with no modules does not (the home page stopped being
+permanently open). A ``dashboard`` grant is therefore the weakest grant that
+can legitimately arrive here, which is why it, not ``[]``, is what the widget
+tests below log in as.
 
 Harness follows test_module_gate.py — every AUTH_* switch pinned per test, and
 users_db redirected at tmp_path because backend/data/users.db is a bind mount
@@ -124,18 +132,19 @@ def _get(client: TestClient, headers: dict, **overrides) -> object:
 
 # ── the widget itself must never break ───────────────────────────────────────
 
-def test_a_user_with_no_modules_can_still_load_the_home_widget(client):
-    """[] is the JIT default since 2026-08-18 — every new joiner starts here.
+def test_a_dashboard_only_user_can_still_load_the_home_widget(client):
+    """The weakest grant that reaches this handler must still get the widget.
 
-    If this goes red the home page is blank for every new colleague on their
-    first day, which is a worse failure than the one the narrowing prevents.
+    If this goes red the home page is blank for everyone who was given the
+    dashboard and nothing else — the exact population the module is for, and a
+    worse failure than the one the narrowing prevents.
     """
-    headers = _mint(client, STAFF, allowed_modules="[]")
+    headers = _mint(client, STAFF, allowed_modules='["dashboard"]')
     assert _get(client, headers).status_code == 200
 
 
 def test_the_widgets_page_size_is_exactly_at_the_ceiling_not_over_it(client):
-    headers = _mint(client, STAFF, allowed_modules="[]")
+    headers = _mint(client, STAFF, allowed_modules='["dashboard"]')
     from app.api.v1.routes.client_return_rate import COMMON_MAX_PAGE_SIZE
 
     assert WIDGET_QUERY["page_size"] <= COMMON_MAX_PAGE_SIZE
@@ -172,7 +181,7 @@ def test_the_real_widget_still_fits_under_the_ceiling():
         f"ReturnRateSummary.tsx asks for page_size={max(sizes)} but the home-page "
         f"carve-out in routes/client_return_rate.py caps non-risk callers at "
         f"{COMMON_MAX_PAGE_SIZE}. Raise COMMON_MAX_PAGE_SIZE in the same commit, "
-        f"or the home page 403s for everyone without the risk module."
+        f"or the home page 403s for every dashboard user who is not also in risk."
     )
 
 
@@ -188,7 +197,7 @@ def test_the_real_widget_still_fits_under_the_ceiling():
     ids=["client-lookup", "avg-equity-columns", "bulk-page-size"],
 )
 def test_beyond_the_widget_needs_the_risk_module(client, extra):
-    headers = _mint(client, STAFF, allowed_modules="[]")
+    headers = _mint(client, STAFF, allowed_modules='["dashboard"]')
     resp = _get(client, headers, **extra)
     assert resp.status_code == 403
     # 403 and never 401: lib/fetch.ts turns 401 into logout-and-redirect, so a

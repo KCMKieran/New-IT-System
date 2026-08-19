@@ -55,3 +55,28 @@ def _clear_settings_cache():
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _clear_auth_event_throttle():
+    """Drop the auth_events refusal throttle around every test.
+
+    ``record_auth_event`` rate-limits refusal rows per (event, email, ip) in a
+    PROCESS-LEVEL dict — deliberately, since the alternative is letting an
+    unauthenticated caller append to users.db without bound. That dict is not
+    reset by pointing ``users_db._DB_PATH`` at a tmp file, so refusals written
+    by one test spend the next test's budget: add a few 403 assertions
+    anywhere in the suite and some later test's "the refusal was recorded"
+    assertion goes red, in a file that did not change.
+
+    Hit for real on 2026-08-19 (the dashboard-module tests pushed
+    test_admin_api's manager-refusal assertion over the per-minute limit), so
+    the isolation lives here rather than in whichever file noticed it.
+    """
+    from app.services import auth_service
+
+    with auth_service._throttle_lock:
+        auth_service._throttle_counts.clear()
+    yield
+    with auth_service._throttle_lock:
+        auth_service._throttle_counts.clear()

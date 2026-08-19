@@ -67,6 +67,7 @@ export const zhCN = {
   // managers tick in /cfg/managers, or the person asking for access and the
   // person granting it are talking about different things.
   modules: {
+    dashboard: "Dashboard（首页）",
     cs: "CS Department（客服部）",
     data: "Data Query（数据查询）",
     risk: "Risk Control（风险控制）",

@@ -449,15 +449,18 @@ def upsert_user(
         # indistinguishable from a returning user's fiftieth. The only way to
         # notice was for somebody to open /cfg/managers and read the list.
         #
-        # '[]' inverts that: a new joiner sees the always-open layer and nothing
-        # else, and asks a manager to grant modules — which is a more reliable
-        # notification than any alert we could send. Forbidden.tsx tells them
-        # who to ask.
+        # '[]' inverts that: a new joiner sees the app shell and nothing else,
+        # and asks a manager to grant modules — which is a more reliable
+        # notification than any alert we could send. The frontend's NoModules
+        # screen (the landing page for exactly this account) tells them who to
+        # ask, in both languages.
         #
-        # ⚠ Do not overstate what this buys. The home page is deliberately open
-        # to every signed-in user (2026-08-14 decision), and its widgets carry
-        # firm-wide open positions and 24h client P&L. '[]' gates the module
-        # PAGES, not the summary on the front page.
+        # ⚠ Since 2026-08-19 this really is "nothing": the home page became the
+        # grantable `dashboard` module, so '[]' no longer sees firm-wide open
+        # positions and 24h client P&L either. Before that date the sentence
+        # above had to be qualified — the note is kept because the qualification
+        # is what changed, and someone reading a 2026-08-18 incident needs to
+        # know the front page was open then.
         #
         # ⚠ This is the INSERT branch only. The two UPDATE branches above must
         # never touch allowed_modules, for the same reason they never reset role

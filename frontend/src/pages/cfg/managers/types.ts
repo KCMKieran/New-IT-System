@@ -8,9 +8,18 @@
  * `allowed_modules` below, where the difference is a privilege escalation).
  */
 
-/** Module keys a manager can grant. Dashboard is deliberately absent — the home
- *  page is permanently open to every signed-in user (design §4.3.2). */
-export type ModuleKey = "cs" | "data" | "risk" | "other";
+/**
+ * Module keys a manager can grant.
+ *
+ * Re-exported from `@/lib/modules` rather than spelled out again: this file
+ * used to carry its own copy of the union, and when `dashboard` was added on
+ * 2026-08-19 the two disagreed — which surfaced as a type error in the
+ * catalogue fallback, but would have surfaced as a checkbox that could not be
+ * ticked had the literal been written somewhere less strict.
+ */
+import type { ModuleKey } from "@/lib/modules";
+
+export type { ModuleKey };
 
 export type Module = {
   key: ModuleKey;
@@ -27,7 +36,8 @@ export type AdminUser = {
   source: string | null;
   /**
    * `null` = every module, including ones added in the future.
-   * `[]`   = nothing but the always-on home page.
+   * `[]`   = nothing but the always-open shell (settings / search / view
+   *          profiles). Since 2026-08-19 that no longer includes the home page.
    * These are NOT the same value and must never be normalised into each other:
    * turning `[]` into `null` silently converts "revoke this person" into
    * "give this person everything".

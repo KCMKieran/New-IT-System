@@ -7,7 +7,9 @@
  * click apart:
  *
  *   null → every module, INCLUDING modules that do not exist yet
- *   []   → nothing but the always-open home page
+ *   []   → nothing at all: settings, search and view profiles, no business
+ *          page — not even the home page, which became the grantable
+ *          `dashboard` module on 2026-08-19
  *
  * So they get two badges that share no colour, no icon and no wording, and `[]`
  * deliberately does NOT render as the "—" this page uses for missing data — an
@@ -15,7 +17,9 @@
  *
  * Ticking every box is a third, distinct state: it is an array, so when an `ai`
  * module ships the `null` users get it automatically and the fully-ticked users
- * do not. That is intentional (design §4.3.3).
+ * do not. That is intentional (design §4.3.3) — and it is not hypothetical:
+ * `dashboard` shipped that way on 2026-08-19, which is why the rollout had to
+ * backfill it into every non-NULL row by hand.
  *
  * Managers bypass the module gate at request time, so a manager row displays
  * full access. It is a DISPLAY rule only — the stored array is never rewritten

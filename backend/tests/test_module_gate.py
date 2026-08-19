@@ -201,24 +201,97 @@ def test_empty_list_means_no_module_at_all(client):
 
 
 def test_empty_list_still_reaches_the_common_layer(client):
-    """A user with no modules must still be able to use the app shell.
+    """A user with no modules must still be able to use the app SHELL.
 
-    DashboardLayout calls useProfileAutoSave() on every page, and the home page
-    is permanently open to everyone (§4.3.2) — so /view-profiles, /dashboard and
-    the two widget carve-outs have to answer for the most restricted account
-    that can exist. Otherwise "no modules" presents as "the app is broken".
+    DashboardLayout calls useProfileAutoSave() on every page — including the
+    "no modules granted yet" screen such a user lands on — so /view-profiles has
+    to answer for the most restricted account that can exist. Otherwise "no
+    modules" presents as "the app is broken" instead of as a permission.
+
+    ⚠ The list is deliberately short. Until 2026-08-19 it also carried
+    /dashboard and the two widget carve-outs, because the home page was open to
+    everyone; those moved to the `dashboard` module and the test below is their
+    replacement. Anything added back here is open to every account forever.
     """
     sid = _mint(STAFF, allowed_modules="[]")
+    for path in ("/view-profiles", "/health", "/auth/me", "/log/client-error"):
+        assert client.get(f"/api/v1{path}", headers=_bearer(sid)).status_code == 200, path
+
+
+# ── T3b: the home page is a module now (2026-08-19) ──────────────────────────
+
+def test_the_home_page_needs_the_dashboard_module(client):
+    """[] is the JIT default, so this is what a new joiner sees on day one.
+
+    The home page draws company-wide position and 24h client-PnL summaries. It
+    was permanently open to every signed-in user until 2026-08-19; making it
+    grantable is the whole point of the `dashboard` module, so a grant that does
+    not include it must not reach any of its three endpoints.
+    """
+    sid = _mint(STAFF, allowed_modules='["cs"]')
     for path in (
-        "/view-profiles",
         "/dashboard/pnl-history",
         "/open-positions/symbol-summary",
         "/client-return-rate/query",
-        "/health",
-        "/auth/me",
-        "/log/client-error",
+    ):
+        assert client.get(f"/api/v1{path}", headers=_bearer(sid)).status_code == 403, path
+
+
+def test_the_dashboard_grant_opens_the_home_page_and_nothing_else(client):
+    """…and in particular does not leak the gated pages the widgets borrow from.
+
+    Both widget endpoints live under another module's prefix, so the risk here
+    is the opposite of the one above: granting the home page must not hand over
+    /position or the client-return-rate page along with it.
+    """
+    sid = _mint(STAFF, allowed_modules='["dashboard"]')
+    for path in (
+        "/dashboard/pnl-history",
+        "/open-positions/symbol-summary",
+        "/client-return-rate/query",
     ):
         assert client.get(f"/api/v1{path}", headers=_bearer(sid)).status_code == 200, path
+    for path in ("/open-positions/today", "/client-return-rate/cache", "/login-ip/search"):
+        assert client.get(f"/api/v1{path}", headers=_bearer(sid)).status_code == 403, path
+
+
+def test_a_shared_endpoint_answers_to_either_of_its_modules(client):
+    """The any-of policy, from the side that is easy to forget.
+
+    `/open-positions/symbol-summary` is the home page's PositionSummary widget
+    AND a panel inside /position (data); `/client-return-rate/query` is the
+    ReturnRateSummary widget AND the whole risk page. Classify either as
+    `dashboard` alone and the gated page silently loses a panel — visible only
+    to whoever opens that page without also holding `dashboard`.
+    """
+    data_only = _mint(STAFF, allowed_modules='["data"]')
+    assert client.get(
+        "/api/v1/open-positions/symbol-summary", headers=_bearer(data_only)
+    ).status_code == 200
+    assert client.get(
+        "/api/v1/dashboard/pnl-history", headers=_bearer(data_only)
+    ).status_code == 403
+
+    risk_only = _mint(STAFF, allowed_modules='["risk"]')
+    assert client.get(
+        "/api/v1/client-return-rate/query", headers=_bearer(risk_only)
+    ).status_code == 200
+    assert client.get(
+        "/api/v1/dashboard/pnl-history", headers=_bearer(risk_only)
+    ).status_code == 403
+
+
+def test_a_refusal_on_a_shared_endpoint_names_both_modules(client):
+    """The person reading the 403 has to know which grant to ask for.
+
+    Naming only one of the two would send them to a manager asking for `data`
+    when `dashboard` was the grant they actually wanted.
+    """
+    sid = _mint(STAFF, allowed_modules="[]")
+    resp = client.get("/api/v1/client-return-rate/query", headers=_bearer(sid))
+    assert resp.status_code == 403
+    detail = resp.json()["detail"]
+    assert "dashboard" in detail and "risk" in detail
 
 
 def test_corrupt_grant_fails_closed(client):
@@ -256,7 +329,7 @@ def test_risk_is_not_treated_as_a_prefix_of_risk_monitor(client):
 
 def test_carve_out_beats_its_own_prefix(client):
     """The longer tuple wins, which is what lets one prefix span two policies."""
-    sid = _mint(STAFF, allowed_modules="[]")
+    sid = _mint(STAFF, allowed_modules='["dashboard"]')
     assert client.get(
         "/api/v1/open-positions/symbol-summary", headers=_bearer(sid)
     ).status_code == 200

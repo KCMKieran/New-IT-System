@@ -1,8 +1,14 @@
-import { Outlet, useLocation } from "react-router-dom"
+import { Navigate, Outlet, useLocation } from "react-router-dom"
 
 import Forbidden from "@/pages/Forbidden"
+import NoModules from "@/pages/NoModules"
 import { useAuth } from "@/providers/auth-provider"
-import { canAccessPath, type ModuleAccess } from "@/lib/modules"
+import {
+  canAccessPath,
+  firstAccessiblePath,
+  isLandingPath,
+  type ModuleAccess,
+} from "@/lib/modules"
 
 /**
  * Route-level module guard (auth P4b).
@@ -40,5 +46,30 @@ export default function ModuleRoute() {
     allowedModules: user ? user.allowedModules : null,
   }
 
-  return canAccessPath(access, pathname) ? <Outlet /> : <Forbidden />
+  if (canAccessPath(access, pathname)) return <Outlet />
+
+  // A refusal on `/` is not the same event as a refusal on `/risk-monitor`.
+  //
+  // `/` is where the app sends people when it has nowhere better: login returns
+  // there, `<Route path="*">` redirects there, the sidebar logo links there. It
+  // stopped being open to everyone on 2026-08-19 (it is the `dashboard` module
+  // now), so for a colleague granted only `cs` every one of those paths would
+  // otherwise end at a 403 — including their first click after every login.
+  // They asked for nothing in particular, so send them to a page they can
+  // actually use; the 403 below is for the case where they asked for a specific
+  // page and that answer is genuinely the information they need.
+  if (isLandingPath(pathname)) {
+    const fallback = firstAccessiblePath(access)
+    // ⚠ Guard against redirecting to where we already are. `firstAccessiblePath`
+    // only returns accessible paths, so this cannot fire today — but a future
+    // edit that let it return `/` while `/` is refused would produce an
+    // infinite redirect, which presents as a frozen white page with no error.
+    if (fallback && fallback !== pathname) return <Navigate to={fallback} replace />
+    // Nothing at all is granted: the JIT default (`[]`) every new colleague is
+    // provisioned with. Tell them, in both languages, rather than showing a
+    // permission error for a page they never asked for.
+    return <NoModules />
+  }
+
+  return <Forbidden />
 }
