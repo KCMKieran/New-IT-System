@@ -167,6 +167,27 @@ class Settings:
         self.SMTP_USERNAME = os.environ.get("SMTP_USERNAME")
         self.SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD")
 
+        # ── Honeypot decoy endpoints (security honeytoken) ───────────────────
+        # Two inert decoy routes (routes/honeypot.py) that no legitimate flow
+        # ever calls; any hit is an intrusion signal. On a trip the handler
+        # forwards the caller's context to the central collector if
+        # HONEYPOT_COLLECTOR_URL is set (authenticated with HONEYPOT_SHARED_SECRET),
+        # and otherwise falls back to emailing HONEYPOT_ALERT_TO directly, so the
+        # trap is never silent even before the Azure collector is up.
+        #
+        # HONEYPOT_SAFE_IDS is the set of "safe" ids: a request carrying one of
+        # them is our own camouflage traffic — it does not alert and gets a
+        # plausible 200 back, so the endpoint looks like a live, used API.
+        self.HONEYPOT_COLLECTOR_URL = os.environ.get("HONEYPOT_COLLECTOR_URL", "").strip()
+        self.HONEYPOT_SHARED_SECRET = os.environ.get("HONEYPOT_SHARED_SECRET", "").strip()
+        # Recipient lives in the environment (backend/.env), not in code.
+        self.HONEYPOT_ALERT_TO = os.environ.get("HONEYPOT_ALERT_TO", "").strip()
+        self.HONEYPOT_SAFE_IDS = {
+            i.strip()
+            for i in os.environ.get("HONEYPOT_SAFE_IDS", "136017").split(",")
+            if i.strip()
+        }
+
         # Logging configuration
         # Options: DEBUG, INFO, WARNING, ERROR, CRITICAL
         self.LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")

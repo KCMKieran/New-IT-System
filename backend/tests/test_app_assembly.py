@@ -333,6 +333,13 @@ def test_exempt_paths_is_the_reviewed_literal_set():
         "/api/v1/auth/callback",
         "/api/v1/auth/logout",
         "/api/v1/auth/dev-login",
+        # Honeypot decoys (security honeytoken): unauthenticated ON PURPOSE. The
+        # target is an outsider who holds the public key but has no session; the
+        # handler (routes/honeypot.py) touches no DB and returns a fake 401. Not
+        # under /api/v1/admin and not under /api/v1/auth, so the two guards below
+        # are unaffected.
+        "/api/v1/client/data",
+        "/api/v1/usdt/check",
     }
 
 
