@@ -104,6 +104,12 @@ EXEMPT_PATHS: frozenset[str] = frozenset(
         "/api/v1/auth/callback",
         "/api/v1/auth/logout",
         "/api/v1/auth/dev-login",
+        # Honeypot decoys (security honeytoken): reachable without a session on
+        # purpose — the target is an outsider holding the public key but no
+        # session. The handler (routes/honeypot.py) touches no DB and returns a
+        # fake 401. Classified INFRA in auth_deps.MODULE_MAP too.
+        "/api/v1/client/data",
+        "/api/v1/usdt/check",
     }
 )
 

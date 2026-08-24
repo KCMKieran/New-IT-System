@@ -1,0 +1,15 @@
+# Local development / single-VM deployment for the Honeypot Collector.
+# For Azure Container Instances, see DEPLOY-AZURE.md (env comes from az cli flags
+# there, not from this file).
+services:
+  collector:
+    build: .
+    image: honeypot-collector:latest
+    # All configuration and secrets come from .env (copy .env.example -> .env).
+    # Nothing internal (DB creds, network) is ever placed here — see isolation
+    # rule in DEPLOY-AZURE.md.
+    env_file:
+      - .env
+    ports:
+      - "8010:8010"
+    restart: unless-stopped

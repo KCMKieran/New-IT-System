@@ -32,6 +32,7 @@ from .routes.risk_cases import router as risk_cases_router
 from .routes.hold_bucket import router as hold_bucket_router
 from .routes.window_scan import router as window_scan_router
 from .routes.ibid_lots import router as ibid_lots_router
+from .routes.honeypot import router as honeypot_router
 
 
 # The page-level permission gate (auth P4b) is mounted ONCE, here, on the
@@ -86,3 +87,8 @@ api_v1_router.include_router(risk_cases_router, tags=["risk-cases"])
 api_v1_router.include_router(hold_bucket_router, tags=["hold-bucket"])
 api_v1_router.include_router(window_scan_router, tags=["window-scan"])
 api_v1_router.include_router(ibid_lots_router, tags=["ibid-lots"])
+# Honeypot decoy endpoints (security honeytoken). Classified INFRA in
+# core/auth_deps.MODULE_MAP and listed in EXEMPT_PATHS so an outsider with the
+# public key but no session can reach them — that outsider is exactly who they
+# are meant to catch. See routes/honeypot.py for the full rationale.
+api_v1_router.include_router(honeypot_router, tags=["honeypot"])

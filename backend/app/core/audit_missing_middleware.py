@@ -77,6 +77,10 @@ AUDIT_EXEMPT_ROUTES = frozenset({
     "/api/v1/auth/callback",
     # ── Browser error reporting: written by the frontend, not by a person.
     "/api/v1/log/client-error",
+    # ── Honeypot decoys: a POST with the safe id returns a camouflage 200 that
+    #    changes nothing. It is a trap, not a write, so it leaves no audit row.
+    "/api/v1/client/data",
+    "/api/v1/usdt/check",
     # ── Emails a one-time code to an external IB. The code table is its trail,
     #    and the caller has no session yet by definition.
     "/api/v1/ib-financial/request-code",

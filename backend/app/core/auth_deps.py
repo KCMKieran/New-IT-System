@@ -226,6 +226,13 @@ MODULE_MAP: dict[tuple[str, ...], ModulePolicy] = {
     ("dashboard",): "dashboard",
     ("open-positions", "symbol-summary"): frozenset({"dashboard", "data"}),
     ("client-return-rate", "query"): frozenset({"dashboard", "risk"}),
+    # ── honeypot decoys (security honeytoken) ────────────────────────────────
+    # INFRA = no gate at all: these must be reachable by an outsider who has the
+    # public key but no session, because catching that outsider is their entire
+    # purpose. The handler (routes/honeypot.py) touches no DB. Also in
+    # EXEMPT_PATHS (session) and AUDIT_EXEMPT_ROUTES (the camouflage 200).
+    ("client", "data"): INFRA,
+    ("usdt", "check"): INFRA,
     # ── manager (require_manager owns these) ─────────────────────────────────
     ("admin",): MANAGER,
     # ── cs ───────────────────────────────────────────────────────────────────
