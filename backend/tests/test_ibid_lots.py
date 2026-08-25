@@ -181,13 +181,25 @@ def trade_row(
     total: float = 10.0,
     above: float = 6.0,
     below: float = 4.0,
+    long_: float | None = None,
     tickets: int = 5,
 ) -> Dict[str, Any]:
+    """One aggregated (loginSid, SYMBOL) row as the DB would return it.
+
+    `long_` is the >=3min slice of `above`; the 10s..<3min slice is whatever
+    is left. Defaulting it to `above` puts all non-fast volume in the >=3min
+    bucket, which keeps the "three buckets sum to total" invariant true for
+    every row a test builds without thinking about it.
+    """
+    if long_ is None:
+        long_ = above
     return {
         "loginSid": login_sid,
         "symbol": symbol,
         "lots_above_10s": above,
         "lots_below_10s": below,
+        "lots_10s_to_3min": above - long_,
+        "lots_above_3min": long_,
         "total_lots": total,
         "total_tickets": tickets,
     }
@@ -564,6 +576,51 @@ def test_above_plus_below_equals_total_volume(monkeypatch):
     assert resp.total_volume == pytest.approx(21.1)
 
 
+def test_three_hold_buckets_partition_total_volume(monkeypatch):
+    """<10s / 10s..<3min / >=3min cover every fill exactly once — at the grand
+    total, per product and per client — and stay a partition after the CEN
+    /100 normalisation."""
+    rows = {
+        "1-8000001": [
+            trade_row(login_sid="1-8000001", symbol="XAUUSD",
+                      total=13.37, above=9.11, below=4.26, long_=6.11),
+            trade_row(login_sid="1-8000001", symbol="EURUSD",
+                      total=0.03, above=0.01, below=0.02, long_=0.0),
+        ],
+        "1-8000002": [
+            trade_row(login_sid="1-8000002", symbol="XAUUSD",
+                      total=770.0, above=110.0, below=660.0, long_=40.0),
+        ],
+    }
+    cursor = FakeCursor(
+        tree_rows=[{"referralId": 111}, {"referralId": 222}],
+        user_rows=[
+            user_row(user_id=111, login=8000001, currency="USD"),
+            user_row(user_id=222, login=8000002, currency="CEN"),
+        ],
+        trades_by_login=rows,
+    )
+    resp = run_query(monkeypatch, cursor, req())
+
+    assert (
+        resp.total_below_10s + resp.total_10s_to_3min + resp.total_above_3min
+    ) == pytest.approx(resp.total_volume, abs=1e-9)
+    # The legacy two-way column must stay consistent with the finer split,
+    # otherwise the page shows two mutually contradicting numbers.
+    assert resp.total_10s_to_3min + resp.total_above_3min == pytest.approx(
+        resp.total_above_10s, abs=1e-9
+    )
+    for stat in [*resp.symbol_stats, *resp.user_stats]:
+        assert (
+            stat.lots_below_10s + stat.lots_10s_to_3min + stat.lots_above_3min
+        ) == pytest.approx(stat.total_lots, abs=1e-9)
+
+    # CEN account (222) contributes 110/100 = 1.1 to the >=10s side, split
+    # 0.7 middle / 0.4 long.
+    assert resp.total_10s_to_3min == pytest.approx(3.71)
+    assert resp.total_above_3min == pytest.approx(6.51)
+
+
 def test_total_tickets_equals_sum_of_user_tickets(monkeypatch):
     cursor = FakeCursor(
         tree_rows=[{"referralId": 111}, {"referralId": 222}],
@@ -797,6 +854,9 @@ def test_trades_query_pins_cmd_and_close_date_window(monkeypatch):
     assert "GROUP BY" in sql and "loginSid, SYMBOL" in sql
     # 10-second fast-trade split, both directions of the comparison.
     assert ">= 10" in sql and "< 10" in sql
+    # 3min boundary: >=180 is its own bucket, and the middle bucket is the
+    # half-open [10, 180) slice — boundary seconds belong to the upper bucket.
+    assert ">= 180" in sql and "< 180" in sql
 
 
 # -- empty results -------------------------------------------------------
@@ -807,6 +867,8 @@ def _assert_zero_shell(resp: IbidLotsQueryResponse, *, account_count: int) -> No
     assert resp.total_volume == 0.0
     assert resp.total_above_10s == 0.0
     assert resp.total_below_10s == 0.0
+    assert resp.total_10s_to_3min == 0.0
+    assert resp.total_above_3min == 0.0
     assert resp.total_tickets == 0
     assert resp.symbol_stats == []
     assert resp.user_stats == []
@@ -868,6 +930,8 @@ def test_null_lot_columns_are_treated_as_zero(monkeypatch):
                     "symbol": "XAUUSD",
                     "lots_above_10s": None,
                     "lots_below_10s": None,
+                    "lots_10s_to_3min": None,
+                    "lots_above_3min": None,
                     "total_lots": None,
                     "total_tickets": None,
                 }
@@ -942,6 +1006,8 @@ def _sample_response() -> IbidLotsQueryResponse:
         total_volume=1234.567,
         total_above_10s=1100.0,
         total_below_10s=134.567,
+        total_10s_to_3min=200.0,
+        total_above_3min=900.0,
         total_tickets=58231,
         symbol_stats=[
             {
@@ -949,6 +1015,8 @@ def _sample_response() -> IbidLotsQueryResponse:
                 "total_lots": 1234.567,
                 "lots_above_10s": 1100.0,
                 "lots_below_10s": 134.567,
+                "lots_10s_to_3min": 200.0,
+                "lots_above_3min": 900.0,
             }
         ],
         user_stats=[
@@ -957,6 +1025,8 @@ def _sample_response() -> IbidLotsQueryResponse:
                 "total_lots": 1234.567,
                 "lots_above_10s": 1100.0,
                 "lots_below_10s": 134.567,
+                "lots_10s_to_3min": 200.0,
+                "lots_above_3min": 900.0,
                 "total_tickets": 58231,
                 "cen": False,
             }
@@ -982,17 +1052,19 @@ def test_route_returns_contract_shape(client: TestClient):
     body = r.json()
     assert set(body) == {
         "query_target", "start_date", "end_date", "symbols", "account_count",
-        "total_volume", "total_above_10s", "total_below_10s", "total_tickets",
+        "total_volume", "total_above_10s", "total_below_10s",
+        "total_10s_to_3min", "total_above_3min", "total_tickets",
         "symbol_stats", "user_stats", "query_time_ms",
     }
     assert body["query_target"] == "For Tobe Global - ibid: 134576"
     assert body["account_count"] == 312
     assert set(body["symbol_stats"][0]) == {
-        "symbol", "total_lots", "lots_above_10s", "lots_below_10s"
+        "symbol", "total_lots", "lots_above_10s", "lots_below_10s",
+        "lots_10s_to_3min", "lots_above_3min",
     }
     assert set(body["user_stats"][0]) == {
         "user_id", "total_lots", "lots_above_10s", "lots_below_10s",
-        "total_tickets", "cen",
+        "lots_10s_to_3min", "lots_above_3min", "total_tickets", "cen",
     }
     assert isinstance(body["user_stats"][0]["user_id"], str)
     assert body["query_time_ms"] >= 0

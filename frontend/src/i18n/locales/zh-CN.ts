@@ -181,10 +181,13 @@ export const zhCN = {
     columns: {
       userId: "用户 ID",
       totalLots: "总手数",
-      lotsAbove10s: "持仓 ≥10s 手数",
       lotsBelow10s: "持仓 <10s 手数",
+      lots10sTo3min: "持仓 10s–3min 手数",
+      lotsAbove3min: "持仓 ≥3min 手数",
       lotsBelow10sTooltip:
         "开仓到平仓不足 10 秒的成交手数——短线/刷量行为的观察指标，数值本身没有好坏。",
+      holdBucketTooltip:
+        "持仓时长把每笔成交分到且只分到三个桶中的一个：<10s、10s–3min、≥3min。边界值归入时间更长的那一桶，所以三列相加等于总手数。",
       totalTickets: "成交笔数",
     },
     form: {
@@ -212,8 +215,9 @@ export const zhCN = {
     },
     stats: {
       totalLots: "总手数",
-      above10s: "持仓 ≥10s 手数",
       below10s: "持仓 <10s 手数",
+      mid10sTo3min: "持仓 10s–3min 手数",
+      above3min: "持仓 ≥3min 手数",
       totalTickets: "总成交笔数",
       accountCount: "涉及账户数",
     },
