@@ -48,6 +48,7 @@ const RiskWatchlistPage = lazyWithRetry(() => import("@/pages/RiskWatchlist"))
 const WindowScanPage = lazyWithRetry(() => import("@/pages/WindowScan"))
 const FundFlowMonitorPage = lazyWithRetry(() => import("@/pages/cs/FundFlowMonitor"))
 const IBTreeQueryPage = lazyWithRetry(() => import("@/pages/cs/IBTreeQuery"))
+const CsIbDepositsPage = lazyWithRetry(() => import("@/pages/cs/IbDeposits"))
 const SettingsPage = lazyWithRetry(() => import("@/pages/Settings"))
 const SearchPage = lazyWithRetry(() => import("@/pages/Search"))
 const ViewProfilesPage = lazyWithRetry(() => import("@/pages/ViewProfiles"))
@@ -138,6 +139,7 @@ function App() {
               <Route path="window-scan" element={<WindowScanPage />} />
               <Route path="cs/fund-flow-monitor" element={<FundFlowMonitorPage />} />
               <Route path="cs/ib-tree" element={<IBTreeQueryPage />} />
+              <Route path="cs/ib-deposits" element={<CsIbDepositsPage />} />
               {/* test page removed */}
               <Route path="settings" element={<SettingsPage />} />
               <Route path="search" element={<SearchPage />} />

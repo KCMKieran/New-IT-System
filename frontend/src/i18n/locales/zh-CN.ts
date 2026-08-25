@@ -51,6 +51,9 @@ export const zhCN = {
     ibFinancialMonitor: "IB 资金监控",
     fundFlowMonitor: "频繁出入金监控",
     ibTreeQuery: "IB Tree查询",
+    // CS 侧的 IB 出入金查询（/cs/ib-deposits）——与 Data Query 的
+    // nav.ibData（IB / 地区出入金）是同一张 IB 表，只是不带地区汇总那半。
+    csIbDeposits: "IB 出入金查询",
     riskAlertMail: "告警邮件中心",
     // These three risk pages keep English labels in both locales — the Chinese
     // names were too similar to tell apart at a glance (user decision 2026-08-05).
@@ -117,6 +120,7 @@ export const zhCN = {
     holdBucketReport: "持仓时间分析",
     ibFinancialMonitor: "IB 资金监控",
     ibTreeQuery: "IB Tree查询",
+    csIbDeposits: "IB 出入金查询",
     riskAlertMail: "告警邮件中心",
     riskWatchlist: "Client Activity Monitor", // English in both locales — see nav block
     windowScan: "Entry Window Scan", // English in both locales — see nav block
@@ -233,6 +237,76 @@ export const zhCN = {
       subtitle: "共 {count} 个用户 · 按总手数降序",
       linkHint: " · 点用户 ID 打开 CRM 客户页",
       noLinkHint: " · 交易账户模式下这一列是 loginSid，不是 CRM 用户 ID",
+    },
+  },
+
+  // 出入金查询。同一份词典服务两个页面：/warehouse/ib-data（IB 卡 + Company
+  // 卡）与 /cs/ib-deposits（只有 IB 卡）—— IB 卡是同一个组件。
+  ibDataPage: {
+    title: "出入金查询",
+    query: "查询",
+    querying: "查询中...",
+    summary: "汇总",
+    badgeRange: "区间：{value}",
+    range: {
+      label: "时间范围：",
+      week: "过去一周",
+      month: "本月",
+      lastMonth: "上个月",
+      custom: "自定义",
+      current: "当前区间",
+      placeholder: "自定义时间范围",
+    },
+    errors: {
+      incompleteRange: "请选择完整的时间区间",
+      httpFailed: "查询失败：HTTP {status}",
+      generic: "查询失败",
+    },
+    ib: {
+      title: "IB 出入金查询",
+      ibidLabel: "IBID：",
+      group1: "组合1",
+      noIbid: "请输入至少一个 IBID",
+      badgeParams: "参数：{value}",
+      badgeLastRun: "上次查询：{value}",
+      noRecord: "暂无记录",
+      noParams: "无",
+      empty: "暂无数据，请输入条件后查询。",
+      // 列头在两种语言下都是英文——这些是数据库口径名，团队本来就这么叫。
+      colIbid: "IBID",
+      colDeposit: "Deposit (USD)",
+      colTotalWithdrawal: "Total Withdrawal (USD)",
+      colIbWithdrawal: "IB Withdrawal (USD)",
+      colWalletBalance: "IB Wallet Balance (USD)",
+      colNetDeposit: "Net Deposit (USD)",
+      tipWalletBalance:
+        "IB 钱包账户 (GROUP LIKE 'IB-WALLET%') 的【当前余额】。\n\n" +
+        "存量指标，不受上方查询时间区间约束 —— 无论查一天还是查一年，显示的都是此刻的余额（数据源 mt4_users 只有实时余额快照，无每日历史）。\n\n" +
+        "因此它不参与 Net Deposit 的计算，两列请分开判读。",
+      tipNetDeposit:
+        "Net Deposit = Deposit + Withdrawal + IB Withdrawal（算术和；出金类金额在库中为负数）。\n\n" +
+        "【含 IB 佣金提现】('ib withdrawal')：IB 从钱包提走的佣金会压低此值。如需只看客户交易本金的净入金，请另行拆分。\n\n" +
+        "口径与 IB Report 页一致；统计 IB 旗下全部客户（含 IB 自己），仅统计查询区间内的流水。\n\n" +
+        "不再减去 IB Wallet Balance（该列是当前存量，与区间流量不同量纲）。",
+      note1:
+        "SQL 计算方式：总提现 = Withdrawal + IB Withdrawal（出金类金额为负数），Net Deposit = Deposit + Withdrawal + IB Withdrawal（含 IB 佣金提现 'ib withdrawal'），口径与 IB Report 页一致。",
+      note2: "统计范围：该 IB 旗下全部客户（含 IB 自己），仅计入查询区间内的流水。",
+      note3:
+        "IB Wallet Balance 是当前余额（存量），不受查询区间约束，不参与 Net Deposit 计算，请单独判读。",
+    },
+    company: {
+      title: "Company 出入金查询",
+      badgeElapsed: "查询耗时：{ms} ms",
+      empty: "暂无数据，请选择时间范围后查询。",
+      colRegion: "地区 (Company)",
+      colDeposit: "入金 (Deposit USD)",
+      colWithdrawal: "出金 (Withdrawal USD)",
+      colIbWithdrawal: "IB出金 (USD)",
+      colTotalWithdrawal: "总出金 (USD)",
+      colNetDeposit: "净入金 (USD)",
+      note1:
+        "SQL 计算方式：总出金 = |Withdrawal| + |IB Withdrawal|，净入金 = Deposit - 总出金（含 IB 佣金提现 'ib withdrawal'），与上方 IB 表口径一致。",
+      note2: "地区判断：cid = 0 为 CN，cid = 1 为 Global。",
     },
   },
 

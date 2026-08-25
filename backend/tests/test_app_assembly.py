@@ -634,28 +634,36 @@ def test_no_module_map_entry_is_an_orphan():
     assert set(MODULE_KEYS) - {"other"} <= granted_by_the_map
 
 
-def test_the_two_exact_path_carve_outs_serve_both_of_their_modules():
-    """Each carve-out feeds a home-page widget AND a gated page of its own.
+def test_the_exact_path_carve_outs_serve_both_of_their_modules():
+    """Each carve-out is one endpoint that two different modules' pages call.
 
-    Both sit under a prefix that belongs to a different module, so folding
-    either back into its prefix breaks a tile on the home page for everyone who
-    was granted `dashboard` but not `data`/`risk` — a 403 in the console and a
-    blank card, which reads as "the app is down" rather than "I lack a
-    permission". Dropping the other half of the pair is just as wrong and much
-    quieter: `/position` and `/client-return-rate` would keep rendering while
-    one panel inside them stopped answering.
+    The first two sit under a prefix that belongs to a different module, so
+    folding either back into its prefix breaks a tile on the home page for
+    everyone who was granted `dashboard` but not `data`/`risk` — a 403 in the
+    console and a blank card, which reads as "the app is down" rather than "I
+    lack a permission". Dropping the other half of the pair is just as wrong and
+    much quieter: `/position` and `/client-return-rate` would keep rendering
+    while one panel inside them stopped answering.
 
     Before 2026-08-19 both were COMMON, because the home page was open to
     everyone. The any-of set is what replaced that, and it is narrower: a user
     with no modules at all now reaches neither.
+
+    The `/ib-data` pair (2026-08-25) is the same shape without a widget: CS's
+    /cs/ib-deposits renders the very same IB card as Data Query's
+    /warehouse/ib-data. Its third sibling, region-query, is deliberately NOT in
+    the set — the firm-wide CN/Global roll-up is not part of what CS was given.
     """
     from app.core.auth_deps import classify_path
 
     assert classify_path("/open-positions/symbol-summary") == frozenset({"dashboard", "data"})
     assert classify_path("/client-return-rate/query") == frozenset({"dashboard", "risk"})
+    assert classify_path("/ib-data/query") == frozenset({"cs", "data"})
+    assert classify_path("/ib-data/last-run") == frozenset({"cs", "data"})
     # …while the rest of each prefix keeps its single real module.
     assert classify_path("/open-positions/today") == "data"
     assert classify_path("/client-return-rate/cache") == "risk"
+    assert classify_path("/ib-data/region-query") == "data"
     # …and the home page's own router is the plain module, not a set.
     assert classify_path("/dashboard/pnl-history") == "dashboard"
 

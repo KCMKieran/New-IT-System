@@ -39,6 +39,9 @@ PROBE_PATHS = [
     "/open-positions/today",
     "/client-return-rate/query",
     "/client-return-rate/cache",
+    "/ib-data/query",
+    "/ib-data/last-run",
+    "/ib-data/region-query",
     "/admin/users",
     "/login-ip/search",
     "/ib-financial/query",
@@ -279,6 +282,27 @@ def test_a_shared_endpoint_answers_to_either_of_its_modules(client):
     assert client.get(
         "/api/v1/dashboard/pnl-history", headers=_bearer(risk_only)
     ).status_code == 403
+
+
+def test_cs_reaches_the_shared_ib_card_but_not_the_region_roll_up(client):
+    """/cs/ib-deposits renders the IB card from /warehouse/ib-data (2026-08-25).
+
+    The page is one shared component, so its two endpoints answer to `cs` as
+    well as `data`. What must NOT come along is the rest of the prefix:
+    region-query is the firm-wide CN/Global deposit roll-up, which is why the
+    carve-out names two paths instead of widening ("ib-data",) to a set.
+    """
+    cs_only = _mint(STAFF, allowed_modules='["cs"]')
+    for path in ("/ib-data/query", "/ib-data/last-run"):
+        assert client.get(f"/api/v1{path}", headers=_bearer(cs_only)).status_code == 200, path
+    assert client.get(
+        "/api/v1/ib-data/region-query", headers=_bearer(cs_only)
+    ).status_code == 403
+
+    # …and the original page's own module keeps all three.
+    data_only = _mint(STAFF, allowed_modules='["data"]')
+    for path in ("/ib-data/query", "/ib-data/region-query"):
+        assert client.get(f"/api/v1{path}", headers=_bearer(data_only)).status_code == 200, path
 
 
 def test_a_refusal_on_a_shared_endpoint_names_both_modules(client):
