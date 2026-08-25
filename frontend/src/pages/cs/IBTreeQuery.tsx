@@ -25,6 +25,7 @@ import {
 import { Search, Copy, Check } from "lucide-react";
 import { toast } from "sonner";
 import { apiFetch } from "@/lib/fetch";
+import { useI18n } from "@/components/i18n-provider";
 import { crmUserUrl } from "@/lib/crm-links";
 
 interface IBTreeNode {
@@ -70,6 +71,7 @@ async function copyText(text: string): Promise<boolean> {
 }
 
 export default function IBTreeQuery() {
+  const { t } = useI18n();
   const [clientId, setClientId] = useState("");
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<IBTreeResponse | null>(null);
@@ -94,19 +96,19 @@ export default function IBTreeQuery() {
       const ok = await copyText(text);
       if (ok) {
         showCopied();
-        if (!silent) toast.success("已复制到剪贴板");
+        if (!silent) toast.success(t("ibTreeQueryPage.copiedToast"));
       } else if (!silent) {
-        toast.error("复制失败，请手动选中文本复制");
+        toast.error(t("ibTreeQueryPage.copyFailed"));
       }
       return ok;
     },
-    [showCopied],
+    [showCopied, t],
   );
 
   const handleQuery = useCallback(async () => {
     const id = clientId.trim();
     if (!id || !/^\d+$/.test(id)) {
-      setError("请输入纯数字客户ID");
+      setError(t("ibTreeQueryPage.errors.idMustBeNumeric"));
       setResult(null);
       return;
     }
@@ -116,12 +118,14 @@ export default function IBTreeQuery() {
       const res = await apiFetch(`/api/v1/ib-tree/${id}`);
       if (res.status === 404) {
         setResult(null);
-        setError(`未找到客户 ${id}`);
+        setError(t("ibTreeQueryPage.errors.notFound", { id }));
         return;
       }
       if (!res.ok) {
         const body = await res.json().catch(() => null);
-        throw new Error(body?.detail || `查询失败 (HTTP ${res.status})`);
+        throw new Error(
+          body?.detail || t("ibTreeQueryPage.errors.httpFailed", { status: res.status }),
+        );
       }
       const data: IBTreeResponse = await res.json();
       setResult(data);
@@ -131,18 +135,18 @@ export default function IBTreeQuery() {
       const ok = await copyText(data.chain_text);
       if (ok) {
         showCopied();
-        toast.success("查询成功，链条已复制到剪贴板");
+        toast.success(t("ibTreeQueryPage.querySuccess"));
       } else {
-        toast.warning("自动复制失败，请点「复制」按钮", { duration: 6000 });
+        toast.warning(t("ibTreeQueryPage.autoCopyFailed"), { duration: 6000 });
       }
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return;
       setResult(null);
-      setError(err instanceof Error ? err.message : "查询失败，请稍后重试");
+      setError(err instanceof Error ? err.message : t("ibTreeQueryPage.errors.generic"));
     } finally {
       setLoading(false);
     }
-  }, [clientId, showCopied]);
+  }, [clientId, showCopied, t]);
 
   return (
     <div className="flex-1 space-y-4 p-4 md:p-6">
@@ -152,7 +156,7 @@ export default function IBTreeQuery() {
           <Input
             autoFocus
             inputMode="numeric"
-            placeholder="输入客户ID，如 170799"
+            placeholder={t("ibTreeQueryPage.inputPlaceholder")}
             value={clientId}
             onChange={(e) => setClientId(e.target.value)}
             onKeyDown={(e) => {
@@ -162,10 +166,10 @@ export default function IBTreeQuery() {
           />
           <Button onClick={handleQuery} disabled={loading}>
             <Search className="h-4 w-4 mr-1.5" />
-            {loading ? "查询中..." : "查询"}
+            {loading ? t("ibTreeQueryPage.querying") : t("ibTreeQueryPage.query")}
           </Button>
           <p className="text-xs text-muted-foreground">
-            输入 CRM 客户ID，回车即可查询；成功后链条自动复制，直接粘贴给场地。
+            {t("ibTreeQueryPage.hint")}
           </p>
         </div>
       </div>
@@ -181,7 +185,7 @@ export default function IBTreeQuery() {
           {/* Copy area — the deliverable */}
           <Card className="gap-3">
             <CardHeader>
-              <CardTitle className="text-base">IB Tree 链条</CardTitle>
+              <CardTitle className="text-base">{t("ibTreeQueryPage.chainTitle")}</CardTitle>
             </CardHeader>
             <CardContent>
               <div className="flex flex-wrap items-center gap-3 [&>button]:min-w-[112px]">
@@ -195,12 +199,12 @@ export default function IBTreeQuery() {
                   {copied ? (
                     <>
                       <Check className="h-4 w-4 mr-1.5" />
-                      已复制
+                      {t("ibTreeQueryPage.copied")}
                     </>
                   ) : (
                     <>
                       <Copy className="h-4 w-4 mr-1.5" />
-                      复制
+                      {t("ibTreeQueryPage.copy")}
                     </>
                   )}
                 </Button>
@@ -211,7 +215,7 @@ export default function IBTreeQuery() {
           {/* Chain detail — for eyeballing before pasting */}
           <Card className="gap-3">
             <CardHeader>
-              <CardTitle className="text-base">链条明细</CardTitle>
+              <CardTitle className="text-base">{t("ibTreeQueryPage.detailTitle")}</CardTitle>
             </CardHeader>
             <CardContent>
               <div className="overflow-hidden rounded-xl border bg-card">
@@ -219,7 +223,7 @@ export default function IBTreeQuery() {
                   <TableHeader className="bg-black [&_th]:font-semibold [&_th]:text-white [&_th:first-child]:rounded-tl-xl [&_th:last-child]:rounded-tr-xl">
                     <TableRow>
                       <TableHead className="w-40">Client ID</TableHead>
-                      <TableHead>姓名</TableHead>
+                      <TableHead>{t("ibTreeQueryPage.name")}</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -249,8 +253,10 @@ export default function IBTreeQuery() {
                 </Table>
               </div>
               <p className="mt-2 text-xs text-muted-foreground">
-                查询耗时 {result.query_time_ms.toFixed(0)} ms
-                {result.sales_code ? ` · 销售代码 ${result.sales_code}` : " · 无销售代码"}
+                {t("ibTreeQueryPage.footer", { ms: result.query_time_ms.toFixed(0) })}
+                {result.sales_code
+                  ? t("ibTreeQueryPage.salesCode", { code: result.sales_code })
+                  : t("ibTreeQueryPage.noSalesCode")}
               </p>
             </CardContent>
           </Card>

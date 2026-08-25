@@ -41,6 +41,7 @@ import {
   Calendar as CalendarIcon,
 } from "lucide-react";
 import { apiFetch } from "@/lib/fetch";
+import { useI18n } from "@/components/i18n-provider";
 import { DateRange } from "react-day-picker";
 import { format } from "date-fns";
 import { cn } from "@/lib/utils";
@@ -81,6 +82,7 @@ function SnapshotSection({
   const [scanning, setScanning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const { t } = useI18n();
   const [downloading, setDownloading] = useState(false);
 
   const load = useCallback(() => {
@@ -109,7 +111,9 @@ function SnapshotSection({
       const res = await apiFetch("/api/v1/cs/fund-flow/scan-now", { method: "POST" });
       if (!res.ok) {
         const txt = await res.text();
-        throw new Error(`扫描失败 ${res.status}: ${txt}`);
+        throw new Error(
+          t("fundFlowPage.common.scanFailed", { status: res.status, detail: txt }),
+        );
       }
       const data: FundFlowSnapshot = await res.json();
       setSnapshot(data);
@@ -130,7 +134,8 @@ function SnapshotSection({
     setError(null);
     try {
       const res = await apiFetch("/api/v1/cs/fund-flow/export");
-      if (!res.ok) throw new Error(`导出失败 ${res.status}`);
+      if (!res.ok)
+        throw new Error(t("fundFlowPage.common.exportFailed", { status: res.status }));
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -153,28 +158,34 @@ function SnapshotSection({
     <section className="space-y-3">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <div>
-          <h2 className="text-lg font-semibold">上周快照</h2>
+          <h2 className="text-lg font-semibold">{t("fundFlowPage.snapshot.title")}</h2>
           <p className="text-xs text-muted-foreground">
             {batch ? (
               <>
-                扫描时间：{fmtHkt(batch.scanned_at)}　·　窗口：{fmtHkt(batch.window_start)} ~ {fmtHkt(batch.window_end)}
-                　·　总命中 {batch.total_alerts}
+                {t("fundFlowPage.snapshot.meta", {
+                  scannedAt: fmtHkt(batch.scanned_at),
+                  start: fmtHkt(batch.window_start),
+                  end: fmtHkt(batch.window_end),
+                  total: batch.total_alerts,
+                })}
                 <Badge variant="outline" className="ml-1 text-xs">
                   {batch.trigger_source || "cron"}
                 </Badge>
               </>
             ) : (
-              "暂无扫描记录 — 点击「立即重扫」或等待每周一 08:00 自动扫描"
+              t("fundFlowPage.snapshot.empty")
             )}
           </p>
         </div>
         <div className="flex gap-2">
           <Button size="sm" variant="outline" onClick={() => setDrawerOpen(true)}>
-            <Settings2 className="h-4 w-4 mr-1" /> 规则配置
+            <Settings2 className="h-4 w-4 mr-1" /> {t("fundFlowPage.snapshot.rules")}
           </Button>
           <Button size="sm" variant="outline" onClick={triggerScan} disabled={scanning}>
             <RefreshCw className={cn("h-4 w-4 mr-1", scanning && "animate-spin")} />
-            {scanning ? "扫描中…" : "立即重扫"}
+            {scanning
+              ? t("fundFlowPage.snapshot.rescanning")
+              : t("fundFlowPage.snapshot.rescan")}
           </Button>
           <Button
             size="sm"
@@ -182,19 +193,26 @@ function SnapshotSection({
             onClick={downloadCsv}
             disabled={downloading}
           >
-            <Download className="h-4 w-4 mr-1" /> {downloading ? "导出中…" : "CSV"}
+            <Download className="h-4 w-4 mr-1" />{" "}
+            {downloading ? t("fundFlowPage.snapshot.exporting") : "CSV"}
           </Button>
         </div>
       </div>
 
-      {error && <p className="text-sm text-destructive">错误：{error}</p>}
+      {error && (
+        <p className="text-sm text-destructive">
+          {t("fundFlowPage.common.error", { message: error })}
+        </p>
+      )}
 
       <AlertsGrid
         rows={snapshot?.alerts ?? []}
         loading={loading}
         onRowClick={onRowClick}
         height={360}
-        emptyMessage={loading ? "加载中…" : "暂无命中客户"}
+        emptyMessage={
+          loading ? t("fundFlowPage.common.loading") : t("fundFlowPage.grid.empty")
+        }
       />
 
       <RulesDrawer open={drawerOpen} onOpenChange={setDrawerOpen} onSaved={load} />
@@ -244,6 +262,7 @@ function AdHocSection({
   const [result, setResult] = useState<FundFlowQueryResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const { t } = useI18n();
 
   const setPreset = (p: AdHocFormState["preset"]) => {
     setForm((prev) => ({
@@ -255,7 +274,7 @@ function AdHocSection({
 
   const runQuery = async () => {
     if (!form.range?.from || !form.range?.to) {
-      setError("请选择日期范围");
+      setError(t("fundFlowPage.common.pickDateRange"));
       return;
     }
     setLoading(true);
@@ -287,7 +306,9 @@ function AdHocSection({
       });
       if (!res.ok) {
         const txt = await res.text();
-        throw new Error(`查询失败 ${res.status}: ${txt}`);
+        throw new Error(
+          t("fundFlowPage.common.queryFailed", { status: res.status, detail: txt }),
+        );
       }
       setResult(await res.json());
     } catch (e) {
@@ -300,9 +321,9 @@ function AdHocSection({
   return (
     <section className="space-y-3">
       <div>
-        <h2 className="text-lg font-semibold">主动查询</h2>
+        <h2 className="text-lg font-semibold">{t("fundFlowPage.adhoc.title")}</h2>
         <p className="text-xs text-muted-foreground">
-          自定义时间范围 + 阈值，按需查 — 不写入历史。
+          {t("fundFlowPage.adhoc.subtitle")}
         </p>
       </div>
 
@@ -310,7 +331,7 @@ function AdHocSection({
         <CardContent className="pt-4 pb-4 space-y-3">
           <div className="flex flex-wrap items-end gap-3">
             <div className="space-y-1">
-              <Label className="text-xs">日期范围</Label>
+              <Label className="text-xs">{t("fundFlowPage.adhoc.dateRange")}</Label>
               <div className="flex gap-1">
                 {(["7d", "14d", "30d", "custom"] as const).map((p) => (
                   <Button
@@ -319,7 +340,7 @@ function AdHocSection({
                     variant={form.preset === p ? "default" : "outline"}
                     onClick={() => setPreset(p)}
                   >
-                    {p === "custom" ? "自定义" : p}
+                    {p === "custom" ? t("fundFlowPage.adhoc.custom") : p}
                   </Button>
                 ))}
               </div>
@@ -341,7 +362,7 @@ function AdHocSection({
                       {format(form.range.to, "yyyy-MM-dd")}
                     </>
                   ) : (
-                    "选择日期"
+                    t("fundFlowPage.adhoc.pickDate")
                   )}
                 </Button>
               </PopoverTrigger>
@@ -359,7 +380,7 @@ function AdHocSection({
 
             <Button onClick={runQuery} disabled={loading} className="ml-auto">
               <Search className={cn("h-4 w-4 mr-1", loading && "animate-pulse")} />
-              {loading ? "查询中…" : "执行查询"}
+              {loading ? t("fundFlowPage.adhoc.running") : t("fundFlowPage.adhoc.run")}
             </Button>
           </div>
 
@@ -367,7 +388,7 @@ function AdHocSection({
 
           <div className="grid grid-cols-2 md:grid-cols-6 gap-3 text-sm">
             <div className="space-y-1">
-              <Label className="text-xs">入金次数 ≥</Label>
+              <Label className="text-xs">{t("fundFlowPage.filters.minDepositCount")}</Label>
               <Input
                 type="number"
                 min={0}
@@ -376,7 +397,7 @@ function AdHocSection({
               />
             </div>
             <div className="space-y-1">
-              <Label className="text-xs">出金次数 ≥</Label>
+              <Label className="text-xs">{t("fundFlowPage.filters.minWithdrawCount")}</Label>
               <Input
                 type="number"
                 min={0}
@@ -385,7 +406,7 @@ function AdHocSection({
               />
             </div>
             <div className="space-y-1">
-              <Label className="text-xs">组合</Label>
+              <Label className="text-xs">{t("fundFlowPage.filters.combine")}</Label>
               <Select
                 value={form.combine}
                 onValueChange={(v) =>
@@ -402,7 +423,7 @@ function AdHocSection({
               </Select>
             </div>
             <div className="space-y-1">
-              <Label className="text-xs">交易笔数 ≤</Label>
+              <Label className="text-xs">{t("fundFlowPage.filters.maxTradeCount")}</Label>
               <Input
                 type="number"
                 min={0}
@@ -413,7 +434,7 @@ function AdHocSection({
               />
             </div>
             <div className="space-y-1">
-              <Label className="text-xs">入金额 ≥ ($)</Label>
+              <Label className="text-xs">{t("fundFlowPage.filters.minDepositAmount")}</Label>
               <Input
                 type="number"
                 min={0}
@@ -421,11 +442,11 @@ function AdHocSection({
                 onChange={(e) =>
                   setForm((p) => ({ ...p, minDepAmt: e.target.value }))
                 }
-                placeholder="不限"
+                placeholder={t("fundFlowPage.filters.unlimited")}
               />
             </div>
             <div className="space-y-1">
-              <Label className="text-xs">出金额 ≥ ($)</Label>
+              <Label className="text-xs">{t("fundFlowPage.filters.minWithdrawAmount")}</Label>
               <Input
                 type="number"
                 min={0}
@@ -433,14 +454,18 @@ function AdHocSection({
                 onChange={(e) =>
                   setForm((p) => ({ ...p, minWdAmt: e.target.value }))
                 }
-                placeholder="不限"
+                placeholder={t("fundFlowPage.filters.unlimited")}
               />
             </div>
           </div>
         </CardContent>
       </Card>
 
-      {error && <p className="text-sm text-destructive">错误：{error}</p>}
+      {error && (
+        <p className="text-sm text-destructive">
+          {t("fundFlowPage.common.error", { message: error })}
+        </p>
+      )}
 
       <AlertsGrid
         rows={result?.alerts ?? []}
@@ -448,13 +473,20 @@ function AdHocSection({
         onRowClick={onRowClick}
         height={420}
         emptyMessage={
-          loading ? "查询中…" : result ? "无命中" : "点击执行查询查看结果"
+          loading
+            ? t("fundFlowPage.adhoc.running")
+            : result
+              ? t("fundFlowPage.adhoc.noHit")
+              : t("fundFlowPage.adhoc.idle")
         }
       />
 
       {result && (
         <p className="text-xs text-muted-foreground">
-          查询耗时 {result.query_time_ms} ms　·　共 {result.alerts.length} 行
+          {t("fundFlowPage.adhoc.footer", {
+            ms: result.query_time_ms,
+            rows: result.alerts.length,
+          })}
           {result.from_cache && (
             <Badge variant="outline" className="ml-2 text-xs">
               cached

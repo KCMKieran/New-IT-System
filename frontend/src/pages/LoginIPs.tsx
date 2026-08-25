@@ -24,27 +24,30 @@ import { ReportTab } from "./login-ip/ReportTab";
 import { WatchlistTab } from "./login-ip/WatchlistTab";
 import { SearchTab } from "./login-ip/SearchTab";
 import { OperationsTab } from "./login-ip/OperationsTab";
+import { useI18n } from "@/components/i18n-provider";
 
 export default function LoginIPsPage() {
+  const { t } = useI18n();
+
   return (
     <div className="flex-1 space-y-4 p-4 md:p-6">
       <Tabs defaultValue="report" className="w-full">
         <TabsList className="grid w-full max-w-2xl grid-cols-4">
           <TabsTrigger value="report" className="gap-1.5">
             <IconReport className="h-4 w-4" />
-            每日报告
+            {t("loginIpsPage.tabs.report")}
           </TabsTrigger>
           <TabsTrigger value="watchlist" className="gap-1.5">
             <IconUsers className="h-4 w-4" />
-            监控账户
+            {t("loginIpsPage.tabs.watchlist")}
           </TabsTrigger>
           <TabsTrigger value="search" className="gap-1.5">
             <IconSearch className="h-4 w-4" />
-            手动搜索
+            {t("loginIpsPage.tabs.search")}
           </TabsTrigger>
           <TabsTrigger value="ops" className="gap-1.5">
             <IconSettings className="h-4 w-4" />
-            运维
+            {t("loginIpsPage.tabs.ops")}
           </TabsTrigger>
         </TabsList>
 
