@@ -84,11 +84,18 @@ interface IbidLotsRequest {
   custom_symbols?: string[];
 }
 
+// Hold-time buckets: lots_below_10s / lots_10s_to_3min / lots_above_3min
+// are mutually exclusive and sum to total_lots. `lots_above_10s` is the
+// legacy two-way split the backend still returns (it equals the last two
+// summed); it is deliberately not rendered — four lot columns side by side
+// read as if they should add up to the total, and they do not.
 interface SymbolStat {
   symbol: string;
   total_lots: number;
   lots_above_10s: number;
   lots_below_10s: number;
+  lots_10s_to_3min: number;
+  lots_above_3min: number;
 }
 
 interface UserStat {
@@ -96,6 +103,8 @@ interface UserStat {
   total_lots: number;
   lots_above_10s: number;
   lots_below_10s: number;
+  lots_10s_to_3min: number;
+  lots_above_3min: number;
   total_tickets: number;
   cen: boolean;
 }
@@ -109,6 +118,8 @@ interface IbidLotsResponse {
   total_volume: number;
   total_above_10s: number;
   total_below_10s: number;
+  total_10s_to_3min: number;
+  total_above_3min: number;
   total_tickets: number;
   symbol_stats: SymbolStat[];
   user_stats: UserStat[];
@@ -492,9 +503,26 @@ export default function IbidLotsPage() {
         }),
       },
       {
-        colId: "lots_above_10s",
-        field: "lots_above_10s",
-        headerName: t("ibidLotsPage.columns.lotsAbove10s"),
+        colId: "lots_10s_to_3min",
+        field: "lots_10s_to_3min",
+        headerName: t("ibidLotsPage.columns.lots10sTo3min"),
+        width: 140,
+        type: "rightAligned",
+        headerComponent: InfoHeader,
+        headerComponentParams: {
+          tooltip: t("ibidLotsPage.columns.holdBucketTooltip"),
+        },
+        valueFormatter: (p) => fmtLots(p.value),
+        cellStyle: () => ({
+          ...WRAP_CELL_STYLE,
+          textAlign: "right",
+          fontVariantNumeric: "tabular-nums",
+        }),
+      },
+      {
+        colId: "lots_above_3min",
+        field: "lots_above_3min",
+        headerName: t("ibidLotsPage.columns.lotsAbove3min"),
         width: 130,
         type: "rightAligned",
         valueFormatter: (p) => fmtLots(p.value),
@@ -855,19 +883,23 @@ export default function IbidLotsPage() {
         <>
           {/* Overview */}
           <div className="rounded-xl border bg-card px-4 py-3">
-            <div className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-3 lg:grid-cols-5">
+            <div className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-3 lg:grid-cols-6">
               <Stat
                 label={t("ibidLotsPage.stats.totalLots")}
                 value={fmtLots(result.total_volume)}
               />
               <Stat
-                label={t("ibidLotsPage.stats.above10s")}
-                value={fmtLots(result.total_above_10s)}
-              />
-              <Stat
                 label={t("ibidLotsPage.stats.below10s")}
                 value={fmtLots(result.total_below_10s)}
                 valueClassName={BELOW_10S_CLASS}
+              />
+              <Stat
+                label={t("ibidLotsPage.stats.mid10sTo3min")}
+                value={fmtLots(result.total_10s_to_3min)}
+              />
+              <Stat
+                label={t("ibidLotsPage.stats.above3min")}
+                value={fmtLots(result.total_above_3min)}
               />
               <Stat
                 label={t("ibidLotsPage.stats.totalTickets")}
@@ -915,10 +947,13 @@ export default function IbidLotsPage() {
                           {t("ibidLotsPage.columns.totalLots")}
                         </TableHead>
                         <TableHead className="text-right">
-                          {t("ibidLotsPage.columns.lotsAbove10s")}
+                          {t("ibidLotsPage.columns.lotsBelow10s")}
                         </TableHead>
                         <TableHead className="text-right">
-                          {t("ibidLotsPage.columns.lotsBelow10s")}
+                          {t("ibidLotsPage.columns.lots10sTo3min")}
+                        </TableHead>
+                        <TableHead className="text-right">
+                          {t("ibidLotsPage.columns.lotsAbove3min")}
                         </TableHead>
                       </TableRow>
                     </TableHeader>
@@ -931,13 +966,16 @@ export default function IbidLotsPage() {
                           <TableCell className="text-right font-semibold tabular-nums">
                             {fmtLots(s.total_lots)}
                           </TableCell>
-                          <TableCell className="text-right tabular-nums">
-                            {fmtLots(s.lots_above_10s)}
-                          </TableCell>
                           <TableCell
                             className={cn("text-right tabular-nums", BELOW_10S_CLASS)}
                           >
                             {fmtLots(s.lots_below_10s)}
+                          </TableCell>
+                          <TableCell className="text-right tabular-nums">
+                            {fmtLots(s.lots_10s_to_3min)}
+                          </TableCell>
+                          <TableCell className="text-right tabular-nums">
+                            {fmtLots(s.lots_above_3min)}
                           </TableCell>
                         </TableRow>
                       ))}

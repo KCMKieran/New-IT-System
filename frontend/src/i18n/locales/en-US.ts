@@ -174,10 +174,13 @@ export const enUS = {
     columns: {
       userId: "User ID",
       totalLots: "Total lots",
-      lotsAbove10s: "Lots held ≥10s",
       lotsBelow10s: "Lots held <10s",
+      lots10sTo3min: "Lots held 10s–3min",
+      lotsAbove3min: "Lots held ≥3min",
       lotsBelow10sTooltip:
         "Lots opened and closed within 10 seconds — an indicator for scalping / volume-farming behaviour. The number itself is neither good nor bad.",
+      holdBucketTooltip:
+        "Hold time splits every fill into exactly one of three buckets: <10s, 10s–3min and ≥3min. Boundary values go to the longer bucket, so the three columns add up to total lots.",
       totalTickets: "Tickets",
     },
     form: {
@@ -205,8 +208,9 @@ export const enUS = {
     },
     stats: {
       totalLots: "Total lots",
-      above10s: "Lots held ≥10s",
       below10s: "Lots held <10s",
+      mid10sTo3min: "Lots held 10s–3min",
+      above3min: "Lots held ≥3min",
       totalTickets: "Total tickets",
       accountCount: "Accounts",
     },

@@ -90,12 +90,20 @@ class IbidLotsQueryRequest(BaseModel):
 
 
 class IbidLotsSymbolStat(BaseModel):
-    """Per-product totals, CEN-normalized, sorted by total_lots desc."""
+    """Per-product totals, CEN-normalized, sorted by total_lots desc.
+
+    Hold-time comes in two overlapping shapes: the legacy two-way split
+    (`lots_above_10s` / `lots_below_10s`) and the three mutually exclusive
+    buckets the UI shows (`lots_below_10s` / `lots_10s_to_3min` /
+    `lots_above_3min`), which sum to `total_lots`.
+    """
 
     symbol: str
     total_lots: float
     lots_above_10s: float
     lots_below_10s: float
+    lots_10s_to_3min: float = 0.0
+    lots_above_3min: float = 0.0
 
 
 class IbidLotsUserStat(BaseModel):
@@ -106,6 +114,8 @@ class IbidLotsUserStat(BaseModel):
     total_lots: float
     lots_above_10s: float
     lots_below_10s: float
+    lots_10s_to_3min: float = 0.0
+    lots_above_3min: float = 0.0
     total_tickets: int
     cen: bool  # true when any of the client's accounts is a CEN account (lots already ÷100)
 
@@ -119,6 +129,8 @@ class IbidLotsQueryResponse(BaseModel):
     total_volume: float
     total_above_10s: float
     total_below_10s: float
+    total_10s_to_3min: float = 0.0
+    total_above_3min: float = 0.0
     total_tickets: int
     symbol_stats: List[IbidLotsSymbolStat] = Field(default_factory=list)
     user_stats: List[IbidLotsUserStat] = Field(default_factory=list)

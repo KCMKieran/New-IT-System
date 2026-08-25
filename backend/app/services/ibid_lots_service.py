@@ -25,9 +25,16 @@ logger = logging.getLogger(__name__)
 # (loginSid, SYMBOL), so concatenating batch results yields no duplicates.
 TRADES_BATCH_SIZE = 400
 
-# Fast-trade threshold: trades closed under 10 seconds after opening are split
-# out into their own bucket (the desk treats them as non-genuine volume).
+# Hold-time bucket boundaries, in seconds. Every fill lands in exactly one of
+# three buckets by TIMESTAMPDIFF(SECOND, OPEN_TIME, CLOSE_TIME):
+#   <10s            — scalping / volume-farming shape, the desk's original ask
+#   10s .. <3min    — short but not machine-fast
+#   >=3min          — ordinary holds
+# Boundaries belong to the upper bucket (10s -> middle, 180s -> long), and the
+# three buckets sum to total_lots. `lots_above_10s` is still emitted alongside
+# them for the legacy two-way split and equals middle + long.
 FAST_TRADE_SECONDS = 10
+LONG_TRADE_SECONDS = 180
 
 TREE_QUERY = "SELECT referralId FROM fxbackoffice.ib_tree_with_self WHERE ibId = %s"
 TREE_QUERY_DIRECT = TREE_QUERY + " AND level = 0"
@@ -52,6 +59,9 @@ TRADES_QUERY = """
         SYMBOL as symbol,
         SUM(CASE WHEN TIMESTAMPDIFF(SECOND, OPEN_TIME, CLOSE_TIME) >= {fast_seconds} THEN lots ELSE 0 END) AS lots_above_10s,
         SUM(CASE WHEN TIMESTAMPDIFF(SECOND, OPEN_TIME, CLOSE_TIME) < {fast_seconds} THEN lots ELSE 0 END) AS lots_below_10s,
+        SUM(CASE WHEN TIMESTAMPDIFF(SECOND, OPEN_TIME, CLOSE_TIME) >= {fast_seconds}
+                  AND TIMESTAMPDIFF(SECOND, OPEN_TIME, CLOSE_TIME) < {long_seconds} THEN lots ELSE 0 END) AS lots_10s_to_3min,
+        SUM(CASE WHEN TIMESTAMPDIFF(SECOND, OPEN_TIME, CLOSE_TIME) >= {long_seconds} THEN lots ELSE 0 END) AS lots_above_3min,
         SUM(lots) AS total_lots,
         COUNT(*) AS total_tickets
     FROM
@@ -116,6 +126,8 @@ def _empty_response(
         total_volume=0.0,
         total_above_10s=0.0,
         total_below_10s=0.0,
+        total_10s_to_3min=0.0,
+        total_above_3min=0.0,
         total_tickets=0,
         symbol_stats=[],
         user_stats=[],
@@ -202,6 +214,7 @@ def _fetch_trade_rows(
         batch = login_sids[bi * TRADES_BATCH_SIZE:(bi + 1) * TRADES_BATCH_SIZE]
         sql = TRADES_QUERY.format(
             fast_seconds=FAST_TRADE_SECONDS,
+            long_seconds=LONG_TRADE_SECONDS,
             login_placeholders=",".join(["%s"] * len(batch)),
             symbol_filter=symbol_filter,
         )
@@ -253,6 +266,8 @@ def query_tobe_global_lots(
     total_vol = 0.0
     total_above = 0.0
     total_below = 0.0
+    total_mid = 0.0
+    total_long = 0.0
     by_symbol: Dict[str, Dict[str, float]] = {}
     by_user: Dict[Any, Dict[str, Any]] = {}
 
@@ -261,6 +276,8 @@ def query_tobe_global_lots(
         v_total = float(row["total_lots"] or 0)
         v_above = float(row["lots_above_10s"] or 0)
         v_below = float(row["lots_below_10s"] or 0)
+        v_mid = float(row["lots_10s_to_3min"] or 0)
+        v_long = float(row["lots_above_3min"] or 0)
 
         # CEN (cent) accounts quote lots at 100x the standard lot — normalize
         # so a mixed IB's totals are comparable. Ticket counts are untouched.
@@ -269,28 +286,39 @@ def query_tobe_global_lots(
             v_total /= 100
             v_above /= 100
             v_below /= 100
+            v_mid /= 100
+            v_long /= 100
 
         tickets = int(row["total_tickets"] or 0)
 
         total_vol += v_total
         total_above += v_above
         total_below += v_below
+        total_mid += v_mid
+        total_long += v_long
 
         sym = by_symbol.setdefault(
-            row["symbol"], {"total_lots": 0.0, "lots_above_10s": 0.0, "lots_below_10s": 0.0}
+            row["symbol"],
+            {"total_lots": 0.0, "lots_above_10s": 0.0, "lots_below_10s": 0.0,
+             "lots_10s_to_3min": 0.0, "lots_above_3min": 0.0},
         )
         sym["total_lots"] += v_total
         sym["lots_above_10s"] += v_above
         sym["lots_below_10s"] += v_below
+        sym["lots_10s_to_3min"] += v_mid
+        sym["lots_above_3min"] += v_long
 
         usr = by_user.setdefault(
             u_id,
             {"total_lots": 0.0, "lots_above_10s": 0.0, "lots_below_10s": 0.0,
+             "lots_10s_to_3min": 0.0, "lots_above_3min": 0.0,
              "total_tickets": 0, "cen": False},
         )
         usr["total_lots"] += v_total
         usr["lots_above_10s"] += v_above
         usr["lots_below_10s"] += v_below
+        usr["lots_10s_to_3min"] += v_mid
+        usr["lots_above_3min"] += v_long
         usr["total_tickets"] += tickets
         # cen = any: flags the client so the UI can note lots were normalized.
         usr["cen"] = usr["cen"] or is_cen
@@ -303,6 +331,8 @@ def query_tobe_global_lots(
             total_lots=round(agg["total_lots"], 3),
             lots_above_10s=round(agg["lots_above_10s"], 3),
             lots_below_10s=round(agg["lots_below_10s"], 3),
+            lots_10s_to_3min=round(agg["lots_10s_to_3min"], 3),
+            lots_above_3min=round(agg["lots_above_3min"], 3),
         )
         for name, agg in sorted(
             sorted(by_symbol.items(), key=lambda kv: kv[0]),
@@ -317,6 +347,8 @@ def query_tobe_global_lots(
             total_lots=round(agg["total_lots"], 3),
             lots_above_10s=round(agg["lots_above_10s"], 3),
             lots_below_10s=round(agg["lots_below_10s"], 3),
+            lots_10s_to_3min=round(agg["lots_10s_to_3min"], 3),
+            lots_above_3min=round(agg["lots_above_3min"], 3),
             total_tickets=agg["total_tickets"],
             cen=bool(agg["cen"]),
         )
@@ -343,6 +375,8 @@ def query_tobe_global_lots(
         total_volume=round(total_vol, 3),
         total_above_10s=round(total_above, 3),
         total_below_10s=round(total_below, 3),
+        total_10s_to_3min=round(total_mid, 3),
+        total_above_3min=round(total_long, 3),
         total_tickets=total_tickets,
         symbol_stats=symbol_stats,
         user_stats=user_stats,
