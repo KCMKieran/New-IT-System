@@ -190,9 +190,10 @@ somebody is wrongly refused — and the module gate would answer "which module i
 #   * a frozenset of module keys -> ANY ONE of them is enough.
 #
 # The any-of form (2026-08-19, added with the `dashboard` module) is for an
-# endpoint that is genuinely the data source of two pages in two modules. Both
-# of today's cases are home-page widgets that call a gated page's own endpoint
-# instead of a summary of their own.
+# endpoint that is genuinely the data source of two pages in two modules. Two of
+# today's cases are home-page widgets that call a gated page's own endpoint
+# instead of a summary of their own; the third (2026-08-25) is one CARD rendered
+# by two pages in two departments.
 #
 # ⚠ Any-of WIDENS, so it is the right shape only when one path really does serve
 # two audiences — never as a way of not deciding. And the gate can only answer
@@ -207,12 +208,16 @@ somebody is wrongly refused — and the module gate would answer "which module i
 # window-scan endpoint. Tuple matching cannot make that mistake at all — it is
 # not "remember to sort the table", it is "the mistake is unrepresentable".
 #
-# Two prefixes need an exact-path carve-out (the longer tuple simply wins):
+# Three prefixes need an exact-path carve-out (the longer tuple simply wins):
 #   /open-positions/symbol-summary  -> home-page PositionSummary widget + /position
 #   /client-return-rate/query       -> home-page ReturnRateSummary widget + /client-return-rate
-# Each feeds a home-page widget while the rest of its prefix is a different
-# module's page, so the carve-out is what stops "dashboard but not data" (or
-# "data but not dashboard") from blanking one of them.
+#   /ib-data/{query,last-run}       -> /warehouse/ib-data (data) + /cs/ib-deposits (cs)
+# The first two feed a home-page widget while the rest of their prefix is a
+# different module's page, so the carve-out is what stops "dashboard but not
+# data" (or "data but not dashboard") from blanking one of them. The third is
+# the same IB card rendered on a Data Query page and on a CS page, while
+# /ib-data/region-query — the firm-wide CN/Global roll-up, which CS does not get
+# — keeps the prefix's plain `data`.
 ModulePolicy = str | frozenset[str]
 
 MODULE_MAP: dict[tuple[str, ...], ModulePolicy] = {
@@ -240,6 +245,12 @@ MODULE_MAP: dict[tuple[str, ...], ModulePolicy] = {
     ("cs",): "cs",
     ("ibid-lots",): "cs",
     ("ib-tree",): "cs",
+    # /cs/ib-deposits (2026-08-25) renders the same IB card as /warehouse/ib-data,
+    # so these two endpoints genuinely serve two pages in two modules. Only these
+    # two: ("ib-data", "region-query") is the firm-wide CN/Global roll-up and
+    # stays `data`, which is why the prefix below is not simply widened.
+    ("ib-data", "query"): frozenset({"cs", "data"}),
+    ("ib-data", "last-run"): frozenset({"cs", "data"}),
     # ── data ─────────────────────────────────────────────────────────────────
     ("ib-financial",): "data",
     ("ib-data",): "data",

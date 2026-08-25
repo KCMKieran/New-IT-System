@@ -86,6 +86,9 @@ export const PAGE_POLICIES: Record<string, PagePolicy> = {
   "/ibid-lots": "cs",
   "/cs/fund-flow-monitor": "cs",
   "/cs/ib-tree": "cs",
+  // The IB half of /warehouse/ib-data, copied here for CS. Its two endpoints
+  // are an any-of carve-out server-side ({cs, data}) — see MODULE_MAP.
+  "/cs/ib-deposits": "cs",
 
   // ── data ───────────────────────────────────────────────────────────────────
   "/hold-bucket-report": "data",

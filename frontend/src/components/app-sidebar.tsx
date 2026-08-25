@@ -80,6 +80,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
             { title: t("nav.ibidLots"), url: "/ibid-lots" },
             { title: t("nav.fundFlowMonitor"), url: "/cs/fund-flow-monitor" },
             { title: t("nav.ibTreeQuery"), url: "/cs/ib-tree" },
+            { title: t("nav.csIbDeposits"), url: "/cs/ib-deposits" },
             // [HIDDEN] ClientPnLMonitor page hidden
             // { title: t("nav.clientPnLMonitor"), url: "/client-pnl-monitor" },
           ],

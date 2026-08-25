@@ -38,6 +38,7 @@ const routeToKeyMap: Record<string, string> = {
   "/search": "pages.search",
   "/cfg/view-profiles": "pages.viewProfiles",
   "/cs/ib-tree": "pages.ibTreeQuery",
+  "/cs/ib-deposits": "pages.csIbDeposits",
 }
 
 export function SiteHeader() {

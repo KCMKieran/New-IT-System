@@ -67,18 +67,35 @@ describe("i18n locale parity", () => {
 // the literal string "typo.path" in the UI and throws nothing. These CS pages
 // were converted from hardcoded Chinese in one pass, so scan them for keys that
 // do not resolve.
-const ROOT = join(__dirname, "..", "pages")
+// Paths are relative to src/, not to src/pages/: the IB deposit card is shared
+// by two pages and therefore lives under components/ (2026-08-25).
+const ROOT = join(__dirname, "..")
 const TARGETS = [
-  "IbidLots.tsx", "LoginIPs.tsx", "cs/FundFlowMonitor.tsx", "cs/IBTreeQuery.tsx",
-  "login-ip", "cs/fund-flow",
+  "pages/IbidLots.tsx", "pages/LoginIPs.tsx",
+  "pages/cs/FundFlowMonitor.tsx", "pages/cs/IBTreeQuery.tsx",
+  "pages/login-ip", "pages/cs/fund-flow",
+  "pages/IBData.tsx", "components/ib-data",
 ]
 
 function files(p: string): string[] {
   const abs = join(ROOT, p)
   if (statSync(abs).isDirectory())
-    return readdirSync(abs).filter((f) => f.endsWith(".tsx")).map((f) => join(abs, f))
+    // .ts as well as .tsx: components/ib-data keeps its hooks and formatters in
+    // a plain shared.ts, and one of them reads a translation key.
+    return readdirSync(abs)
+      .filter((f) => /\.tsx?$/.test(f))
+      .map((f) => join(abs, f))
   return [abs]
 }
+
+/**
+ * The `labelKey: "…"` values in the shared IB card, read from its source so
+ * that adding a preset button cannot slip past this test.
+ */
+const defaultIbGroupKeys = [
+  ...readFileSync(join(ROOT, "components/ib-data/IbFundFlowCard.tsx"), "utf8")
+    .matchAll(/labelKey:\s*"([a-zA-Z0-9_.]+)"/g),
+].map((m) => m[1])
 
 function has(path: string): boolean {
   let v: unknown = zhCN
@@ -95,7 +112,7 @@ describe("CS pages reference only real translation keys", () => {
     for (const f of TARGETS.flatMap(files)) {
       const src = readFileSync(f, "utf8")
       for (const m of src.matchAll(/\bt\(\s*"([a-zA-Z0-9_.]+)"/g)) {
-        if (!has(m[1])) missing.push(`${f.replace(ROOT, "pages")}: ${m[1]}`)
+        if (!has(m[1])) missing.push(`${f.replace(`${ROOT}/`, "")}: ${m[1]}`)
       }
     }
     expect(missing).toEqual([])
@@ -119,7 +136,13 @@ describe("CS pages reference only real translation keys", () => {
         `ibidLotsPage.steps.loginTitle${i}`,
         `ibidLotsPage.steps.loginHint${i}`,
       ]),
+      // IbFundFlowCard's preset IBID buttons hold a key, not a label — the
+      // labels would otherwise be frozen at import time in whichever language
+      // the app first loaded.
+      ...defaultIbGroupKeys,
     ]
+    // A regex that matched nothing would make the line above vacuous.
+    expect(defaultIbGroupKeys.length).toBeGreaterThan(0)
     expect(dynamic.filter((k) => !has(k))).toEqual([])
   })
 })

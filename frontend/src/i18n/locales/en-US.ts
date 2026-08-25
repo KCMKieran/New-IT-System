@@ -51,6 +51,8 @@ export const enUS = {
     ibFinancialMonitor: "IB Financial Monitor",
     fundFlowMonitor: "Frequent Fund Flow",
     ibTreeQuery: "IB Tree Lookup",
+    // CS-side copy of the IB half of nav.ibData ("IB & Region Deposits").
+    csIbDeposits: "IB Deposits & Withdrawals",
     riskAlertMail: "Alert Mail Center",
     riskMonitor: "Risk Rule Alerts",
     riskWatchlist: "Client Activity Monitor",
@@ -108,6 +110,7 @@ export const enUS = {
     holdBucketReport: "Hold Duration Analysis",
     ibFinancialMonitor: "IB Financial Monitor",
     ibTreeQuery: "IB Tree Lookup",
+    csIbDeposits: "IB Deposits & Withdrawals",
     riskAlertMail: "Alert Mail Center",
     riskWatchlist: "Client Activity Monitor",
     windowScan: "Entry Window Scan",
@@ -230,6 +233,77 @@ export const enUS = {
     },
   },
   
+  // Deposit / withdrawal queries. One dictionary, two pages:
+  // /warehouse/ib-data (IB card + Company card) and /cs/ib-deposits (IB card
+  // only) — the IB card is literally the same component.
+  ibDataPage: {
+    title: "Deposits & Withdrawals",
+    query: "Search",
+    querying: "Searching…",
+    summary: "Total",
+    badgeRange: "Range: {value}",
+    range: {
+      label: "Date range",
+      week: "Last 7 days",
+      month: "This month",
+      lastMonth: "Last month",
+      custom: "Custom",
+      current: "Selected",
+      placeholder: "Pick a date range",
+    },
+    errors: {
+      incompleteRange: "Select both ends of the date range",
+      httpFailed: "Query failed (HTTP {status})",
+      generic: "Query failed",
+    },
+    ib: {
+      title: "IB deposits & withdrawals",
+      ibidLabel: "IBID",
+      group1: "Preset 1",
+      noIbid: "Enter at least one IBID",
+      badgeParams: "IBIDs: {value}",
+      badgeLastRun: "Last run: {value}",
+      noRecord: "never",
+      noParams: "none",
+      empty: "No data yet — enter your filters and search.",
+      colIbid: "IBID",
+      colDeposit: "Deposit (USD)",
+      colTotalWithdrawal: "Total Withdrawal (USD)",
+      colIbWithdrawal: "IB Withdrawal (USD)",
+      colWalletBalance: "IB Wallet Balance (USD)",
+      colNetDeposit: "Net Deposit (USD)",
+      tipWalletBalance:
+        "CURRENT balance of the IB wallet accounts (GROUP LIKE 'IB-WALLET%').\n\n" +
+        "A stock figure, not a flow: it ignores the date range above — one day or one year, you always see the balance as of right now (mt4_users only holds a live snapshot, no daily history).\n\n" +
+        "That is why it is left out of Net Deposit. Read the two columns separately.",
+      tipNetDeposit:
+        "Net Deposit = Deposit + Withdrawal + IB Withdrawal (a plain sum; withdrawal amounts are stored negative).\n\n" +
+        "INCLUDES IB commission withdrawals ('ib withdrawal'): commission an IB takes out of its wallet pushes this down. Split it out yourself if you only want client trading capital.\n\n" +
+        "Same definition as the IB Report page; covers every client under the IB (the IB's own accounts included) and only transactions inside the selected range.\n\n" +
+        "IB Wallet Balance is no longer subtracted — it is a current stock, a different dimension from range flow.",
+      note1:
+        "SQL: Total Withdrawal = Withdrawal + IB Withdrawal (withdrawals are stored negative); Net Deposit = Deposit + Withdrawal + IB Withdrawal (IB commission withdrawals included), same definition as the IB Report page.",
+      note2:
+        "Scope: every client under the IB, the IB's own accounts included, counting only transactions inside the selected range.",
+      note3:
+        "IB Wallet Balance is a current balance (a stock). It ignores the date range, takes no part in Net Deposit, and should be read on its own.",
+    },
+    company: {
+      title: "Company deposits & withdrawals",
+      badgeElapsed: "Query time: {ms} ms",
+      empty: "No data yet — pick a date range and search.",
+      colRegion: "Region (Company)",
+      colDeposit: "Deposit (USD)",
+      colWithdrawal: "Withdrawal (USD)",
+      colIbWithdrawal: "IB Withdrawal (USD)",
+      colTotalWithdrawal: "Total Withdrawal (USD)",
+      colNetDeposit: "Net Deposit (USD)",
+      note1:
+        "SQL: Total Withdrawal = |Withdrawal| + |IB Withdrawal|; Net Deposit = Deposit − Total Withdrawal (IB commission withdrawals included), same definition as the IB table above.",
+      note2: "Region comes from cid: 0 = CN, 1 = Global.",
+    },
+  },
+
   ibTreeQueryPage: {
     inputPlaceholder: "Client ID, e.g. 170799",
     hint: "Enter a CRM client ID and press Enter. The chain is copied automatically — paste it straight to the venue.",
