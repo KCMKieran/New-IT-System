@@ -6,7 +6,7 @@
  * details are all rendered as columns.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { apiFetch } from "@/lib/fetch";
 import { toast } from "sonner";
 import { Card, CardContent } from "@/components/ui/card";
@@ -30,6 +30,7 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { IconRefresh, IconCalendar } from "@tabler/icons-react";
 import type { ReportResponse } from "./types";
+import { useI18n } from "@/components/i18n-provider";
 
 function fmtDate(yyyymmdd: string): string {
   if (yyyymmdd.length !== 8) return yyyymmdd;
@@ -37,6 +38,13 @@ function fmtDate(yyyymmdd: string): string {
 }
 
 export function ReportTab() {
+  const { t } = useI18n();
+  // The mount effect below must not re-run when the language changes (that
+  // would refetch the date list and reset the user's selection), but its error
+  // toast still has to speak the CURRENT language — so read t through a ref
+  // rather than capturing the first-render one in a `[]` dep array.
+  const tRef = useRef(t);
+  tRef.current = t;
   const [dates, setDates] = useState<string[]>([]);
   const [selectedDate, setSelectedDate] = useState<string>("");
   const [report, setReport] = useState<ReportResponse | null>(null);
@@ -57,7 +65,9 @@ export function ReportTab() {
       } catch (e) {
         if (e instanceof DOMException && e.name === "AbortError") return;
         toast.error(
-          `加载日期列表失败: ${e instanceof Error ? e.message : String(e)}`,
+          tRef.current("loginIpsPage.report.loadDatesFailed", {
+            message: e instanceof Error ? e.message : String(e),
+          }),
         );
       } finally {
         setLoadingDates(false);
@@ -82,12 +92,16 @@ export function ReportTab() {
       setReport(data);
     } catch (e) {
       if (e instanceof DOMException && e.name === "AbortError") return;
-      toast.error(`加载报告失败: ${e instanceof Error ? e.message : String(e)}`);
+      toast.error(
+        t("loginIpsPage.report.loadReportFailed", {
+          message: e instanceof Error ? e.message : String(e),
+        }),
+      );
       setReport(null);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     if (!selectedDate) return;
@@ -112,14 +126,22 @@ export function ReportTab() {
         <div className="flex flex-wrap items-center gap-4">
           <div className="flex items-center gap-2">
             <IconCalendar className="h-4 w-4 text-muted-foreground" />
-            <span className="text-sm text-muted-foreground">日期</span>
+            <span className="text-sm text-muted-foreground">
+              {t("loginIpsPage.report.date")}
+            </span>
             <Select
               value={selectedDate}
               onValueChange={setSelectedDate}
               disabled={loadingDates || dates.length === 0}
             >
               <SelectTrigger className="w-[180px]">
-                <SelectValue placeholder={loadingDates ? "加载中..." : "选择日期"} />
+                <SelectValue
+                  placeholder={
+                    loadingDates
+                      ? t("loginIpsPage.common.loading")
+                      : t("loginIpsPage.report.pickDate")
+                  }
+                />
               </SelectTrigger>
               <SelectContent>
                 {dates.map((d) => (
@@ -138,18 +160,20 @@ export function ReportTab() {
             disabled={!selectedDate || loading}
           >
             <IconRefresh className={`mr-1 h-4 w-4 ${loading ? "animate-spin" : ""}`} />
-            刷新
+            {t("loginIpsPage.common.refresh")}
           </Button>
 
           {summary && (
             <div className="ml-auto flex items-center gap-3 text-sm">
-              <Badge variant="outline">监控账户 {summary.monitored}</Badge>
+              <Badge variant="outline">
+                {t("loginIpsPage.report.monitored", { count: summary.monitored })}
+              </Badge>
               <Badge variant={summary.anyCorr ? "destructive" : "secondary"}>
-                关联账户 {summary.correlated}
+                {t("loginIpsPage.report.correlated", { count: summary.correlated })}
               </Badge>
               {report?.generated_at && (
                 <span className="text-xs text-muted-foreground">
-                  生成于 {report.generated_at}
+                  {t("loginIpsPage.report.generatedAt", { at: report.generated_at })}
                 </span>
               )}
             </div>
@@ -170,7 +194,7 @@ export function ReportTab() {
           {report.accounts.length === 0 && (
             <Card>
               <CardContent className="py-10 text-center text-sm text-muted-foreground">
-                当日无监控账户数据
+                {t("loginIpsPage.report.noData")}
               </CardContent>
             </Card>
           )}
@@ -180,14 +204,18 @@ export function ReportTab() {
               <Table>
                 <TableHeader className="bg-black [&_th]:font-semibold [&_th]:text-white [&_th:first-child]:rounded-tl-xl [&_th:last-child]:rounded-tr-xl">
                   <TableRow>
-                    <TableHead>MT账号</TableHead>
-                    <TableHead>服务器</TableHead>
-                    <TableHead>是否登录</TableHead>
-                    <TableHead>备注</TableHead>
-                    <TableHead className="text-right">登录次数</TableHead>
-                    <TableHead className="text-right">IP数</TableHead>
-                    <TableHead>IP明细</TableHead>
-                    <TableHead>关联账户（含姓名）</TableHead>
+                    <TableHead>{t("loginIpsPage.common.mtAccount")}</TableHead>
+                    <TableHead>{t("loginIpsPage.common.server")}</TableHead>
+                    <TableHead>{t("loginIpsPage.report.loggedIn")}</TableHead>
+                    <TableHead>{t("loginIpsPage.common.remarks")}</TableHead>
+                    <TableHead className="text-right">
+                      {t("loginIpsPage.report.loginCount")}
+                    </TableHead>
+                    <TableHead className="text-right">
+                      {t("loginIpsPage.report.ipCount")}
+                    </TableHead>
+                    <TableHead>{t("loginIpsPage.report.ipDetail")}</TableHead>
+                    <TableHead>{t("loginIpsPage.report.correlatedAccounts")}</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -203,14 +231,14 @@ export function ReportTab() {
                       </TableCell>
                       <TableCell>
                         {!acc.logged_in ? (
-                          <Badge variant="outline">未登录</Badge>
+                          <Badge variant="outline">{t("loginIpsPage.report.notLoggedIn")}</Badge>
                         ) : hasCorrelation ? (
                           <Badge className="bg-red-600 text-white hover:bg-red-600">
-                            已登录
+                            {t("loginIpsPage.report.hasLoggedIn")}
                           </Badge>
                         ) : (
                           <Badge className="bg-green-600 text-white hover:bg-green-600">
-                            已登录
+                            {t("loginIpsPage.report.hasLoggedIn")}
                           </Badge>
                         )}
                       </TableCell>
@@ -257,7 +285,7 @@ export function ReportTab() {
                                       {c.chinese_name ? `(${c.chinese_name})` : ""}
                                       {" · "}
                                       {!c.historical_date || c.historical_date === report.target_date
-                                        ? "当日"
+                                        ? t("loginIpsPage.report.sameDay")
                                         : fmtDate(c.historical_date)}
                                     </Badge>
                                   ))}

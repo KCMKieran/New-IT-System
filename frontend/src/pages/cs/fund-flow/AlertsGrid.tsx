@@ -12,6 +12,7 @@ import { ColDef } from "ag-grid-community";
 import { useTheme } from "@/components/theme-provider";
 import { Badge } from "@/components/ui/badge";
 import { useGridThemeStyle } from "./gridTheme";
+import { useI18n } from "@/components/i18n-provider";
 import type { FundFlowAlert } from "./types";
 
 const defaultColDef: ColDef = {
@@ -46,6 +47,7 @@ export function AlertsGrid({
   height = 380,
 }: AlertsGridProps) {
   const { theme } = useTheme();
+  const { t } = useI18n();
   const isDarkMode = theme === "dark";
   const gridStyle = useGridThemeStyle(isDarkMode);
 
@@ -69,7 +71,7 @@ export function AlertsGrid({
         ),
       },
       {
-        headerName: "国家",
+        headerName: t("fundFlowPage.grid.country"),
         field: "country_label",
         width: 90,
         cellRenderer: (p: { value: string | null }) =>
@@ -79,9 +81,9 @@ export function AlertsGrid({
             "—"
           ),
       },
-      { headerName: "姓名", field: "full_name", width: 160 },
+      { headerName: t("fundFlowPage.grid.fullName"), field: "full_name", width: 160 },
       {
-        headerName: "MT 账号",
+        headerName: t("fundFlowPage.grid.mtLogins"),
         field: "mt_logins",
         width: 160,
         cellRenderer: (p: { value: string | null }) => {
@@ -92,14 +94,14 @@ export function AlertsGrid({
         },
       },
       {
-        headerName: "入金次数",
+        headerName: t("fundFlowPage.grid.depositCount"),
         field: "deposit_count",
         width: 110,
         filter: "agNumberColumnFilter",
         type: "numericColumn",
       },
       {
-        headerName: "入金额",
+        headerName: t("fundFlowPage.grid.depositAmount"),
         field: "deposit_amount_usd",
         width: 140,
         filter: "agNumberColumnFilter",
@@ -107,14 +109,14 @@ export function AlertsGrid({
         valueFormatter: (p) => fmtUsd(p.value),
       },
       {
-        headerName: "出金次数",
+        headerName: t("fundFlowPage.grid.withdrawCount"),
         field: "withdraw_count",
         width: 110,
         filter: "agNumberColumnFilter",
         type: "numericColumn",
       },
       {
-        headerName: "出金额",
+        headerName: t("fundFlowPage.grid.withdrawAmount"),
         field: "withdraw_amount_usd",
         width: 140,
         filter: "agNumberColumnFilter",
@@ -122,7 +124,7 @@ export function AlertsGrid({
         valueFormatter: (p) => fmtUsd(p.value),
       },
       {
-        headerName: "净流入",
+        headerName: t("fundFlowPage.grid.netFlow"),
         field: "net_flow_usd",
         width: 140,
         filter: "agNumberColumnFilter",
@@ -137,15 +139,15 @@ export function AlertsGrid({
         },
       },
       {
-        headerName: "交易笔数",
+        headerName: t("fundFlowPage.grid.tradeCount"),
         field: "trade_count",
         width: 100,
         filter: "agNumberColumnFilter",
         type: "numericColumn",
       },
-      { headerName: "命中规则", field: "rule_label", width: 200 },
+      { headerName: t("fundFlowPage.grid.ruleLabel"), field: "rule_label", width: 200 },
     ],
-    [],
+    [t],
   );
 
   return (
@@ -168,7 +170,7 @@ export function AlertsGrid({
         loading={loading}
         onRowClicked={(e) => e.data && onRowClick?.(e.data)}
         overlayNoRowsTemplate={`<span class="text-sm text-muted-foreground">${
-          emptyMessage ?? "暂无命中客户"
+          emptyMessage ?? t("fundFlowPage.grid.empty")
         }</span>`}
       />
     </div>

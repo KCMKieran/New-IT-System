@@ -25,9 +25,10 @@ import {
 import { Plus, Trash2, Save } from "lucide-react";
 import { apiFetch } from "@/lib/fetch";
 import type { FundFlowConfig, FundFlowRule } from "./types";
+import { useI18n } from "@/components/i18n-provider";
 
-const EMPTY_RULE: FundFlowRule = {
-  name: "新规则",
+const emptyRule = (name: string): FundFlowRule => ({
+  name,
   enabled: true,
   lookback_days: 7,
   min_deposit_count: 3,
@@ -36,7 +37,7 @@ const EMPTY_RULE: FundFlowRule = {
   max_trade_count: 1,
   min_deposit_amount_usd: null,
   min_withdrawal_amount_usd: null,
-};
+});
 
 interface Props {
   open: boolean;
@@ -49,6 +50,7 @@ export function RulesDrawer({ open, onOpenChange, onSaved }: Props) {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const { t } = useI18n();
 
   useEffect(() => {
     if (!open) return;
@@ -69,7 +71,8 @@ export function RulesDrawer({ open, onOpenChange, onSaved }: Props) {
     setRules((prev) => prev.map((r, i) => (i === idx ? { ...r, ...patch } : r)));
   };
 
-  const addRule = () => setRules((prev) => [...prev, { ...EMPTY_RULE }]);
+  const addRule = () =>
+    setRules((prev) => [...prev, emptyRule(t("fundFlowPage.rules.newRuleName"))]);
   const removeRule = (idx: number) =>
     setRules((prev) => prev.filter((_, i) => i !== idx));
 
@@ -84,7 +87,9 @@ export function RulesDrawer({ open, onOpenChange, onSaved }: Props) {
       });
       if (!res.ok) {
         const txt = await res.text();
-        throw new Error(`保存失败 ${res.status}: ${txt}`);
+        throw new Error(
+          t("fundFlowPage.common.saveFailed", { status: res.status, detail: txt }),
+        );
       }
       onSaved();
       onOpenChange(false);
@@ -99,26 +104,33 @@ export function RulesDrawer({ open, onOpenChange, onSaved }: Props) {
     <Drawer open={open} onOpenChange={onOpenChange} direction="right">
       <DrawerContent className="!w-[640px] !max-w-[90vw]">
         <DrawerHeader className="flex flex-row items-center justify-between border-b">
-          <DrawerTitle>规则配置</DrawerTitle>
+          <DrawerTitle>{t("fundFlowPage.rules.title")}</DrawerTitle>
           <div className="flex gap-2">
             <Button size="sm" variant="outline" onClick={addRule}>
-              <Plus className="h-4 w-4 mr-1" />新建规则
+              <Plus className="h-4 w-4 mr-1" />
+              {t("fundFlowPage.rules.add")}
             </Button>
             <DrawerClose asChild>
-              <Button size="sm" variant="ghost">关闭</Button>
+              <Button size="sm" variant="ghost">{t("fundFlowPage.rules.close")}</Button>
             </DrawerClose>
           </div>
         </DrawerHeader>
 
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
-          {loading && <p className="text-sm text-muted-foreground">加载中…</p>}
+          {loading && (
+            <p className="text-sm text-muted-foreground">
+              {t("fundFlowPage.common.loading")}
+            </p>
+          )}
           {error && (
-            <p className="text-sm text-destructive">错误：{error}</p>
+            <p className="text-sm text-destructive">
+              {t("fundFlowPage.common.error", { message: error })}
+            </p>
           )}
 
           {!loading && rules.length === 0 && (
             <p className="text-sm text-muted-foreground">
-              暂无规则，点击"新建规则"添加第一条。
+              {t("fundFlowPage.rules.empty")}
             </p>
           )}
 
@@ -129,7 +141,7 @@ export function RulesDrawer({ open, onOpenChange, onSaved }: Props) {
                   className="font-medium max-w-sm"
                   value={rule.name}
                   onChange={(e) => updateRule(idx, { name: e.target.value })}
-                  placeholder="规则名"
+                  placeholder={t("fundFlowPage.rules.namePlaceholder")}
                 />
                 <div className="flex items-center gap-3">
                   <label className="flex items-center gap-1 text-sm">
@@ -137,13 +149,13 @@ export function RulesDrawer({ open, onOpenChange, onSaved }: Props) {
                       checked={rule.enabled}
                       onCheckedChange={(v) => updateRule(idx, { enabled: !!v })}
                     />
-                    启用
+                    {t("fundFlowPage.rules.enabled")}
                   </label>
                   <Button
                     size="sm"
                     variant="ghost"
                     onClick={() => removeRule(idx)}
-                    aria-label="删除"
+                    aria-label={t("fundFlowPage.rules.delete")}
                   >
                     <Trash2 className="h-4 w-4 text-destructive" />
                   </Button>
@@ -152,7 +164,7 @@ export function RulesDrawer({ open, onOpenChange, onSaved }: Props) {
 
               <div className="grid grid-cols-2 gap-3 text-sm">
                 <div className="space-y-1">
-                  <Label>窗口（天）</Label>
+                  <Label>{t("fundFlowPage.rules.lookbackDays")}</Label>
                   <Input
                     type="number"
                     min={1}
@@ -164,7 +176,7 @@ export function RulesDrawer({ open, onOpenChange, onSaved }: Props) {
                   />
                 </div>
                 <div className="space-y-1">
-                  <Label>交易笔数 ≤</Label>
+                  <Label>{t("fundFlowPage.filters.maxTradeCount")}</Label>
                   <Input
                     type="number"
                     min={0}
@@ -176,7 +188,7 @@ export function RulesDrawer({ open, onOpenChange, onSaved }: Props) {
                 </div>
 
                 <div className="space-y-1">
-                  <Label>入金次数 ≥</Label>
+                  <Label>{t("fundFlowPage.filters.minDepositCount")}</Label>
                   <Input
                     type="number"
                     min={0}
@@ -187,11 +199,11 @@ export function RulesDrawer({ open, onOpenChange, onSaved }: Props) {
                           e.target.value === "" ? null : Number(e.target.value),
                       })
                     }
-                    placeholder="不限"
+                    placeholder={t("fundFlowPage.filters.unlimited")}
                   />
                 </div>
                 <div className="space-y-1">
-                  <Label>出金次数 ≥</Label>
+                  <Label>{t("fundFlowPage.filters.minWithdrawCount")}</Label>
                   <Input
                     type="number"
                     min={0}
@@ -202,12 +214,12 @@ export function RulesDrawer({ open, onOpenChange, onSaved }: Props) {
                           e.target.value === "" ? null : Number(e.target.value),
                       })
                     }
-                    placeholder="不限"
+                    placeholder={t("fundFlowPage.filters.unlimited")}
                   />
                 </div>
 
                 <div className="space-y-1">
-                  <Label>入金额 ≥ ($)</Label>
+                  <Label>{t("fundFlowPage.filters.minDepositAmount")}</Label>
                   <Input
                     type="number"
                     min={0}
@@ -219,11 +231,11 @@ export function RulesDrawer({ open, onOpenChange, onSaved }: Props) {
                           e.target.value === "" ? null : Number(e.target.value),
                       })
                     }
-                    placeholder="不限"
+                    placeholder={t("fundFlowPage.filters.unlimited")}
                   />
                 </div>
                 <div className="space-y-1">
-                  <Label>出金额 ≥ ($)</Label>
+                  <Label>{t("fundFlowPage.filters.minWithdrawAmount")}</Label>
                   <Input
                     type="number"
                     min={0}
@@ -235,12 +247,12 @@ export function RulesDrawer({ open, onOpenChange, onSaved }: Props) {
                           e.target.value === "" ? null : Number(e.target.value),
                       })
                     }
-                    placeholder="不限"
+                    placeholder={t("fundFlowPage.filters.unlimited")}
                   />
                 </div>
 
                 <div className="space-y-1 col-span-2">
-                  <Label>组合逻辑</Label>
+                  <Label>{t("fundFlowPage.rules.combineLogic")}</Label>
                   <Select
                     value={rule.combine_logic}
                     onValueChange={(v) =>
@@ -251,8 +263,8 @@ export function RulesDrawer({ open, onOpenChange, onSaved }: Props) {
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="OR">OR (任一达标即命中)</SelectItem>
-                      <SelectItem value="AND">AND (两者都达标)</SelectItem>
+                      <SelectItem value="OR">{t("fundFlowPage.rules.combineOr")}</SelectItem>
+                      <SelectItem value="AND">{t("fundFlowPage.rules.combineAnd")}</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
@@ -263,11 +275,11 @@ export function RulesDrawer({ open, onOpenChange, onSaved }: Props) {
 
         <div className="border-t p-4 flex justify-end gap-2">
           <DrawerClose asChild>
-            <Button variant="outline">取消</Button>
+            <Button variant="outline">{t("fundFlowPage.rules.cancel")}</Button>
           </DrawerClose>
           <Button onClick={save} disabled={saving}>
             <Save className="h-4 w-4 mr-1" />
-            {saving ? "保存中…" : "保存"}
+            {saving ? t("fundFlowPage.rules.saving") : t("fundFlowPage.rules.save")}
           </Button>
         </div>
       </DrawerContent>

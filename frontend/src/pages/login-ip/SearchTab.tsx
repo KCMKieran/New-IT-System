@@ -28,6 +28,7 @@ import { crmAccountUrl, crmUserUrl } from "@/lib/crm-links";
 import { toast } from "sonner";
 import { AgGridReact } from "ag-grid-react";
 import type { ColDef, ICellRendererParams } from "ag-grid-community";
+import { useI18n } from "@/components/i18n-provider";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
@@ -114,6 +115,14 @@ function formatApiDetail(detail: unknown): string {
 const DAYS_OPTIONS = [1, 3, 7, 14, 30, 60, 90, 120];
 
 export function SearchTab() {
+  const { t } = useI18n();
+  // The export-polling effect below keys off exportTaskId only — adding `t` to
+  // its deps would tear down and restart an in-flight poll (aborting its
+  // controller mid-request) every time someone flips the language. Read the
+  // current t through a ref instead, so its messages follow the language
+  // without the loop restarting.
+  const tRef = useRef(t);
+  tRef.current = t;
   const { theme } = useTheme();
   const isDark = theme === "dark";
 
@@ -141,7 +150,7 @@ export function SearchTab() {
   const handleSearch = useCallback(async () => {
     const terms = parseTerms(termsText);
     if (terms.length === 0) {
-      toast.error("请输入搜索关键字");
+      toast.error(t("loginIpsPage.search.needKeyword"));
       return;
     }
     setLoading(true);
@@ -175,8 +184,8 @@ export function SearchTab() {
         nextRows = data.results;
         setRows(data.results);
         if (data.results.length === 0) {
-          nextStatus = "无匹配结果";
-          setStatusMsg("无匹配结果");
+          nextStatus = t("loginIpsPage.search.noMatch");
+          setStatusMsg(nextStatus);
         } else {
           setStatusMsg("");
         }
@@ -189,11 +198,15 @@ export function SearchTab() {
         statusMsg: nextStatus,
       });
     } catch (e) {
-      toast.error(`搜索失败: ${e instanceof Error ? e.message : String(e)}`);
+      toast.error(
+        t("loginIpsPage.search.failed", {
+          message: e instanceof Error ? e.message : String(e),
+        }),
+      );
     } finally {
       setLoading(false);
     }
-  }, [searchType, termsText, days]);
+  }, [searchType, termsText, days, t]);
 
   // ── Async CSV export ─────────────────────────────────────
   const parseFilename = (disp: string | null, fallback: string) => {
@@ -240,10 +253,10 @@ export function SearchTab() {
   const handleExportCsv = useCallback(async () => {
     const terms = parseTerms(termsText);
     if (terms.length === 0) {
-      toast.error("请先输入搜索关键字");
+      toast.error(t("loginIpsPage.search.needKeywordFirst"));
       return;
     }
-    setExportStatusText("创建导出任务中...");
+    setExportStatusText(t("loginIpsPage.search.creatingExport"));
     setExporting(true);
     setExportProgress(0);
     try {
@@ -263,17 +276,19 @@ export function SearchTab() {
       }
       const created = await res.json();
       setExportTaskId(created.task_id);
-      setExportStatusText("任务已创建，排队中...");
+      setExportStatusText(t("loginIpsPage.search.exportQueued"));
     } catch (e) {
       toast.error(
-        `创建导出任务失败: ${e instanceof Error ? e.message : String(e)}`,
+        t("loginIpsPage.search.exportCreateFailed", {
+          message: e instanceof Error ? e.message : String(e),
+        }),
       );
       setExportStatusText("");
       setExporting(false);
       setExportTaskId(null);
       setExportProgress(0);
     }
-  }, [searchType, termsText, days]);
+  }, [searchType, termsText, days, t]);
 
   // Polling effect: starts when exportTaskId is set, stops on terminal state.
   useEffect(() => {
@@ -301,22 +316,30 @@ export function SearchTab() {
         setExportProgress(data.progress ?? 0);
 
         if (data.status === "queued") {
-          setExportStatusText(`排队中... ${data.progress ?? 0}%`);
+          setExportStatusText(
+            tRef.current("loginIpsPage.search.exportQueueing", { pct: data.progress ?? 0 }),
+          );
         } else if (data.status === "running") {
-          setExportStatusText(`生成中... ${data.progress ?? 0}%`);
+          setExportStatusText(
+            tRef.current("loginIpsPage.search.exportGenerating", { pct: data.progress ?? 0 }),
+          );
         } else if (data.status === "succeeded") {
-          setExportStatusText("生成完成，开始下载...");
+          setExportStatusText(tRef.current("loginIpsPage.search.exportDownloading"));
           await downloadExportFile(exportTaskId);
           setExportStatusText(
-            `导出完成，已下载 ${(data.row_count ?? 0).toLocaleString()} 行`,
+            tRef.current("loginIpsPage.search.exportDone", {
+              rows: (data.row_count ?? 0).toLocaleString(),
+            }),
           );
           setExportTaskId(null);
           setExporting(false);
           return;
         } else if (data.status === "failed") {
-          throw new Error(data.error_message || "导出任务失败");
+          throw new Error(
+            data.error_message || tRef.current("loginIpsPage.search.exportFailed"),
+          );
         } else if (data.status === "expired") {
-          throw new Error("导出文件已过期，请重新创建导出任务");
+          throw new Error(tRef.current("loginIpsPage.search.exportExpired"));
         }
       } catch (e) {
         if (e instanceof DOMException && e.name === "AbortError") return;
@@ -343,7 +366,7 @@ export function SearchTab() {
     if (searchType === "account_id") {
       return [
         {
-          headerName: "搜索账号",
+          headerName: t("loginIpsPage.search.colSearchAccount"),
           field: "search_term" as const,
           width: 130,
           cellRenderer: (p: ICellRendererParams<SearchResultRow>) => {
@@ -403,17 +426,29 @@ export function SearchTab() {
             );
           },
         },
-        { headerName: "日期", field: "date" as const, width: 110 },
-        { headerName: "服务器", field: "server" as const, width: 120 },
         {
-          headerName: "登录 IP",
+          headerName: t("loginIpsPage.search.colDate"),
+          field: "date" as const,
+          width: 110,
+        },
+        {
+          headerName: t("loginIpsPage.search.colServer"),
+          field: "server" as const,
+          width: 120,
+        },
+        {
+          headerName: t("loginIpsPage.search.colLoginIp"),
           field: "login_ip" as const,
           width: 160,
           cellClass: "font-mono",
         },
-        { headerName: "次数", field: "login_count" as const, width: 80 },
         {
-          headerName: "关联账户",
+          headerName: t("loginIpsPage.search.colCount"),
+          field: "login_count" as const,
+          width: 80,
+        },
+        {
+          headerName: t("loginIpsPage.search.colCorrelated"),
           flex: 1,
           minWidth: 220,
           autoHeight: true,
@@ -465,15 +500,23 @@ export function SearchTab() {
     // ip_address
     return [
       {
-        headerName: "搜索 IP",
+        headerName: t("loginIpsPage.search.colSearchIp"),
         field: "search_term" as const,
         width: 160,
         cellClass: "font-mono",
       },
-      { headerName: "日期", field: "date" as const, width: 110 },
-      { headerName: "服务器", field: "server" as const, width: 120 },
       {
-        headerName: "关联账户",
+        headerName: t("loginIpsPage.search.colDate"),
+        field: "date" as const,
+        width: 110,
+      },
+      {
+        headerName: t("loginIpsPage.search.colServer"),
+        field: "server" as const,
+        width: 120,
+      },
+      {
+        headerName: t("loginIpsPage.search.colCorrelated"),
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         valueGetter: (p: any) =>
           (p.data?.correlated_accounts ?? []).join(", "),
@@ -483,7 +526,7 @@ export function SearchTab() {
           ((p.data as any)?.correlated_accounts ?? []).join(", "),
       },
     ];
-  }, [searchType]);
+  }, [searchType, t]);
 
   const defaultColDef = useMemo<ColDef>(
     () => ({
@@ -523,7 +566,7 @@ export function SearchTab() {
       {/* Search form */}
       <Card className="gap-3">
         <CardHeader>
-          <CardTitle className="text-base">手动搜索</CardTitle>
+          <CardTitle className="text-base">{t("loginIpsPage.search.title")}</CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
           {/* Neutral muted tokens, not amber: this announces a capability, it
@@ -535,12 +578,12 @@ export function SearchTab() {
             <IconInfoCircle className="size-4 shrink-0 opacity-90" aria-hidden />
             <p className="leading-snug">
               <span className="font-medium text-foreground">Update</span>
-              ：搜索范围更新到最近 120 天。
+              {t("loginIpsPage.search.updateNote")}
             </p>
           </div>
           <div className="grid gap-3 md:grid-cols-4">
             <div className="space-y-1">
-              <Label>搜索类型</Label>
+              <Label>{t("loginIpsPage.search.searchType")}</Label>
               <Select
                 value={searchType}
                 onValueChange={(v) => setSearchType(v as SearchType)}
@@ -549,16 +592,20 @@ export function SearchTab() {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="account_id">按账号</SelectItem>
-                  <SelectItem value="ip_address">按 IP</SelectItem>
+                  <SelectItem value="account_id">
+                    {t("loginIpsPage.search.byAccount")}
+                  </SelectItem>
+                  <SelectItem value="ip_address">
+                    {t("loginIpsPage.search.byIp")}
+                  </SelectItem>
                 </SelectContent>
               </Select>
             </div>
             <div className="space-y-1 md:col-span-2">
               <Label htmlFor="search-terms">
                 {searchType === "account_id"
-                  ? "账号 ID（多个用空格/逗号/换行分隔）"
-                  : "IP 地址（多个用空格/逗号/换行分隔）"}
+                  ? t("loginIpsPage.search.termsAccount")
+                  : t("loginIpsPage.search.termsIp")}
               </Label>
               <Textarea
                 id="search-terms"
@@ -569,7 +616,7 @@ export function SearchTab() {
               />
             </div>
             <div className="space-y-1">
-              <Label>天数范围</Label>
+              <Label>{t("loginIpsPage.search.dayRange")}</Label>
               <Select
                 value={String(days)}
                 onValueChange={(v) => setDays(Number(v))}
@@ -580,7 +627,7 @@ export function SearchTab() {
                 <SelectContent>
                   {DAYS_OPTIONS.map((d) => (
                     <SelectItem key={d} value={String(d)}>
-                      最近 {d} 天
+                      {t("loginIpsPage.search.lastNDays", { days: d })}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -593,7 +640,9 @@ export function SearchTab() {
           <div className="flex flex-wrap items-center gap-2 [&>button]:min-w-[112px]">
             <Button onClick={handleSearch} disabled={loading}>
               <IconSearch className="mr-1 h-4 w-4" />
-              {loading ? "搜索中..." : "搜索"}
+              {loading
+                ? t("loginIpsPage.search.searching")
+                : t("loginIpsPage.search.search")}
             </Button>
             <Button
               variant="outline"
@@ -608,7 +657,7 @@ export function SearchTab() {
               ) : (
                 <>
                   <IconDownload className="mr-1 h-4 w-4" />
-                  导出 CSV
+                  {t("loginIpsPage.search.exportCsv")}
                 </>
               )}
             </Button>
@@ -624,8 +673,11 @@ export function SearchTab() {
           {/* Export fans each correlated account onto its own CSV row, so the
               file has more rows than the grid below — say so up front. */}
           <p className="text-xs text-muted-foreground">
-            导出的 CSV 中，<strong className="font-medium">每个关联账户单独占一行</strong>
-            （关联账号 / Last name / First name 分列），便于在 Excel 里筛选与统计；因此文件行数会多于下方表格的条数。
+            {t("loginIpsPage.search.csvNotePrefix")}
+            <strong className="font-medium">
+              {t("loginIpsPage.search.csvNoteStrong")}
+            </strong>
+            {t("loginIpsPage.search.csvNoteSuffix")}
           </p>
         </CardContent>
       </Card>
@@ -634,7 +686,7 @@ export function SearchTab() {
       <Card className="gap-3">
         <CardHeader>
           <CardTitle className="text-base">
-            搜索结果（共 {rows.length} 条）
+            {t("loginIpsPage.search.resultsTitle", { count: rows.length })}
           </CardTitle>
         </CardHeader>
         <CardContent>

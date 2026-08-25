@@ -19,6 +19,7 @@ import { useTheme } from "@/components/theme-provider";
 import { AgGridReact } from "ag-grid-react";
 import { ColDef } from "ag-grid-community";
 import { useGridThemeStyle } from "./gridTheme";
+import { useI18n } from "@/components/i18n-provider";
 import type {
   FundFlowAlert,
   FundFlowDetail,
@@ -63,6 +64,7 @@ export function DetailSheet({ alert, onClose }: Props) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const { theme } = useTheme();
+  const { t } = useI18n();
   const isDarkMode = theme === "dark";
   const agClass = isDarkMode ? "ag-theme-quartz-dark" : "ag-theme-quartz";
   const gridStyle = useGridThemeStyle(isDarkMode);
@@ -97,13 +99,13 @@ export function DetailSheet({ alert, onClose }: Props) {
   const txColumns = useMemo<ColDef<FundFlowTransaction>[]>(
     () => [
       {
-        headerName: "日期",
+        headerName: t("fundFlowPage.detail.date"),
         field: "transaction_date",
         width: 120,
         sort: "asc",
       },
       {
-        headerName: "类型",
+        headerName: t("fundFlowPage.detail.type"),
         field: "type",
         width: 110,
         cellRenderer: (p: { value: string }) => (
@@ -120,14 +122,14 @@ export function DetailSheet({ alert, onClose }: Props) {
         ),
       },
       {
-        headerName: "金额",
+        headerName: t("fundFlowPage.detail.amount"),
         field: "amount_usd",
         width: 130,
         type: "numericColumn",
         valueFormatter: (p) => fmtUsd(p.value as number),
       },
       {
-        headerName: "笔数",
+        headerName: t("fundFlowPage.detail.count"),
         field: "count_transactions",
         width: 80,
         type: "numericColumn",
@@ -135,14 +137,14 @@ export function DetailSheet({ alert, onClose }: Props) {
       { headerName: "Currency", field: "currency", width: 90 },
       { headerName: "LoginSid", field: "loginsid", flex: 1, minWidth: 110 },
     ],
-    [],
+    [t],
   );
 
   // ── trade column defs ────────────────────────────────────
   const tradeColumns = useMemo<ColDef<FundFlowTrade>[]>(
     () => [
       {
-        headerName: "开仓时间",
+        headerName: t("fundFlowPage.detail.openTime"),
         field: "open_time",
         width: 175,
         sort: "asc",
@@ -175,14 +177,14 @@ export function DetailSheet({ alert, onClose }: Props) {
         valueFormatter: (p) => fmtUsd(p.value as number | null | undefined),
       },
       {
-        headerName: "平仓时间",
+        headerName: t("fundFlowPage.detail.closeTime"),
         field: "close_time",
         flex: 1,
         minWidth: 170,
         valueFormatter: (p) => fmtDate(p.value as string | null),
       },
     ],
-    [],
+    [t],
   );
 
   const totalDep = detail?.transactions
@@ -203,7 +205,7 @@ export function DetailSheet({ alert, onClose }: Props) {
       <SheetContent className="!w-[820px] !max-w-[98vw] overflow-y-auto px-8">
         <SheetHeader>
           <SheetTitle>
-            客户 #
+            {t("fundFlowPage.detail.titlePrefix")}
             {alert?.user_id != null ? (
               <a
                 href={`https://mt4.kohleglobal.com/crm/users/${alert.user_id}`}
@@ -219,15 +221,22 @@ export function DetailSheet({ alert, onClose }: Props) {
             {detail?.full_name || alert?.full_name || ""}
           </SheetTitle>
           <SheetDescription>
-            窗口：{fmtDate(alert?.window_start)} ~ {fmtDate(alert?.window_end)}
+            {t("fundFlowPage.detail.window", {
+              start: fmtDate(alert?.window_start),
+              end: fmtDate(alert?.window_end),
+            })}
           </SheetDescription>
         </SheetHeader>
 
         {loading && (
-          <p className="text-sm text-muted-foreground mt-4">加载中…</p>
+          <p className="text-sm text-muted-foreground mt-4">
+            {t("fundFlowPage.common.loading")}
+          </p>
         )}
         {error && (
-          <p className="text-sm text-destructive mt-4">错误：{error}</p>
+          <p className="text-sm text-destructive mt-4">
+            {t("fundFlowPage.common.error", { message: error })}
+          </p>
         )}
 
         {detail && (
@@ -239,11 +248,15 @@ export function DetailSheet({ alert, onClose }: Props) {
                 <span className="truncate">{detail.email || "—"}</span>
               </div>
               <div className="flex gap-2">
-                <span className="text-muted-foreground w-20">电话:</span>
+                <span className="text-muted-foreground w-20">
+                  {t("fundFlowPage.detail.phone")}:
+                </span>
                 <span>{detail.phone || "—"}</span>
               </div>
               <div className="flex gap-2">
-                <span className="text-muted-foreground w-20">国家:</span>
+                <span className="text-muted-foreground w-20">
+                  {t("fundFlowPage.detail.country")}:
+                </span>
                 {detail.country_label ? (
                   <Badge
                     variant={detail.country_label === "CN" ? "default" : "secondary"}
@@ -255,11 +268,15 @@ export function DetailSheet({ alert, onClose }: Props) {
                 )}
               </div>
               <div className="flex gap-2">
-                <span className="text-muted-foreground w-20">注册时间:</span>
+                <span className="text-muted-foreground w-20">
+                  {t("fundFlowPage.detail.registeredAt")}:
+                </span>
                 <span>{fmtDate(detail.registered_at)}</span>
               </div>
               <div className="flex gap-2 flex-wrap md:col-span-2">
-                <span className="text-muted-foreground w-20">MT 账号:</span>
+                <span className="text-muted-foreground w-20">
+                  {t("fundFlowPage.detail.mtLogins")}:
+                </span>
                 {detail.mt_logins.length ? (
                   detail.mt_logins.map((l) => (
                     <Badge key={l} variant="outline" className="text-xs">
@@ -278,10 +295,17 @@ export function DetailSheet({ alert, onClose }: Props) {
             <div>
               <div className="flex items-baseline justify-between mb-2">
                 <h3 className="font-medium text-sm">
-                  出入金（{detail.transactions.length}）
+                  {t("fundFlowPage.detail.txTitle", {
+                    count: detail.transactions.length,
+                  })}
                 </h3>
                 <p className="text-xs text-muted-foreground">
-                  入金 {depCount ?? 0} 次 / {fmtUsd(totalDep)}　·　出金 {wdCount ?? 0} 次 / {fmtUsd(totalWd)}
+                  {t("fundFlowPage.detail.txSummary", {
+                    depCount: depCount ?? 0,
+                    depAmt: fmtUsd(totalDep),
+                    wdCount: wdCount ?? 0,
+                    wdAmt: fmtUsd(totalWd),
+                  })}
                 </p>
               </div>
               <div
@@ -297,7 +321,9 @@ export function DetailSheet({ alert, onClose }: Props) {
                   headerHeight={36}
                   suppressCellFocus
                   animateRows
-                  overlayNoRowsTemplate={`<span class="text-xs text-muted-foreground">窗口内无出入金记录</span>`}
+                  overlayNoRowsTemplate={`<span class="text-xs text-muted-foreground">${t(
+                    "fundFlowPage.detail.txEmpty",
+                  )}</span>`}
                 />
               </div>
             </div>
@@ -307,7 +333,9 @@ export function DetailSheet({ alert, onClose }: Props) {
             {/* Trades table */}
             <div>
               <h3 className="font-medium text-sm mb-2">
-                窗口内开仓订单（{detail.trades.length}）
+                {t("fundFlowPage.detail.tradesTitle", {
+                  count: detail.trades.length,
+                })}
               </h3>
               <div
                 className={`${agClass} w-full rounded border`}
@@ -322,7 +350,9 @@ export function DetailSheet({ alert, onClose }: Props) {
                   headerHeight={36}
                   suppressCellFocus
                   animateRows
-                  overlayNoRowsTemplate={`<span class="text-xs text-muted-foreground">窗口内无开仓订单</span>`}
+                  overlayNoRowsTemplate={`<span class="text-xs text-muted-foreground">${t(
+                    "fundFlowPage.detail.tradesEmpty",
+                  )}</span>`}
                 />
               </div>
             </div>

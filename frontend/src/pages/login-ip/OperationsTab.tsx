@@ -10,6 +10,7 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
+import { useI18n } from "@/components/i18n-provider";
 import { apiFetch } from "@/lib/fetch";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -58,6 +59,7 @@ export function OperationsTab() {
 // ── Scheduler panel ────────────────────────────────────────
 
 function SchedulerPanel() {
+  const { t } = useI18n();
   const [runs, setRuns] = useState<SchedulerRunOut[]>([]);
   const [loading, setLoading] = useState(false);
   const [triggerJob, setTriggerJob] = useState<"download" | "analyze_report">(
@@ -78,12 +80,14 @@ function SchedulerPanel() {
     } catch (e) {
       if (e instanceof DOMException && e.name === "AbortError") return;
       toast.error(
-        `加载调度记录失败: ${e instanceof Error ? e.message : String(e)}`,
+        t("loginIpsPage.ops.loadJobsFailed", {
+          message: e instanceof Error ? e.message : String(e),
+        }),
       );
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     const ac = new AbortController();
@@ -108,12 +112,14 @@ function SchedulerPanel() {
         const err = await res.json().catch(() => ({}));
         throw new Error(err.detail || `HTTP ${res.status}`);
       }
-      toast.success(`已提交 ${triggerJob} 任务`);
+      toast.success(t("loginIpsPage.ops.submitted", { job: triggerJob }));
       // Give the background job a moment to insert the first row.
       setTimeout(() => fetchRuns(), 500);
     } catch (e) {
       toast.error(
-        `触发失败: ${e instanceof Error ? e.message : String(e)}`,
+        t("loginIpsPage.ops.triggerFailed", {
+          message: e instanceof Error ? e.message : String(e),
+        }),
       );
     } finally {
       setSubmitting(false);
@@ -130,12 +136,12 @@ function SchedulerPanel() {
   return (
     <Card className="gap-3">
       <CardHeader>
-        <CardTitle className="text-base">调度任务运维</CardTitle>
+        <CardTitle className="text-base">{t("loginIpsPage.ops.schedulerTitle")}</CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="grid gap-3 md:grid-cols-4">
           <div className="space-y-1">
-            <Label>任务</Label>
+            <Label>{t("loginIpsPage.ops.job")}</Label>
             <Select
               value={triggerJob}
               onValueChange={(v) =>
@@ -146,15 +152,19 @@ function SchedulerPanel() {
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="download">download (FTP 拉取)</SelectItem>
+                <SelectItem value="download">
+                  {t("loginIpsPage.ops.jobDownload")}
+                </SelectItem>
                 <SelectItem value="analyze_report">
-                  analyze_report (分析 + 邮件)
+                  {t("loginIpsPage.ops.jobAnalyze")}
                 </SelectItem>
               </SelectContent>
             </Select>
           </div>
           <div className="space-y-1">
-            <Label htmlFor="trigger-date">目标日期（可选）</Label>
+            <Label htmlFor="trigger-date">
+              {t("loginIpsPage.ops.targetDateOptional")}
+            </Label>
             <Input
               id="trigger-date"
               type="date"
@@ -167,7 +177,9 @@ function SchedulerPanel() {
           <div className="flex flex-wrap items-end gap-2 [&>button]:min-w-[112px]">
             <Button onClick={handleRunNow} disabled={submitting}>
               <IconPlayerPlay className="mr-1 h-4 w-4" />
-              {submitting ? "提交中..." : "立即执行"}
+              {submitting
+                ? t("loginIpsPage.ops.submitting")
+                : t("loginIpsPage.ops.runNow")}
             </Button>
             <Button
               variant="outline"
@@ -177,7 +189,7 @@ function SchedulerPanel() {
               <IconRefresh
                 className={`mr-1 h-4 w-4 ${loading ? "animate-spin" : ""}`}
               />
-              刷新
+              {t("loginIpsPage.common.refresh")}
             </Button>
           </div>
         </div>
@@ -188,19 +200,21 @@ function SchedulerPanel() {
           <Table>
             <TableHeader className="bg-black [&_th]:font-semibold [&_th]:text-white [&_th:first-child]:rounded-tl-xl [&_th:last-child]:rounded-tr-xl">
               <TableRow>
-                <TableHead className="w-[160px]">任务</TableHead>
-                <TableHead className="w-[110px]">目标日期</TableHead>
-                <TableHead className="w-[160px]">开始</TableHead>
-                <TableHead className="w-[160px]">结束</TableHead>
-                <TableHead className="w-[100px]">状态</TableHead>
-                <TableHead>详情</TableHead>
+                <TableHead className="w-[160px]">{t("loginIpsPage.ops.job")}</TableHead>
+                <TableHead className="w-[110px]">
+                  {t("loginIpsPage.ops.targetDate")}
+                </TableHead>
+                <TableHead className="w-[160px]">{t("loginIpsPage.ops.start")}</TableHead>
+                <TableHead className="w-[160px]">{t("loginIpsPage.ops.end")}</TableHead>
+                <TableHead className="w-[100px]">{t("loginIpsPage.ops.status")}</TableHead>
+                <TableHead>{t("loginIpsPage.ops.detail")}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {runs.length === 0 && (
                 <TableRow>
                   <TableCell colSpan={6} className="text-center text-muted-foreground">
-                    暂无记录
+                    {t("loginIpsPage.ops.noRecords")}
                   </TableCell>
                 </TableRow>
               )}
@@ -237,6 +251,7 @@ function SchedulerPanel() {
 // ── Mail recipients panel ──────────────────────────────────
 
 function MailPanel() {
+  const { t } = useI18n();
   const [rows, setRows] = useState<MailRecipientOut[]>([]);
   const [loading, setLoading] = useState(false);
   const [newEmail, setNewEmail] = useState("");
@@ -256,12 +271,14 @@ function MailPanel() {
     } catch (e) {
       if (e instanceof DOMException && e.name === "AbortError") return;
       toast.error(
-        `加载收件人失败: ${e instanceof Error ? e.message : String(e)}`,
+        t("loginIpsPage.ops.loadRecipientsFailed", {
+          message: e instanceof Error ? e.message : String(e),
+        }),
       );
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     const ac = new AbortController();
@@ -272,7 +289,7 @@ function MailPanel() {
   const handleAdd = async () => {
     const email = newEmail.trim();
     if (!email) {
-      toast.error("请输入邮箱");
+      toast.error(t("loginIpsPage.ops.needEmail"));
       return;
     }
     try {
@@ -289,7 +306,7 @@ function MailPanel() {
         const err = await res.json().catch(() => ({}));
         throw new Error(err.detail || `HTTP ${res.status}`);
       }
-      toast.success("已添加");
+      toast.success(t("loginIpsPage.ops.recipientAdded"));
       setNewEmail("");
       setNewRemarks("");
       fetchRows();
@@ -299,14 +316,14 @@ function MailPanel() {
   };
 
   const handleDelete = async (id: number) => {
-    if (!confirm("确认停用该收件人？")) return;
+    if (!confirm(t("loginIpsPage.ops.confirmDisable"))) return;
     try {
       const res = await apiFetch(
         `/api/v1/login-ip/mail/recipients/${id}`,
         { method: "DELETE" },
       );
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      toast.success("已停用");
+      toast.success(t("loginIpsPage.ops.recipientDisabled"));
       fetchRows();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : String(e));
@@ -318,13 +335,13 @@ function MailPanel() {
       <CardHeader>
         <CardTitle className="flex items-center gap-2 text-base">
           <IconMail className="h-4 w-4" />
-          邮件收件人
+          {t("loginIpsPage.ops.mailTitle")}
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="grid gap-3 md:grid-cols-4">
           <div className="space-y-1 md:col-span-2">
-            <Label htmlFor="new-email">邮箱</Label>
+            <Label htmlFor="new-email">{t("loginIpsPage.ops.email")}</Label>
             <Input
               id="new-email"
               type="email"
@@ -334,7 +351,7 @@ function MailPanel() {
             />
           </div>
           <div className="space-y-1">
-            <Label>角色</Label>
+            <Label>{t("loginIpsPage.ops.role")}</Label>
             <Select
               value={newRole}
               onValueChange={(v) => setNewRole(v as "to" | "cc")}
@@ -343,13 +360,15 @@ function MailPanel() {
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="to">to (主送)</SelectItem>
-                <SelectItem value="cc">cc (抄送)</SelectItem>
+                <SelectItem value="to">{t("loginIpsPage.ops.roleTo")}</SelectItem>
+                <SelectItem value="cc">{t("loginIpsPage.ops.roleCc")}</SelectItem>
               </SelectContent>
             </Select>
           </div>
           <div className="space-y-1">
-            <Label htmlFor="new-remarks-mail">备注（选填）</Label>
+            <Label htmlFor="new-remarks-mail">
+              {t("loginIpsPage.watchlist.remarksOptional")}
+            </Label>
             <Input
               id="new-remarks-mail"
               value={newRemarks}
@@ -360,7 +379,7 @@ function MailPanel() {
         <div className="flex flex-wrap gap-2 [&>button]:min-w-[112px]">
           <Button onClick={handleAdd}>
             <IconPlus className="mr-1 h-4 w-4" />
-            添加
+            {t("loginIpsPage.ops.add")}
           </Button>
           <Button
             variant="outline"
@@ -370,7 +389,7 @@ function MailPanel() {
             <IconRefresh
               className={`mr-1 h-4 w-4 ${loading ? "animate-spin" : ""}`}
             />
-            刷新
+            {t("loginIpsPage.common.refresh")}
           </Button>
         </div>
 
@@ -378,18 +397,22 @@ function MailPanel() {
           <Table>
             <TableHeader className="bg-black [&_th]:font-semibold [&_th]:text-white [&_th:first-child]:rounded-tl-xl [&_th:last-child]:rounded-tr-xl">
               <TableRow>
-                <TableHead>邮箱</TableHead>
-                <TableHead className="w-[80px]">角色</TableHead>
-                <TableHead>备注</TableHead>
-                <TableHead className="w-[160px]">添加时间</TableHead>
-                <TableHead className="w-[80px]">操作</TableHead>
+                <TableHead>{t("loginIpsPage.ops.email")}</TableHead>
+                <TableHead className="w-[80px]">{t("loginIpsPage.ops.role")}</TableHead>
+                <TableHead>{t("loginIpsPage.common.remarks")}</TableHead>
+                <TableHead className="w-[160px]">
+                  {t("loginIpsPage.ops.addedAt")}
+                </TableHead>
+                <TableHead className="w-[80px]">
+                  {t("loginIpsPage.common.actions")}
+                </TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {rows.length === 0 && (
                 <TableRow>
                   <TableCell colSpan={5} className="text-center text-muted-foreground">
-                    暂无收件人
+                    {t("loginIpsPage.ops.noRecipients")}
                   </TableCell>
                 </TableRow>
               )}

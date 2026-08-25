@@ -39,10 +39,12 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { IconTrash, IconRefresh } from "@tabler/icons-react";
 import type { MonitoredAccountOut, ServerName } from "./types";
+import { useI18n } from "@/components/i18n-provider";
 
 const SERVER_OPTIONS: ServerName[] = ["MT4", "MT5", "MT4_Live2"];
 
 export function WatchlistTab() {
+  const { t } = useI18n();
   const [rows, setRows] = useState<MonitoredAccountOut[]>([]);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -68,12 +70,14 @@ export function WatchlistTab() {
     } catch (e) {
       if (e instanceof DOMException && e.name === "AbortError") return;
       toast.error(
-        `加载监控账户失败: ${e instanceof Error ? e.message : String(e)}`,
+        t("loginIpsPage.watchlist.loadFailed", {
+          message: e instanceof Error ? e.message : String(e),
+        }),
       );
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     const ac = new AbortController();
@@ -92,7 +96,7 @@ export function WatchlistTab() {
       ),
     );
     if (ids.length === 0) {
-      toast.error("请输入至少一个账号 ID");
+      toast.error(t("loginIpsPage.watchlist.needAccountId"));
       return;
     }
     const parsed: number[] = [];
@@ -102,7 +106,9 @@ export function WatchlistTab() {
       else bad.push(s);
     }
     if (bad.length) {
-      toast.error(`以下账号 ID 不是数字: ${bad.slice(0, 5).join(", ")}`);
+      toast.error(
+        t("loginIpsPage.watchlist.notNumeric", { list: bad.slice(0, 5).join(", ") }),
+      );
       return;
     }
 
@@ -124,7 +130,7 @@ export function WatchlistTab() {
         );
       }
       const data: { message?: string } = await res.json();
-      toast.success(data.message || "已新增");
+      toast.success(data.message || t("loginIpsPage.watchlist.added"));
       setAccountsText("");
       setNewRemarks("");
       await fetchRows();
@@ -150,7 +156,7 @@ export function WatchlistTab() {
         );
       }
       const data: { message?: string } = await res.json();
-      toast.success(data.message || "已删除");
+      toast.success(data.message || t("loginIpsPage.watchlist.deleted"));
       await fetchRows();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : String(e));
@@ -166,7 +172,7 @@ export function WatchlistTab() {
     const next = normalized ? normalized : null;
     const prev = row.remarks ?? null;
     if ((next ?? "") === (prev ?? "")) {
-      toast.message("备注无变更");
+      toast.message(t("loginIpsPage.watchlist.remarksUnchanged"));
       return;
     }
 
@@ -184,7 +190,7 @@ export function WatchlistTab() {
         );
       }
       const data: { message?: string } = await res.json();
-      toast.success(data.message || "备注已保存");
+      toast.success(data.message || t("loginIpsPage.watchlist.remarksSaved"));
       await fetchRows();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : String(e));
@@ -202,13 +208,13 @@ export function WatchlistTab() {
           title-to-content distance. See .cursor/skills/page-style-conventions. */}
       <Card className="gap-3">
         <CardHeader>
-          <CardTitle className="text-base">批量新增监控账户</CardTitle>
+          <CardTitle className="text-base">{t("loginIpsPage.watchlist.addTitle")}</CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
           <div className="space-y-3">
             <div className="space-y-1">
               <Label htmlFor="accounts-input">
-                账号 ID（多个用空格 / 逗号 / 换行分隔）
+                {t("loginIpsPage.watchlist.accountIds")}
               </Label>
               <Textarea
                 id="accounts-input"
@@ -221,7 +227,7 @@ export function WatchlistTab() {
 
             <div className="grid gap-3 md:grid-cols-2">
               <div className="min-w-0 space-y-1">
-                <Label className="block">服务器</Label>
+                <Label className="block">{t("loginIpsPage.common.server")}</Label>
                 <Select
                   value={serverName}
                   onValueChange={(v) => setServerName(v as ServerName)}
@@ -239,7 +245,9 @@ export function WatchlistTab() {
                 </Select>
               </div>
               <div className="min-w-0 space-y-1">
-                <Label htmlFor="new-remarks">备注（选填）</Label>
+                <Label htmlFor="new-remarks">
+                  {t("loginIpsPage.watchlist.remarksOptional")}
+                </Label>
                 <Input
                   id="new-remarks"
                   value={newRemarks}
@@ -255,7 +263,7 @@ export function WatchlistTab() {
               onClick={handleAddClick}
               disabled={!canAdd || saving}
             >
-              新增
+              {t("loginIpsPage.watchlist.add")}
             </Button>
           </div>
         </CardContent>
@@ -263,7 +271,7 @@ export function WatchlistTab() {
 
       <Card className="gap-3">
         <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-2">
-          <CardTitle className="text-base">监控账户列表</CardTitle>
+          <CardTitle className="text-base">{t("loginIpsPage.watchlist.listTitle")}</CardTitle>
           <Button
             variant="outline"
             size="sm"
@@ -273,7 +281,7 @@ export function WatchlistTab() {
             <IconRefresh
               className={`mr-1 h-4 w-4 ${loading ? "animate-spin" : ""}`}
             />
-            刷新列表
+            {t("loginIpsPage.watchlist.refreshList")}
           </Button>
         </CardHeader>
         <CardContent>
@@ -281,10 +289,12 @@ export function WatchlistTab() {
             <Table>
               <TableHeader className="bg-black [&_th]:font-semibold [&_th]:text-white [&_th:first-child]:rounded-tl-xl [&_th:last-child]:rounded-tr-xl">
                 <TableRow>
-                  <TableHead>MT账号</TableHead>
-                  <TableHead>服务器</TableHead>
-                  <TableHead>备注</TableHead>
-                  <TableHead className="w-[200px]">操作</TableHead>
+                  <TableHead>{t("loginIpsPage.common.mtAccount")}</TableHead>
+                  <TableHead>{t("loginIpsPage.common.server")}</TableHead>
+                  <TableHead>{t("loginIpsPage.common.remarks")}</TableHead>
+                  <TableHead className="w-[200px]">
+                    {t("loginIpsPage.common.actions")}
+                  </TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -294,7 +304,7 @@ export function WatchlistTab() {
                       colSpan={4}
                       className="py-10 text-center text-muted-foreground"
                     >
-                      暂无监控账户
+                      {t("loginIpsPage.watchlist.empty")}
                     </TableCell>
                   </TableRow>
                 )}
@@ -325,7 +335,7 @@ export function WatchlistTab() {
                           onClick={() => handleSaveRemarks(row)}
                           disabled={saving}
                         >
-                          保存备注
+                          {t("loginIpsPage.watchlist.saveRemarks")}
                         </Button>
                         <Button
                           variant="ghost"
