@@ -275,13 +275,22 @@ const REQ: ScanRequest = {
   holdBucket: "total",
   sids: [1, 5, 6],
   symbol: null,
+  scanBy: "open",
 };
 
 describe("buildScanQuery", () => {
   it("emits the contract §3 param names and omits an empty symbol", () => {
     expect(buildScanQuery(REQ)).toBe(
-      "anchor=2026-08-01T03%3A00&window_min=5&hold_bucket=total&sids=1%2C5%2C6",
+      "anchor=2026-08-01T03%3A00&window_min=5&hold_bucket=total" +
+        "&scan_by=open&sids=1%2C5%2C6",
     );
+  });
+
+  it("sends the close basis when the close tab is active", () => {
+    const parsed = new URLSearchParams(
+      buildScanQuery({ ...REQ, scanBy: "close" }),
+    );
+    expect(parsed.get("scan_by")).toBe("close");
   });
 
   it("includes the symbol when set and sorts sids", () => {
@@ -299,6 +308,7 @@ describe("describeQuery", () => {
       "时点 (HK)",
       "时点 (MT)",
       "窗口",
+      "扫描基准",
       "持仓分桶",
       "服务器",
       "品种前缀",
@@ -307,7 +317,14 @@ describe("describeQuery", () => {
     expect(chips[1].value).toBe("2026-07-31 22:00");
     expect(chips[2].value).toContain("2026-07-31 21:55");
     expect(chips[2].value).toContain("2026-07-31 22:05");
-    expect(chips[5].value).toBe("全部品种");
+    expect(chips[6].value).toBe("全部品种");
+  });
+
+  it("names the basis so an empty result cannot be misread as the other tab", () => {
+    expect(describeQuery(REQ)[3].value).toBe("开仓时点");
+    expect(describeQuery({ ...REQ, scanBy: "close" })[3].value).toBe(
+      "平仓时点",
+    );
   });
 
   it("degrades gracefully on a malformed anchor", () => {

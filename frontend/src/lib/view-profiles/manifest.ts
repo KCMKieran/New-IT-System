@@ -56,6 +56,8 @@ export const UI_STATE_KEYS: readonly string[] = [
   "RISK_MONITOR_BURST_OPEN_AGGREGATED_V1",
   "RISK_MONITOR_HEDGE_OPEN_AGGREGATED_V1",
   "RISK_MONITOR_ACTIVE_TAB_V1",
+  // Trade Window Scan: which basis tab (entry / close) the page opens on.
+  "WINDOW_SCAN_ACTIVE_TAB_V1",
 ];
 
 /**

@@ -59,7 +59,7 @@ export const zhCN = {
     // names were too similar to tell apart at a glance (user decision 2026-08-05).
     riskMonitor: "Risk Rule Alerts",
     riskWatchlist: "Client Activity Monitor",
-    windowScan: "Entry Window Scan",
+    windowScan: "Trade Window Scan",
     home: "首页",
     // Auth P4b: tooltip on the greyed-out /docs/ entry. The entry stays visible
     // for everyone — a vanished link reads as "the docs were deleted".
@@ -123,7 +123,7 @@ export const zhCN = {
     csIbDeposits: "IB 出入金查询",
     riskAlertMail: "告警邮件中心",
     riskWatchlist: "Client Activity Monitor", // English in both locales — see nav block
-    windowScan: "Entry Window Scan", // English in both locales — see nav block
+    windowScan: "Trade Window Scan", // English in both locales — see nav block
   },
 
   ibidLotsPage: {

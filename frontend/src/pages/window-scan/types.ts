@@ -1,5 +1,5 @@
 /**
- * Window Scan (开仓时点扫描) — API + UI types.
+ * Trade Window Scan (交易时点扫描) — API + UI types.
  *
  * Field names mirror the frozen contract §3 verbatim (backend
  * `schemas/window_scan.py`). Do NOT rename fields here without changing the
@@ -9,6 +9,18 @@
 
 export type HoldBucket = "total" | "lt30m" | "m30_2h" | "gt2h";
 export type WindowMin = 1 | 3 | 5 | 10 | 15;
+
+/**
+ * Which timestamp the ±N minute window is measured against — also the tab
+ * identity, so one value drives both the URL (`?tab=close`) and the API
+ * (`scan_by=close`). Two names for one concept invites them to drift apart.
+ *
+ * `close` scans are structurally free of open positions: a trade that closed
+ * inside the window has a close time by definition. `open_orders`,
+ * `floating_profit` and `open_trades_scanned` are therefore always 0 / null
+ * there — a property of the question asked, NOT missing data.
+ */
+export type ScanBasis = "open" | "close";
 
 /**
  * Client-level open/closed rollup (contract §4.2).
@@ -83,12 +95,18 @@ export interface WindowScanStatistics {
   range_mt_to: string;
   window_min: number;
   hold_bucket: HoldBucket;
+  /** Echo of the requested basis; "open" for pre-v2 callers. */
+  scan_by: ScanBasis;
   sids: number[];
   symbol: string | null;
-  /** De-duplicated clients that opened in the window, losers included. */
+  /**
+   * De-duplicated clients that opened (basis "open") or closed (basis
+   * "close") in the window, losers included.
+   */
   clients_scanned: number;
   clients_profitable: number;
   trades_scanned: number;
+  /** Always 0 on the "close" basis — see {@link ScanBasis}. */
   open_trades_scanned: number;
   /**
    * De-duplicated clients dropped by the employee rule (CLAUDE.md: reports
@@ -122,6 +140,7 @@ export interface ScanRequest {
   holdBucket: HoldBucket;
   sids: number[];
   symbol: string | null;
+  scanBy: ScanBasis;
 }
 
 // ─── Controls ───────────────────────────────────────────────────────────
@@ -134,6 +153,29 @@ export const HOLD_BUCKET_OPTIONS: { value: HoldBucket; label: string }[] = [
   { value: "m30_2h", label: "30分–2小时" },
   { value: "gt2h", label: ">2小时" },
 ];
+
+/**
+ * Tab strip. English labels in both locales, matching the page title and the
+ * three sibling Risk Control pages (see app-sidebar.tsx).
+ */
+export const SCAN_BASIS_TABS: readonly ScanBasis[] = ["open", "close"];
+
+export const SCAN_BASIS_LABELS: Record<ScanBasis, string> = {
+  open: "Entry Window Scan",
+  close: "Close Window Scan",
+};
+
+/** Short Chinese wording for inline copy (summaries, empty state, chips). */
+export const SCAN_BASIS_NOUN: Record<ScanBasis, string> = {
+  open: "开仓",
+  close: "平仓",
+};
+
+export function isScanBasis(v: string | null): v is ScanBasis {
+  // Derived from SCAN_BASIS_TABS so adding a basis is a one-line edit — a
+  // hardcoded list here would silently reject it (deep-link + restore no-op).
+  return v !== null && (SCAN_BASIS_TABS as readonly string[]).includes(v);
+}
 
 export const SERVER_OPTIONS: { sid: number; name: string }[] = [
   { sid: 1, name: "MT4 Live" },
@@ -153,7 +195,16 @@ export interface WindowScanFilters extends Record<string, unknown> {
   sids: number[];
 }
 
+/**
+ * Shared by BOTH tabs on purpose: window width / hold bucket / servers mean
+ * the same thing either way, and the point of the two tabs is to run the same
+ * conditions against the same instant on a different basis. A per-tab key
+ * would make that comparison a re-typing exercise.
+ */
 export const FILTERS_KEY = "WINDOW_SCAN_FILTERS_V1";
+
+/** Last-active tab. `?tab=` in the URL still wins (deep links keep working). */
+export const ACTIVE_TAB_KEY = "WINDOW_SCAN_ACTIVE_TAB_V1";
 
 export const FILTER_DEFAULTS: WindowScanFilters = {
   windowMin: 5,

@@ -14,6 +14,7 @@
 import type {
   ClientStatusTag,
   HoldBucket,
+  ScanBasis,
   ScanRequest,
   TradeStatus,
   WindowMin,
@@ -21,6 +22,8 @@ import type {
 import {
   FILTER_DEFAULTS,
   HOLD_BUCKET_OPTIONS,
+  isScanBasis,
+  SCAN_BASIS_NOUN,
   SERVER_OPTIONS,
   WINDOW_MIN_OPTIONS,
 } from "./types";
@@ -277,6 +280,16 @@ export function windowMinLabel(n: number): string {
   return `±${n} 分钟`;
 }
 
+/** "开仓时点" / "平仓时点" — the noun used in inline Chinese copy. */
+export function scanBasisLabel(basis: ScanBasis): string {
+  return `${SCAN_BASIS_NOUN[basis] ?? String(basis)}时点`;
+}
+
+/** Persisted / URL tab value → a basis, falling back to the v1 behaviour. */
+export function sanitizeScanBasis(raw: unknown): ScanBasis {
+  return typeof raw === "string" && isScanBasis(raw) ? raw : "open";
+}
+
 export function serverName(sid: number): string {
   return SERVER_OPTIONS.find((o) => o.sid === sid)?.name ?? `sid ${sid}`;
 }
@@ -342,6 +355,7 @@ export function describeQuery(req: ScanRequest): QueryChip[] {
         ? `${windowMinLabel(req.windowMin)}（MT ${fmtStamp(range.from)} ~ ${fmtStamp(range.to)}）`
         : windowMinLabel(req.windowMin),
     },
+    { label: "扫描基准", value: scanBasisLabel(req.scanBy) },
     { label: "持仓分桶", value: holdBucketLabel(req.holdBucket) },
     { label: "服务器", value: serverNames(req.sids) },
     { label: "品种前缀", value: req.symbol ?? "全部品种" },
@@ -354,6 +368,7 @@ export function buildScanQuery(req: ScanRequest): string {
     anchor: req.anchor,
     window_min: String(req.windowMin),
     hold_bucket: req.holdBucket,
+    scan_by: req.scanBy,
     sids: req.sids
       .slice()
       .sort((a, b) => a - b)

@@ -1,4 +1,4 @@
-"""Unit + contract tests for Window Scan (开仓时点扫描).
+"""Unit + contract tests for Window Scan (交易时点扫描).
 
 Pure functions only — no MySQL, no PG. The route tests mount the router on a
 bare FastAPI app and mock the service layer, so nothing here touches a real
@@ -9,7 +9,10 @@ Regression coverage worth calling out:
     closed sum, never per trade;
   * the sid=5 closed-row direction inversion (and its non-application to
     open rows / MT4);
-  * cent products scaling BOTH lots and money by 100.
+  * cent products scaling BOTH lots and money by 100;
+  * the close-basis (``scan_by="close"``) column swap — it must land on the
+    INDEXED generated column and must never let the 1970 open-position
+    sentinel into a result set.
 """
 
 from __future__ import annotations
@@ -612,6 +615,9 @@ def test_build_trades_sql_parameterizes_everything():
     assert "t.openDate BETWEEN %(date_from)s AND %(date_to)s" in sql
     assert "OR t.openDate" not in sql
     assert "t.OPEN_TIME BETWEEN %(mt_from)s AND %(mt_to)s" in sql
+    # Open basis must not drag the close-basis columns in with it.
+    assert "t.closeDate BETWEEN" not in sql
+    assert "t.CLOSE_TIME BETWEEN" not in sql
     assert "t.CMD IN (0, 1)" in sql
     assert "%(sid_0)s" in sql and "%(sid_1)s" in sql and "%(sid_2)s" in sql
     assert params["sid_0"] == 1 and params["sid_1"] == 5 and params["sid_2"] == 6
@@ -691,6 +697,178 @@ def test_row_cap_is_bound_as_a_parameter_not_interpolated():
     assert str(svc.MAX_TRADE_ROWS) not in sql
 
 
+# ── scan_by: open vs close basis ────────────────────────────────────────
+
+
+def test_close_basis_swaps_to_the_indexed_close_columns():
+    """CLOSE_TIME has no index either — the day bracket must go through the
+    STORED generated `closeDate` (INDEX_CLOSEDATE), exactly like the open
+    basis goes through `openDate`."""
+    sql, _ = svc.build_trades_sql(
+        sids=[1], excluded_groupsids=[], has_symbol=False, scan_by="close"
+    )
+    assert "t.closeDate BETWEEN %(date_from)s AND %(date_to)s" in sql
+    assert "t.CLOSE_TIME BETWEEN %(mt_from)s AND %(mt_to)s" in sql
+    # Same anti-OR rule as the open basis: an OR of two dates loses the index.
+    assert "OR t.closeDate" not in sql
+    # And the open-basis predicates must be gone, not merely joined.
+    assert "t.openDate BETWEEN" not in sql
+    assert "t.OPEN_TIME BETWEEN" not in sql
+
+
+def test_close_basis_guards_the_1970_open_position_sentinel():
+    """Still-open rows park CLOSE_TIME on the epoch. A window centred on the
+    epoch would otherwise sweep up every open position in the table and
+    report them as closed trades."""
+    sql, params = svc.build_trades_sql(
+        sids=[1], excluded_groupsids=[], has_symbol=False, scan_by="close"
+    )
+    assert "AND t.CLOSE_TIME >= %(close_sentinel)s" in sql
+    assert params["close_sentinel"] == svc._OPEN_CLOSE_TIME_CUTOFF
+    # The bound value must not be baked into the statement text.
+    assert "1971" not in sql
+
+
+def test_open_basis_has_no_sentinel_guard():
+    sql, params = svc.build_trades_sql(
+        sids=[1], excluded_groupsids=[], has_symbol=False, scan_by="open"
+    )
+    assert "close_sentinel" not in sql
+    assert "close_sentinel" not in params
+
+
+def test_build_trades_sql_defaults_to_the_open_basis():
+    default_sql, _ = svc.build_trades_sql(
+        sids=[1], excluded_groupsids=[], has_symbol=False
+    )
+    explicit_sql, _ = svc.build_trades_sql(
+        sids=[1], excluded_groupsids=[], has_symbol=False, scan_by="open"
+    )
+    assert default_sql == explicit_sql
+
+
+@pytest.mark.parametrize(
+    "bad", ["OPEN", "closed", "entry", "", "openDate", "1; DROP TABLE"]
+)
+def test_build_trades_sql_rejects_unknown_scan_by(bad: str):
+    """The ONLY caller-influenced thing interpolated into the statement text
+    is this key, so the last line of defence lives here, not in the route."""
+    with pytest.raises(ValueError):
+        svc.build_trades_sql(
+            sids=[1], excluded_groupsids=[], has_symbol=False, scan_by=bad
+        )
+
+
+def test_scan_by_is_never_echoed_into_the_statement_text():
+    for basis in svc.ALLOWED_SCAN_BY:
+        sql, _ = svc.build_trades_sql(
+            sids=[1], excluded_groupsids=[], has_symbol=False, scan_by=basis
+        )
+        date_col, time_col = svc._SCAN_BASIS_COLUMNS[basis]
+        # Only the frozen column names reach the SQL — never the key itself.
+        assert f"t.{date_col} BETWEEN" in sql
+        assert f"t.{time_col} BETWEEN" in sql
+
+
+def _raw(client_id: int, ticket: str, profit: float, close_time):
+    """Raw DB row shape as `fetch_window_trades` returns it."""
+    return {
+        "ticket_sid": ticket,
+        "sid": 1,
+        "login": 1000 + client_id,
+        "symbol": "XAUUSD",
+        "cmd": 0,
+        "lots": 1.0,
+        "total_profit": profit,
+        "open_time": datetime(2026, 7, 31, 21, 57, 30),
+        "close_time": close_time,
+        "client_id": client_id,
+        "is_employee": 0,
+    }
+
+
+def _run_scan(rows, *, scan_by: str):
+    """query_window_scan end-to-end with MySQL + PG stubbed out."""
+    with mock.patch.object(svc, "_get_excluded_groupsids", return_value=[]), \
+         mock.patch.object(svc, "_connect_mysql", return_value=_FakeConn(rows)), \
+         mock.patch.object(svc, "enrich_clients", return_value=True):
+        return svc.query_window_scan(
+            mock.Mock(),
+            anchor="2026-08-01T03:00",
+            window_min=5,
+            scan_by=scan_by,
+            as_of_mt=datetime(2026, 8, 1),
+        )
+
+
+def test_fetch_window_trades_forwards_the_basis_to_the_sql_builder():
+    window = svc.compute_window(svc.parse_anchor_hk("2026-08-01T03:00"), 5)
+    with mock.patch.object(svc, "_get_excluded_groupsids", return_value=[]), \
+         mock.patch.object(svc, "_connect_mysql", return_value=_FakeConn([])), \
+         mock.patch.object(
+             svc, "build_trades_sql", wraps=svc.build_trades_sql
+         ) as builder:
+        svc.fetch_window_trades(
+            mock.Mock(), window=window, sids=[1], symbol=None, scan_by="close"
+        )
+    assert builder.call_args.kwargs["scan_by"] == "close"
+
+
+def test_stats_echo_the_requested_basis():
+    for basis in svc.ALLOWED_SCAN_BY:
+        _, stats = _run_scan([], scan_by=basis)
+        assert stats["scan_by"] == basis
+
+
+def test_scan_by_defaults_to_open_in_the_service():
+    with mock.patch.object(svc, "_get_excluded_groupsids", return_value=[]), \
+         mock.patch.object(svc, "_connect_mysql", return_value=_FakeConn([])), \
+         mock.patch.object(svc, "enrich_clients", return_value=True):
+        _, stats = svc.query_window_scan(
+            mock.Mock(), anchor="2026-08-01T03:00", window_min=5
+        )
+    assert stats["scan_by"] == svc.DEFAULT_SCAN_BY == "open"
+
+
+@pytest.mark.parametrize("bad", ["OPEN", "closed", "entry", ""])
+def test_query_window_scan_rejects_unknown_scan_by(bad: str):
+    with pytest.raises(ValueError):
+        svc.query_window_scan(mock.Mock(), anchor="2026-08-01T03:00", scan_by=bad)
+
+
+def test_close_basis_rollup_has_no_open_positions():
+    """Structural, not incidental: a row that closed inside the window has a
+    close time by definition, so every open-position column degrades to
+    empty. The frontend renders 0 / — for these and must not read it as
+    missing data."""
+    rows = [
+        _raw(111, "1-a", 500.0, datetime(2026, 7, 31, 22, 0, 0)),
+        _raw(111, "1-b", -100.0, datetime(2026, 7, 31, 22, 3, 0)),
+    ]
+    winners, stats = _run_scan(rows, scan_by="close")
+    assert [w["client_id"] for w in winners] == [111]
+    winner = winners[0]
+    assert winner["closed_profit"] == 400.0
+    assert winner["open_orders"] == 0
+    assert winner["floating_profit"] is None
+    assert winner["status_tag"] == "closed_only"
+    assert stats["open_trades_scanned"] == 0
+
+
+def test_open_basis_still_carries_open_positions():
+    """Guards the other direction: the close-basis change must not have
+    quietly dropped open rows from the ORIGINAL mode."""
+    rows = [
+        _raw(111, "1-a", 500.0, datetime(2026, 7, 31, 22, 0, 0)),
+        _raw(111, "1-open", 42.0, datetime(1970, 1, 1, 0, 0, 0)),
+    ]
+    winners, stats = _run_scan(rows, scan_by="open")
+    assert winners[0]["open_orders"] == 1
+    assert winners[0]["floating_profit"] == 42.0
+    assert winners[0]["status_tag"] == "mixed"
+    assert stats["open_trades_scanned"] == 1
+
+
 # ── Route contract ──────────────────────────────────────────────────────
 
 
@@ -768,6 +946,7 @@ def _fake_result(rows: List[Dict[str, Any]]):
         "range_mt_to": "2026-07-31T22:05",
         "window_min": 5,
         "hold_bucket": "total",
+        "scan_by": "open",
         "sids": [1, 5, 6],
         "symbol": None,
         "clients_scanned": 87,
@@ -857,6 +1036,55 @@ def test_mysql_failure_maps_to_500_without_leaking_details(client: TestClient):
         r = client.get("/api/v1/risk/window-scan", params=_OK_PARAMS)
     assert r.status_code == 500
     assert "pw@host" not in r.text
+
+
+@pytest.mark.parametrize("bad", ["OPEN", "closed", "entry", "", "openDate"])
+def test_bad_scan_by_422(client: TestClient, bad: str):
+    r = client.get(
+        "/api/v1/risk/window-scan", params={**_OK_PARAMS, "scan_by": bad}
+    )
+    assert r.status_code == 422
+    assert "scan_by" in r.text
+
+
+def test_scan_by_is_validated_before_the_service_runs(client: TestClient):
+    with mock.patch.object(svc, "query_window_scan") as q:
+        r = client.get(
+            "/api/v1/risk/window-scan", params={**_OK_PARAMS, "scan_by": "nope"}
+        )
+    assert r.status_code == 422
+    q.assert_not_called()
+
+
+def test_scan_by_reaches_the_service(client: TestClient):
+    with mock.patch.object(
+        svc, "query_window_scan", return_value=_fake_result([])
+    ) as q:
+        r = client.get(
+            "/api/v1/risk/window-scan", params={**_OK_PARAMS, "scan_by": "close"}
+        )
+    assert r.status_code == 200
+    assert q.call_args.kwargs["scan_by"] == "close"
+
+
+def test_scan_by_omitted_defaults_to_open(client: TestClient):
+    """Backward compatibility: every existing caller (and bookmark) keeps the
+    v1 entry-time behaviour without changing its query string."""
+    with mock.patch.object(
+        svc, "query_window_scan", return_value=_fake_result([])
+    ) as q:
+        r = client.get("/api/v1/risk/window-scan", params=_OK_PARAMS)
+    assert r.status_code == 200
+    assert q.call_args.kwargs["scan_by"] == "open"
+    assert r.json()["statistics"]["scan_by"] == "open"
+
+
+def test_statistics_scan_by_enum_rejects_unknown_values(client: TestClient):
+    rows, stats = _fake_result([])
+    stats["scan_by"] = "sideways"
+    with mock.patch.object(svc, "query_window_scan", return_value=(rows, stats)):
+        with pytest.raises(Exception):
+            client.get("/api/v1/risk/window-scan", params=_OK_PARAMS)
 
 
 def test_handler_is_sync_def_not_coroutine():

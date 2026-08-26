@@ -56,7 +56,7 @@ export const enUS = {
     riskAlertMail: "Alert Mail Center",
     riskMonitor: "Risk Rule Alerts",
     riskWatchlist: "Client Activity Monitor",
-    windowScan: "Entry Window Scan",
+    windowScan: "Trade Window Scan",
     home: "Home",
     docsManagerOnly: "The documentation portal is manager-only — ask a manager for access",
   },
@@ -113,7 +113,7 @@ export const enUS = {
     csIbDeposits: "IB Deposits & Withdrawals",
     riskAlertMail: "Alert Mail Center",
     riskWatchlist: "Client Activity Monitor",
-    windowScan: "Entry Window Scan",
+    windowScan: "Trade Window Scan",
   },
 
   ibidLotsPage: {
