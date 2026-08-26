@@ -846,16 +846,6 @@ export default function ClientReturnRate() {
       <Card>
         <CardHeader>
           <CardTitle className="text-2xl font-bold">客户收益率查询</CardTitle>
-          <p className="text-sm text-muted-foreground">
-            展示所选时间范围内有平仓记录的客户
-          </p>
-          {/* Long-term return (ROACE): same definition as backend / docs/features/roace-return-rate.md */}
-          <p className="text-xs text-muted-foreground leading-relaxed border-l-2 border-muted pl-3 mt-2">
-            <span className="font-medium text-foreground/80">长期收益率（ROACE）说明：</span>
-            长期收益率% = 历史利润 ÷ 日均净值 × 100%。日均净值为全历史中「有交易或资金变动」的日期上，
-            各日日终净值（交易账户 sid 1/5/6，不含 IB 钱包与 demo）的平均值；历史利润为已实现交易盈亏（不含
-            IB 佣金、奖金、浮动盈亏）。列头 ℹ 可查看公式与口径细节。
-          </p>
         </CardHeader>
         <CardContent>
           <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
