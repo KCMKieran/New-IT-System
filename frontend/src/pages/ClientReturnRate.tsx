@@ -61,6 +61,16 @@ import { useIsMobile } from "@/hooks/use-mobile";
 import { useGridColumnPersist } from "@/hooks/useGridColumnPersist";
 import { ColumnVisibilityMenu } from "@/components/ColumnVisibilityMenu";
 
+/**
+ * Toolbar sizing system (方案 B). The filter grid owns the width — every
+ * control just fills its track, so all boxes end up identical however many
+ * columns the viewport affords. Same idea as HoldBucketReport's
+ * FILTER_TRIGGER_CLASS, expressed as a grid track instead of a fixed px.
+ */
+const FILTER_CONTROL_CLASS = "h-9 w-full min-w-0";
+/** Actions keep a fixed width so the right-aligned row reads as one block. */
+const ACTION_BUTTON_CLASS = "h-9 w-full sm:w-[140px]";
+
 interface ClientReturnRateRow {
   client_id: number;
   /** TRADING net deposit — excludes 'ib withdrawal' (IB commission cash-outs). */
@@ -848,16 +858,22 @@ export default function ClientReturnRate() {
           <CardTitle className="text-2xl font-bold">客户收益率查询</CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
-            {/* Filter controls — flex-wrap so 3 dropdowns + date + time + search reflow on narrow screens */}
-            <div className="flex flex-col gap-2 w-full sm:flex-row sm:flex-wrap sm:items-center sm:gap-3 sm:w-auto sm:flex-1 max-w-full">
+          {/* Toolbar. Filters sit in an auto-fill grid: one shared track width,
+              column edges aligned no matter how many rows it wraps into (a full
+              single row needs ~1880px of viewport, so wrapping is the norm, not
+              the exception). Actions get their own row, right-aligned to the
+              same container edge — previously they were vertically centred
+              against a wrapped filter block and lined up with neither row. */}
+          <div className="flex flex-col gap-3">
+            <div className="grid grid-cols-[repeat(auto-fill,minmax(200px,1fr))] gap-3">
               {/* Date Range Picker */}
               <Popover>
                 <PopoverTrigger asChild>
                   <Button
                     variant="outline"
                     className={cn(
-                      "w-full sm:w-[260px] justify-start text-left font-normal h-9",
+                      FILTER_CONTROL_CLASS,
+                      "justify-start text-left font-normal",
                       !date && "text-muted-foreground",
                     )}
                   >
@@ -899,7 +915,7 @@ export default function ClientReturnRate() {
                   setDate(undefined);
                 }}
               >
-                <SelectTrigger className="w-full sm:w-[140px] h-9">
+                <SelectTrigger className={FILTER_CONTROL_CLASS}>
                   <SelectValue placeholder="时间快选" />
                 </SelectTrigger>
                 <SelectContent>
@@ -917,24 +933,25 @@ export default function ClientReturnRate() {
                 </SelectContent>
               </Select>
 
-              {/* Search Input */}
-              <div className="flex items-center gap-1">
-                <div className="relative w-full sm:w-[200px]">
-                  <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                  <Input
-                    placeholder="搜索客户ID"
-                    value={searchInput}
-                    onChange={(e) => setSearchInput(e.target.value)}
-                    onKeyDown={handleSearchKeyDown}
-                    className="h-9 pl-9 w-full"
-                  />
-                </div>
+              {/* Search Input. The clear button is absolutely positioned INSIDE
+                  the field: as a sibling it was conditionally rendered and shoved
+                  every downstream control 36px sideways the moment you typed. */}
+              <div className={cn(FILTER_CONTROL_CLASS, "relative")}>
+                <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  placeholder="搜索客户ID"
+                  value={searchInput}
+                  onChange={(e) => setSearchInput(e.target.value)}
+                  onKeyDown={handleSearchKeyDown}
+                  className={cn("h-9 w-full pl-9", searchValue && "pr-9")}
+                />
                 {searchValue && (
                   <Button
                     variant="ghost"
                     size="sm"
                     onClick={handleClearSearch}
-                    className="h-9 px-2"
+                    aria-label="清除搜索"
+                    className="absolute right-1 top-1/2 h-7 w-7 -translate-y-1/2 p-0"
                   >
                     <X className="h-4 w-4" />
                   </Button>
@@ -944,13 +961,18 @@ export default function ClientReturnRate() {
               {/* Country Filter (CN / Global) — risk-monitor style dropdown */}
               <Select value={countryFilter} onValueChange={setCountryFilter}>
                 <SelectTrigger
-                  className="w-full min-w-0 h-9 sm:w-40 sm:shrink-0"
+                  className={FILTER_CONTROL_CLASS}
                   aria-label="按国家筛选"
                 >
-                  <SelectValue />
+                  {/* Closed state shows the category name while inactive and the
+                      chosen value once filtering — same convention as 入金渠道
+                      below and HoldBucketReport's filter row. */}
+                  <SelectValue>
+                    {countryFilter === "all" ? "国家" : countryFilter}
+                  </SelectValue>
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="all">全部国家</SelectItem>
+                  <SelectItem value="all">全部</SelectItem>
                   <SelectItem value="CN">CN</SelectItem>
                   <SelectItem value="Global">Global</SelectItem>
                 </SelectContent>
@@ -959,13 +981,19 @@ export default function ClientReturnRate() {
               {/* AKCM Tag Filter */}
               <Select value={akcmFilter} onValueChange={setAkcmFilter}>
                 <SelectTrigger
-                  className="w-full min-w-0 h-9 sm:w-40 sm:shrink-0"
+                  className={FILTER_CONTROL_CLASS}
                   aria-label="按 AKCM 标签筛选"
                 >
-                  <SelectValue />
+                  <SelectValue>
+                    {akcmFilter === "only"
+                      ? "仅 AKCM"
+                      : akcmFilter === "exclude"
+                        ? "排除 AKCM"
+                        : "AKCM 标签"}
+                  </SelectValue>
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="all">全部 AKCM</SelectItem>
+                  <SelectItem value="all">全部</SelectItem>
                   <SelectItem value="only">仅 AKCM</SelectItem>
                   <SelectItem value="exclude">排除 AKCM</SelectItem>
                 </SelectContent>
@@ -977,7 +1005,7 @@ export default function ClientReturnRate() {
                   当选了具体值时显示该选项的文字，否则维持类目名。 */}
               <Select value={usdtFilter} onValueChange={setUsdtFilter}>
                 <SelectTrigger
-                  className="w-full min-w-0 h-9 sm:w-40 sm:shrink-0"
+                  className={FILTER_CONTROL_CLASS}
                   aria-label="按入金渠道筛选"
                 >
                   <SelectValue>
@@ -996,12 +1024,14 @@ export default function ClientReturnRate() {
               </Select>
             </div>
 
-            {/* Action buttons */}
-            <div className="flex flex-col sm:flex-row gap-2 w-full sm:w-auto">
+            {/* Action row — right-aligned to the same container edge as the
+                filter grid above, so it stays anchored no matter how many rows
+                the grid wraps into. */}
+            <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
               <Button
                 onClick={fetchData}
                 disabled={loading}
-                className="w-full sm:w-[120px] h-9 gap-2"
+                className={cn(ACTION_BUTTON_CLASS, "gap-2")}
               >
                 {loading ? (
                   <RefreshCw className="h-4 w-4 animate-spin" />
@@ -1014,7 +1044,7 @@ export default function ClientReturnRate() {
                 variant="outline"
                 onClick={handleExportCsv}
                 disabled={loading || exporting}
-                className="w-full sm:w-[140px] h-9 gap-2"
+                className={cn(ACTION_BUTTON_CLASS, "gap-2")}
               >
                 {exporting ? (
                   <RefreshCw className="h-4 w-4 animate-spin" />
@@ -1026,7 +1056,7 @@ export default function ClientReturnRate() {
               <ColumnVisibilityMenu
                 persist={columnPersist}
                 columnDefs={columnDefs as ColDef<unknown>[]}
-                buttonClassName="w-full sm:w-[140px] h-9"
+                buttonClassName={ACTION_BUTTON_CLASS}
               />
             </div>
           </div>
