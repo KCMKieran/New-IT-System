@@ -1,4 +1,4 @@
-"""Window Scan (开仓时点扫描) endpoint.
+"""Window Scan (交易时点扫描) endpoint.
 
 SSOT: docs/features/window-scan.md (frozen contract v1 §3).
 
@@ -71,6 +71,13 @@ def window_scan(
     hold_bucket: str = Query(
         default="total", description="total | lt30m | m30_2h | gt2h"
     ),
+    scan_by: str = Query(
+        default=svc.DEFAULT_SCAN_BY,
+        description=(
+            "open = clients that ENTERED in the window (default); "
+            "close = clients that EXITED in the window"
+        ),
+    ),
     sids: Optional[str] = Query(
         default="1,5,6", description="Comma-separated server ids (subset of 1,5,6)"
     ),
@@ -78,7 +85,8 @@ def window_scan(
         default=None, description="Prefix match, e.g. XAUUSD → SYMBOL LIKE 'XAUUSD%'"
     ),
 ):
-    """Clients that opened inside ±window_min of ``anchor`` and closed in profit."""
+    """Clients that opened (or closed) inside ±window_min of ``anchor`` and
+    came out ahead on their closed rows."""
     if window_min not in svc.ALLOWED_WINDOW_MIN:
         raise _unprocessable(
             f"invalid window_min {window_min!r}; allowed values are "
@@ -88,6 +96,11 @@ def window_scan(
         raise _unprocessable(
             f"invalid hold_bucket {hold_bucket!r}; allowed values are "
             f"{list(svc.HOLD_BUCKETS)}"
+        )
+    if scan_by not in svc.ALLOWED_SCAN_BY:
+        raise _unprocessable(
+            f"invalid scan_by {scan_by!r}; allowed values are "
+            f"{list(svc.ALLOWED_SCAN_BY)}"
         )
     sid_list = _parse_sids(sids)
     try:
@@ -105,6 +118,7 @@ def window_scan(
             hold_bucket=hold_bucket,
             sids=sid_list,
             symbol=symbol_clean or None,
+            scan_by=scan_by,
         )
     except ValueError as exc:
         # Domain validation that slipped past the checks above.

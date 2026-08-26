@@ -1,4 +1,4 @@
-"""Pydantic schemas for the Window Scan API (开仓时点扫描).
+"""Pydantic schemas for the Trade Window Scan API (交易时点扫描).
 
 SSOT: docs/features/window-scan.md (frozen contract v1 §3).
 
@@ -14,6 +14,13 @@ from pydantic import BaseModel, Field
 # Hold-time buckets, evaluated per trade before the client-level rollup.
 # "total" means "no hold filter at all" (synthetic bucket).
 WindowHoldBucket = Literal["total", "lt30m", "m30_2h", "gt2h"]
+# Which timestamp the +/-N minute window is measured against.
+#   "open"  — the client ENTERED inside the window (v1 behaviour, default).
+#   "close" — the client EXITED inside the window. Every returned trade is
+#             closed by construction, so open_orders / floating_profit /
+#             open_trades_scanned are structurally 0 / null and status_tag is
+#             always "closed_only". That is the caliber, not missing data.
+WindowScanBasis = Literal["open", "close"]
 # Per-trade lifecycle state; drives the detail-row badge.
 TradeStatus = Literal["closed", "open"]
 # Client-level rollup of the above; drives the client-row badge.
@@ -118,6 +125,9 @@ class WindowScanStatistics(BaseModel):
     range_mt_to: str
     window_min: int
     hold_bucket: WindowHoldBucket
+    scan_by: WindowScanBasis = Field(
+        "open", description="Which timestamp the window was measured against"
+    )
     sids: List[int] = Field(default_factory=list)
     symbol: Optional[str] = None
     clients_scanned: int = Field(
@@ -125,14 +135,17 @@ class WindowScanStatistics(BaseModel):
         description=(
             "Distinct non-employee clients in the window, losers included. "
             "clients_scanned + employees_excluded = every distinct client "
-            "that opened in the window"
+            "that opened (scan_by=open) or closed (scan_by=close) in the "
+            "window"
         ),
     )
     clients_profitable: int = Field(0, description="= len(data)")
     trades_scanned: int = Field(
         0, description="Rows kept after the bucket + employee filters"
     )
-    open_trades_scanned: int = 0
+    open_trades_scanned: int = Field(
+        0, description="Always 0 when scan_by=close (see WindowScanBasis)"
+    )
     employees_excluded: int = Field(
         0,
         description=(

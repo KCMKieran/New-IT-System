@@ -1,7 +1,8 @@
-"""Window Scan (开仓时点扫描) — single-instant open-time scan over mt4_trades.
+"""Window Scan (交易时点扫描) — single-instant scan over mt4_trades.
 
-Frozen contract v1. Given one Hong-Kong instant and a +/- N minute window,
-find every client that OPENED a position inside that window and, counting
+Frozen contract v1 (v2 adds ``scan_by``). Given one Hong-Kong instant and a
++/- N minute window, find every client that OPENED — or, with
+``scan_by="close"``, CLOSED — a position inside that window and, counting
 CLOSED rows only, came out ahead.
 
 Shape of the work (deliberately kept to 2 round trips):
@@ -17,10 +18,14 @@ Shape of the work (deliberately kept to 2 round trips):
 Hard data-source constraints honoured here (each one is a bug we already
 paid for once):
 
-  * ``OPEN_TIME`` has no index — the day bracket goes through ``openDate``
-    (STORED generated, IDX_OPEN_DATE) with BETWEEN, never OR.
+  * neither ``OPEN_TIME`` nor ``CLOSE_TIME`` has an index — the day bracket
+    goes through the STORED generated column (``openDate`` / IDX_OPEN_DATE,
+    ``closeDate`` / INDEX_CLOSEDATE) with BETWEEN, never OR.
   * ``CMD`` 6 is a balance operation, not a trade → ``CMD IN (0, 1)``.
-  * still-open rows carry ``CLOSE_TIME``/``closeDate`` = '1970-01-01'.
+  * still-open rows carry ``CLOSE_TIME``/``closeDate`` = '1970-01-01'. In
+    close-basis mode that keeps them out of any real window for free — but
+    only until someone asks for a window AROUND the epoch, hence the
+    explicit sentinel guard in the SQL.
   * cent products (``.kcmc`` / ``.cent``) store BOTH lots and money in
     cents → both get /100, not just one of them.
   * sid=5 (MT5 mirror) CLOSED rows record the EXIT direction, so the stored
@@ -53,6 +58,19 @@ DEFAULT_SIDS: Tuple[int, ...] = (1, 5, 6)
 ALLOWED_SIDS: Tuple[int, ...] = (1, 5, 6)
 ALLOWED_WINDOW_MIN: Tuple[int, ...] = (1, 3, 5, 10, 15)
 HOLD_BUCKETS: Tuple[str, ...] = ("total", "lt30m", "m30_2h", "gt2h")
+# Which timestamp the window is measured against. "open" = the client ENTERED
+# in the window (the original v1 behaviour, still the default); "close" = the
+# client EXITED in the window, i.e. "who took money off the table right then".
+ALLOWED_SCAN_BY: Tuple[str, ...] = ("open", "close")
+DEFAULT_SCAN_BY = "open"
+
+# scan_by -> (indexed STORED day column, precise wall-clock column). Both
+# columns are hard-coded here and NEVER built from caller input; only the
+# validated key is chosen by the caller.
+_SCAN_BASIS_COLUMNS: Dict[str, Tuple[str, str]] = {
+    "open": ("openDate", "OPEN_TIME"),
+    "close": ("closeDate", "CLOSE_TIME"),
+}
 
 SERVER_LABELS: Dict[int, str] = {1: "MT4_Live", 5: "MT5", 6: "MT4_Live2"}
 
@@ -95,7 +113,9 @@ class WindowRange(NamedTuple):
     anchor_mt: datetime
     mt_from: datetime
     mt_to: datetime
-    # Day bracket for the indexed openDate predicate (inclusive BETWEEN).
+    # Day bracket for the indexed openDate/closeDate predicate (inclusive
+    # BETWEEN). Which of the two columns it is applied to is decided by
+    # ``scan_by``; the window arithmetic is identical either way.
     date_from: date
     date_to: date
 
@@ -146,8 +166,8 @@ def compute_window(anchor_hk: datetime, window_min: int) -> WindowRange:
 
     The bracket can span two calendar days (e.g. HK 03:00 → MT 22:00 the
     PREVIOUS day, and a window straddling midnight), which is exactly why
-    the SQL uses ``openDate BETWEEN d1 AND d2`` — an OR of two dates would
-    lose IDX_OPEN_DATE.
+    the SQL uses ``<dayCol> BETWEEN d1 AND d2`` — an OR of two dates would
+    lose IDX_OPEN_DATE / INDEX_CLOSEDATE.
     """
     anchor_mt = hk_to_mt(anchor_hk)
     delta = timedelta(minutes=window_min)
@@ -468,8 +488,9 @@ _WINDOW_TRADES_SQL = """
     FROM mt4_trades t
     JOIN mt4_users u ON u.loginSid = t.loginSid
     LEFT JOIN users eu ON eu.id = u.userId
-    WHERE t.openDate BETWEEN %(date_from)s AND %(date_to)s
-      AND t.OPEN_TIME BETWEEN %(mt_from)s AND %(mt_to)s
+    WHERE t.{date_col} BETWEEN %(date_from)s AND %(date_to)s
+      AND t.{time_col} BETWEEN %(mt_from)s AND %(mt_to)s
+      {basis_guard}
       AND t.sid IN ({sid_placeholders})
       AND t.CMD IN (0, 1)
       AND COALESCE(t.isDeleted, 0) = 0
@@ -499,12 +520,21 @@ def build_trades_sql(
     sids: Sequence[int],
     excluded_groupsids: Sequence[str],
     has_symbol: bool,
+    scan_by: str = DEFAULT_SCAN_BY,
 ) -> Tuple[str, Dict[str, Any]]:
     """Render the window query + its static params.
 
     Everything variable is a bound parameter; only the NUMBER of
-    placeholders is interpolated, never a caller-supplied value.
+    placeholders — and the two column NAMES picked from the frozen
+    ``_SCAN_BASIS_COLUMNS`` table — is interpolated, never a caller-supplied
+    value. ``scan_by`` is re-validated here rather than trusted from the
+    route: this function is the last place before the column name reaches
+    the statement text.
     """
+    if scan_by not in _SCAN_BASIS_COLUMNS:
+        raise ValueError(f"unknown scan_by: {scan_by!r}")
+    date_col, time_col = _SCAN_BASIS_COLUMNS[scan_by]
+
     sid_placeholders = ", ".join(f"%(sid_{i})s" for i in range(len(sids)))
     params: Dict[str, Any] = {f"sid_{i}": int(s) for i, s in enumerate(sids)}
 
@@ -522,7 +552,20 @@ def build_trades_sql(
     # under NO_BACKSLASH_ESCAPES.
     symbol_clause = "AND t.SYMBOL LIKE %(symbol_like)s" if has_symbol else ""
 
+    # Still-open rows park CLOSE_TIME on the 1970 epoch, so they normally fall
+    # outside any close-basis window for free. "Normally" is not "always": a
+    # window centred on the epoch itself would sweep up every open position in
+    # the table and report them as closed trades. Cheap predicate, absurd
+    # failure mode — keep it.
+    if scan_by == "close":
+        basis_guard = "AND t.CLOSE_TIME >= %(close_sentinel)s"
+    else:
+        basis_guard = ""
+
     sql = _WINDOW_TRADES_SQL.format(
+        date_col=date_col,
+        time_col=time_col,
+        basis_guard=basis_guard,
         sid_placeholders=sid_placeholders,
         groupsid_condition=groupsid_condition,
         symbol_clause=symbol_clause,
@@ -535,6 +578,8 @@ def build_trades_sql(
             "row_limit": MAX_TRADE_ROWS,
         }
     )
+    if scan_by == "close":
+        params["close_sentinel"] = _OPEN_CLOSE_TIME_CUTOFF
     return sql, params
 
 
@@ -558,8 +603,13 @@ def fetch_window_trades(
     window: WindowRange,
     sids: Sequence[int],
     symbol: Optional[str],
+    scan_by: str = DEFAULT_SCAN_BY,
 ) -> Tuple[List[Dict[str, Any]], bool]:
-    """Fetch candidate rows (closed + open) that opened in the window.
+    """Fetch candidate rows whose open (or close) time falls in the window.
+
+    On ``scan_by="open"`` the result mixes closed and still-open rows; on
+    ``scan_by="close"`` every row is closed by construction — a row without
+    a close time cannot have closed inside a window.
 
     Returns (rows, truncated). ``truncated`` is True when the row cap was
     reached, i.e. the result is INCOMPLETE — it is propagated all the way
@@ -571,6 +621,7 @@ def fetch_window_trades(
         sids=sids,
         excluded_groupsids=excluded_groupsids,
         has_symbol=bool(symbol),
+        scan_by=scan_by,
     )
     params.update(
         {
@@ -591,8 +642,10 @@ def fetch_window_trades(
     truncated = len(rows) >= MAX_TRADE_ROWS
     if truncated:
         logger.warning(
-            "window-scan hit the %d row cap (anchor_mt=%s, window covers %s..%s)",
+            "window-scan hit the %d row cap (scan_by=%s, anchor_mt=%s, "
+            "window covers %s..%s)",
             MAX_TRADE_ROWS,
+            scan_by,
             window.anchor_mt,
             window.mt_from,
             window.mt_to,
@@ -649,9 +702,15 @@ def query_window_scan(
     hold_bucket: str = "total",
     sids: Optional[Sequence[int]] = None,
     symbol: Optional[str] = None,
+    scan_by: str = DEFAULT_SCAN_BY,
     as_of_mt: Optional[datetime] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """Run one window scan. Returns (client rows, statistics).
+
+    ``scan_by`` picks which timestamp the window is measured against; the
+    profitability rule is unchanged either way (closed rows only, summed per
+    client, > 0). On ``scan_by="close"`` the open-position columns are all
+    structurally empty — see the statistics note in the schema.
 
     Raises ValueError for a malformed anchor / out-of-domain parameter; the
     route maps those to 422. ``as_of_mt`` is injectable so tests can pin the
@@ -662,6 +721,8 @@ def query_window_scan(
         raise ValueError(f"unknown window_min: {window_min!r}")
     if hold_bucket not in HOLD_BUCKETS:
         raise ValueError(f"unknown hold_bucket: {hold_bucket!r}")
+    if scan_by not in ALLOWED_SCAN_BY:
+        raise ValueError(f"unknown scan_by: {scan_by!r}")
     sid_list = sorted({int(s) for s in (sids or DEFAULT_SIDS)})
     if not sid_list or any(s not in ALLOWED_SIDS for s in sid_list):
         raise ValueError(f"unknown sids: {sids!r}")
@@ -672,7 +733,7 @@ def query_window_scan(
 
     t0 = time.perf_counter()
     raw_rows, truncated = fetch_window_trades(
-        settings, window=window, sids=sid_list, symbol=symbol
+        settings, window=window, sids=sid_list, symbol=symbol, scan_by=scan_by
     )
 
     trades = [build_trade_row(r, as_of) for r in raw_rows]
@@ -693,6 +754,7 @@ def query_window_scan(
         "range_mt_to": _fmt_minute(window.mt_to),
         "window_min": window_min,
         "hold_bucket": hold_bucket,
+        "scan_by": scan_by,
         "sids": sid_list,
         "symbol": symbol,
         "clients_scanned": len(all_clients),

@@ -36,18 +36,31 @@ import {
   SERVER_OPTIONS,
   WINDOW_MIN_OPTIONS,
 } from "./types";
-import type { HoldBucket, WindowMin } from "./types";
+import type { HoldBucket, ScanBasis, WindowMin } from "./types";
 
-/** Why short buckets nuke open trades — a caliber consequence, not a bug. */
+/**
+ * Why short buckets nuke open trades — a caliber consequence, not a bug.
+ *
+ * Entry basis only. On the close basis every row in the window is closed by
+ * construction, so `hold_sec` is a settled number and the bucket filter has
+ * no such side effect; showing this warning there would be a lie.
+ */
 export const BUCKET_OPEN_TRADE_NOTE =
   "持仓分桶在单笔层过滤。未平仓单的持仓时长按「现在 − 开仓时刻」算，" +
   "所以查历史时点时它必然很大：选 <30分钟 / 30分–2小时 会把未平仓单几乎全部滤掉。" +
   "这是口径的必然结果，不是 bug。想同时看未平仓单请选「全部」。";
 
+/** The same control on the close basis — no open rows exist to be filtered. */
+export const BUCKET_CLOSE_BASIS_NOTE =
+  "持仓分桶在单笔层过滤。平仓时点模式下窗口内的单全部已平仓，" +
+  "持仓时长是「平仓 − 开仓」的定值，不会随时间漂移——" +
+  "选 <30分钟 就是「在这个时刻平掉的短线单」。";
+
 /** Sentinel for the "all servers" row — the API still receives every sid. */
 const ALL_SERVERS = "all";
 
 interface Props {
+  scanBy: ScanBasis;
   anchor: string;
   onAnchorChange: (v: string) => void;
   windowMin: WindowMin;
@@ -101,6 +114,7 @@ function FieldLabel({
 }
 
 export function QueryPanel({
+  scanBy,
   anchor,
   onAnchorChange,
   windowMin,
@@ -120,6 +134,11 @@ export function QueryPanel({
   // Exactly one sid → that server; anything else (incl. legacy multi-select
   // state) reads as "all", and picking a row rewrites sids authoritatively.
   const serverValue = sids.length === 1 ? String(sids[0]) : ALL_SERVERS;
+
+  const isClose = scanBy === "close";
+  // One noun, threaded through every hint on this panel, so the toolbar can
+  // never describe a different scan than the tab the user is on.
+  const basisNoun = isClose ? "平仓" : "开仓";
 
   const ctlHeight = isMobile ? "h-11" : "h-9";
   const ctlWidth = isMobile ? "w-full" : "w-full sm:w-[168px] sm:shrink-0";
@@ -157,7 +176,7 @@ export function QueryPanel({
 
           {/* ── window width ───────────────────────────────────── */}
           <div className={cn("min-w-0", ctlWidth)}>
-            <FieldLabel hint="以时点为中心的前后各 N 分钟，按开仓时刻取单。">
+            <FieldLabel hint={`以时点为中心的前后各 N 分钟，按${basisNoun}时刻取单。`}>
               窗口宽度
             </FieldLabel>
             <Select
@@ -179,7 +198,11 @@ export function QueryPanel({
 
           {/* ── hold bucket ────────────────────────────────────── */}
           <div className={cn("min-w-0", ctlWidth)}>
-            <FieldLabel hint={BUCKET_OPEN_TRADE_NOTE}>持仓时长</FieldLabel>
+            <FieldLabel
+              hint={isClose ? BUCKET_CLOSE_BASIS_NOTE : BUCKET_OPEN_TRADE_NOTE}
+            >
+              持仓时长
+            </FieldLabel>
             <Select
               value={holdBucket}
               onValueChange={(v) => onHoldBucketChange(v as HoldBucket)}
@@ -267,7 +290,9 @@ export function QueryPanel({
           </p>
         )}
 
-        {holdBucket !== "total" && (
+        {/* Entry basis only: on the close basis there are no open rows for the
+            bucket to silently drop, so this warning would be misinformation. */}
+        {holdBucket !== "total" && !isClose && (
           <p className="mt-1.5 rounded-lg border border-amber-500/40 px-2 py-1.5 text-[11.5px] leading-relaxed text-amber-700 dark:text-amber-300">
             未平仓单的持仓时长按「现在 − 开仓」算，查历史时点时必然很大，会被这个桶滤掉——这是口径的必然结果，不是 bug。
           </p>

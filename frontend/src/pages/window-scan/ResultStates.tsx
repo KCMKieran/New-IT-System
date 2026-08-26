@@ -10,6 +10,7 @@
 import { AlertTriangle, RotateCw, SearchX } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { describeQuery, fmtInt } from "./format";
+import { SCAN_BASIS_NOUN } from "./types";
 import type { ScanRequest, WindowScanStatistics } from "./types";
 
 function ConditionEcho({ req }: { req: ScanRequest }) {
@@ -45,8 +46,11 @@ export function EmptyState({
   req: ScanRequest;
   stats: WindowScanStatistics | null;
 }) {
+  const basisNoun = SCAN_BASIS_NOUN[req.scanBy] ?? "开仓";
+  // Entry basis only — the close basis has no open rows for a short bucket to
+  // silently swallow, so pointing at one would send the user chasing nothing.
   const bucketHint =
-    req.holdBucket !== "total"
+    req.holdBucket !== "total" && req.scanBy === "open"
       ? "当前选了非「全部」的持仓分桶——查历史时点时未平仓单的持仓时长必然很大，短桶会把它们全部滤掉。想看全貌请切回「全部」。"
       : null;
 
@@ -66,7 +70,7 @@ export function EmptyState({
             <strong className="font-semibold text-foreground tabular-nums">
               {fmtInt(stats.clients_scanned)}
             </strong>{" "}
-            个客户开仓、
+            个客户{basisNoun}、
             <strong className="font-semibold text-foreground tabular-nums">
               {fmtInt(stats.trades_scanned)}
             </strong>{" "}
