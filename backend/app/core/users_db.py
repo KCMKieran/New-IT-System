@@ -96,7 +96,14 @@ CREATE TABLE IF NOT EXISTS users (
     status          TEXT NOT NULL DEFAULT 'active'
                     CHECK (status IN ('active', 'disabled')),
     source          TEXT,                        -- 'entra' | 'cf_access' | 'otp' | 'dev'
-    allowed_modules TEXT,                        -- reserved for v2 page-level ACL; NULL in v1
+    -- JSON array of module keys. '["*"]' = every module incl. future ones,
+    -- '[]' = none, '["cs","data"]' = exactly those. No DEFAULT and no NOT NULL
+    -- on purpose: `CREATE TABLE IF NOT EXISTS` is a no-op against the live
+    -- database, so constraints written here would apply to nobody who already
+    -- exists while implying to a reader that NULL cannot occur. Legacy NULL
+    -- rows (pre-2026-08-27) do occur and are read as '["*"]' — see
+    -- auth_service.parse_allowed_modules.
+    allowed_modules TEXT,
     created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     last_login_at   TEXT,
     created_by      TEXT

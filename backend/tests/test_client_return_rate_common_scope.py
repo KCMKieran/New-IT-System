@@ -110,8 +110,10 @@ def client(make_client):
 def _mint(client: TestClient, email: str, *, allowed_modules: str | None) -> dict:
     """Log in and set the RAW allowed_modules column; returns auth headers.
 
-    Raw, because the three states are exactly what is being tested: ``None`` is
-    SQL NULL (every module), ``"[]"`` is an empty grant, ``'["risk"]'`` is real.
+    Raw, because the grant states are exactly what is being tested:
+    ``'["*"]'`` is every module, ``"[]"`` is an empty grant, ``'["risk"]'`` is
+    a real one. Python ``None`` writes SQL NULL — the legacy spelling of "every
+    module", kept readable forever (see auth_service.parse_allowed_modules).
     """
     from app.core.users_db import get_users_db
     from app.services import auth_service
@@ -226,11 +228,11 @@ def test_the_risk_module_keeps_the_full_endpoint(client, extra):
     assert _get(client, headers, **extra).status_code == 200
 
 
-# ── the three states, and the switch ─────────────────────────────────────────
+# ── the grant states, and the switch ─────────────────────────────────────────
 
-def test_null_means_every_module_including_risk(client):
-    """NULL is not "unset", it is "everything" — the opposite of []."""
-    headers = _mint(client, STAFF, allowed_modules=None)
+def test_the_all_sentinel_means_every_module_including_risk(client):
+    """``["*"]`` is not "unset", it is "everything" — the opposite of []."""
+    headers = _mint(client, STAFF, allowed_modules='["*"]')
     assert _get(client, headers, search="8522845").status_code == 200
 
 

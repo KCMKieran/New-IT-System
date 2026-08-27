@@ -35,6 +35,7 @@ import {
 } from "@/components/ui/table";
 import { IconRefresh, IconSearch } from "@tabler/icons-react";
 import { readFilterState, useFilterPersist } from "@/hooks/useFilterPersist";
+import { ALL_MODULES } from "@/lib/modules";
 import { fetchPagedLog } from "./api";
 import { fmtHkTime } from "./helpers";
 import type { AuditLogEntry, AuthEvent, Paginated } from "./types";
@@ -47,25 +48,101 @@ function isModuleChange(action: string | null | undefined): boolean {
 }
 
 /**
+ * Decode one side of an allowed_modules diff into what it MEANS.
+ *
+ * Parsed, not string-compared. The stored value is whatever wrote the column,
+ * and not everything goes through `json.dumps`: the "backfill the new module"
+ * SQL in design §5.2 writes this column with SQLite's `json_insert()`, whose
+ * spacing is SQLite's business, and a hand-run `sqlite3` fix during an incident
+ * can put anything valid in there. `value === '["*"]'` compares a byte
+ * sequence; this screen's entire reason to exist is telling two opposite GRANTS
+ * apart, and it must not hinge on a space.
+ *
+ * Returns:
+ *   "all"     every module, including ones added later
+ *   "none"    nothing beyond the always-open shell
+ *   "some"    an explicit list
+ *   "opaque"  not parseable as a grant — shown verbatim rather than guessed at
+ */
+type GrantKind = "all" | "none" | "some" | "opaque";
+
+function grantKind(value: string | null | undefined): GrantKind {
+  // SQL NULL, permanently. It was the pre-2026-08-27 spelling of "every
+  // module", so every audit row written before that date carries it, and any
+  // row the sentinel migration never reached carries it on the "before" side of
+  // its first edit.
+  if (value === null || value === undefined) return "all";
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    return "opaque";
+  }
+  if (!Array.isArray(parsed)) return "opaque";
+  if (parsed.includes(ALL_MODULES)) return "all";
+  return parsed.length === 0 ? "none" : "some";
+}
+
+/**
  * Render one side of an audit diff.
  *
  * Everything else can safely collapse an absent value to "—", but
- * allowed_modules cannot: the backend deliberately stores SQL NULL for "every
- * module, including ones added later" and the string '[]' for "no modules at
- * all", and those are opposite grants. Printing both as "—" — which is what a
- * plain `?? "—"` does, since NULL arrives as JSON null — makes "I gave this
- * person the whole system" and "I revoked everything" read identically in the
- * one record that exists to tell them apart, and it does so a year later when
- * nobody remembers. Same reason the API layer and the DB keep them distinct.
+ * allowed_modules cannot: "every module" and "no modules at all" are opposite
+ * grants, and a plain `?? "—"` (SQL NULL arrives as JSON null) would make "I
+ * gave this person the whole system" and "I revoked everything" read
+ * identically in the one record that exists to tell them apart — a year later,
+ * when nobody remembers. Raw JSON would be readable but not obviously opposite;
+ * the two words below are.
+ *
+ * The legacy NULL spelling is labelled rather than silently equated with
+ * `["*"]`, because "which representation was this row on when somebody edited
+ * it?" is a real question while the migration is still settling.
  */
 function fmtAuditValue(
   action: string | null | undefined,
   value: string | null | undefined,
 ): string {
   if (!isModuleChange(action)) return value ?? "—";
-  if (value === null || value === undefined) return "全部模块";
-  if (value === "[]") return "无模块";
-  return value;
+  switch (grantKind(value)) {
+    case "all":
+      return value === null || value === undefined
+        ? "全部模块（旧 NULL 写法）"
+        : "全部模块";
+    case "none":
+      return "无模块";
+    default:
+      return value ?? "—";
+  }
+}
+
+/**
+ * True when a modules diff moved the REPRESENTATION but not the authority.
+ *
+ * There is exactly one such pair — legacy SQL NULL on one side, `["*"]` on the
+ * other — and it is produced by the ordinary act of editing a row the sentinel
+ * migration never reached. Rendered as a normal diff it reads
+ * "全部模块（旧 NULL 写法） → 全部模块": a highlighted permission change that
+ * never happened, in the log people read precisely to find permission changes.
+ *
+ * Worth special-casing rather than leaving, for the same reason the two grants
+ * get different words at all: this screen's job is that a change looks like a
+ * change. A non-change dressed as one is the same failure inverted, and it is
+ * the MORE likely of the two now — the migration's step 2 moved to
+ * /cfg/managers, so PATCHing a still-NULL row is a normal Tuesday rather than
+ * an oddity.
+ *
+ * ⚠ Deliberately narrow: only when BOTH sides mean "all". Any other pair of
+ * equal-looking values is either impossible (record_diff() writes no row when
+ * the stored string did not change) or a real change, and widening this into a
+ * general "semantically equal" test would be a way to hide one.
+ */
+function isRepresentationOnlyChange(
+  action: string | null | undefined,
+  before: string | null | undefined,
+  after: string | null | undefined,
+): boolean {
+  if (!isModuleChange(action)) return false;
+  return grantKind(before) === "all" && grantKind(after) === "all";
 }
 
 /** Shared paging state machine for both log tabs. */
@@ -613,12 +690,20 @@ export function AuditLogTab() {
               )}
               {rows.map((r) => {
                 // fmtAuditValue, not `?? "—"`. See its docstring: for
-                // allowed_modules, NULL and '[]' are opposite grants and must
-                // not render identically.
+                // allowed_modules, "every module" (in either spelling) and
+                // "no modules" are opposite grants and must not render alike.
                 const before = fmtAuditValue(r.action, r.old_value);
                 const after = fmtAuditValue(r.action, r.new_value);
                 const hasDiff =
                   isModuleChange(r.action) || !!r.old_value || !!r.new_value;
+                // …and the mirror-image rule: a NULL -> ["*"] row moved the
+                // spelling, not the authority, so it must not be drawn as an
+                // arrow. Same screen, same job — a change looks like a change.
+                const representationOnly = isRepresentationOnlyChange(
+                  r.action,
+                  r.old_value,
+                  r.new_value,
+                );
                 return (
                   <TableRow key={r.id}>
                     <TableCell className="whitespace-nowrap text-xs">
@@ -635,9 +720,22 @@ export function AuditLogTab() {
                         than letting one row set the width of the table. */}
                     <TableCell
                       className="max-w-[400px] truncate text-xs"
-                      title={hasDiff ? `${before} → ${after}` : undefined}
+                      title={
+                        representationOnly
+                          ? `${before} → ${after}（授权未变）`
+                          : hasDiff
+                            ? `${before} → ${after}`
+                            : undefined
+                      }
                     >
-                      {hasDiff ? (
+                      {representationOnly ? (
+                        // Muted and un-arrowed, but not hidden: the row exists,
+                        // somebody did press save, and the full before/after is
+                        // still one hover away in `title`.
+                        <span className="text-muted-foreground">
+                          全部模块（表示法变更，授权未变）
+                        </span>
+                      ) : hasDiff ? (
                         <span>
                           <span className="text-muted-foreground">{before}</span>
                           {" → "}

@@ -1,0 +1,15 @@
+# This directory must EXIST for the app to import at all.
+#
+# main.py mounts it unconditionally: StaticFiles(directory="public") raises
+# RuntimeError at import time when the directory is missing, which takes down
+# create_app() — and with it the 15 tests in test_app_assembly.py, where BOTH
+# MODULE_MAP anti-drift assertions live (every live route resolves to exactly
+# one policy; every table key still matches a route). Those are the guardrails
+# that would catch a mis-classified path or the "*" sentinel leaking into
+# MODULE_KEYS, so losing them to an import error is the worst way to lose them:
+# the suite reports errors, not failures, and a fresh worktree looks broken
+# rather than unguarded.
+#
+# Git does not track empty directories, and the only real file here
+# (Favicon-01.svg) is not committed — so without this placeholder every clean
+# clone and every git worktree starts out in that state. It did, once.

@@ -25,7 +25,7 @@ from fastapi import HTTPException, Request, status
 from app.core.auth_middleware import client_ip
 from app.core.config import get_settings
 from app.core.logging_config import get_logger
-from app.schemas.admin import MODULE_KEYS
+from app.schemas.admin import ALL_MODULES, MODULE_KEYS
 from app.services.auth_service import SessionUser, record_auth_event
 
 logger = get_logger(__name__)
@@ -302,6 +302,21 @@ assert _MODULES_IN_MAP <= set(MODULE_KEYS), (
     f"{sorted(_MODULES_IN_MAP - set(MODULE_KEYS))}"
 )
 
+# The sentinel is a GRANT ("everything"), not a page group, and this asserts the
+# difference at import time. If "*" ever landed in MODULE_KEYS, /cfg/managers
+# would render a sixth checkbox for it and a path could be classified as
+# requiring it — at which point `caller_has_module(request, "*")` becomes true
+# for everyone holding ["*"] and false for everyone else, i.e. a module nobody
+# can be granted individually.
+assert ALL_MODULES not in MODULE_KEYS, (
+    f"{ALL_MODULES!r} is the every-module sentinel and must not be a grantable "
+    "module key — see schemas/admin.py"
+)
+assert ALL_MODULES not in _MODULES_IN_MAP, (
+    f"MODULE_MAP classifies a path as requiring {ALL_MODULES!r}, which is a "
+    "grant and not a page group"
+)
+
 # Where main.py mounts api_v1_router. Stripped before lookup so MODULE_MAP keys
 # read like the route paths a developer sees in routes/*.py.
 API_PREFIX = "/api/v1"
@@ -342,9 +357,9 @@ def caller_has_module(request: Request, module: str) -> bool:
     cannot express "everyone may have the widget's slice of this, only the risk
     module may have the rest", so the handler asks.
 
-    Mirrors the gate's precedence exactly (kill switch, manager, NULL = all,
-    membership) and deliberately shares the membership step with it — two
-    implementations of "may they?" drift, and the direction they drift in is
+    Mirrors the gate's precedence exactly (kill switch, manager, the ALL_MODULES
+    sentinel, membership) and deliberately shares the membership step with it —
+    two implementations of "may they?" drift, and the direction they drift in is
     the one where the narrow answer says yes.
 
     ⚠ Answers about a GRANT, not about a page. Passing COMMON or INFRA here is
@@ -358,7 +373,9 @@ def caller_has_module(request: Request, module: str) -> bool:
         return False
     if user.is_manager:
         return True
-    if user.allowed_modules is None:
+    # "*" is checked before membership, not folded into it: it is a grant, not
+    # a module, and `module in ["*"]` would be False for every real page.
+    if ALL_MODULES in user.allowed_modules:
         return True
     return module in user.allowed_modules
 
@@ -412,12 +429,14 @@ def enforce_module_access(request: Request) -> None:
        should see different amounts of data the handler narrows it further.
     7. **The grant test itself is ``caller_has_module`` above**, shared with the
        one handler that has to ask the same question about its own parameters.
-       It is where ``allowed_modules is None`` -> pass lives: ``None`` is SQL
-       NULL and means "every module, including ones added later", while ``[]``
-       is the opposite and falls through to the membership test. ⚠ Never write
-       that as a falsy check — ``if not user.allowed_modules`` reads ``[]`` as
-       ``None`` and turns "revoke this person's access" into "give this person
-       everything".
+       It is where the ``ALL_MODULES`` ("*") sentinel -> pass lives: ``["*"]``
+       means "every module, including ones added later", while ``[]`` is the
+       opposite and falls through to the membership test. ⚠ Never collapse the
+       two with a falsy check — ``if not user.allowed_modules`` reads ``[]`` as
+       "unset" and turns "revoke this person's access" into "give this person
+       everything". Since 2026-08-27 the two are no longer null-vs-list but two
+       different lists, which is what makes ``??`` / ``||`` unable to confuse
+       them in the first place.
     8. **Not granted -> 403.** Never 401: ``frontend/src/lib/fetch.ts`` reacts
        to 401 by calling ``notifyUnauthorized()``, which drops the client to
        anonymous and redirects to /login. Answering 401 for "logged in but not

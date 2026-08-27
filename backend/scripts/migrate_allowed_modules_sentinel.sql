@@ -1,0 +1,199 @@
+-- ============================================================================
+-- users.allowed_modules: SQL NULL -> the '["*"]' sentinel   (auth, 2026-08-27)
+--
+-- Rollback: backend/scripts/rollback_allowed_modules_sentinel.sql
+-- ============================================================================
+--
+-- WHAT THIS DOES
+-- --------------
+-- ONE thing: every row still holding SQL NULL becomes '["*"]'.
+--
+-- NULL has meant "every module, including ones added later" since the module
+-- gate went live (P4b, 2026-08-18). This changes nobody's access — it writes
+-- down what the value already meant, so that the column stops having a state
+-- ("no value") that six layers of code had to keep apart from '[]' by hand.
+--
+-- Idempotent by construction: it only matches NULL, so after one successful run
+-- there is nothing left for it to match.
+--
+-- ⚠ WHAT THIS DELIBERATELY DOES **NOT** DO
+-- -----------------------------------------
+-- The 2026-08-27 decision also narrows three NON-manager accounts
+-- (vincent.shih / tobe.wong / yuna.wong) from "everything" to the five modules
+-- that exist today, so they stop inheriting modules that ship later.
+--
+-- **Do that on /cfg/managers, not here.** Open each row's 权限 cell, turn the
+-- "All modules" switch off, tick all five boxes, done — three clicks each. The
+-- page is the better tool for it and not by a little:
+--
+--   * it shows you what the grant is BEFORE you change it — a SQL UPDATE does
+--     not, and cannot;
+--   * it goes through UpdateUserRequest, so a typo'd key is a 422 instead of a
+--     row that silently grants nothing;
+--   * it goes through update_user(), which writes an `admin.user.modules_change`
+--     audit row naming who did it, from where, with the old and new values. A
+--     direct UPDATE writes nothing anywhere. These are the most privileged rows
+--     in the database and the audit trail is the entire point of P5;
+--   * it cannot get the WHERE clause wrong, because there isn't one.
+--
+-- A SQL fallback for when the admin page is unavailable is at the BOTTOM of
+-- this file, commented out, with the guard clause it needs. Read its notes
+-- before uncommenting it.
+--
+--
+-- ⚠ RUN ORDER: DEPLOY THE CODE FIRST, THEN THIS SCRIPT.
+-- -----------------------------------------------------
+-- The wrong order is not "slower", it is an outage for the people this script
+-- is about:
+--
+--   code first, then data (CORRECT)
+--     The new backend reads a NULL row as ["*"] anyway (a permanent
+--     compatibility line in auth_service.parse_allowed_modules), so between the
+--     deploy and this script nobody's access changes at all. The script then
+--     converts a value the running code already agrees with.
+--
+--   data first, then code (WRONG)
+--     The OLD backend does not know "*". It would read '["*"]' as a list
+--     containing one unrecognised key, i.e. a grant of NOTHING, and every
+--     account this script touched would lose every page until the deploy
+--     landed. Managers would survive (they pass on role), which is exactly the
+--     kind of partial failure that takes an hour to interpret.
+--
+-- ⚠ ROLLBACK: rolling the IMAGE back does NOT roll this data back, and the old
+-- image reads '["*"]' as "no modules". If the new code has to be rolled back
+-- after this script has run, run rollback_allowed_modules_sentinel.sql in the
+-- same breath. It is a separate file precisely because nobody opens a migration
+-- to find a rollback during an incident.
+--
+--
+-- ⚠ HOW TO RUN IT — in place, on the host. Never on a copy.
+-- ---------------------------------------------------------
+-- backend/data/users.db is WAL-mode with a thread-local connection pool whose
+-- connections are never closed, and the autocheckpoint threshold (1000 pages)
+-- is rarely reached — so the main .db file can be DAYS stale while everything
+-- real lives in users.db-wal. `cp`/`scp` of the single file silently yields an
+-- old snapshot. Anything that opens the database properly (sqlite3, python's
+-- sqlite3 module) reads the WAL and is fine.
+--
+-- The file is owned by root, so the practical route is through the container.
+-- It has no sqlite3 CLI, but it has python — and python's driver defaults to a
+-- 5-second busy timeout, which the CLI does not (see the host route below).
+--
+--   # 0. see what you are about to change, and how many rows to expect
+--   docker exec new-it-backend-prod python -c "
+--   import sqlite3; c=sqlite3.connect('/app/data/users.db')
+--   print('NULL rows (step 1 will touch these):',
+--         c.execute('SELECT COUNT(*) FROM users WHERE allowed_modules IS NULL').fetchone()[0])
+--   for r in c.execute('SELECT id,email,role,allowed_modules FROM users ORDER BY id'):
+--       print(r)"
+--
+--   # 1. copy this file in and run it as a script
+--   docker cp backend/scripts/migrate_allowed_modules_sentinel.sql \
+--             new-it-backend-prod:/tmp/mig.sql
+--   docker exec new-it-backend-prod python -c "
+--   import sqlite3; c=sqlite3.connect('/app/data/users.db')
+--   c.executescript(open('/tmp/mig.sql').read()); c.commit(); c.close()"
+--
+--   # 2. verify — expect ZERO NULLs and no other column touched
+--   docker exec new-it-backend-prod python -c "
+--   import sqlite3; c=sqlite3.connect('/app/data/users.db')
+--   print('remaining NULLs (want 0):',
+--         c.execute('SELECT COUNT(*) FROM users WHERE allowed_modules IS NULL').fetchone()[0])
+--   for r in c.execute('SELECT email,role,allowed_modules FROM users ORDER BY id'):
+--       print(r)"
+--
+-- On the host directly (needs root):
+--
+--   sudo sqlite3 /opt/myproject/New-IT-System/backend/data/users.db \
+--        < backend/scripts/migrate_allowed_modules_sentinel.sql
+--
+-- ⚠ The `PRAGMA busy_timeout` below is what makes that host route safe. The
+-- sqlite3 CLI defaults to busy_timeout=0, and this database is served by four
+-- uvicorn workers holding long-lived WAL connections — every request's
+-- resolve_session() and every /docs/ auth_request sub-request contends for the
+-- same write lock. At timeout 0 a single overlapping write returns
+-- "database is locked" immediately.
+--
+-- ⚠ And the transaction is what makes a failure survivable. Statement-level
+-- autocommit would let a multi-statement script stop halfway with the first
+-- half committed; wrapped in BEGIN/COMMIT the script either lands whole or
+-- leaves nothing behind. It is one statement today, but the fallback at the
+-- bottom is designed to be uncommented into the same transaction.
+--
+-- ⚠ No restart is needed either way. allowed_modules is re-read from the row on
+-- every request (resolve_session selects it as a column), so the change takes
+-- effect on the next click, and nobody is logged out.
+-- ============================================================================
+
+PRAGMA busy_timeout = 5000;
+
+BEGIN;
+
+-- ── step 1: NULL is no longer a way to say "everything" ─────────────────────
+UPDATE users
+   SET allowed_modules = '["*"]'
+ WHERE allowed_modules IS NULL;
+
+-- Expected: the number of NULL rows from probe 0 above (5, as of the last
+-- reading of the live database on 2026-08-19 — CONFIRM WITH PROBE 0, do not
+-- trust this number). A second run must print 0; anything else means somebody
+-- wrote a NULL in between, which is worth understanding before continuing.
+SELECT changes() AS step1_rows_updated;
+
+COMMIT;
+
+
+-- ============================================================================
+-- FALLBACK ONLY — narrowing the three accounts by SQL
+-- ============================================================================
+-- Use /cfg/managers instead. This exists for the case where the admin page is
+-- unavailable (the API is down, or auth is off and require_manager has made
+-- administration read-only) and the narrowing genuinely cannot wait.
+--
+-- Uncomment the statements below INSIDE the transaction above, between the
+-- step-1 UPDATE and the COMMIT.
+--
+-- ⚠ Two things are load-bearing in this WHERE clause, and both were missing
+-- from the first draft:
+--
+--   1. `allowed_modules IS NULL OR allowed_modules = '["*"]'` — WITHOUT it this
+--      is an unconditional overwrite, not a narrowing. A person currently
+--      holding, say, '["cs","data"]' would be WIDENED to all five modules,
+--      silently and with no audit row. That is the opposite of what this step
+--      is for. With the guard, the statement can only ever take "everything"
+--      down to "everything that exists today".
+--
+--   2. `lower(trim(email))` — users.email has no COLLATE NOCASE, so a bare
+--      `email IN (...)` is case- and whitespace-sensitive and matches ZERO rows
+--      on a capitalised address without saying so. Combined with (1) missing,
+--      the two failures are indistinguishable from the output: no rows changed
+--      and no error either way. Addresses are stored normalised
+--      (auth_service.normalize_email lowercases and strips), so this only
+--      guards against a hand-edited row — which is exactly the kind of row a
+--      break-glass fallback meets.
+--
+-- ⚠ The key list is spelled out rather than derived, so this file records what
+-- "all modules today" meant on the day it was written. Re-running it after a
+-- sixth module ships REVOKES that module from these three — which is the
+-- correct reading of "they no longer get new modules automatically", but it
+-- means the statement is idempotent, not future-proof.
+--
+-- ⚠ `role <> 'manager'` is a safety catch, not a filter: none of the three is a
+-- manager today. If one is promoted later their stored grant goes inert
+-- (managers pass the gate on role) but it is still what comes back into force
+-- on demotion, and silently narrowing a manager's fallback grant from a script
+-- is not this file's business.
+--
+-- Expected: 3 rows. Fewer means an address did not match, or somebody has
+-- already been narrowed — check which before assuming it worked.
+--
+-- UPDATE users
+--    SET allowed_modules = '["dashboard","cs","data","risk","other"]'
+--  WHERE role <> 'manager'
+--    AND (allowed_modules IS NULL OR allowed_modules = '["*"]')
+--    AND lower(trim(email)) IN (
+--         'vincent.shih@kohleservices.com',
+--         'tobe.wong@kohleservices.com',
+--         'yuna.wong@kohleservices.com'
+--    );
+-- SELECT changes() AS step2_rows_updated;

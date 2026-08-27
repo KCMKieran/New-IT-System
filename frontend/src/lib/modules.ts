@@ -29,6 +29,22 @@ export const MODULE_KEYS = ["dashboard", "cs", "data", "risk", "other"] as const
 export type ModuleKey = (typeof MODULE_KEYS)[number]
 
 /**
+ * The "every module, including ones that do not exist yet" grant (2026-08-27).
+ * Mirrors ALL_MODULES in backend schemas/admin.py.
+ *
+ * It replaces what used to be the ABSENCE of a value: `allowedModules` was
+ * `string[] | null` and `null` meant everything, which put two opposite grants
+ * (`null` = all, `[]` = none) one `??` away from each other in every file that
+ * touched them. A sentinel makes them two ordinary arrays instead, so there is
+ * no nullish state left for `??` or `||` to collapse.
+ *
+ * ⚠ Deliberately NOT a member of MODULE_KEYS: it is not a page group, no route
+ * may be classified as requiring it, and /cfg/managers must not render a
+ * checkbox for it — it is the switch above the checkboxes.
+ */
+export const ALL_MODULES = "*"
+
+/**
  * Open to every signed-in user. Not a grantable module: these are the pages
  * that must work for somebody whose `allowedModules` is `[]`, i.e. who has
  * been granted nothing at all.
@@ -134,18 +150,21 @@ export const PAGE_POLICIES: Record<string, PagePolicy> = {
 /**
  * What the caller knows about the current user's rights.
  *
- * `allowedModules` is THREE-STATE and the three are not interchangeable:
- *   `null` → every module, including modules added in the future
- *   `[]`   → no module; only the always-open pages
- *   `[..]` → exactly these
- * ⚠ Never narrow this with `??` or `||`. Both read `[]` as `null` and turn
- * "this person's access was revoked" into "this person can see everything".
+ * `allowedModules` is always a list — never null, never undefined:
+ *   `["*"]` → every module, including modules added in the future
+ *   `[]`    → no module; only the always-open pages
+ *   `[..]`  → exactly these
+ *
+ * `[]` and `["*"]` are still opposite grants, but they are now opposite VALUES
+ * rather than a value and its absence, which is the whole point: `??` and `||`
+ * cannot merge two non-nullish arrays. The one place a nullish grant can still
+ * appear is the wire (`auth-provider.tsx`), where it is normalised on arrival.
  */
 export type ModuleAccess = {
   /** Mirrors the backend's AUTH_ENABLED. False means the kill switch is thrown. */
   authEnabled: boolean
   isManager: boolean
-  allowedModules: string[] | null
+  allowedModules: string[]
 }
 
 /**
@@ -160,8 +179,9 @@ export function hasModule(access: ModuleAccess, module: ModuleKey): boolean {
   // hide most of the app precisely when auth is off.
   if (!access.authEnabled) return true
   if (access.isManager) return true
-  // Explicit null check, not a falsy one — see the type's note above.
-  if (access.allowedModules === null) return true
+  // Checked before membership, not folded into it: "*" is a grant, not a
+  // module, so `includes("cs")` is false for a user who holds everything.
+  if (access.allowedModules.includes(ALL_MODULES)) return true
   return access.allowedModules.includes(module)
 }
 

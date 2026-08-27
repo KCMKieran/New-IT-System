@@ -33,13 +33,15 @@ from typing import Any
 from app.core.logging_config import get_logger
 from app.core.users_db import get_users_db
 from app.services import auth_service
+from app.schemas.admin import ALL_MODULES
 from app.services.auth_service import SessionUser
 
 logger = get_logger(__name__)
 
-# Sentinel for "the caller did not send this field", which JSON null cannot
-# express: `allowed_modules: null` is a real, meaningful value (grant every
-# module) and must not be confused with the field being absent.
+# Sentinel for "the caller did not send this field". Still needed after
+# `allowed_modules: null` stopped being a grant (2026-08-27): a PATCH is
+# partial by definition, so "leave role alone" and "set role to something"
+# remain different requests, and Python's None cannot carry both.
 UNSET: Any = object()
 
 # Pagination bounds for the two log tabs. The cap exists because auth_events is
@@ -73,21 +75,35 @@ def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _parse_modules(raw: str | None) -> list[str] | None:
-    """Decode the stored allowed_modules JSON. NULL stays None (= all modules).
+def _parse_modules(raw: str | None) -> list[str]:
+    """Decode the stored allowed_modules JSON. Always a list; legacy NULL -> ["*"].
 
     Auth P4b moved the body to ``auth_service.parse_allowed_modules`` because
     the per-request session path needs the identical decode, and two copies of
-    the one function whose job is to keep ``[]`` (revoked) apart from ``NULL``
-    (everything) is exactly how they eventually stop agreeing. Kept as a local
-    name so the reads in this module still say what they mean.
+    the one function whose job is to keep ``[]`` (revoked) apart from "every
+    module" is exactly how they eventually stop agreeing. Kept as a local name
+    so the reads in this module still say what they mean.
     """
     return auth_service.parse_allowed_modules(raw)
 
 
-def _encode_modules(modules: list[str] | None) -> str | None:
-    """None -> SQL NULL (all modules); [] -> the literal string '[]' (none)."""
-    return None if modules is None else json.dumps(modules)
+def _encode_modules(modules: list[str]) -> str:
+    """Always a JSON array. The column no longer stores SQL NULL (2026-08-27).
+
+    ``None`` is refused rather than encoded. It used to mean "every module", so
+    a caller still passing it is working from the retired three-state contract,
+    and every way of accepting it is wrong in a different direction:
+    ``json.dumps(None)`` writes the string ``'null'``, which the reader treats
+    as corrupt and fails closed to ``[]`` (a silent revoke); writing SQL NULL
+    re-creates the state this change exists to delete. Raising is the only
+    answer that reaches whoever wrote the call.
+    """
+    if modules is None:
+        raise TypeError(
+            f'allowed_modules is always a list now — pass ["{ALL_MODULES}"] for '
+            "every module, [] for none"
+        )
+    return json.dumps(modules)
 
 
 def _user_row_to_dict(row: sqlite3.Row, active_sessions: int) -> dict:
@@ -477,9 +493,13 @@ def update_user(
             actor_email=actor_email,
             actor_user_id=actor_id,
             target=target,
-            # Stored verbatim, so NULL and '[]' stay distinguishable in the
-            # audit trail too — "cleared their modules" and "gave them
-            # everything" must not read identically a year from now.
+            # The RAW column value, not the parsed list: the audit trail should
+            # record what is in the table, including a legacy SQL NULL on the
+            # "before" side of the first edit to a row the migration never
+            # reached. '["*"]' and '[]' are opposite grants and must not read
+            # identically a year from now; NULL is a third rendering of the
+            # first one, and flattening it here would hide that this row was
+            # still on the old representation when it was edited.
             old_value=row["allowed_modules"],
             new_value=updated["allowed_modules"],
             ip=ip,

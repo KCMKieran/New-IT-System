@@ -27,6 +27,10 @@ from datetime import datetime, timedelta, timezone
 from app.core.config import get_settings
 from app.core.logging_config import get_logger, trace_id_var
 from app.core.users_db import get_users_db
+# The module catalogue is a schema-level constant, not a service-level one:
+# schemas/admin.py already owns MODULE_KEYS (GET /admin/modules serves it) and
+# imports nothing from app.services, so this edge is one-way and cycle-free.
+from app.schemas.admin import ALL_MODULES
 
 logger = get_logger(__name__)
 
@@ -51,14 +55,17 @@ class SessionUser:
     role: str
     status: str
     sid_hash: str
-    # Auth P4b. THREE-STATE, and the three states are not interchangeable:
-    #   None -> every module, including modules that do not exist yet
-    #   []   -> no module at all; only the always-open common layer
-    #   [..] -> exactly these modules
-    # Defaulted last so the field is additive, but never rely on the default in
-    # production code: a construction that forgets to pass it silently grants
-    # everything. Both real construction sites below pass it explicitly.
-    allowed_modules: list[str] | None = None
+    # Auth P4b, sentinel form since 2026-08-27. ALWAYS a list — never None:
+    #   ["*"] -> every module, including modules that do not exist yet
+    #   []    -> no module at all; only the always-open common layer
+    #   [..]  -> exactly these modules
+    # No default on purpose. The field used to default to None (= everything),
+    # so a construction site that forgot it silently granted the whole
+    # application. Required, it raises TypeError at CONSTRUCTION instead — which
+    # is not as early as a type checker but is the earliest a dataclass can
+    # manage, and it turns a silent privilege grant into a stack trace naming
+    # the line.
+    allowed_modules: list[str]
 
     @property
     def is_manager(self) -> bool:
@@ -112,25 +119,39 @@ def default_role_for(email: str) -> str:
 
 # ── module grants (auth P4b) ─────────────────────────────────────────────────
 
-def parse_allowed_modules(raw: str | None) -> list[str] | None:
-    """Decode ``users.allowed_modules``. SQL NULL stays None (= every module).
+def parse_allowed_modules(raw: str | None) -> list[str]:
+    """Decode ``users.allowed_modules``. Always a list — never None.
 
     Single implementation on purpose: P4a wrote the same decode in
     ``admin_service._parse_modules`` for the administration page, and P4b needs
-    it on the per-request session path. Two copies of a function whose only job
-    is to keep ``[]`` and ``NULL`` apart is how they eventually stop agreeing —
-    and the direction they would disagree in ("empty means unset means all") is
-    the one that turns *revoking* someone's access into *granting* them
-    everything. ``admin_service`` imports this one; it already depends on this
-    module, so sharing costs no new edge in the import graph.
+    it on the per-request session path. Two copies of the one function that
+    decides what a grant means is how they eventually stop agreeing — and the
+    direction they would disagree in ("empty means unset means all") is the one
+    that turns *revoking* someone's access into *granting* them everything.
+    ``admin_service`` imports this one; it already depends on this module, so
+    sharing costs no new edge in the import graph.
 
-    A row that is neither NULL nor valid JSON fails CLOSED to ``[]`` rather than
-    to ``None``. Corrupt data must not read as "may see everything": an
-    over-restricted account is a support ticket, an over-permitted one is an
-    incident.
+    ⚠ **SQL NULL is read as ``[ALL_MODULES]``, permanently.** Writers stopped
+    producing NULL on 2026-08-27 (the sentinel replaced it), but this line is
+    not a migration helper to delete afterwards:
+
+      * the live ``users.db`` is a bind mount that outlives any deploy, and a
+        row the migration never reached — one restored from a backup, one
+        inserted by hand during an incident, one created by a rolled-back
+        image — is still legal;
+      * NULL predates the sentinel, so the only truthful reading of it is the
+        one it had for its whole life: every module. Failing closed here would
+        silently revoke exactly the accounts the migration missed, and the
+        symptom ("half the app vanished") points nowhere near this function.
+
+    A row that is neither NULL nor valid JSON still fails CLOSED to ``[]``.
+    Corrupt data must not read as "may see everything": an over-restricted
+    account is a support ticket, an over-permitted one is an incident. Note the
+    deliberate asymmetry with NULL above — NULL is a value we once wrote and
+    know the meaning of; garbage is a value nobody ever wrote.
     """
     if raw is None:
-        return None
+        return [ALL_MODULES]
     try:
         value = json.loads(raw)
     except (TypeError, ValueError):
@@ -436,6 +457,14 @@ def upsert_user(
             )
         # allowed_modules is written EXPLICITLY as '[]' rather than left to the
         # column default (auth P4b follow-up, 2026-08-18).
+        #
+        # ⚠ Still explicit after the 2026-08-27 sentinel change, and for a
+        # sharper reason than before: the column still has no DEFAULT, so
+        # omitting it would store SQL NULL — the one legacy value the read side
+        # is required to keep interpreting as ["*"] (see parse_allowed_modules).
+        # A JIT insert that leaked a NULL would therefore be born with
+        # EVERYTHING, and would look like the pre-migration rows it is meant to
+        # be nothing like.
         #
         # The column has no DEFAULT, so omitting it stored SQL NULL — and NULL
         # does not mean "unset", it means "every module, including ones added

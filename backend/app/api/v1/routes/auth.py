@@ -74,12 +74,37 @@ class MeResponse(BaseModel):
     # user could never read it — and the sidebar filter and route guard both
     # need it on every page load.
     #
-    # ⚠ Three-state, and JSON keeps the three apart only if nothing collapses
-    # them: `null` = every module (including ones added later), `[]` = none,
-    # a list = exactly those. Pydantic emits the field either way, so `null`
-    # here always means NULL in the database and never "the backend is too old
-    # to send this".
-    allowed_modules: list[str] | None = None
+    # ⚠ Two states on the wire since 2026-08-27, not three: `["*"]` = every
+    # module (including ones added later), `[]` = none, a list = exactly those.
+    # `null` appears on exactly one response — the unauthenticated one, where
+    # there is no subject to have grants — and the SPA discards that whole
+    # object rather than reading this field out of it.
+    #
+    # ⚠ This IS a wire-contract change, and it is deliberate (design §2.6). A
+    # bundle predating it treats "*" as an unknown key and therefore as no
+    # grant, so a stale tab belonging to a NON-MANAGER with the everything grant
+    # renders an empty sidebar until it is reloaded. Server-side enforcement
+    # reads the database, not the bundle, so nothing is actually refused; the
+    # alternative — translating "*" back to null here — would have kept the
+    # null/[] inversion trap alive in the layer this change exists to clear.
+    #
+    # ⚠ REQUIRED — no `= None` default, unlike every other optional field above,
+    # and the asymmetry is the point. With a default, deleting the
+    # `allowed_modules=user.allowed_modules` line from the authenticated branch
+    # below is a silent FAIL-OPEN: the field ships as `null`, the SPA's
+    # `?? [ALL_MODULES]` reads that as "every module", and every signed-in
+    # person gets a sidebar listing the whole application whose every entry
+    # 403s. A cold review deleted exactly that line and all 1471 backend tests
+    # stayed green, which is what a default buys you here.
+    #
+    # So both branches must SAY what the grants are, including the anonymous one
+    # (which says `None` — there is no subject to have grants). The nullability
+    # is about the anonymous shape only; on an authenticated response this field
+    # is always a list. Kept as one model rather than two because the union
+    # return type would change what FastAPI serialises, and a subclass under a
+    # parent's `response_model` silently DROPS the extra fields — a second way
+    # to lose this field, replacing the one just closed.
+    allowed_modules: list[str] | None
 
 
 class DevLoginRequest(BaseModel):
@@ -211,7 +236,12 @@ def get_me(request: Request) -> MeResponse:
             user = auth_service.resolve_session(sid)
 
     if user is None:
-        return MeResponse(authenticated=False, auth_enabled=settings.AUTH_ENABLED)
+        # allowed_modules is passed explicitly, not defaulted: see the field.
+        return MeResponse(
+            authenticated=False,
+            auth_enabled=settings.AUTH_ENABLED,
+            allowed_modules=None,
+        )
 
     return MeResponse(
         authenticated=True,
