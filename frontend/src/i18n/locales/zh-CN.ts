@@ -16,6 +16,10 @@ export const zhCN = {
     add: "添加",
     close: "关闭",
     comma: "，",
+    // Shown by <DataScopeNotice> when the backend narrowed a response to the
+    // caller's country data scope.
+    dataScopeNotice:
+      "已按你的数据范围过滤——这里只统计你有权查看的客户，同一条件下与同事看到的数字不会一致。",
   },
 
   // Navigation

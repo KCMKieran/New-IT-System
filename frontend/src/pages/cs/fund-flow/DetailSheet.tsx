@@ -84,14 +84,41 @@ export function DetailSheet({ alert, onClose }: Props) {
     apiFetch(`/api/v1/cs/fund-flow/detail/${alert.user_id}?${params}`, {
       signal: controller.signal,
     })
-      .then((r) => r.json())
-      .then((j: FundFlowDetail) => setDetail(j))
+      .then(async (r) => {
+        if (!r.ok) {
+          // Without this branch a refusal was parsed as if it were the payload:
+          // `{"detail": "..."}` has none of the fields this sheet renders, so
+          // the panel opened EMPTY and said nothing. The 403 that the country
+          // data scope answers with (core/data_scope.py — "this client is not
+          // in your scope") then looks like a client with no transactions,
+          // which is a wrong answer rather than a missing one. Surface the
+          // backend's `detail`: it is the only explanation the user gets, and
+          // it is written for them.
+          const body = (await r.json().catch(() => null)) as {
+            detail?: unknown;
+          } | null;
+          throw new Error(
+            t("fundFlowPage.common.queryFailed", {
+              status: String(r.status),
+              detail:
+                typeof body?.detail === "string"
+                  ? body.detail
+                  : r.statusText || "",
+            }),
+          );
+        }
+        return (await r.json()) as FundFlowDetail;
+      })
+      .then((j) => setDetail(j))
       .catch((e) => {
-        if (e?.name !== "AbortError") setError(String(e));
+        if (e?.name === "AbortError") return;
+        // `String(err)` renders an Error as "Error: <message>", which the
+        // template below then prefixes AGAIN ("Error: Error: ...").
+        setError(e instanceof Error ? e.message : String(e));
       })
       .finally(() => setLoading(false));
     return () => controller.abort();
-  }, [alert]);
+  }, [alert, t]);
 
   const open = alert !== null;
 

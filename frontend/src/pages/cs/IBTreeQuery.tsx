@@ -12,6 +12,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { DataScopeNotice } from "@/components/DataScopeNotice";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -41,6 +42,10 @@ interface IBTreeResponse {
   sales_code: string | null;
   chain_text: string;
   nodes: IBTreeNode[];
+  // True when the backend narrowed this chain to the caller's country data
+  // scope (backend/app/core/data_scope.py). Optional: an older API build then
+  // reads as "not narrowed" instead of rendering `undefined`.
+  data_scope_filtered?: boolean;
   query_time_ms: number;
 }
 
@@ -182,6 +187,11 @@ export default function IBTreeQuery() {
 
       {result && (
         <>
+          {/* Before the copy area, not after it: the chain is copied to the
+              clipboard automatically and pasted straight to a venue, so a
+              caller has to learn the chain is partial BEFORE they paste it. */}
+          <DataScopeNotice show={result.data_scope_filtered} className="px-1" />
+
           {/* Copy area — the deliverable */}
           <Card className="gap-3">
             <CardHeader>

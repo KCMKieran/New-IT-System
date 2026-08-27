@@ -16,6 +16,11 @@ export const enUS = {
     add: "Add",
     close: "Close",
     comma: ", ",
+    // Shown by <DataScopeNotice> when the backend narrowed a response to the
+    // caller's country data scope. Says WHY the number differs from a
+    // colleague's, because that is the question it exists to pre-empt.
+    dataScopeNotice:
+      "Filtered to your data scope — these figures cover only the clients you are allowed to see, so they will not match a colleague's for the same query.",
   },
   
   // Navigation

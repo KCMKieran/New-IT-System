@@ -30,6 +30,7 @@ from fastapi.responses import RedirectResponse
 
 from app.api.v1.routers import api_v1_router
 from app.core.config import get_settings
+from app.core.data_scope import verify_data_scope_overrides
 from app.core.trace_middleware import TraceIDMiddleware
 from app.core.api_key_middleware import APIKeyMiddleware
 from app.core.auth_middleware import AuthMiddleware
@@ -239,6 +240,14 @@ async def lifespan(app: FastAPI):
             "AUTH_ENABLED=true but AUTH_COOKIE_ENABLED=false — browsers cannot "
             "keep a session; sign-in will loop back to the login page."
         )
+
+    # Row-level country scope (core/data_scope.py). The name list is keyed by
+    # EMAIL, and email is deliberately not this system's identity key —
+    # upsert_user() rewrites users.email by entra_oid when somebody is renamed,
+    # and the dict then silently stops matching. Nothing else would say so, so
+    # the check is here: every boot, in every worker, read-only, never raises.
+    # See the function's docstring for why it is not behind the scheduler flock.
+    verify_data_scope_overrides()
 
     owns_scheduler = _try_acquire_scheduler_lock()
     if owns_scheduler:

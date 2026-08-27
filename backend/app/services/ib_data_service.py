@@ -27,6 +27,7 @@ tx_referrals AS (
     SELECT it.referralId
     FROM fxbackoffice.ib_tree_with_self it
     JOIN params p ON p.target_ib = it.ibid
+    {referral_scope}
 ),
 tx_totals AS (
     SELECT
@@ -52,6 +53,7 @@ wallet_referrals AS (
     SELECT it.referralId
     FROM fxbackoffice.ib_tree_with_self it
     JOIN params p ON p.target_ib = it.ibid
+    {referral_scope}
 ),
 wallet_total AS (
     -- STOCK, not flow: the CURRENT balance sitting in the IB wallet accounts.
@@ -85,6 +87,65 @@ FROM params p
 LEFT JOIN tx_totals tx ON 1=1
 LEFT JOIN wallet_total wt ON 1=1
 """
+
+# ── Row-level (country) data scope, applied to the RELATED side ──────────────
+#
+# The route gates the INPUT (the caller's `ib_ids` are checked against their
+# cids, all-or-nothing). That is not enough here, and the reason is the same
+# one as in ibid_lots_service: the two CTEs above fan OUT to the named IB's
+# whole downline, and every figure this endpoint returns — deposits,
+# withdrawals, IB-wallet balance, net deposit — is a SUM over that downline.
+# 11 Global IBs have at least one CN client under them, so an in-scope IB's
+# totals silently include CN clients' money.
+#
+# Injected into BOTH CTEs, in SQL, so the narrowing happens before any amount
+# is summed rather than after. There is nothing to post-filter here even in
+# principle: by the time the rows reach Python they are already one aggregated
+# number per IB, with the out-of-scope money folded in and unrecoverable.
+#
+# The JOIN is the filter: a referral whose cid is NULL or is some entity nobody
+# told us about has no matching users row and drops out. Fail closed, with no
+# extra branch that could be forgotten. Note _get_company_name() further down
+# renders an unrecognised cid as the visible string "Unknown(2)" — that is the
+# shape of mistake this join must not make.
+REFERRAL_SCOPE_JOIN = """JOIN fxbackoffice.users u
+      ON u.id = it.referralId
+     AND u.cid IN ({cid_placeholders})"""
+
+# "Was anything actually removed?", asked ONCE for the whole request rather
+# than per IB id. Existence only — it returns a literal 1 and never a client id
+# or an amount, so the flag is obtained without reading a single out-of-scope
+# row into the process.
+#
+# Over-reporting (a notice on a request that happened to be fully in scope) is
+# harmless; UNDER-reporting means a restricted colleague sees smaller totals
+# than their neighbour with nothing on the page saying why. So an unresolvable
+# cid counts as filtered, same direction as everywhere else in this change.
+SCOPE_PROBE_QUERY = """
+SELECT 1 AS hit
+FROM fxbackoffice.ib_tree_with_self it
+LEFT JOIN fxbackoffice.users u ON u.id = it.referralId
+WHERE it.ibid IN ({ib_placeholders})
+  AND (u.cid IS NULL OR u.cid NOT IN ({cid_placeholders}))
+LIMIT 1
+"""
+
+# Server-side statement kill switch. Set as a SESSION variable rather than as a
+# `/*+ MAX_EXECUTION_TIME(...) */` hint because IB_QUERY is a `WITH ... SELECT`
+# and MySQL only honours that hint on the outermost query block — a hint that
+# lands in the wrong place is accepted with a warning and silently does
+# nothing, which is the worst possible outcome for a guard.
+#
+# Applied ONLY on the scoped path. Not because the unrestricted query deserves
+# less protection, but because this change owns the scoped statements and an
+# extra `SET` round-trip on every colleague's IB query is exactly the cost the
+# short-circuit exists to avoid. Guarding the unscoped query too is a separate,
+# larger change (this connection carries no read_timeout either).
+#
+# A client-side timeout would not substitute: it abandons the SOCKET while the
+# server thread keeps running, queued behind whatever lock it wanted, as a
+# zombie — 2,637 of them on the replica in 14.5h on 2026-08-09.
+_SCOPE_MAX_EXECUTION_TIME_MS = 60000
 
 LAST_QUERY_FILENAME = "ib_data_last_query.txt"
 LOCK_FILENAME = "ib_data_last_query.lock"
@@ -142,11 +203,57 @@ def _normalize_range(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _query_single_ib(conn, ibid: str, start_str: str, end_str: str) -> dict:
-    """Execute SQL query for a single IB ID and return normalized metrics."""
+# The unscoped statement, materialised once: identical to what this module ran
+# before the data scope existed (bar one blank line where the JOIN goes).
+IB_QUERY_UNSCOPED = IB_QUERY.format(referral_scope="")
+
+
+def _scoped_ib_query(cid_count: int) -> str:
+    """IB_QUERY with the cid JOIN spliced into both referral CTEs.
+
+    Placeholders are BUILT from the count, never interpolated from the values:
+    this is an authorization filter, and an injection here does not merely leak
+    a row, it edits the question that decides who may see it.
+    """
+    placeholders = ",".join(["%s"] * cid_count)
+    return IB_QUERY.format(
+        referral_scope=REFERRAL_SCOPE_JOIN.format(cid_placeholders=placeholders)
+    )
+
+
+def _downline_has_out_of_scope(
+    conn, ib_ids: List[str], allowed_cids: frozenset
+) -> bool:
+    """Did the scope JOIN above actually remove anybody? One query, whole request."""
+    cid_params = tuple(sorted(allowed_cids))
+    sql = SCOPE_PROBE_QUERY.format(
+        ib_placeholders=",".join(["%s"] * len(ib_ids)),
+        cid_placeholders=",".join(["%s"] * len(cid_params)),
+    )
+    with conn.cursor() as cur:
+        cur.execute(sql, tuple(ib_ids) + cid_params)
+        return cur.fetchone() is not None
+
+
+def _query_single_ib(
+    conn,
+    ibid: str,
+    start_str: str,
+    end_str: str,
+    sql: str = IB_QUERY_UNSCOPED,
+    scope_params: tuple = (),
+) -> dict:
+    """Execute SQL query for a single IB ID and return normalized metrics.
+
+    ``scope_params`` carries the caller's cids once per referral CTE, in
+    statement order (params CTE first, then tx_referrals, then
+    wallet_referrals). Order matters and is not checkable at runtime — pymysql
+    fills %s positionally — so the tuple is assembled in exactly one place,
+    ``aggregate_ib_data`` below.
+    """
     try:
         with conn.cursor() as cur:
-            cur.execute(IB_QUERY, (ibid, start_str, end_str))
+            cur.execute(sql, (ibid, start_str, end_str) + scope_params)
             row = cur.fetchone() or {}
         return {
             "ibid": str(row.get("ibid", ibid)),
@@ -199,8 +306,18 @@ def aggregate_ib_data(
     ib_ids: List[str],
     start: datetime,
     end: datetime,
-) -> Tuple[list[dict], dict, datetime]:
-    """Aggregate IB data for given IDs and time range. Returns (rows, totals, timestamp)."""
+    allowed_cids: frozenset | None = None,
+) -> Tuple[list[dict], dict, datetime, bool]:
+    """Aggregate IB data for given IDs and time range.
+
+    Returns (rows, totals, timestamp, data_scope_filtered).
+
+    ``allowed_cids`` is the caller's country data scope. ``None`` means
+    UNRESTRICTED and runs the original statement unchanged — no extra
+    predicate, no extra query, no extra round-trip. It is never tested for
+    truthiness: ``None`` (no restriction) and an empty set (may see nothing)
+    are opposite answers, the ``["*"]`` vs ``[]`` trap again.
+    """
     if not ib_ids:
         raise ValueError("ib_ids cannot be empty")
     if end < start:
@@ -220,10 +337,40 @@ def aggregate_ib_data(
                 raise RuntimeError(f"数据库连接失败: {str(e)}") from e
 
             try:
+                data_scope_filtered = False
+                sql = IB_QUERY_UNSCOPED
+                scope_params: tuple = ()
+                if allowed_cids is not None:
+                    # Restricted caller only: everything in this block is work
+                    # the other ~30 colleagues never pay for.
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            f"SET SESSION MAX_EXECUTION_TIME = {_SCOPE_MAX_EXECUTION_TIME_MS}"
+                        )
+                    # The empty set means "may see NOTHING" (never None, which
+                    # would have short-circuited above). It is unreachable
+                    # today, but `IN ()` is a syntax error, so it is spelled
+                    # `IN (NULL)` — which matches no row, and is the fail-closed
+                    # answer. The probe is skipped for it because `NOT IN
+                    # (NULL)` is NULL, i.e. it would answer "nothing was
+                    # filtered" about a response that filtered everything.
+                    cid_params = tuple(sorted(allowed_cids)) or (None,)
+                    data_scope_filtered = (
+                        True
+                        if not allowed_cids
+                        else _downline_has_out_of_scope(conn, ib_ids, allowed_cids)
+                    )
+                    sql = _scoped_ib_query(len(cid_params))
+                    # Once per referral CTE, tx_referrals before
+                    # wallet_referrals — statement order, see _query_single_ib.
+                    scope_params = cid_params + cid_params
+
                 rows = []
                 for ibid in ib_ids:
                     try:
-                        row = _query_single_ib(conn, ibid, start_str, end_str)
+                        row = _query_single_ib(
+                            conn, ibid, start_str, end_str, sql, scope_params
+                        )
                         rows.append(row)
                     except Exception as e:
                         logger.error(f"Failed to query IB {ibid}: {e}")
@@ -249,8 +396,11 @@ def aggregate_ib_data(
             except Exception as e:
                 logger.warning(f"Failed to write last query time: {e}")
 
-            logger.info(f"IB data aggregation completed: {len(rows)} rows")
-            return rows, totals, timestamp
+            logger.info(
+                f"IB data aggregation completed: {len(rows)} rows, "
+                f"data_scope_filtered={data_scope_filtered}"
+            )
+            return rows, totals, timestamp, data_scope_filtered
     except Exception as e:
         logger.error(f"IB data aggregation failed: {type(e).__name__}: {e}", exc_info=True)
         raise

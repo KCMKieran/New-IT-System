@@ -144,4 +144,13 @@ class IbidLotsQueryResponse(BaseModel):
     # is smaller than the plain "direct only" one is self-explanatory rather
     # than looking like data loss.
     excluded_sub_ib_users: int = 0
+    # True when the row-level (country) data scope actually REMOVED downline
+    # clients from this answer — so the frontend can say so. The numbers above
+    # are then legitimately smaller than the ones an unrestricted colleague
+    # sees for the same IB, and a silently smaller total is the failure mode
+    # this flag exists to prevent. False for every unrestricted caller, and
+    # false for a restricted one whose whole downline was in scope anyway.
+    # NOT Optional and NOT nested: the frontend keys its notice off exactly
+    # this name on all three of ib-tree / ibid-lots / ib-data.
+    data_scope_filtered: bool = False
     query_time_ms: float = 0.0

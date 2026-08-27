@@ -18,6 +18,7 @@ import { type DateRange } from "react-day-picker";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { DataScopeNotice } from "@/components/DataScopeNotice";
 import { Input } from "@/components/ui/input";
 import {
   Table,
@@ -60,6 +61,10 @@ type IBAnalyticsResponsePayload = {
   rows: IBAnalyticsRow[];
   totals: IBAnalyticsTotals;
   last_query_time?: string | null;
+  // True when the backend narrowed this response to the caller's country data
+  // scope (backend/app/core/data_scope.py). Optional so an older API build
+  // reads as "not narrowed" rather than rendering `undefined`.
+  data_scope_filtered?: boolean;
 };
 
 type LastRunResponsePayload = {
@@ -88,6 +93,10 @@ export default function IbFundFlowCard() {
   const [lastQueryTime, setLastQueryTime] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Per-RESPONSE, not per-user: the same restricted caller can get a narrowed
+  // answer for one IB and a complete one for the next, and claiming "filtered"
+  // on a query that was not filtered is its own kind of wrong number.
+  const [scopeFiltered, setScopeFiltered] = useState(false);
 
   const rangeLabel = useRangeLabel(dateRange);
 
@@ -187,9 +196,13 @@ export default function IbFundFlowCard() {
       setRows(Array.isArray(data.rows) ? data.rows : []);
       setTotals(data.totals ?? null);
       setLastQueryTime(data.last_query_time ?? null);
+      setScopeFiltered(data.data_scope_filtered === true);
     } catch (err: any) {
       setRows([]);
       setTotals(null);
+      // Cleared with the rows it described — a notice left over from the
+      // previous query would be attached to an empty table.
+      setScopeFiltered(false);
       setError(err?.message ?? t("ibDataPage.errors.generic"));
     } finally {
       setIsLoading(false);
@@ -290,6 +303,11 @@ export default function IbFundFlowCard() {
               })}
             </Badge>
           </div>
+
+          {/* Sits with the badges that describe WHAT was queried, above the
+              table it qualifies — the totals row at the bottom is the number
+              most likely to be compared with a colleague's. */}
+          <DataScopeNotice show={scopeFiltered} />
 
           <div className="overflow-x-auto rounded-lg border">
             <Table>

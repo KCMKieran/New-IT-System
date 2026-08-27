@@ -351,11 +351,19 @@ def caller_has_module(request: Request, module: str) -> bool:
     Exported so a handler can narrow WHAT it returns on a path the gate itself
     lets through. There is exactly one such path today and it is not an
     exception to the model, it is the model's edge: ``/client-return-rate/query``
-    is classified COMMON because the always-open home page draws a widget from
-    it, yet it is also the sole data source of the risk-module page of the same
-    name — the same endpoint, the same parameters. Path-level classification
-    cannot express "everyone may have the widget's slice of this, only the risk
-    module may have the rest", so the handler asks.
+    feeds BOTH the home page's ReturnRateSummary widget and the risk-module page
+    of the same name — the same endpoint, the same parameters. Path-level
+    classification cannot express "the dashboard module may have the widget's
+    slice of this, only the risk module may have the rest", so the handler asks.
+
+    ⚠ This paragraph said "is classified COMMON" until 2026-08-27, describing
+    the pre-2026-08-19 world in which the home page was open to every signed-in
+    user. It has been ``frozenset({"dashboard", "risk"})`` since `dashboard`
+    became a grantable module. The correction matters beyond tidiness: COMMON
+    bypasses BOTH this gate and ``data_scope.enforce_data_scope_coverage``, so a
+    reader deciding "is COMMON safe to widen?" on the strength of this docstring
+    would have concluded that a firm-wide per-client equity endpoint already
+    lives there. It does not, and COMMON's membership is now pinned by a test.
 
     Mirrors the gate's precedence exactly (kill switch, manager, the ALL_MODULES
     sentinel, membership) and deliberately shares the membership step with it —

@@ -25,11 +25,19 @@ from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 
 from ....core.audit import Auditor, get_auditor
+from ....core.config import get_settings
+from ....core.data_scope import (
+    caller_cids,
+    cid_for_crm_user_ids,
+    require_cids_allowed,
+    scope_cache_suffix,
+)
 from ....core.fund_flow_monitor_db import (
+    count_alerts_by_batch,
     get_latest_scan,
     list_recent_scans,
     load_rules,
@@ -52,7 +60,9 @@ from ....services.clickhouse_service import clickhouse_service
 from ....services.fund_flow_detail_service import get_client_detail
 from ....services.fund_flow_monitor_service import (
     compute_summary,
+    filter_alerts_to_scope,
     iso_to_mysql_dt,
+    labels_for_cids,
     run_detection,
 )
 
@@ -86,10 +96,35 @@ _query_singleflight = SingleFlight()
 _query_semaphore = threading.Semaphore(_MAX_INFLIGHT_QUERIES)
 
 
-def _query_cache_key(payload: dict) -> str:
-    """Hash the canonicalized payload for a stable Redis key."""
+def _query_cache_key(payload: dict, scope_suffix: str) -> str:
+    """Hash the canonicalized payload for a stable Redis key, scoped to the caller.
+
+    ``scope_suffix`` is NOT optional and is deliberately a required positional
+    argument: a default would let a future caller reintroduce the shared key by
+    omission, silently and with a passing test suite.
+
+    Identity used to be absent from this key, and that alone defeats the whole
+    row filter. Two callers sending the same filters shared one cache entry, so
+    the first UNRESTRICTED colleague to run a query warmed Redis with the
+    firm-wide result — CN rows included — and the next restricted caller sending
+    the same payload was served that entry verbatim. No filtered query ever ran,
+    nothing was logged, nothing 403'd, and a unit test exercising one user at a
+    time could not see it. The leak's schedule was set by whoever queried first.
+
+    The suffix rides OUTSIDE the md5 rather than inside the hashed payload so a
+    human reading Redis (or the SingleFlight coalescing log line, which prints
+    key[:50]) can tell at a glance which scope an entry belongs to. Hiding it in
+    the digest would work identically and be unauditable.
+
+    The same string is used for SingleFlight. That is not tidiness: coalescing
+    two in-flight requests from differently-scoped callers onto one result is
+    the identical bug with a shorter window, so the two keys must never diverge.
+    """
     canonical = json.dumps(payload, sort_keys=True, default=str)
-    return f"app:fund_flow:query:{hashlib.md5(canonical.encode()).hexdigest()}"
+    return (
+        f"app:fund_flow:query:{scope_suffix}:"
+        f"{hashlib.md5(canonical.encode()).hexdigest()}"
+    )
 
 
 def _parse_iso(value: str, field: str) -> str:
@@ -111,6 +146,43 @@ def _empty_summary() -> FundFlowSummary:
     return FundFlowSummary()
 
 
+def _scope_snapshot(snapshot: dict | None, cids: frozenset[int] | None) -> dict | None:
+    """Return a snapshot narrowed to ``cids``. ``None`` cids = unrestricted.
+
+    Returns the SAME object when unrestricted — the 99% path allocates nothing
+    and their response stays byte-identical.
+
+    Builds a NEW dict when it does filter, and this is load-bearing rather than
+    stylistic: ``fund_flow_scheduler.get_latest_snapshot()`` hands back the
+    module-level ``_latest_snapshot`` object itself, shared by every request and
+    by the weekly cron. Filtering it in place would let one restricted caller
+    permanently delete CN alerts from the copy everybody else is served, until
+    the next scan or process restart. The nested ``batch`` dict is copied for
+    the same reason.
+
+    ``batch.total_alerts`` is recomputed as the length of the filtered list, not
+    fetched. For a snapshot that is exact by construction — ``get_latest_scan()``
+    selects ALL alert rows for the batch, and ``finish_scan_batch`` stored
+    ``len(alerts)`` as the total — and it guarantees the property that matters:
+    the headline number always equals the number of rows the reader can count,
+    so there is no difference left to subtract. /scans has no rows in hand and
+    has to ask the database instead (``count_alerts_by_batch``).
+    """
+    if cids is None or not snapshot:
+        return snapshot
+
+    alerts = filter_alerts_to_scope(snapshot.get("alerts", []), cids)
+    scoped: dict = dict(snapshot)
+    scoped["alerts"] = alerts
+    scoped["summary"] = compute_summary(alerts)
+    batch = snapshot.get("batch")
+    if batch:
+        scoped_batch = dict(batch)
+        scoped_batch["total_alerts"] = len(alerts)
+        scoped["batch"] = scoped_batch
+    return scoped
+
+
 def _snapshot_to_model(snapshot: dict | None) -> FundFlowSnapshot:
     if not snapshot or not snapshot.get("batch"):
         return FundFlowSnapshot(batch=None, alerts=[], summary=_empty_summary())
@@ -125,24 +197,55 @@ def _snapshot_to_model(snapshot: dict | None) -> FundFlowSnapshot:
 # ── Snapshot ──────────────────────────────────────────────
 
 @router.get("/snapshot/latest", response_model=FundFlowSnapshot)
-async def snapshot_latest():
+async def snapshot_latest(request: Request):
     """Return the latest successful weekly scan + flagged clients."""
     snapshot = get_latest_snapshot()
     if snapshot is None:
         snapshot = get_latest_scan()
         if snapshot is not None:
             snapshot["summary"] = compute_summary(snapshot.get("alerts", []))
-    return _snapshot_to_model(snapshot)
+    # Row-level country scope. No-op (and no copy) for an unrestricted caller.
+    return _snapshot_to_model(_scope_snapshot(snapshot, caller_cids(request)))
 
 
 @router.get("/scans", response_model=list[FundFlowScanBatch])
-async def list_scans(limit: int = Query(default=20, ge=1, le=100)):
+# Sync `def`, not `async def`: everything below is a blocking SQLite read
+# (list_recent_scans / count_alerts_by_batch), and a blocking read inside an
+# `async def` runs ON the event loop and stalls every other request in this
+# worker for its duration. Sync handlers are dispatched to the threadpool.
+def list_scans(request: Request, limit: int = Query(default=20, ge=1, le=100)):
+    """Recent scan batches for the selector.
+
+    Scoped even though it returns no client rows, because ``total_alerts`` is a
+    firm-wide aggregate: leave it whole next to a filtered alert list and the
+    reader recovers the CN count by subtraction. A filtered list beside an
+    unfiltered total is a subtraction away from being no filter at all.
+    """
     rows = list_recent_scans(limit=limit)
-    return [FundFlowScanBatch(**r) for r in rows]
+
+    cids = caller_cids(request)
+    if cids is None:
+        return [FundFlowScanBatch(**r) for r in rows]
+
+    # One grouped COUNT for the whole page, not one per row: this endpoint
+    # returns up to 100 batches and the SQLite file is also written by the
+    # weekly scan.
+    scoped_totals = count_alerts_by_batch(
+        [int(r["id"]) for r in rows], labels_for_cids(cids)
+    )
+    out: list[FundFlowScanBatch] = []
+    for r in rows:
+        row = dict(r)
+        # Absent from the map means "no rows of yours in that batch". Zero is
+        # the truthful answer for an all-CN batch, a still-running one, and a
+        # failed one alike — and it must NOT fall back to the firm-wide total.
+        row["total_alerts"] = scoped_totals.get(int(r["id"]), 0)
+        out.append(FundFlowScanBatch(**row))
+    return out
 
 
 @router.post("/scan-now", response_model=FundFlowSnapshot)
-async def scan_now(audit: Auditor = Depends(get_auditor)):
+async def scan_now(request: Request, audit: Auditor = Depends(get_auditor)):
     """Run an immediate ad-hoc scan and return the resulting snapshot."""
     try:
         result = trigger_scan_now()
@@ -173,13 +276,19 @@ async def scan_now(audit: Auditor = Depends(get_auditor)):
             "total_alerts": len(result.get("alerts") or []),
         },
     )
-    return _snapshot_to_model(result)
+    # The SCAN is firm-wide and stays that way — a restricted user kicking one
+    # off must not persist a snapshot that is missing CN alerts for everybody
+    # else, and the audit row above deliberately records what the scan DID, not
+    # what this caller was shown. Only the RESPONSE is narrowed, and only into a
+    # copy: `result` is the same object fund_flow_scheduler keeps as its cached
+    # `_latest_snapshot`.
+    return _snapshot_to_model(_scope_snapshot(result, caller_cids(request)))
 
 
 # ── Ad-hoc query ─────────────────────────────────────────
 
 @router.post("/query", response_model=FundFlowQueryResponse)
-async def ad_hoc_query(req: FundFlowQueryRequest):
+async def ad_hoc_query(request: Request, req: FundFlowQueryRequest):
     """Ad-hoc detection query. Layered concurrency protection:
     Redis cache → SingleFlight dedup → Semaphore for MySQL.
 
@@ -240,7 +349,11 @@ async def ad_hoc_query(req: FundFlowQueryRequest):
         "min_dep_amt": req.min_deposit_amount_usd,
         "min_wd_amt": req.min_withdrawal_amount_usd,
     }
-    cache_key = _query_cache_key(cache_payload)
+    # Two callers with different data scopes must never share a cache entry;
+    # see _query_cache_key(). Resolved once and reused for the filter below so
+    # the key and the rows cannot disagree about who is asking.
+    cids = caller_cids(request)
+    cache_key = _query_cache_key(cache_payload, scope_cache_suffix(request))
     redis_client = clickhouse_service.redis_client
     if redis_client is not None:
         try:
@@ -272,6 +385,15 @@ async def ad_hoc_query(req: FundFlowQueryRequest):
             )
         finally:
             _query_semaphore.release()
+        # Belt and braces with the scoped cache key above. Filtering HERE means
+        # what gets written to Redis under a scoped key is already scoped, so a
+        # future refactor that loses the suffix leaks nothing that this compute
+        # produced — the two defences fail independently.
+        #
+        # Note this also covers req.user_id (the single-account lookup): /query
+        # is classified FILTER, so a restricted caller naming a CN client gets
+        # an empty result rather than a 403. /detail is the LOOKUP that refuses.
+        alerts = filter_alerts_to_scope(alerts, cids)
         elapsed_ms = int((time.perf_counter() - started) * 1000)
         return {
             "alerts": alerts,
@@ -313,7 +435,14 @@ async def ad_hoc_query(req: FundFlowQueryRequest):
 # ── Detail (single client) ───────────────────────────────
 
 @router.get("/detail/{user_id}", response_model=FundFlowDetailResponse)
-async def client_detail(
+# Sync `def` — this handler makes TWO blocking MySQL round trips: the scope
+# resolver below (`cid_for_crm_user_ids`, connect_timeout=5 + read_timeout=20)
+# and `get_client_detail`. On the event loop that is up to ~25s of total stall
+# for every other request this worker is serving, from one restricted caller
+# clicking one row (OPT-0055 measured a 1.3s endpoint dragged to 2.7-5.2s by
+# far less). Every callee here is sync; nothing is awaited.
+def client_detail(
+    request: Request,
     user_id: int,
     start: str = Query(..., description="ISO8601 UTC lower bound"),
     end: str = Query(..., description="ISO8601 UTC upper bound (exclusive)"),
@@ -325,6 +454,21 @@ async def client_detail(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="end must be greater than start.",
         )
+
+    # A LOOKUP, not a filter: the caller already named the client, so the only
+    # place a decision can be made is BEFORE the query. Checking the
+    # `country_label` that get_client_detail() returns would mean the CN
+    # client's transactions and trades had already been read out of MySQL, and
+    # would answer 403 only after paying for the answer.
+    #
+    # The resolver is skipped entirely when unrestricted — this is an extra
+    # MySQL round trip on a page that is otherwise nobody's exception.
+    if caller_cids(request) is not None:
+        resolved = cid_for_crm_user_ids(get_settings(), [user_id])
+        require_cids_allowed(
+            request, resolved.get(user_id), what=f"client {user_id}"
+        )
+
     try:
         payload = get_client_detail(user_id, start_iso, end_iso)
     except Exception as exc:
@@ -427,10 +571,15 @@ def _alerts_to_csv(alerts: list[dict]) -> io.StringIO:
 
 
 @router.get("/export")
-async def export_snapshot():
+async def export_snapshot(request: Request):
     """Stream the latest snapshot as CSV."""
     snapshot = get_latest_snapshot() or get_latest_scan() or {"alerts": []}
     alerts = snapshot.get("alerts", []) if isinstance(snapshot, dict) else []
+    # Filtered BEFORE the CSV is built. Once _alerts_to_csv has run the rows are
+    # a flat text buffer and the only way back is to re-parse it, so this is the
+    # last point where a row can be dropped — and an export is the one artefact
+    # here that outlives the request and gets forwarded around.
+    alerts = filter_alerts_to_scope(alerts, caller_cids(request))
     buf = _alerts_to_csv(alerts)
     filename = "fund_flow_snapshot.csv"
     headers = {
