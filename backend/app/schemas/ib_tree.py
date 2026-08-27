@@ -20,4 +20,10 @@ class IBTreeResponse(BaseModel):
     sales_code: Optional[str] = None
     chain_text: str                # ready-to-paste line, e.g. "HZL013 > 122830 刘坤林 > ..."
     nodes: List[IBTreeNode]
+    # True when at least one node in the chain was MASKED because it is outside
+    # the caller's country data scope (see ib_tree_service._mask_out_of_scope).
+    # The chain keeps its shape — a chain with a hole punched in it is worse
+    # than useless for CS work — so without this flag a masked chain and a
+    # chain that genuinely has an anonymous link look identical.
+    data_scope_filtered: bool = False
     query_time_ms: float = 0.0

@@ -67,6 +67,12 @@ class IBAnalyticsResponse(BaseModel):
     rows: List[IBAnalyticsRow]
     totals: IBAnalyticsMetrics
     last_query_time: datetime | None = None
+    # True when the row-level (country) data scope actually narrowed the
+    # referral sets these totals were summed over. Same contract as the field
+    # of the same name on IbidLotsQueryResponse / IBTreeResponse — the whole
+    # point is that a restricted colleague's smaller number is LABELLED rather
+    # than silently different from everyone else's.
+    data_scope_filtered: bool = False
 
 
 class LastQueryResponse(BaseModel):

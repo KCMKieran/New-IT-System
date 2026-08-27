@@ -39,6 +39,66 @@ LONG_TRADE_SECONDS = 180
 TREE_QUERY = "SELECT referralId FROM fxbackoffice.ib_tree_with_self WHERE ibId = %s"
 TREE_QUERY_DIRECT = TREE_QUERY + " AND level = 0"
 
+# ── Row-level (country) data scope, applied to the RELATED side ──────────────
+#
+# The route already gated the INPUT: the caller named ONE IB and it was checked
+# against their cids. But the ANSWER fans out to that IB's downline — one row
+# per client, with lots and ticket counts — and 11 Global IBs have at least one
+# CN client under them. So a restricted caller naming an IB they are allowed to
+# see still gets CN clients' CRM ids and volumes back. That is the hole these
+# two statements close.
+#
+# Filtered in SQL, not in Python, and specifically HERE at step 1 rather than
+# on the finished rows. Three reasons, in order of how badly each bites:
+#   1. a post-filter still reads CN rows out of the replica, so the leak is
+#      only closed in this process, not on the wire or in the query log;
+#   2. everything downstream (mt4_users, the mt4_trades batches, every total
+#      and the account_count) is derived from this id list, so narrowing it
+#      once makes the header figures and the row list agree BY CONSTRUCTION —
+#      the "filtered list beside an unfiltered total" bug cannot be written;
+#   3. dropping a client here means their trades are never scanned at all,
+#      which on a 48M-row table is the difference that pays for the join.
+#
+# The INNER JOIN is the filter: a referral whose cid is NULL, or is some third
+# entity nobody told us about, has no matching row and disappears. Fail closed
+# with no extra branch to forget.
+TREE_QUERY_SCOPED = """
+    SELECT /*+ MAX_EXECUTION_TIME({max_exec_ms}) */ it.referralId
+    FROM fxbackoffice.ib_tree_with_self it
+    INNER JOIN fxbackoffice.users u
+            ON u.id = it.referralId
+           AND u.cid IN ({cid_placeholders})
+    WHERE it.ibId = %s{level_filter}
+"""
+
+# "Was anything actually removed?" — an EXISTENCE probe, not a second copy of
+# the filter. It returns at most one literal 1 and never a client id, so the
+# answer to "should the UI say this view is narrowed" is obtained without
+# reading a single out-of-scope row into the process.
+#
+# LEFT JOIN + `IS NULL OR NOT IN` rather than an anti-join on the scoped set:
+# the two failure directions are not symmetric. Over-reporting shows a notice
+# on a chain that happened to be fully in scope (harmless); UNDER-reporting
+# means smaller numbers with nothing saying why, which is the entire failure
+# this contract exists to prevent. So an unresolvable cid counts as filtered.
+TREE_SCOPE_PROBE = """
+    SELECT /*+ MAX_EXECUTION_TIME({max_exec_ms}) */ 1 AS hit
+    FROM fxbackoffice.ib_tree_with_self it
+    LEFT JOIN fxbackoffice.users u ON u.id = it.referralId
+    WHERE it.ibId = %s{level_filter}
+      AND (u.cid IS NULL OR u.cid NOT IN ({cid_placeholders}))
+    LIMIT 1
+"""
+
+# Statement-level rather than this module's usual `SET SESSION` idiom, and that
+# is deliberate: the session variable would also cap the mt4_trades batches,
+# which legitimately run for tens of seconds on a large IB (hence the 60s
+# read_timeout below) and would start failing for exactly the two restricted
+# colleagues. Both statements above are point lookups on the closure table's
+# ibId index, so 15s means "the replica is in trouble, stop holding a slot"
+# — the 2026-08-09 lesson, which cost 2,637 zombie threads in 14.5h.
+_SCOPE_MAX_EXECUTION_TIME_MS = 15000
+
 # Sub-IB detection for query_type="ibid_direct_client".
 #
 # `users.isIb` is the CRM's authoritative IB flag and the criterion the desk
@@ -135,6 +195,7 @@ def _empty_response(
     display_symbols: List[str],
     account_count: int = 0,
     excluded_sub_ib_users: int = 0,
+    data_scope_filtered: bool = False,
 ) -> IbidLotsQueryResponse:
     """200 shell for "no trades found" — the UI renders its own empty state."""
     return IbidLotsQueryResponse(
@@ -152,6 +213,7 @@ def _empty_response(
         symbol_stats=[],
         user_stats=[],
         excluded_sub_ib_users=excluded_sub_ib_users,
+        data_scope_filtered=data_scope_filtered,
     )
 
 
@@ -183,12 +245,66 @@ def _drop_sub_ibs(
     return kept, len(user_ids) - len(kept)
 
 
+def _scoped_tree_rows(
+    cursor, payload: IbidLotsQueryRequest, allowed_cids: frozenset
+) -> Tuple[List[Any], bool]:
+    """Step 1 for a RESTRICTED caller: in-scope referrals + "did we drop any?".
+
+    Split out of _resolve_accounts so the unrestricted path below stays exactly
+    the two lines it always was — the SQL a restricted caller runs is a
+    different statement, not the same one with an if inside it.
+    """
+    direct_only = payload.query_type in ("ibid_direct", "ibid_direct_client")
+    # Must mirror the level filter of the query it is measuring: probing the
+    # whole tree while the query only asked for level 0 would report "narrowed"
+    # because of a deep CN client that was never going to be in this answer.
+    level_filter = " AND it.level = 0" if direct_only else ""
+    cid_params = tuple(sorted(allowed_cids))
+    cid_placeholders = ",".join(["%s"] * len(cid_params))
+
+    cursor.execute(
+        TREE_QUERY_SCOPED.format(
+            max_exec_ms=_SCOPE_MAX_EXECUTION_TIME_MS,
+            cid_placeholders=cid_placeholders,
+            level_filter=level_filter,
+        ),
+        cid_params + (payload.target_id,),
+    )
+    user_ids = [row["referralId"] for row in cursor.fetchall()]
+
+    cursor.execute(
+        TREE_SCOPE_PROBE.format(
+            max_exec_ms=_SCOPE_MAX_EXECUTION_TIME_MS,
+            cid_placeholders=cid_placeholders,
+            level_filter=level_filter,
+        ),
+        (payload.target_id,) + cid_params,
+    )
+    scope_filtered = cursor.fetchone() is not None
+
+    logger.info(
+        "ibid-lots data scope applied: ibId=%s direct_only=%s allowed_cids=%s "
+        "in_scope_users=%d dropped_any=%s",
+        payload.target_id, direct_only, sorted(allowed_cids),
+        len(user_ids), scope_filtered,
+    )
+    return user_ids, scope_filtered
+
+
 def _resolve_accounts(
-    cursor, payload: IbidLotsQueryRequest
-) -> Tuple[Dict[str, Any], List[str], Set[str], int]:
+    cursor,
+    payload: IbidLotsQueryRequest,
+    allowed_cids: Optional[frozenset] = None,
+) -> Tuple[Dict[str, Any], List[str], Set[str], int, bool]:
     """Steps 1-2: target user ids → live (non-demo) loginSids + CEN account set.
 
-    Returns (login_to_user, login_sids, cen_logins, excluded_sub_ib_users).
+    Returns (login_to_user, login_sids, cen_logins, excluded_sub_ib_users,
+    data_scope_filtered).
+
+    ``allowed_cids`` is the caller's country scope; ``None`` means UNRESTRICTED
+    and takes the byte-identical original path. Never test it for truthiness —
+    ``None`` (no restriction) and an empty set (may see nothing) are opposite
+    answers, the same trap as ``allowed_modules`` ``["*"]`` vs ``[]``.
     """
     if payload.query_type == "login":
         # Steps 1 and 2 do not apply: the caller already named the account.
@@ -205,32 +321,50 @@ def _resolve_accounts(
             login_sid, bool(cen_logins),
         )
         # Maps to itself so the per-client table shows the loginSid.
-        return {login_sid: login_sid}, [login_sid], cen_logins, 0
+        # No data scope work: this mode answers about the ONE account the
+        # caller named, which the route already checked on the way in. There is
+        # no related side to fan out to, so nothing can have been narrowed.
+        return {login_sid: login_sid}, [login_sid], cen_logins, 0, False
 
     # Step 1 — resolve the CRM user ids in scope.
     excluded_sub_ib_users = 0
+    data_scope_filtered = False
     if payload.query_type in ("ibid", "ibid_direct", "ibid_direct_client"):
-        direct_only = payload.query_type in ("ibid_direct", "ibid_direct_client")
-        cursor.execute(
-            TREE_QUERY_DIRECT if direct_only else TREE_QUERY,
-            (payload.target_id,),
-        )
-        user_ids = [row["referralId"] for row in cursor.fetchall()]
-        logger.debug(
-            "ibid-lots step1: ibId=%s direct_only=%s downstream_users=%d",
-            payload.target_id, direct_only, len(user_ids),
-        )
+        if allowed_cids is None:
+            direct_only = payload.query_type in ("ibid_direct", "ibid_direct_client")
+            cursor.execute(
+                TREE_QUERY_DIRECT if direct_only else TREE_QUERY,
+                (payload.target_id,),
+            )
+            user_ids = [row["referralId"] for row in cursor.fetchall()]
+            logger.debug(
+                "ibid-lots step1: ibId=%s direct_only=%s downstream_users=%d",
+                payload.target_id, direct_only, len(user_ids),
+            )
+        elif not allowed_cids:
+            # Unreachable today — caller_cids() never hands back an empty set —
+            # but the empty set means "may see NOTHING", and the two ways of
+            # spelling that in SQL both misbehave: `IN ()` is a syntax error and
+            # `IN (NULL)` matches nothing while making the probe answer "we
+            # filtered nothing". Answer it directly rather than let either
+            # spelling decide.
+            user_ids, data_scope_filtered = [], True
+        else:
+            user_ids, data_scope_filtered = _scoped_tree_rows(
+                cursor, payload, allowed_cids
+            )
         # Step 1b — only this mode narrows level 0 down to the plain clients.
         if payload.query_type == "ibid_direct_client":
             user_ids, excluded_sub_ib_users = _drop_sub_ibs(
                 cursor, user_ids, payload.target_id
             )
     else:  # "id" — the user itself, no tree lookup
+        # Same as "login": the target is the answer, and the route gated it.
         user_ids = [payload.target_id]
         logger.debug("ibid-lots step1: single user mode, userId=%s", payload.target_id)
 
     if not user_ids:
-        return {}, [], set(), excluded_sub_ib_users
+        return {}, [], set(), excluded_sub_ib_users, data_scope_filtered
 
     # Step 2 — map user ids to live trading accounts (demo excluded).
     placeholders = ",".join(["%s"] * len(user_ids))
@@ -246,7 +380,13 @@ def _resolve_accounts(
     logger.debug(
         "ibid-lots step2: loginSids=%d cen=%d", len(login_to_user), len(cen_logins)
     )
-    return login_to_user, list(login_to_user.keys()), cen_logins, excluded_sub_ib_users
+    return (
+        login_to_user,
+        list(login_to_user.keys()),
+        cen_logins,
+        excluded_sub_ib_users,
+        data_scope_filtered,
+    )
 
 
 def _fetch_trade_rows(
@@ -284,12 +424,23 @@ def _fetch_trade_rows(
 
 
 def query_tobe_global_lots(
-    settings: Settings, payload: IbidLotsQueryRequest
+    settings: Settings,
+    payload: IbidLotsQueryRequest,
+    allowed_cids: Optional[frozenset] = None,
 ) -> IbidLotsQueryResponse:
     """Run one "For Tobe Global" lots query and return the aggregated result.
 
     Always returns a response object; "no trades found" is an all-zero shell,
     not an error.
+
+    ``allowed_cids`` is the caller's country data scope (``None`` =
+    UNRESTRICTED, and NOT the same as an empty set). When it is set, the
+    downline is narrowed at step 1 and every figure below — per-symbol,
+    per-client, the headline totals and account_count — is computed from the
+    narrowed set, so the header and the row list cannot disagree. The response
+    then carries ``data_scope_filtered=True`` if anything was actually dropped,
+    because a smaller total with no explanation is indistinguishable from a
+    wrong one.
     """
     symbols = payload.resolved_symbols()
     display_symbols = [ALL_SYMBOLS_LABEL] if symbols is None else list(symbols)
@@ -307,12 +458,14 @@ def query_tobe_global_lots(
                 login_sids,
                 cen_logins,
                 excluded_sub_ib_users,
-            ) = _resolve_accounts(cursor, payload)
+                data_scope_filtered,
+            ) = _resolve_accounts(cursor, payload, allowed_cids)
             if not login_sids:
                 logger.info("ibid-lots query end: no live accounts for the target")
                 return _empty_response(
                     payload, display_symbols,
                     excluded_sub_ib_users=excluded_sub_ib_users,
+                    data_scope_filtered=data_scope_filtered,
                 )
 
             trade_rows = _fetch_trade_rows(
@@ -325,6 +478,7 @@ def query_tobe_global_lots(
             payload, display_symbols,
             account_count=len(login_sids),
             excluded_sub_ib_users=excluded_sub_ib_users,
+            data_scope_filtered=data_scope_filtered,
         )
 
     # Step 4 — normalize and aggregate. Sums stay in full float precision and
@@ -450,4 +604,5 @@ def query_tobe_global_lots(
         symbol_stats=symbol_stats,
         user_stats=user_stats,
         excluded_sub_ib_users=excluded_sub_ib_users,
+        data_scope_filtered=data_scope_filtered,
     )

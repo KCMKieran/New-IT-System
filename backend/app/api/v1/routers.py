@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends
 
 from app.core.auth_deps import enforce_module_access
+from app.core.data_scope import enforce_data_scope_coverage
 
 from .routes.health import router as health_router
 from .routes.auth import router as auth_router
@@ -52,7 +53,24 @@ from .routes.honeypot import router as honeypot_router
 # fails closed on an unknown path and ``test_app_assembly.py`` asserts that
 # every live route resolves to exactly one entry, so the omission is a red
 # test, not a silent hole.
-api_v1_router = APIRouter(dependencies=[Depends(enforce_module_access)])
+#
+# The row-level (country) data scope gate rides along on the SAME mount, for the
+# same reason and with one extra property: order. FastAPI runs a router's
+# dependencies in sequence, so the module gate is asked "may you open this page
+# group?" BEFORE the scope gate is asked "can we even scope this page group for
+# you?" — which means the second one only ever fires for somebody who genuinely
+# holds the grant, and its ERROR log is therefore always worth reading. Flipped,
+# every ordinary "not granted" click from the two restricted colleagues would
+# raise an ERROR about a coverage gap that is not there.
+#
+# It is a no-op (one dict lookup on the caller's email) for everybody who is not
+# in DATA_SCOPE_OVERRIDES, which is everybody but two people.
+api_v1_router = APIRouter(
+    dependencies=[
+        Depends(enforce_module_access),
+        Depends(enforce_data_scope_coverage),
+    ]
+)
 api_v1_router.include_router(health_router, tags=["health"])
 api_v1_router.include_router(auth_router, tags=["auth"])
 # /api/v1/admin — manager-only administration (auth P4a). Deliberately its own

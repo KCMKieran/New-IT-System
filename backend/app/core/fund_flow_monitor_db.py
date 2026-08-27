@@ -330,6 +330,54 @@ def get_latest_scan() -> dict[str, Any] | None:
     }
 
 
+def count_alerts_by_batch(
+    batch_ids: list[int],
+    country_labels: list[str],
+) -> dict[int, int]:
+    """Per-batch alert count restricted to ``country_labels``. One query, not N.
+
+    Exists because ``fund_flow_scan_history.total_alerts`` is a FIRM-WIDE
+    number and a filtered list beside an unfiltered total leaks the difference:
+    a Global-only colleague who sees 20 rows under a batch labelled "64 total"
+    has just been told CN had 44. Recomputing the total inside the caller's
+    scope is what stops the subtraction. See core/data_scope.py's ROUTE_SCOPE
+    note on /cs/fund-flow/scans.
+
+    Batched on purpose. /scans returns up to 100 rows, and the obvious
+    per-row COUNT would turn one selector render into 100 SQLite round trips —
+    on a file that the weekly scan also writes.
+
+    A batch id with no matching rows is ABSENT from the result, not zero. The
+    caller decides what a miss means: for /scans it means zero-in-your-scope,
+    which is the truthful answer for a batch whose alerts were all CN, for a
+    'running' batch that has written nothing yet, and for a 'failed' one alike.
+
+    ``country_label`` IS NULL never satisfies ``IN (...)`` in SQL, so rows whose
+    country could not be determined drop out here for free — the same
+    fail-closed direction as ``filter_alerts_to_scope``.
+    """
+    if not batch_ids or not country_labels:
+        return {}
+
+    # Both lists are bound, never interpolated. country_labels originates from
+    # CID_LABELS (a code constant) today, but this is an authorization-shaped
+    # query and the next caller may not be so careful.
+    batch_ph = ", ".join("?" * len(batch_ids))
+    label_ph = ", ".join("?" * len(country_labels))
+    with get_fund_flow_db() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT scan_batch_id, COUNT(*) AS n
+            FROM fund_flow_alerts
+            WHERE scan_batch_id IN ({batch_ph})
+              AND country_label IN ({label_ph})
+            GROUP BY scan_batch_id
+            """,
+            tuple(int(b) for b in batch_ids) + tuple(country_labels),
+        ).fetchall()
+    return {int(r["scan_batch_id"]): int(r["n"]) for r in rows}
+
+
 def list_recent_scans(limit: int = 20) -> list[dict[str, Any]]:
     with get_fund_flow_db() as conn:
         rows = conn.execute(

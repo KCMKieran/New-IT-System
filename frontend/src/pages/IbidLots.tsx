@@ -38,6 +38,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Calendar } from "@/components/ui/calendar";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { DataScopeNotice } from "@/components/DataScopeNotice";
 import { Input } from "@/components/ui/input";
 import { InfoHeader } from "@/components/ui/info-header";
 import { Label } from "@/components/ui/label";
@@ -132,6 +133,11 @@ interface IbidLotsResponse {
   // "ibid_direct_client" mode; surfaced so a total smaller than the plain
   // direct-only one reads as "filtered", not as missing data.
   excluded_sub_ib_users: number;
+  // True when the backend narrowed this response to the caller's country data
+  // scope (backend/app/core/data_scope.py). Optional so an older API build —
+  // or a cached bundle talking to one — reads as "not narrowed" rather than
+  // rendering `undefined`.
+  data_scope_filtered?: boolean;
   query_time_ms: number;
 }
 
@@ -873,6 +879,14 @@ export default function IbidLotsPage() {
       )}
 
       {/* ── Empty result (HTTP 200 + all zeros) ────────────────────────── */}
+      {/* Above BOTH the results and the empty state on purpose: a restricted
+          caller whose whole result was filtered away sees the empty state, and
+          that is precisely the moment "there is nothing here" needs the word
+          "for you" attached to it. */}
+      {!loading && !error && (
+        <DataScopeNotice show={result?.data_scope_filtered} className="px-1" />
+      )}
+
       {!loading && !error && isEmptyResult && result && (
         <div className="flex flex-col items-center justify-center rounded-xl border border-dashed px-6 py-12 text-center">
           <SearchX className="size-8 text-muted-foreground/60" aria-hidden />

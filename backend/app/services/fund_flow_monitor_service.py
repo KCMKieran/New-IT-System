@@ -24,6 +24,7 @@ from zoneinfo import ZoneInfo
 import pymysql
 
 from ..core.config import get_settings
+from ..core.data_scope import CID_LABELS
 from ..core.sql_helpers import (
     BROKER_TZ_OFFSET,
     FILETIME_EPOCH_OFFSET,
@@ -322,6 +323,54 @@ def _country_label(cid: Any) -> Optional[str]:
     if c == 1:
         return "Global"
     return f"Unknown({c})"
+
+
+# ── Row-level country scope (see core/data_scope.py) ───────
+#
+# Alert rows carry ``country_label`` as a STRING ('CN' | 'Global'); a caller's
+# scope is a set of INTS (cids). The translation happens here, in the same file
+# as ``_country_label`` above, so the two directions of one mapping cannot drift
+# apart — a second copy of "0 means CN" living next to the filter is exactly how
+# a filter ends up matching nothing and failing OPEN.
+
+_CID_BY_LABEL: Dict[str, int] = {label: cid for cid, label in CID_LABELS.items()}
+
+
+def labels_for_cids(cids: Iterable[int]) -> list[str]:
+    """The country_label strings a caller with these cids may see.
+
+    Unknown cids are dropped rather than stringified: they have no label in the
+    alerts table to match, so including them could only ever widen a WHERE IN
+    with a value that means nothing.
+    """
+    return [CID_LABELS[c] for c in sorted(cids) if c in CID_LABELS]
+
+
+def filter_alerts_to_scope(
+    alerts: List[Dict[str, Any]],
+    cids: Optional[frozenset[int]],
+) -> List[Dict[str, Any]]:
+    """Narrow alert rows to the caller's cids. ``cids is None`` = unrestricted.
+
+    Returns the SAME list object when unrestricted. That is deliberate and is
+    the "costs nothing for the 99%" property: the overwhelmingly common caller
+    pays no allocation, no copy and no per-row predicate, and their response is
+    byte-identical to what it was before this gate existed.
+
+    Fails CLOSED on an unrecognised label. ``country_label`` is NULL for a
+    client whose CRM row had no cid, and ``_country_label`` above renders a
+    third entity as the literal string ``Unknown(2)``. Neither maps back to a
+    cid, so both are DROPPED for a restricted caller — "I cannot tell whose this
+    is" must never resolve to "show it", which is the same rule
+    ``require_cids_allowed`` follows on the input side. An unrestricted caller
+    keeps every row, unknown labels included; nothing here is their business.
+
+    Never test ``cids`` for truthiness: ``None`` (no restriction) and
+    ``frozenset()`` (may see nothing) are opposite answers and both are falsy.
+    """
+    if cids is None:
+        return alerts
+    return [a for a in alerts if _CID_BY_LABEL.get(a.get("country_label")) in cids]
 
 
 def _build_alert_row(

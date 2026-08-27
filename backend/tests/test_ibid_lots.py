@@ -1195,7 +1195,13 @@ def test_route_returns_contract_shape(client: TestClient):
         "query_target", "start_date", "end_date", "symbols", "account_count",
         "total_volume", "total_above_10s", "total_below_10s",
         "total_10s_to_3min", "total_above_3min", "total_tickets",
-        "symbol_stats", "user_stats", "excluded_sub_ib_users", "query_time_ms",
+        "symbol_stats", "user_stats", "excluded_sub_ib_users",
+        # Row-level (country) data scope: true only when the downline was
+        # actually narrowed for this caller. Always present, never Optional —
+        # the frontend notice keys off exactly this name on ib-tree /
+        # ibid-lots / ib-data, and a missing field could not be told apart
+        # from an old backend.
+        "data_scope_filtered", "query_time_ms",
     }
     assert body["query_target"] == "For Tobe Global - ibid: 134576"
     assert body["account_count"] == 312
