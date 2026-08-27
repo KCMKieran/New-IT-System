@@ -4,6 +4,7 @@ import { Navigate, useSearchParams } from "react-router-dom"
 import { useAuth } from "@/providers/auth-provider"
 import { useI18n } from "@/components/i18n-provider"
 import { LoginForm } from "@/components/login-form"
+import { BreakGlassForm } from "@/components/break-glass-form"
 import BlurText from "@/components/blur-text"
 import { PageLoader } from "@/components/LazyErrorBoundary"
 import { errorKeyFor } from "@/lib/auth-errors"
@@ -11,7 +12,7 @@ import { isNonSpaPath, sanitizeReturnTo } from "@/lib/auth-session"
 
 export default function LoginPage() {
   const { t } = useI18n()
-  const { status, loginWithMicrosoft } = useAuth()
+  const { status, loginWithMicrosoft, loginWithBreakGlass } = useAuth()
   const [searchParams] = useSearchParams()
   // Clicking the button navigates the whole page away, so this only has to
   // survive the moment in between — but in that moment a second click would
@@ -19,6 +20,11 @@ export default function LoginPage() {
   const [busy, setBusy] = useState(false)
 
   const errorKey = errorKeyFor(searchParams.get("error"))
+  // Unlisted entry point for an IdP outage (auth design §4.2.2). Not a link
+  // anywhere in the app: the backend 404s unless the mode is armed, so there is
+  // nothing to advertise, and advertising it would only tell a scanner that a
+  // shared secret is worth grinding for. See break-glass-form.tsx.
+  const breakGlass = searchParams.get("break_glass") === "1"
   const returnTo = sanitizeReturnTo(searchParams.get("return_to"))
 
   if (status === "loading") return <PageLoader />
@@ -62,11 +68,15 @@ export default function LoginPage() {
               repeatEveryMs={5000}
             />
           </div>
-          <LoginForm
-            onSignIn={handleSignIn}
-            errorMessage={errorKey ? t(errorKey) : null}
-            busy={busy}
-          />
+          {breakGlass ? (
+            <BreakGlassForm onSubmit={loginWithBreakGlass} />
+          ) : (
+            <LoginForm
+              onSignIn={handleSignIn}
+              errorMessage={errorKey ? t(errorKey) : null}
+              busy={busy}
+            />
+          )}
         </div>
       </div>
     </div>

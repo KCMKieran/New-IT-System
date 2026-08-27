@@ -489,6 +489,7 @@ def login(
     ip: str | None = None,
     user_agent: str | None = None,
     device_id: str | None = None,
+    absolute_hours: int | None = None,
 ) -> tuple[str, SessionUser]:
     """Validate the address, provision the user, mint a session.
 
@@ -497,6 +498,12 @@ def login(
 
     Raises AuthError when the domain is not ours or the account is disabled.
     Both are recorded as ``login_failure`` so a burst is visible in auth_events.
+
+    ``absolute_hours`` shortens (or lengthens) the hard expiry for this one
+    session; break-glass logins pass it so a session minted while the IdP is
+    down cannot outlive the outage by the normal 7 days. It never touches the
+    idle window — the sliding renewal is what keeps a working day working, and
+    the absolute ceiling is the thing an incident should be able to lower.
     """
     email = normalize_email(email)
 
@@ -538,7 +545,16 @@ def login(
                 _fmt(now),
                 _fmt(now),
                 _fmt(now + timedelta(hours=settings.AUTH_SESSION_IDLE_HOURS)),
-                _fmt(now + timedelta(hours=settings.AUTH_SESSION_ABSOLUTE_HOURS)),
+                _fmt(
+                    now
+                    + timedelta(
+                        hours=(
+                            settings.AUTH_SESSION_ABSOLUTE_HOURS
+                            if absolute_hours is None
+                            else absolute_hours
+                        )
+                    )
+                ),
                 ip,
                 (user_agent or "")[:300] or None,
                 device_id,

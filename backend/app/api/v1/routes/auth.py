@@ -3,6 +3,7 @@
     GET  /api/v1/auth/me          who am I
     POST /api/v1/auth/logout      revoke this session
     POST /api/v1/auth/dev-login   mint a session with no IdP  (dev back door)
+    POST /api/v1/auth/break-glass mint a session with no IdP  (prod, IdP outage)
     GET  /api/v1/auth/login       302 to Entra ID              (P3)
     GET  /api/v1/auth/callback    Entra redirects back here    (P3)
 
@@ -86,6 +87,15 @@ class DevLoginRequest(BaseModel):
     # is only allowed when it matches that address, so this cannot be used to
     # impersonate a colleague even in dev.
     email: EmailStr | None = None
+
+
+class BreakGlassRequest(BaseModel):
+    """Both fields required. There is no "use the configured address" shortcut
+    here (dev-login has one) — during an incident the operator should have to
+    say who they are, and the allowlist has more than one name in it."""
+
+    email: EmailStr
+    secret: str
 
 
 class LoginResponse(BaseModel):
@@ -348,6 +358,113 @@ def post_dev_login(
 
     _set_session_cookie(response, sid)
     logger.warning(f"DEV LOGIN used for {user.email} from {client_ip(request)}")
+    return LoginResponse(ok=True, email=user.email, role=user.role, session_id=sid)
+
+
+# ── break-glass local login (design §4.2.2, prerequisite 2) ──────────────────
+
+
+@router.post("/break-glass", response_model=LoginResponse)
+def post_break_glass(
+    payload: BreakGlassRequest, request: Request, response: Response
+) -> LoginResponse:
+    """Mint a session for a named operator without going through Entra.
+
+    This exists so that ``AUTH_ENABLED=false`` never has to be the answer to an
+    IdP outage. The two are not interchangeable:
+
+    * ``AUTH_ENABLED=false`` removes the authentication layer for EVERYONE and
+      leaves the API key — which Vite compiles into the public bundle — as the
+      only lock on /api/*. Since CF Access was retired that is the whole API,
+      the whole internet, for the length of the window.
+    * This route removes ONE hop: the redirect to Microsoft. A session is still
+      required afterwards, the module gate still applies, ``audit_log`` still
+      names a person, and the session it mints dies in
+      AUTH_BREAK_GLASS_SESSION_HOURS rather than the usual 7 days.
+
+    Five guards, in this order, because every one of them is a way the mode
+    could be wrong without anyone noticing:
+
+      1. **404 unless the mode is fully configured.** Not 403 — a back door
+         that answers "wrong secret" tells a scanner it exists and is worth
+         grinding. ``AUTH_BREAK_GLASS_ACTIVE`` is false when the flag is off
+         AND when the flag is on but the secret is missing/too short or the
+         allowlist is empty (config.py), so a half-configured mode is a closed
+         mode rather than a weakened one.
+      2. **The address must be on AUTH_BREAK_GLASS_EMAILS.** The domain
+         allowlist is not enough: it admits every colleague, and this is meant
+         to be two or three named people.
+      3. **The secret must match, compared with ``compare_digest``.** Length is
+         floored at BREAK_GLASS_SECRET_MIN_LEN when the setting is read.
+      4. **The account must already exist and be active.** Break-glass is for
+         getting known people back in, never for provisioning: JIT creation
+         here would let whoever holds the secret mint an account that outlives
+         the incident, and ``upsert_user()`` deliberately never resets role or
+         status afterwards.
+      5. ``auth_service.login`` still applies the domain allowlist and the
+         disabled-account check, exactly as the Entra path does.
+
+    Every refusal is an auth_event (``login_failure``, throttled per source IP
+    like every other one), and every success is a ``login_success`` whose
+    detail says ``break_glass`` — so "was the back door used, and by whom" is a
+    question the logs answer without anyone having to have been watching.
+    """
+    settings = get_settings()
+
+    if not settings.AUTH_BREAK_GLASS_ACTIVE:
+        raise HTTPException(status_code=404, detail="Not Found")
+
+    ip = client_ip(request)
+    ua = request.headers.get("User-Agent")
+    email = auth_service.normalize_email(str(payload.email))
+
+    if email not in settings.AUTH_BREAK_GLASS_EMAILS:
+        auth_service.record_auth_event(
+            "login_failure", email=email, detail="break_glass_not_allowed", ip=ip, ua=ua
+        )
+        logger.warning(f"BREAK-GLASS refused: {email} is not on the allowlist (ip={ip})")
+        raise HTTPException(status_code=403, detail="Not permitted")
+
+    # compare_digest, not ==: the naive comparison leaks the length of the
+    # matching prefix through timing, and this is the only credential in the
+    # system that is not already public.
+    if not secrets.compare_digest(payload.secret, settings.AUTH_BREAK_GLASS_SECRET):
+        auth_service.record_auth_event(
+            "login_failure", email=email, detail="break_glass_bad_secret", ip=ip, ua=ua
+        )
+        logger.warning(f"BREAK-GLASS refused: bad secret for {email} (ip={ip})")
+        raise HTTPException(status_code=403, detail="Not permitted")
+
+    # Guard 4. Checked here rather than inside auth_service.login() so that the
+    # service keeps exactly one provisioning policy: login() provisions, and the
+    # one caller that must not provision says so itself.
+    if auth_service.get_user_by_email(email) is None:
+        auth_service.record_auth_event(
+            "login_failure", email=email, detail="break_glass_no_account", ip=ip, ua=ua
+        )
+        logger.warning(f"BREAK-GLASS refused: {email} has no account (ip={ip})")
+        raise HTTPException(status_code=403, detail="Not permitted")
+
+    try:
+        sid, user = auth_service.login(
+            email,
+            source="break_glass",
+            ip=ip,
+            user_agent=ua,
+            device_id=request.headers.get("X-Device-ID"),
+            absolute_hours=settings.AUTH_BREAK_GLASS_SESSION_HOURS,
+        )
+    except auth_service.AuthError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+    _set_session_cookie(response, sid)
+    # CRITICAL, not warning: this is the one login path that bypasses the
+    # company IdP and its MFA. It should be impossible to read a week of logs
+    # and not notice that it happened.
+    logger.critical(
+        f"BREAK-GLASS LOGIN succeeded for {user.email} (role={user.role}) from {ip} — "
+        f"session expires in {settings.AUTH_BREAK_GLASS_SESSION_HOURS}h"
+    )
     return LoginResponse(ok=True, email=user.email, role=user.role, session_id=sid)
 
 
