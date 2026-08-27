@@ -62,12 +62,16 @@ class FakeCursor:
         single_currency: Optional[str] = None,
         single_row_missing: bool = False,
         trades_by_login: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+        sub_ib_ids: Optional[Iterable[Any]] = None,
     ):
         self.tree_rows = tree_rows or []
         self.user_rows = user_rows or []
         self.single_currency = single_currency
         self.single_row_missing = single_row_missing
         self.trades_by_login = trades_by_login or {}
+        # ids the CRM flags as IBs (users.isIb = 1) — only queried in
+        # "ibid_direct_client" mode.
+        self.sub_ib_ids = list(sub_ib_ids or [])
 
         self.calls: List[Dict[str, Any]] = []
         self._pending: Any = None
@@ -87,7 +91,20 @@ class FakeCursor:
         if kind == "tree":
             self._pending = list(self.tree_rows)
         elif kind == "users":
-            self._pending = list(self.user_rows)
+            # Honour the `ID IN (...)` list: modes that narrow the id set
+            # before this step (ibid_direct_client) must not get the dropped
+            # ids handed back anyway, or the filter would look like a no-op.
+            asked = {str(p) for p in (params or ())}
+            self._pending = [
+                r for r in self.user_rows if not asked or str(r["ID"]) in asked
+            ]
+        elif kind == "ib_flag":
+            # Mirror the real query: it only returns the flagged rows, and
+            # only for ids actually asked about.
+            asked = {str(p) for p in (params or ())}
+            self._pending = [
+                {"id": i} for i in self.sub_ib_ids if str(i) in asked
+            ]
         elif kind == "single":
             self._pending = (
                 None if self.single_row_missing else {"CURRENCY": self.single_currency}
@@ -119,6 +136,8 @@ class FakeCursor:
             return "trades"
         if "mt4_users" in sql:
             return "single" if "loginSid = %s" in sql else "users"
+        if "fxbackoffice.users" in sql and "isIb" in sql:
+            return "ib_flag"
         return "?"
 
     @staticmethod
@@ -246,7 +265,7 @@ def test_login_mode_accepts_the_three_servers(sid: str):
     assert req(query_type="login", target_id="8001234", server_sid=sid).server_sid == sid
 
 
-@pytest.mark.parametrize("qt", ["ibid", "ibid_direct", "id"])
+@pytest.mark.parametrize("qt", ["ibid", "ibid_direct", "ibid_direct_client", "id"])
 def test_non_login_modes_do_not_require_server_sid(qt: str):
     payload = req(query_type=qt)
     assert payload.server_sid is None
@@ -731,6 +750,124 @@ def test_ibid_direct_mode_restricts_to_level_zero(monkeypatch):
     assert tree_calls[0]["params"] == ("134576",)
 
 
+# -- ibid_direct_client: level 0 minus the sub-IBs -----------------------
+
+
+def _mixed_level0_cursor() -> FakeCursor:
+    """Level 0 = the IB itself (500) + two sub-IBs (601, 602) + two plain
+    clients (701, 702). Every member has exactly one live account, and every
+    account traded, so whatever survives the filter is visible in user_stats."""
+    members = [500, 601, 602, 701, 702]
+    return FakeCursor(
+        tree_rows=[{"referralId": m} for m in members],
+        user_rows=[user_row(user_id=m, login=8000000 + m) for m in members],
+        sub_ib_ids=[500, 601, 602],  # the IB itself is flagged isIb=1 too
+        trades_by_login={
+            f"1-{8000000 + m}": [trade_row(login_sid=f"1-{8000000 + m}")]
+            for m in members
+        },
+    )
+
+
+def test_direct_client_mode_drops_sub_ibs_but_keeps_the_ib_itself(monkeypatch):
+    cursor = _mixed_level0_cursor()
+    resp = run_query(
+        monkeypatch, cursor, req(query_type="ibid_direct_client", target_id="500")
+    )
+
+    assert sorted(u.user_id for u in resp.user_stats) == ["500", "701", "702"]
+    assert resp.excluded_sub_ib_users == 2
+    # 3 survivors x 10 lots — the two sub-IBs' 10 lots each are gone.
+    assert resp.total_volume == 30.0
+
+
+def test_direct_client_mode_still_restricts_to_level_zero(monkeypatch):
+    cursor = _mixed_level0_cursor()
+    run_query(
+        monkeypatch, cursor, req(query_type="ibid_direct_client", target_id="500")
+    )
+
+    tree_calls = cursor.calls_of("tree")
+    assert len(tree_calls) == 1
+    assert "level = 0" in tree_calls[0]["sql"]
+
+
+def test_direct_client_mode_asks_only_about_the_level_zero_ids(monkeypatch):
+    cursor = _mixed_level0_cursor()
+    run_query(
+        monkeypatch, cursor, req(query_type="ibid_direct_client", target_id="500")
+    )
+
+    flag_calls = cursor.calls_of("ib_flag")
+    assert len(flag_calls) == 1
+    assert set(flag_calls[0]["params"]) == {500, 601, 602, 701, 702}
+    # The criterion is the flag, never a downline count.
+    assert "isIb" in flag_calls[0]["sql"]
+    assert "ib_tree" not in flag_calls[0]["sql"]
+
+
+def test_direct_client_mode_only_maps_the_surviving_ids_to_accounts(monkeypatch):
+    """The dropped sub-IBs must not reach mt4_users — otherwise their accounts
+    would be queried for trades and then silently summed back in."""
+    cursor = _mixed_level0_cursor()
+    run_query(
+        monkeypatch, cursor, req(query_type="ibid_direct_client", target_id="500")
+    )
+
+    users_calls = cursor.calls_of("users")
+    assert len(users_calls) == 1
+    assert set(users_calls[0]["params"]) == {500, 701, 702}
+
+
+@pytest.mark.parametrize("qt", ["ibid", "ibid_direct", "id"])
+def test_other_modes_never_run_the_ib_flag_query(qt: str, monkeypatch):
+    cursor = _standard_cursor()
+    resp = run_query(monkeypatch, cursor, req(query_type=qt, target_id="134576"))
+
+    assert cursor.calls_of("ib_flag") == []
+    assert resp.excluded_sub_ib_users == 0
+
+
+def test_direct_client_mode_with_every_member_flagged_keeps_the_ib_alone(monkeypatch):
+    """An IB whose whole direct layer is sub-IBs still reports its own trading
+    rather than collapsing to the empty-result shell."""
+    members = [500, 601, 602]
+    cursor = FakeCursor(
+        tree_rows=[{"referralId": m} for m in members],
+        user_rows=[user_row(user_id=m, login=8000000 + m) for m in members],
+        sub_ib_ids=members,
+        trades_by_login={
+            f"1-{8000000 + m}": [trade_row(login_sid=f"1-{8000000 + m}")]
+            for m in members
+        },
+    )
+    resp = run_query(
+        monkeypatch, cursor, req(query_type="ibid_direct_client", target_id="500")
+    )
+
+    assert [u.user_id for u in resp.user_stats] == ["500"]
+    assert resp.excluded_sub_ib_users == 2
+    assert resp.total_volume == 10.0
+
+
+def test_direct_client_mode_reports_exclusions_even_when_nothing_traded(monkeypatch):
+    """Empty result still carries the counter — otherwise the UI cannot explain
+    why the total went to zero."""
+    cursor = FakeCursor(
+        tree_rows=[{"referralId": m} for m in (500, 601)],
+        user_rows=[user_row(user_id=500, login=8000500)],
+        sub_ib_ids=[601],
+        trades_by_login={},
+    )
+    resp = run_query(
+        monkeypatch, cursor, req(query_type="ibid_direct_client", target_id="500")
+    )
+
+    assert resp.total_volume == 0.0
+    assert resp.user_stats == []
+    assert resp.excluded_sub_ib_users == 1
+
+
 def test_id_mode_skips_the_tree_and_maps_the_id_directly(monkeypatch):
     cursor = _standard_cursor()
     resp = run_query(monkeypatch, cursor, req(query_type="id", target_id="111"))
@@ -955,6 +1092,10 @@ def test_null_lot_columns_are_treated_as_zero(monkeypatch):
             {"query_type": "ibid_direct", "target_id": "134576"},
             "For Tobe Global - ibid直属: 134576",
         ),
+        (
+            {"query_type": "ibid_direct_client", "target_id": "134576"},
+            "For Tobe Global - ibid直属客户(不含subIB): 134576",
+        ),
         ({"query_type": "id", "target_id": "170799"}, "For Tobe Global - id: 170799"),
         (
             {"query_type": "login", "target_id": "8001234", "server_sid": "1"},
@@ -1054,7 +1195,7 @@ def test_route_returns_contract_shape(client: TestClient):
         "query_target", "start_date", "end_date", "symbols", "account_count",
         "total_volume", "total_above_10s", "total_below_10s",
         "total_10s_to_3min", "total_above_3min", "total_tickets",
-        "symbol_stats", "user_stats", "query_time_ms",
+        "symbol_stats", "user_stats", "excluded_sub_ib_users", "query_time_ms",
     }
     assert body["query_target"] == "For Tobe Global - ibid: 134576"
     assert body["account_count"] == 312

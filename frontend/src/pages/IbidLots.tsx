@@ -71,7 +71,12 @@ import type { DateRange } from "react-day-picker";
 
 // ── contract types (docs: ibid-lots-contract.md §3) ────────────────────────
 
-type QueryType = "ibid" | "ibid_direct" | "id" | "login";
+type QueryType =
+  | "ibid"
+  | "ibid_direct"
+  | "ibid_direct_client"
+  | "id"
+  | "login";
 type SymbolMode = "default" | "all" | "custom";
 
 interface IbidLotsRequest {
@@ -123,6 +128,10 @@ interface IbidLotsResponse {
   total_tickets: number;
   symbol_stats: SymbolStat[];
   user_stats: UserStat[];
+  // Direct referrals dropped for being sub-IBs. Only non-zero in
+  // "ibid_direct_client" mode; surfaced so a total smaller than the plain
+  // direct-only one reads as "filtered", not as missing data.
+  excluded_sub_ib_users: number;
   query_time_ms: number;
 }
 
@@ -131,7 +140,13 @@ interface IbidLotsResponse {
 // Options carry i18n keys, not display strings: these are module-level consts
 // evaluated once at import time, so a literal would freeze whichever language
 // was active on first load and never follow the language toggle.
-const QUERY_TYPES: QueryType[] = ["ibid", "ibid_direct", "id", "login"];
+const QUERY_TYPES: QueryType[] = [
+  "ibid",
+  "ibid_direct",
+  "ibid_direct_client",
+  "id",
+  "login",
+];
 
 const SERVERS: { value: string; label: string }[] = [
   { value: "1", label: "MT4Live1" },
@@ -910,6 +925,13 @@ export default function IbidLotsPage() {
                 value={fmtInt(result.account_count)}
               />
             </div>
+            {result.excluded_sub_ib_users > 0 && (
+              <p className="mt-2 border-t border-border pt-2 text-[11.5px] leading-relaxed text-muted-foreground">
+                {t("ibidLotsPage.subIbExcluded", {
+                  count: fmtInt(result.excluded_sub_ib_users),
+                })}
+              </p>
+            )}
             <p
               className="mt-2 border-t border-border pt-2 text-[11.5px] leading-relaxed text-muted-foreground"
               title={(result.symbols ?? []).join(", ")}

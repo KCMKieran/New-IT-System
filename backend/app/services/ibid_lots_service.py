@@ -39,6 +39,22 @@ LONG_TRADE_SECONDS = 180
 TREE_QUERY = "SELECT referralId FROM fxbackoffice.ib_tree_with_self WHERE ibId = %s"
 TREE_QUERY_DIRECT = TREE_QUERY + " AND level = 0"
 
+# Sub-IB detection for query_type="ibid_direct_client".
+#
+# `users.isIb` is the CRM's authoritative IB flag and the criterion the desk
+# picked, deliberately over "does this person actually have a downline":
+# 7,631 of the 13,164 flagged IBs have an empty downline, and those "IB on
+# paper" accounts still earn rebate, so the desk counts them as sub-IBs too.
+# (The reverse case — a downline while isIb=0 — exists for 14 users company
+# wide; the flag's answer wins there, and they stay classified as clients.)
+#
+# Returning only the flagged ids keeps the result set small: a level-0 layer
+# is a few dozen rows for a typical IB, and this is a primary-key lookup.
+IB_FLAG_QUERY = (
+    "SELECT id FROM fxbackoffice.users "
+    "WHERE id IN ({placeholders}) AND COALESCE(isIb, 0) = 1"
+)
+
 # Two reasons this reads mt4_users rather than trusting the tree alone:
 #  1. demo accounts share sid + userId with real ones (a client's Gold.demo
 #     account would otherwise be mapped in by `ID IN (...)`), so they must be
@@ -105,6 +121,9 @@ def _query_target(payload: IbidLotsQueryRequest) -> str:
         return f"For Tobe Global - ibid: {payload.target_id}"
     if payload.query_type == "ibid_direct":
         return f"For Tobe Global - ibid直属: {payload.target_id}"
+    if payload.query_type == "ibid_direct_client":
+        # No legacy :8088 counterpart to match — this mode is new here.
+        return f"For Tobe Global - ibid直属客户(不含subIB): {payload.target_id}"
     if payload.query_type == "id":
         return f"For Tobe Global - id: {payload.target_id}"
     server_name = SERVER_NAMES.get(payload.server_sid or "", payload.server_sid or "")
@@ -115,6 +134,7 @@ def _empty_response(
     payload: IbidLotsQueryRequest,
     display_symbols: List[str],
     account_count: int = 0,
+    excluded_sub_ib_users: int = 0,
 ) -> IbidLotsQueryResponse:
     """200 shell for "no trades found" — the UI renders its own empty state."""
     return IbidLotsQueryResponse(
@@ -131,15 +151,44 @@ def _empty_response(
         total_tickets=0,
         symbol_stats=[],
         user_stats=[],
+        excluded_sub_ib_users=excluded_sub_ib_users,
     )
+
+
+def _drop_sub_ibs(
+    cursor, user_ids: List[Any], target_id: str
+) -> Tuple[List[Any], int]:
+    """Keep the IB itself plus its non-IB direct referrals; drop the sub-IBs.
+
+    The IB being queried sits at level 0 alongside its referrals and of course
+    carries isIb=1, so it has to be exempted explicitly — a naive flag filter
+    would drop the very account the caller asked about.
+
+    Ids are compared as strings: the tree hands back ints while `users.id`
+    and the caller's `target_id` arrive as strings.
+    """
+    if not user_ids:
+        return [], 0
+
+    placeholders = ",".join(["%s"] * len(user_ids))
+    cursor.execute(IB_FLAG_QUERY.format(placeholders=placeholders), tuple(user_ids))
+    sub_ibs = {str(row["id"]) for row in cursor.fetchall()}
+    sub_ibs.discard(str(target_id))
+
+    kept = [uid for uid in user_ids if str(uid) not in sub_ibs]
+    logger.debug(
+        "ibid-lots step1b: dropped %d sub-IBs, kept %d of %d level-0 members",
+        len(user_ids) - len(kept), len(kept), len(user_ids),
+    )
+    return kept, len(user_ids) - len(kept)
 
 
 def _resolve_accounts(
     cursor, payload: IbidLotsQueryRequest
-) -> Tuple[Dict[str, Any], List[str], Set[str]]:
+) -> Tuple[Dict[str, Any], List[str], Set[str], int]:
     """Steps 1-2: target user ids → live (non-demo) loginSids + CEN account set.
 
-    Returns (login_to_user, login_sids, cen_logins).
+    Returns (login_to_user, login_sids, cen_logins, excluded_sub_ib_users).
     """
     if payload.query_type == "login":
         # Steps 1 and 2 do not apply: the caller already named the account.
@@ -156,11 +205,12 @@ def _resolve_accounts(
             login_sid, bool(cen_logins),
         )
         # Maps to itself so the per-client table shows the loginSid.
-        return {login_sid: login_sid}, [login_sid], cen_logins
+        return {login_sid: login_sid}, [login_sid], cen_logins, 0
 
     # Step 1 — resolve the CRM user ids in scope.
-    if payload.query_type in ("ibid", "ibid_direct"):
-        direct_only = payload.query_type == "ibid_direct"
+    excluded_sub_ib_users = 0
+    if payload.query_type in ("ibid", "ibid_direct", "ibid_direct_client"):
+        direct_only = payload.query_type in ("ibid_direct", "ibid_direct_client")
         cursor.execute(
             TREE_QUERY_DIRECT if direct_only else TREE_QUERY,
             (payload.target_id,),
@@ -170,12 +220,17 @@ def _resolve_accounts(
             "ibid-lots step1: ibId=%s direct_only=%s downstream_users=%d",
             payload.target_id, direct_only, len(user_ids),
         )
+        # Step 1b — only this mode narrows level 0 down to the plain clients.
+        if payload.query_type == "ibid_direct_client":
+            user_ids, excluded_sub_ib_users = _drop_sub_ibs(
+                cursor, user_ids, payload.target_id
+            )
     else:  # "id" — the user itself, no tree lookup
         user_ids = [payload.target_id]
         logger.debug("ibid-lots step1: single user mode, userId=%s", payload.target_id)
 
     if not user_ids:
-        return {}, [], set()
+        return {}, [], set(), excluded_sub_ib_users
 
     # Step 2 — map user ids to live trading accounts (demo excluded).
     placeholders = ",".join(["%s"] * len(user_ids))
@@ -191,7 +246,7 @@ def _resolve_accounts(
     logger.debug(
         "ibid-lots step2: loginSids=%d cen=%d", len(login_to_user), len(cen_logins)
     )
-    return login_to_user, list(login_to_user.keys()), cen_logins
+    return login_to_user, list(login_to_user.keys()), cen_logins, excluded_sub_ib_users
 
 
 def _fetch_trade_rows(
@@ -247,10 +302,18 @@ def query_tobe_global_lots(
 
     with _connect(settings) as conn:
         with conn.cursor() as cursor:
-            login_to_user, login_sids, cen_logins = _resolve_accounts(cursor, payload)
+            (
+                login_to_user,
+                login_sids,
+                cen_logins,
+                excluded_sub_ib_users,
+            ) = _resolve_accounts(cursor, payload)
             if not login_sids:
                 logger.info("ibid-lots query end: no live accounts for the target")
-                return _empty_response(payload, display_symbols)
+                return _empty_response(
+                    payload, display_symbols,
+                    excluded_sub_ib_users=excluded_sub_ib_users,
+                )
 
             trade_rows = _fetch_trade_rows(
                 cursor, login_sids, payload.start_date, payload.end_date, symbols
@@ -258,7 +321,11 @@ def query_tobe_global_lots(
 
     if not trade_rows:
         logger.info("ibid-lots query end: no trades in range")
-        return _empty_response(payload, display_symbols, account_count=len(login_sids))
+        return _empty_response(
+            payload, display_symbols,
+            account_count=len(login_sids),
+            excluded_sub_ib_users=excluded_sub_ib_users,
+        )
 
     # Step 4 — normalize and aggregate. Sums stay in full float precision and
     # are rounded only once at the end, matching the legacy pandas pipeline
@@ -362,8 +429,10 @@ def query_tobe_global_lots(
     total_tickets = sum(u.total_tickets for u in user_stats)
 
     logger.info(
-        "ibid-lots query end: accounts=%d symbols=%d users=%d total_lots=%.3f tickets=%d",
-        len(login_sids), len(symbol_stats), len(user_stats), total_vol, total_tickets,
+        "ibid-lots query end: accounts=%d symbols=%d users=%d total_lots=%.3f "
+        "tickets=%d excluded_sub_ibs=%d",
+        len(login_sids), len(symbol_stats), len(user_stats), total_vol,
+        total_tickets, excluded_sub_ib_users,
     )
 
     return IbidLotsQueryResponse(
@@ -380,4 +449,5 @@ def query_tobe_global_lots(
         total_tickets=total_tickets,
         symbol_stats=symbol_stats,
         user_stats=user_stats,
+        excluded_sub_ib_users=excluded_sub_ib_users,
     )

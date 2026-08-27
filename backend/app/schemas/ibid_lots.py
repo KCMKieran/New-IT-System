@@ -40,11 +40,16 @@ def _parse_date(value: str, field_name: str) -> date:
 class IbidLotsQueryRequest(BaseModel):
     """One "For Tobe Global" lots query.
 
-    All four sub-modes read raw mt4_trades; `login` addresses a single trading
-    account directly, the other three resolve a set of CRM user ids first.
+    All five sub-modes read raw mt4_trades; `login` addresses a single trading
+    account directly, the other four resolve a set of CRM user ids first.
+
+    `ibid_direct` and `ibid_direct_client` share the same level-0 scope and
+    differ only in whether direct referrals that are themselves IBs stay in:
+    `ibid_direct` keeps them, `ibid_direct_client` drops them and leaves the
+    IB itself plus its plain (non-IB) clients.
     """
 
-    query_type: Literal["ibid", "ibid_direct", "id", "login"]
+    query_type: Literal["ibid", "ibid_direct", "ibid_direct_client", "id", "login"]
     target_id: str = Field(..., min_length=1, max_length=32)
     server_sid: Optional[str] = Field(
         default=None, description='"1"|"5"|"6" — required when query_type == "login"'
@@ -134,4 +139,9 @@ class IbidLotsQueryResponse(BaseModel):
     total_tickets: int
     symbol_stats: List[IbidLotsSymbolStat] = Field(default_factory=list)
     user_stats: List[IbidLotsUserStat] = Field(default_factory=list)
+    # How many direct referrals were dropped for being sub-IBs. Only ever
+    # non-zero in "ibid_direct_client" mode; the UI shows it so a total that
+    # is smaller than the plain "direct only" one is self-explanatory rather
+    # than looking like data loss.
+    excluded_sub_ib_users: int = 0
     query_time_ms: float = 0.0

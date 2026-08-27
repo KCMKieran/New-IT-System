@@ -132,6 +132,7 @@ export const zhCN = {
     queryTypes: {
       ibid: "ibid 查询（旗下所有账户）",
       ibid_direct: "ibid 直属查询（仅 level=0）",
+      ibid_direct_client: "ibid 直属客户查询（排除 sub-IB）",
       id: "id 查询（此 id 账户本身）",
       login: "交易账户查询（MT4/MT5 Login）",
     },
@@ -143,15 +144,19 @@ export const zhCN = {
     idLabel: {
       ibid: "ibid",
       ibid_direct: "ibid",
+      ibid_direct_client: "ibid",
       id: "用户 id",
       login: "交易账户 Login",
     },
     idPlaceholder: {
       ibid: "请输入 ibid，如 134576",
       ibid_direct: "请输入 ibid，如 134576",
+      ibid_direct_client: "请输入 ibid，如 134576",
       id: "请输入用户 id，如 170799",
       login: "请输入 MT4/MT5 Login 号码，如 8001234",
     },
+    subIbExcluded:
+      "已排除 {count} 个身份为 sub-IB 的直属成员（users.isIb = 1，含名下暂无下线的挂名 IB）；IB 本人保留在内。",
     cenTooltip:
       "CEN = 美分账户。这类账户的手数已按 ÷100 归一化成标准手，成交笔数不折算。",
     steps: {

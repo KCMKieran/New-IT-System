@@ -122,6 +122,8 @@ export const enUS = {
     queryTypes: {
       ibid: "By ibid (all accounts beneath it)",
       ibid_direct: "By ibid, direct only (level = 0)",
+      ibid_direct_client:
+        "By ibid, direct clients only (excl. sub-IBs)",
       id: "By user id (that account itself)",
       login: "By trading account (MT4/MT5 login)",
     },
@@ -133,15 +135,19 @@ export const enUS = {
     idLabel: {
       ibid: "ibid",
       ibid_direct: "ibid",
+      ibid_direct_client: "ibid",
       id: "User id",
       login: "Trading account login",
     },
     idPlaceholder: {
       ibid: "Enter an ibid, e.g. 134576",
       ibid_direct: "Enter an ibid, e.g. 134576",
+      ibid_direct_client: "Enter an ibid, e.g. 134576",
       id: "Enter a user id, e.g. 170799",
       login: "Enter an MT4/MT5 login, e.g. 8001234",
     },
+    subIbExcluded:
+      "{count} direct referrals were excluded for being sub-IBs (users.isIb = 1, including IBs with no downline of their own). The IB itself is kept.",
     cenTooltip:
       "CEN = cent account. Lots on these accounts are already normalised to standard lots (÷100); ticket counts are not scaled.",
     steps: {
