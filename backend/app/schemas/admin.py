@@ -23,12 +23,34 @@ from pydantic import BaseModel, Field, model_validator
 # given the company-wide position and client-PnL widgets the home page draws.
 #
 # ⚠ Adding a key here changes what EXISTING accounts can reach, and in the
-# direction that takes access away: `allowed_modules = NULL` means "every
-# module, including ones added later" and is unaffected, but every non-NULL row
-# loses the new module until somebody ticks it. The 2026-08-19 rollout
-# backfilled `dashboard` into all six non-NULL rows before deploying, which is
-# the step to repeat when `ai` joins this list.
+# direction that takes access away: a row holding the ALL_MODULES sentinel
+# below means "every module, including ones added later" and is unaffected, but
+# every explicit row loses the new module until somebody ticks it. The
+# 2026-08-19 rollout backfilled `dashboard` into all six explicit rows before
+# deploying, which is the step to repeat when `ai` joins this list.
 MODULE_KEYS: tuple[str, ...] = ("dashboard", "cs", "data", "risk", "other")
+
+# The "every module, including ones that do not exist yet" grant, spelled as a
+# VALUE rather than as the absence of one (2026-08-27).
+#
+# Until this date that grant was SQL NULL. NULL was never a decision — the
+# column shipped in P1 (2026-08-08) and was read by nobody until P4b
+# (2026-08-18), so on the day the gate went live every account held NULL and it
+# had to be read as "everything" or the whole company would have lost access in
+# one deploy. The cost was that `[]` (revoked) and NULL (everything) were
+# OPPOSITE grants that every layer had to keep apart by hand, while `??`, `||`
+# and `if not x:` all quietly conflate them — six places held the line with
+# comments and tests, and missing any one of them was a silent privilege
+# escalation in the direction nobody wants.
+#
+# A sentinel removes the state instead of guarding it: the column now always
+# holds a JSON array, so there is no "no value" left to misread.
+#
+# ⚠ NOT a member of MODULE_KEYS, deliberately. It is not a page group and
+# /cfg/managers must not render a checkbox for it — it is the switch ABOVE the
+# checkboxes. Mixing it with real keys is refused (see UpdateUserRequest), so
+# there is exactly one way to spell "everything".
+ALL_MODULES = "*"
 
 
 class Module(BaseModel):
@@ -57,9 +79,16 @@ class AdminUser(BaseModel):
     role: Literal["manager", "user"]
     status: Literal["active", "disabled"]
     source: Optional[str] = None  # 'entra' | 'dev' | 'otp' | None
-    # None means "every module, including ones added later" — see the note on
-    # UpdateUserRequest below. [] means "common layer only". Never conflate.
-    allowed_modules: Optional[list[str]] = None
+    # Always a list, never null (2026-08-27): ["*"] means "every module,
+    # including ones added later", [] means "common layer only", anything else
+    # is exactly those keys. A legacy SQL NULL row is normalised to ["*"] on
+    # read, so the wire shape has one fewer state than the table can still hold.
+    #
+    # Required, with no default. Every plausible default is a lie about
+    # somebody's permissions — [] would report a full-access account as revoked,
+    # ["*"] the reverse — so a construction site that forgets the field should
+    # raise rather than pick one.
+    allowed_modules: list[str]
     last_login_at: Optional[str] = None
     created_at: str
     active_sessions: int
@@ -121,26 +150,32 @@ class AuditEntry(BaseModel):
 class UpdateUserRequest(BaseModel):
     """PATCH /admin/users/{id} — every field optional, all of them a real edit.
 
-    ⚠ ``allowed_modules`` has THREE meanings and the API must keep them apart:
+    ``allowed_modules`` has TWO meanings, not three (2026-08-27):
 
-        field absent   -> leave the user's modules exactly as they are
-        field is null  -> grant everything, including modules added in future
-        field is []    -> grant nothing beyond the always-open common layer
+        field absent    -> leave the user's modules exactly as they are
+        field is a list -> store exactly this: ["*"] everything, [] nothing,
+                           otherwise those keys
 
-    Pydantic collapses the first two into ``None``, so the service reads
-    ``model_fields_set`` to tell them apart. Anything that normalises [] to
-    null turns "revoke this person's access" into "give this person full
-    access" — the exact inversion §2.3 guardrail 6 exists to prevent.
+    Explicit ``null`` used to be the third meaning ("grant everything") and is
+    now REFUSED, for the same reason ``role`` and ``status`` refuse it: the
+    service asks ``model_fields_set`` whether a field was SENT, so null and
+    absent are one keystroke apart and mean opposite things. ``["*"]`` says the
+    same thing without needing the distinction to survive six layers of
+    ``??``/``||``/falsy checks.
 
-    ⚠ ``role`` and ``status`` have only TWO meanings — absent, or one of the
-    enum values. Explicit null is NOT "leave it alone" for them; see ``_check``.
+    ⚠ A pre-sentinel bundle (a manager's stale tab) still sends null when the
+    "All modules" switch is flipped. It gets a 422 that names the fix rather
+    than a silent reinterpretation — a permission change is the last place to
+    guess at what an old client meant, and a refusal is visible and one refresh
+    from being correct.
     """
 
     role: Optional[Literal["manager", "user"]] = None
     status: Optional[Literal["active", "disabled"]] = None
     allowed_modules: Optional[list[str]] = Field(
         default=None,
-        description='null = all modules; [] = none; subset of MODULE_KEYS otherwise',
+        description='["*"] = every module (incl. future ones); [] = none; '
+                    "otherwise a subset of MODULE_KEYS. null is refused.",
     )
 
     @model_validator(mode="after")
@@ -152,28 +187,52 @@ class UpdateUserRequest(BaseModel):
             raise ValueError("no fields to update")
 
         # ``Optional[...] = None`` is how "you may omit this" is spelled, but it
-        # also makes an explicit JSON null validate. For allowed_modules that is
-        # wanted (null = every module); for these two it is a hole: the service
-        # asks model_fields_set whether the field was SENT, so `{"role": null}`
-        # reads as a real edit and reaches SQLite as `SET role = NULL`. The
-        # column's NOT NULL/CHECK constraints stop the write, but they stop it
-        # by raising IntegrityError out of the handler — a 500 for a request the
-        # contract (§2.2: role?: "manager"|"user") never allowed in the first
-        # place. Refuse it here so it is a 422 that names the field.
+        # also makes an explicit JSON null validate — and that is a hole for
+        # every field here: the service asks model_fields_set whether the field
+        # was SENT, so `{"role": null}` reads as a real edit and reaches SQLite
+        # as `SET role = NULL`. The column's NOT NULL/CHECK constraints stop
+        # that write, but they stop it by raising IntegrityError out of the
+        # handler — a 500 for a request the contract (§2.2) never allowed.
+        # Refuse it here so it is a 422 that names the field.
+        #
+        # ``allowed_modules`` joined this list on 2026-08-27, when null stopped
+        # being a grant. Its message names the replacement, because the caller
+        # that still sends null is a stale bundle, not a typo.
         for field in ("role", "status"):
             if field in self.model_fields_set and getattr(self, field) is None:
                 raise ValueError(
                     f"{field} cannot be null — omit the field to leave it unchanged"
                 )
+        if "allowed_modules" in self.model_fields_set and self.allowed_modules is None:
+            raise ValueError(
+                f'allowed_modules cannot be null — send ["{ALL_MODULES}"] for every '
+                "module, [] for none, or omit the field to leave it unchanged"
+            )
 
         if self.allowed_modules is not None:
-            unknown = [m for m in self.allowed_modules if m not in MODULE_KEYS]
+            unknown = [
+                m for m in self.allowed_modules
+                if m not in MODULE_KEYS and m != ALL_MODULES
+            ]
             if unknown:
                 # 422 rather than dropping the unknown keys: a typo'd module
                 # would otherwise be stored and silently grant nothing, and the
                 # admin would see a checkbox they ticked come back unticked.
                 raise ValueError(
-                    f"unknown module keys: {unknown} (allowed: {list(MODULE_KEYS)})"
+                    f"unknown module keys: {unknown} (allowed: {list(MODULE_KEYS)} "
+                    f'or the single value ["{ALL_MODULES}"])'
+                )
+            # One spelling per grant. `["*", "cs"]` is not wrong so much as
+            # UNDECIDED — "*" already contains "cs", so storing both leaves two
+            # renderings of the same authority that a later diff, badge or
+            # backfill has to agree about. Reading them back is easy; keeping
+            # every writer agreeing on which one to emit is not, and the
+            # 2026-08-19 `dashboard` backfill is the kind of bulk edit that
+            # would have to special-case the mixed form.
+            if ALL_MODULES in self.allowed_modules and len(self.allowed_modules) > 1:
+                raise ValueError(
+                    f'"{ALL_MODULES}" already means every module and cannot be '
+                    f'combined with other keys — send ["{ALL_MODULES}"] alone'
                 )
             if len(set(self.allowed_modules)) != len(self.allowed_modules):
                 raise ValueError("allowed_modules contains duplicates")

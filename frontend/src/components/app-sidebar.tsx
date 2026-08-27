@@ -26,7 +26,7 @@ import {
 } from "@/components/ui/sidebar";
 import { useI18n } from "@/components/i18n-provider";
 import { useAuth } from "@/providers/auth-provider";
-import { canAccessPath, type ModuleAccess } from "@/lib/modules";
+import { ALL_MODULES, canAccessPath, type ModuleAccess } from "@/lib/modules";
 
 export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   const { t } = useI18n();
@@ -45,16 +45,18 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   // drift, and the symptom is either a menu entry that leads straight to a 403
   // or a page reachable only through an entry that was hidden.
   //
-  // ⚠ `allowedModules` passed through untouched: `[]` (nothing) and `null`
-  // (everything) are opposite grants, and `??`/`||` cannot tell them apart.
-  // `authEnabled` is inside the predicate for the same reason `isManager`
-  // handles it above — with the kill switch thrown /auth/me reports no user,
-  // and a bare grant check would empty the sidebar precisely when auth is off.
+  // ⚠ `allowedModules` passed through untouched: `[]` (nothing) and `["*"]`
+  // (everything) are opposite grants, and the provider is the single place
+  // that decides which one a response means. `authEnabled` is inside the
+  // predicate for the same reason `isManager` handles it above — with the kill
+  // switch thrown /auth/me reports no user, and a bare grant check would empty
+  // the sidebar precisely when auth is off. The no-user fallback is permissive
+  // for the same reason: an empty menu is how "the app is broken" looks.
   const access = React.useMemo<ModuleAccess>(
     () => ({
       authEnabled,
       isManager,
-      allowedModules: user ? user.allowedModules : null,
+      allowedModules: user ? user.allowedModules : [ALL_MODULES],
     }),
     [authEnabled, isManager, user],
   );

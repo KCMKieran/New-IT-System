@@ -4,8 +4,12 @@
  * These mirror §2.2 of docs/architecture/auth-p4-process.md verbatim — that
  * document, not this file, is the contract. Fields the backend documents as
  * nullable are typed nullable here on purpose: collapsing `null` into a default
- * at the type level is how a UI ends up lying about the data (see
- * `allowed_modules` below, where the difference is a privilege escalation).
+ * at the type level is how a UI ends up lying about the data.
+ *
+ * ⚠ `allowed_modules` is the field where that lie used to be a privilege
+ * escalation, and since 2026-08-27 it is the field that no longer needs the
+ * discipline: "every module" is the VALUE `["*"]`, so the wire type is a plain
+ * `string[]` and there is no null left for a default to swallow.
  */
 
 /**
@@ -35,14 +39,15 @@ export type AdminUser = {
   status: "active" | "disabled";
   source: string | null;
   /**
-   * `null` = every module, including ones added in the future.
-   * `[]`   = nothing but the always-open shell (settings / search / view
-   *          profiles). Since 2026-08-19 that no longer includes the home page.
+   * Always a list, never null (2026-08-27 — the sentinel replaced SQL NULL).
+   * `["*"]` = every module, including ones added in the future.
+   * `[]`    = nothing but the always-open shell (settings / search / view
+   *           profiles). Since 2026-08-19 that no longer includes the home page.
    * These are NOT the same value and must never be normalised into each other:
-   * turning `[]` into `null` silently converts "revoke this person" into
+   * turning `[]` into `["*"]` silently converts "revoke this person" into
    * "give this person everything".
    */
-  allowed_modules: string[] | null;
+  allowed_modules: string[];
   last_login_at: string | null;
   created_at: string;
   active_sessions: number;
@@ -118,10 +123,14 @@ export type AuditLogEntry = {
 };
 
 /** Body of `PATCH /admin/users/{id}`. Every field is optional; only the ones
- *  present are changed. `allowed_modules: null` is a meaningful value, so this
- *  cannot be modelled with `undefined` alone. */
+ *  present are changed.
+ *
+ *  ⚠ `allowed_modules` is `string[] | undefined`, NOT nullable: since
+ *  2026-08-27 the backend 422s an explicit null (it used to mean "every
+ *  module", which is now `["*"]`). Typing it nullable here would let a future
+ *  edit send the one body the server refuses. */
 export type UserPatch = {
   role?: "manager" | "user";
   status?: "active" | "disabled";
-  allowed_modules?: string[] | null;
+  allowed_modules?: string[];
 };

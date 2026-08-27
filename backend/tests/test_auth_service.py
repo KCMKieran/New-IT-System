@@ -625,7 +625,7 @@ def test_retention_of_zero_days_keeps_everything(auth, monkeypatch):
 # ── a new joiner is provisioned with NO modules (auth P4b follow-up) ─────────
 
 def test_a_brand_new_account_gets_no_modules(auth):
-    """NULL would mean "every module, including ones added later".
+    """A missing value would mean "every module, including ones added later".
 
     The column has no DEFAULT, so an INSERT that omits it hands a first-time
     user full visibility of risk control, client P&L and the alert-mail centre
@@ -633,10 +633,17 @@ def test_a_brand_new_account_gets_no_modules(auth):
     auth_event. '[]' is the deny-by-default the cold review asked for (O5).
     """
     row = auth.upsert_user("newjoiner@kohleservices.com", display_name="New Joiner")
+    # The RAW column, because that is where the mistake would be: the column has
+    # no DEFAULT, so an INSERT that simply omits it stores SQL NULL, and NULL is
+    # the one legacy value the reader still has to treat as EVERY module.
     assert row["allowed_modules"] == "[]"
+    # …and decoded it must be the empty grant, not the everything grant. The
+    # sentinel is what makes this assertion sayable: before 2026-08-27 the
+    # opposite of `[]` was `None`, so this line read `is not None`, which
+    # parse_allowed_modules can no longer return at all — a tautology dressed as
+    # a guardrail. Comparing against the actual opposite value is the check.
     assert auth.parse_allowed_modules(row["allowed_modules"]) == []
-    # …and it must be [] rather than NULL, which is the opposite grant.
-    assert auth.parse_allowed_modules(row["allowed_modules"]) is not None
+    assert auth.parse_allowed_modules(row["allowed_modules"]) != [auth.ALL_MODULES]
 
 
 def test_relogin_does_not_reset_an_existing_grant(auth):

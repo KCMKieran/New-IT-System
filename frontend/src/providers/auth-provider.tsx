@@ -10,6 +10,7 @@ import {
 import { apiFetch } from "@/lib/fetch"
 import { clearAllLoginIpSearchCaches } from "@/lib/login-ip-search-cache"
 import { onUnauthorized, sanitizeReturnTo, setAuthSubject } from "@/lib/auth-session"
+import { ALL_MODULES } from "@/lib/modules"
 
 /**
  * Real authentication state, backed by the server session (auth design P3).
@@ -30,15 +31,17 @@ export type AuthUser = {
   role: string
   status: string
   /**
-   * Module grants (auth P4b). THREE-STATE — `null` means every module,
-   * including ones added later; `[]` means no module at all, only the
-   * always-open pages; a list means exactly those.
+   * Module grants (auth P4b; sentinel form since 2026-08-27). ALWAYS a list —
+   * `["*"]` means every module including ones added later, `[]` means no
+   * module at all, a list of keys means exactly those.
    *
-   * ⚠ Do not "simplify" this to `string[]`. Collapsing `null` into `[]` locks
-   * everyone out of everything; collapsing `[]` into `null` turns revoking
-   * someone's access into granting them the whole application.
+   * ⚠ `[]` and `["*"]` are still opposite grants and must never be collapsed;
+   * what changed is that they are now two ordinary arrays rather than a value
+   * and its absence, so `??` / `||` / falsy checks can no longer merge them by
+   * accident. Normalisation happens once, in `toUser` below — every consumer
+   * downstream receives a list.
    */
-  allowedModules: string[] | null
+  allowedModules: string[]
 }
 
 /**
@@ -91,15 +94,21 @@ function toUser(me: MeResponse): AuthUser | null {
     displayName: me.display_name,
     role: me.role ?? "user",
     status: me.status ?? "active",
-    // ⚠ NOT `me.allowed_modules ?? null` and definitely not `?? []`, even
-    // though both compile. `??` and `||` cannot tell "the field is absent"
-    // (an older backend, or a response shape that changed) from "the value is
-    // the empty array" — and those two are opposite grants here. So the two
-    // cases are separated explicitly: absent -> null (all modules, the
-    // pre-P4b behaviour every existing account already has), present -> used
-    // verbatim, empty array included.
-    allowedModules:
-      me.allowed_modules === undefined ? null : me.allowed_modules,
+    // The one place a nullish grant can still arrive, and where it stops.
+    //
+    // `??` is CORRECT here and only here: it falls back on null/undefined and
+    // leaves `[]` alone, which is exactly the distinction that matters. The
+    // fallback is `["*"]` — "every module" — because absent or null can only
+    // come from a backend older than the sentinel (or, for null, the
+    // unauthenticated /auth/me shape, whose object `toUser` has already
+    // rejected above by returning null on a missing email). "Every module" is
+    // what no-value meant for that backend's entire life, so this mirrors the
+    // permanent NULL tolerance in auth_service.parse_allowed_modules rather
+    // than inventing a second reading of the same absence.
+    //
+    // ⚠ Do NOT "improve" this to `?? []`: that reads a stale/no-value response
+    // as "revoked" and empties the sidebar for people who have full access.
+    allowedModules: me.allowed_modules ?? [ALL_MODULES],
   }
 }
 

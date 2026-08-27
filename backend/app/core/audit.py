@@ -77,10 +77,13 @@ def _render(value: Any) -> Optional[str]:
     on the way into the table.
 
     ⚠ ``None`` is returned as ``None``, never as ``"None"`` or ``""``. SQL NULL
-    carries meaning in this project — ``users.allowed_modules`` NULL means "every
-    module" while ``'[]'`` means "no modules at all", two opposite grants. Losing
-    that distinction inside the audit trail would make them read identically a
-    year from now, which is precisely when someone needs to tell them apart.
+    carries meaning in this project — a legacy ``users.allowed_modules`` NULL
+    (pre-2026-08-27, before the ``'["*"]'`` sentinel replaced it) means "every
+    module" while ``'[]'`` means "no modules at all", two opposite grants.
+    Losing that distinction inside the audit trail would make them read
+    identically a year from now, which is precisely when someone needs to tell
+    them apart — and rows written before the migration keep NULL on their
+    "before" side forever.
     """
     if value is None:
         return None

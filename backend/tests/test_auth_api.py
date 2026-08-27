@@ -11,6 +11,8 @@ never touched.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
@@ -114,9 +116,9 @@ def test_me_reports_anonymous_when_auth_is_off(make_client):
         "display_name": None,
         "role": None,
         "status": None,
-        # P4b. Present-and-null for an anonymous answer, not absent: the SPA
-        # reads this field to decide which sidebar groups to render, and
-        # "absent" and "null" have to keep meaning the same thing there.
+        # P4b. Present-and-null for an anonymous answer, not absent. There is
+        # no subject here to have grants, and the SPA discards this whole
+        # object (it keys off `email`) rather than reading the field out of it.
         "allowed_modules": None,
     }
 
@@ -130,6 +132,61 @@ def test_me_still_recognises_a_valid_session_when_auth_is_off(make_client):
     assert body["authenticated"] is True
     assert body["email"] == DEV_EMAIL
     assert body["auth_enabled"] is False
+
+
+# ── /me is the SPA's only source of its own module grants (auth P4b) ─────────
+
+@pytest.mark.parametrize("stored", ['["*"]', "[]", '["cs"]'])
+def test_me_carries_the_module_grant_verbatim(enforcing, stored):
+    """Every grant shape has to survive the trip, including the two extremes.
+
+    ⚠ This test exists because of a mutation that survived the ENTIRE backend
+    suite: deleting `allowed_modules=user.allowed_modules` from the /me handler
+    left 1471 tests green. Nothing else asserts the field on an authenticated
+    response, and the failure is fail-OPEN in two steps — the field ships as
+    `null`, and the SPA's `?? [ALL_MODULES]` reads a missing grant as EVERY
+    module. The visible result is a sidebar listing the whole application for
+    everyone, with a 403 behind each entry.
+
+    Parametrised over all three shapes rather than one, because the ways to get
+    this wrong differ per shape: `[]` is the one a falsy check swallows, `["*"]`
+    is the one a "translate the sentinel back for old clients" patch would
+    rewrite, and `["cs"]` is the ordinary case that would keep passing while
+    either of the other two broke.
+    """
+    from app.core.users_db import get_users_db
+
+    sid = _login(enforcing)
+    with get_users_db() as conn:
+        conn.execute(
+            "UPDATE users SET allowed_modules = ? WHERE email = ?", (stored, DEV_EMAIL)
+        )
+
+    body = enforcing.get("/api/v1/auth/me", headers=_bearer(sid)).json()
+    assert body["authenticated"] is True
+    assert "allowed_modules" in body, "the SPA has no other source for this"
+    assert body["allowed_modules"] == json.loads(stored)
+
+
+def test_me_reads_a_legacy_null_grant_as_every_module(enforcing):
+    """The permanent SQL-NULL tolerance, asserted on the wire this time.
+
+    A row the sentinel migration never reached must not reach the SPA as
+    `null`: the browser would fall back to "every module" for its own reasons
+    and arrive at the right answer by luck, which is not the same as the server
+    having answered. The normalisation belongs to parse_allowed_modules, and
+    this pins that it happens before the response is built.
+    """
+    from app.core.users_db import get_users_db
+
+    sid = _login(enforcing)
+    with get_users_db() as conn:
+        conn.execute(
+            "UPDATE users SET allowed_modules = NULL WHERE email = ?", (DEV_EMAIL,)
+        )
+
+    body = enforcing.get("/api/v1/auth/me", headers=_bearer(sid)).json()
+    assert body["allowed_modules"] == ["*"]
 
 
 # ── enforcement ──────────────────────────────────────────────────────────────

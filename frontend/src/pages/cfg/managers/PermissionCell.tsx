@@ -2,24 +2,28 @@
  * The 权限 column: read-only badges for what is granted, plus a small edit
  * button that opens the module picker in a Popover.
  *
- * The whole point of this cell is to make `null` and `[]` look different on
+ * The whole point of this cell is to make `["*"]` and `[]` look different on
  * screen, because they are the two ends of the privilege range and they are one
  * click apart:
  *
- *   null → every module, INCLUDING modules that do not exist yet
- *   []   → nothing at all: settings, search and view profiles, no business
- *          page — not even the home page, which became the grantable
- *          `dashboard` module on 2026-08-19
+ *   ["*"] → every module, INCLUDING modules that do not exist yet
+ *   []    → nothing at all: settings, search and view profiles, no business
+ *           page — not even the home page, which became the grantable
+ *           `dashboard` module on 2026-08-19
  *
  * So they get two badges that share no colour, no icon and no wording, and `[]`
  * deliberately does NOT render as the "—" this page uses for missing data — an
  * empty grant is a decision someone made, not an absent value.
  *
- * Ticking every box is a third, distinct state: it is an array, so when an `ai`
- * module ships the `null` users get it automatically and the fully-ticked users
- * do not. That is intentional (design §4.3.3) — and it is not hypothetical:
- * `dashboard` shipped that way on 2026-08-19, which is why the rollout had to
- * backfill it into every non-NULL row by hand.
+ * ⚠ Both ends are ordinary arrays since 2026-08-27; `["*"]` used to be SQL
+ * NULL, i.e. the ABSENCE of a value, which is exactly why this cell had to
+ * work so hard to keep it from rendering as "missing".
+ *
+ * Ticking every box is a third, distinct state: it lists the keys that exist
+ * today, so when an `ai` module ships the `["*"]` users get it automatically
+ * and the fully-ticked users do not. That is intentional (design §4.3.3) — and
+ * it is not hypothetical: `dashboard` shipped that way on 2026-08-19, which is
+ * why the rollout had to backfill it into every explicit row by hand.
  *
  * Managers bypass the module gate at request time, so a manager row displays
  * full access. It is a DISPLAY rule only — the stored array is never rewritten
@@ -44,17 +48,18 @@ import {
   IconWorld,
 } from "@tabler/icons-react";
 import { cn } from "@/lib/utils";
+import { ALL_MODULES } from "@/lib/modules";
 import type { Module } from "./types";
 
 type Props = {
-  value: string[] | null;
+  value: string[];
   modules: Module[];
   /** True while a PATCH for this row is in flight, or when the row is read-only. */
   disabled?: boolean;
   /** Managers bypass the module gate entirely; the badges say so. Storage is
    *  untouched — see the file header. */
   isManagerRow?: boolean;
-  onChange: (next: string[] | null) => void;
+  onChange: (next: string[]) => void;
 };
 
 export function PermissionCell({
@@ -66,8 +71,11 @@ export function PermissionCell({
 }: Props) {
   const [open, setOpen] = useState(false);
 
-  const all = value === null;
-  const granted = value ?? [];
+  const all = value.includes(ALL_MODULES);
+  // The sentinel is stripped from the per-module view: it is the switch above
+  // the boxes, not a box, and leaving it in `granted` would render it as a
+  // badge labelled "*" next to the "All modules" badge that already says it.
+  const granted = value.filter((k) => k !== ALL_MODULES);
   // Widened to string[] on purpose: a grant the catalogue does not know about
   // (an `ai` key added server-side before this bundle shipped) still has to be
   // comparable here instead of being narrowed out of existence.
@@ -170,15 +178,18 @@ export function PermissionCell({
                   onCheckedChange={(checked) =>
                     // Leaving this state writes [] — an explicitly empty grant, not
                     // a guess at what the manager meant. They then tick what they
-                    // want. Writing the four known keys here instead would quietly
+                    // want. Writing the five known keys here instead would quietly
                     // hand out whatever ships next.
-                    onChange(checked ? null : [])
+                    // ⚠ Entering it writes ["*"] ALONE: the sentinel already
+                    // contains every key, and the backend 422s a mixed array so
+                    // there is exactly one spelling of "everything".
+                    onChange(checked ? [ALL_MODULES] : [])
                   }
                   aria-label="全部模块（含将来新增）"
                 />
               </div>
 
-              {/* While `null` is in force the individual boxes are shown ticked but
+              {/* While `["*"]` is in force the individual boxes are shown ticked but
               inert: everything IS granted, and the switch above is the control
               that says so. They are not the stored value and must not be
               mistaken for it. */}

@@ -104,10 +104,15 @@ def patch_user(
     contract, which the frontend is written against.
 
     Absent fields are passed as ``UNSET`` rather than None. This is the seam
-    where "clear this person's modules" (``[]``) and "give this person every
-    module" (``null``) would otherwise collapse into the same call — Pydantic
-    represents both as None, and only ``model_fields_set`` still knows which
-    one the manager clicked.
+    where "leave this person's modules alone" and "clear them" (``[]``) would
+    otherwise collapse into the same call — Pydantic represents an omitted
+    field as None, and only ``model_fields_set`` still knows the difference.
+
+    ⚠ Explicit ``allowed_modules: null`` no longer reaches here at all: since
+    2026-08-27 "every module" is the value ``["*"]`` and the schema 422s null.
+    So the three-way branch this line used to make is a two-way one, and the
+    remaining ambiguity is the ordinary REST one (absent vs sent), not a
+    grant that is one keystroke from its own opposite.
     """
     try:
         data = svc.update_user(

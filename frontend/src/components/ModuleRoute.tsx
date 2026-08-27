@@ -4,6 +4,7 @@ import Forbidden from "@/pages/Forbidden"
 import NoModules from "@/pages/NoModules"
 import { useAuth } from "@/providers/auth-provider"
 import {
+  ALL_MODULES,
   canAccessPath,
   firstAccessiblePath,
   isLandingPath,
@@ -35,15 +36,17 @@ export default function ModuleRoute() {
   const { user, authEnabled } = useAuth()
   const { pathname } = useLocation()
 
-  // ⚠ `allowedModules` is passed through untouched — no `?? []`, no `|| null`.
-  // `[]` (no modules) and `null` (every module) are opposite grants and any
-  // coalescing operator here silently merges them. Anonymous is impossible at
-  // this point (PrivateRoute has already resolved), but a `null` user during a
-  // refresh must not read as "granted nothing", so it falls back to `null`.
+  // ⚠ `allowedModules` is passed through untouched — no `?? []`. `[]` (no
+  // modules) and `["*"]` (every module) are opposite grants; the provider has
+  // already normalised the wire value, so anything applied here would be a
+  // second, disagreeing opinion. Anonymous is impossible at this point
+  // (PrivateRoute has already resolved), but a null USER during a refresh must
+  // not read as "granted nothing" — hence the permissive fallback, which only
+  // ever widens a frame the server is enforcing anyway.
   const access: ModuleAccess = {
     authEnabled,
     isManager: user?.role === "manager",
-    allowedModules: user ? user.allowedModules : null,
+    allowedModules: user ? user.allowedModules : [ALL_MODULES],
   }
 
   if (canAccessPath(access, pathname)) return <Outlet />

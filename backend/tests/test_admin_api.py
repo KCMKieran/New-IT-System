@@ -542,13 +542,15 @@ def test_manager_may_still_edit_their_own_modules(client):
 
 # ── guardrail 6 + the []/null distinction ────────────────────────────────────
 
-def test_allowed_modules_empty_and_null_are_distinct_end_to_end(client):
-    """[] = nothing beyond the common layer. null = everything, forever.
+def test_allowed_modules_empty_and_all_are_distinct_end_to_end(client):
+    """[] = nothing beyond the common layer. ["*"] = everything, forever.
 
-    Any layer that normalises [] to null turns "revoke this person's access"
-    into "grant this person full access", including modules that do not exist
-    yet. The two values are checked at all three levels they pass through: the
-    PATCH response, the list endpoint, and the raw column.
+    Any layer that normalises one into the other turns "revoke this person's
+    access" into "grant this person full access", including modules that do not
+    exist yet. Both values are checked at all three levels they pass through:
+    the PATCH response, the list endpoint, and the raw column — and the raw
+    column assertions are the ones that pin the 2026-08-27 change, because they
+    say the table now holds a JSON array in BOTH cases.
     """
     sid = _mint(MANAGER)
     _mint(STAFF)
@@ -565,14 +567,69 @@ def test_allowed_modules_empty_and_null_are_distinct_end_to_end(client):
     assert next(u for u in listed if u["id"] == uid)["allowed_modules"] == []
 
     granted = client.patch(
-        f"{ADMIN}/users/{uid}", json={"allowed_modules": None}, headers=_bearer(sid)
+        f"{ADMIN}/users/{uid}", json={"allowed_modules": ["*"]}, headers=_bearer(sid)
     )
     assert granted.status_code == 200, granted.text
-    assert granted.json()["allowed_modules"] is None
+    assert granted.json()["allowed_modules"] == ["*"]
+    assert _raw_column(uid, "allowed_modules") == '["*"]'
+
+    listed = client.get(f"{ADMIN}/users", headers=_bearer(sid)).json()["data"]
+    assert next(u for u in listed if u["id"] == uid)["allowed_modules"] == ["*"]
+
+
+def test_a_legacy_null_column_still_reads_as_every_module(client):
+    """The permanent NULL tolerance, asserted through the administration API.
+
+    The migration is a one-off script run by a human on the live database, so
+    "every row is a JSON array" is a property of one moment, not an invariant:
+    a restored backup, a hand-inserted row, or a rolled-back image can put NULL
+    back. This test is the guardrail on the single line in
+    parse_allowed_modules that keeps such a row meaning what it has always
+    meant. Deleting that line once the migration has run would silently revoke
+    exactly the accounts the migration missed.
+    """
+    sid = _mint(MANAGER)
+    _mint(STAFF)
+    uid = _user_id(STAFF)
+
+    from app.core.users_db import get_users_db
+
+    with get_users_db() as conn:
+        conn.execute("UPDATE users SET allowed_modules = NULL WHERE id = ?", (uid,))
     assert _raw_column(uid, "allowed_modules") is None
 
     listed = client.get(f"{ADMIN}/users", headers=_bearer(sid)).json()["data"]
-    assert next(u for u in listed if u["id"] == uid)["allowed_modules"] is None
+    assert next(u for u in listed if u["id"] == uid)["allowed_modules"] == ["*"]
+
+
+def test_the_all_sentinel_cannot_be_mixed_with_real_keys(client):
+    """One spelling per grant: ["*"] already contains every key.
+
+    Storing ["*", "cs"] would leave two renderings of the same authority, and
+    every later reader — the badge row, the audit diff, the "backfill the new
+    module" SQL in design §5.2 — would have to agree about both.
+    """
+    sid = _mint(MANAGER)
+    _mint(STAFF)
+    uid = _user_id(STAFF)
+
+    for body in (["*", "cs"], ["cs", "*"], ["*", "*"]):
+        r = client.patch(
+            f"{ADMIN}/users/{uid}", json={"allowed_modules": body}, headers=_bearer(sid)
+        )
+        assert r.status_code == 422, f"{body} -> {r.status_code} {r.text}"
+
+
+def test_the_all_sentinel_is_not_a_grantable_module(client):
+    """It must never reach /cfg/managers as a sixth checkbox.
+
+    The catalogue endpoint is what the page renders from, so this is the
+    assertion that keeps "the switch above the boxes" from becoming "a box".
+    """
+    sid = _mint(MANAGER)
+
+    modules = client.get(f"{ADMIN}/modules", headers=_bearer(sid)).json()
+    assert "*" not in [m["key"] for m in modules["data"]]
 
 
 def test_omitting_allowed_modules_leaves_it_untouched(client):
@@ -625,26 +682,39 @@ def test_explicit_null_role_or_status_is_422_not_500(client):
     handler as a 500 rather than a refusal naming the field. The transaction
     rolls back, so no row was ever harmed; the bug was the answer, not the data.
 
-    allowed_modules is the ONE field where null is a real value, so it is
-    checked here too — a fix that blanket-rejected null would silently remove
-    the only way to grant every module.
+    allowed_modules JOINED this list on 2026-08-27. It used to be the one field
+    where null was a real value ("every module"), which is precisely why that
+    value moved to ``["*"]``: null and absent are one keystroke apart, mean
+    opposite things, and no amount of commenting stops ``??`` from merging them
+    three layers away. Now all three fields answer the same way, and the
+    refusal message names the replacement so a stale bundle's manager can see
+    what to do instead of a mystery.
     """
     sid = _mint(MANAGER)
     _mint(STAFF)
     uid = _user_id(STAFF)
 
-    for body in ({"role": None}, {"status": None}, {"role": None, "status": "disabled"}):
+    client.patch(f"{ADMIN}/users/{uid}", json={"allowed_modules": ["cs"]}, headers=_bearer(sid))
+
+    for body in (
+        {"role": None},
+        {"status": None},
+        {"role": None, "status": "disabled"},
+        {"allowed_modules": None},
+    ):
         r = client.patch(f"{ADMIN}/users/{uid}", json=body, headers=_bearer(sid))
         assert r.status_code == 422, f"{body} -> {r.status_code} {r.text}"
 
     assert _raw_column(uid, "role") == "user"
     assert _raw_column(uid, "status") == "active"
+    # The refused null must not have been half-applied on its way out.
+    assert _raw_column(uid, "allowed_modules") == '["cs"]'
 
     ok = client.patch(
-        f"{ADMIN}/users/{uid}", json={"allowed_modules": None}, headers=_bearer(sid)
+        f"{ADMIN}/users/{uid}", json={"allowed_modules": ["*"]}, headers=_bearer(sid)
     )
     assert ok.status_code == 200, ok.text
-    assert ok.json()["allowed_modules"] is None
+    assert ok.json()["allowed_modules"] == ["*"]
 
 
 def test_empty_patch_is_422(client):
@@ -938,7 +1008,7 @@ def test_audit_row_records_the_actor_and_the_old_and_new_value(client):
     assert STAFF in entry["target"]
 
 
-def test_module_audit_keeps_null_and_empty_distinguishable(client):
+def test_module_audit_keeps_all_and_empty_distinguishable(client):
     """The distinction has to survive into the audit trail too.
 
     "Cleared their modules" and "gave them everything" must not read the same
@@ -948,17 +1018,42 @@ def test_module_audit_keeps_null_and_empty_distinguishable(client):
     _mint(STAFF)
     uid = _user_id(STAFF)
 
-    # A new row starts at '[]' (P4b follow-up), so go []->None->[] to exercise
+    # A new row starts at '[]' (P4b follow-up), so go []->["*"]->[] to exercise
     # both directions. Starting with a []->[] patch would be a no-op and log
     # nothing, which is record_diff() behaving correctly, not a missing audit.
-    client.patch(f"{ADMIN}/users/{uid}", json={"allowed_modules": None}, headers=_bearer(sid))
+    client.patch(f"{ADMIN}/users/{uid}", json={"allowed_modules": ["*"]}, headers=_bearer(sid))
     client.patch(f"{ADMIN}/users/{uid}", json={"allowed_modules": []}, headers=_bearer(sid))
 
     rows = [r for r in client.get(f"{ADMIN}/audit-log", headers=_bearer(sid)).json()["data"]
             if r["action"] == "admin.user.modules_change"]
     values = {(r["old_value"], r["new_value"]) for r in rows}
-    assert (None, "[]") in values
-    assert ("[]", None) in values
+    assert ("[]", '["*"]') in values
+    assert ('["*"]', "[]") in values
+
+
+def test_module_audit_shows_a_legacy_null_on_the_before_side(client):
+    """A row the migration never reached still audits truthfully when edited.
+
+    The trail stores the raw column, so the first edit to such a row records
+    NULL -> '["cs"]'. Rendering that NULL as '["*"]' here would be a small lie
+    with a specific cost: it would hide that this account was still on the
+    pre-2026-08-27 representation at the moment somebody changed it, which is
+    exactly the question anyone auditing the migration will be asking.
+    """
+    from app.core.users_db import get_users_db
+
+    sid = _mint(MANAGER)
+    _mint(STAFF)
+    uid = _user_id(STAFF)
+
+    with get_users_db() as conn:
+        conn.execute("UPDATE users SET allowed_modules = NULL WHERE id = ?", (uid,))
+
+    client.patch(f"{ADMIN}/users/{uid}", json={"allowed_modules": ["cs"]}, headers=_bearer(sid))
+
+    rows = [r for r in client.get(f"{ADMIN}/audit-log", headers=_bearer(sid)).json()["data"]
+            if r["action"] == "admin.user.modules_change"]
+    assert (None, '["cs"]') in {(r["old_value"], r["new_value"]) for r in rows}
 
 
 def test_a_refused_write_leaves_no_audit_row(client):

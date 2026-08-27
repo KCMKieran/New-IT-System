@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
 
 import {
+  ALL_MODULES,
   COMMON,
   LANDING_CANDIDATES,
   MANAGER,
@@ -115,20 +116,28 @@ describe("App.tsx <-> PAGE_POLICIES", () => {
   })
 })
 
-describe("the three states of allowedModules", () => {
-  const staff = (allowedModules: string[] | null): ModuleAccess => ({
+describe("the grant states of allowedModules", () => {
+  const staff = (allowedModules: string[]): ModuleAccess => ({
     authEnabled: true,
     isManager: false,
     allowedModules,
   })
 
-  it("null grants every module, including ones added later", () => {
+  it("the \"*\" sentinel grants every module, including ones added later", () => {
     for (const key of MODULE_KEYS) {
-      expect(hasModule(staff(null), key)).toBe(true)
+      expect(hasModule(staff([ALL_MODULES]), key)).toBe(true)
     }
-    // The point of null rather than "all four ticked": a fifth module would be
-    // granted automatically to these people and NOT to the four-ticked ones.
-    expect(hasModule(staff(null), "ai" as never)).toBe(true)
+    // The point of ["*"] rather than "all five ticked": a sixth module would be
+    // granted automatically to these people and NOT to the five-ticked ones.
+    expect(hasModule(staff([ALL_MODULES]), "ai" as never)).toBe(true)
+  })
+
+  it("keeps \"*\" out of the grantable module list", () => {
+    // It is the switch above the checkboxes, not a checkbox: /cfg/managers
+    // renders one box per MODULE_KEYS entry, and no route may be classified as
+    // requiring it. Mirrors two import-time asserts in backend auth_deps.py.
+    expect((MODULE_KEYS as readonly string[]).includes(ALL_MODULES)).toBe(false)
+    expect(Object.values(PAGE_POLICIES)).not.toContain(ALL_MODULES)
   })
 
   it("an empty list grants nothing — it is not a missing value", () => {
@@ -180,7 +189,11 @@ describe("role and kill switch", () => {
   })
 
   it("refuses manager-only pages to everyone else, whatever their modules", () => {
-    const staff: ModuleAccess = { authEnabled: true, isManager: false, allowedModules: null }
+    const staff: ModuleAccess = {
+      authEnabled: true,
+      isManager: false,
+      allowedModules: [ALL_MODULES],
+    }
     expect(canAccessPath(staff, "/cfg/managers")).toBe(false)
     expect(canAccessPath(staff, "/cfg/reports")).toBe(false)
     // …but not /cfg/view-profiles, which everyone needs despite the prefix.
@@ -208,7 +221,11 @@ describe("path handling", () => {
   })
 
   it("fails closed on an unknown path", () => {
-    const anyone: ModuleAccess = { authEnabled: true, isManager: true, allowedModules: null }
+    const anyone: ModuleAccess = {
+      authEnabled: true,
+      isManager: true,
+      allowedModules: [ALL_MODULES],
+    }
     expect(canAccessPath(anyone, "/not-a-page")).toBe(false)
   })
 
@@ -223,7 +240,7 @@ describe("path handling", () => {
 })
 
 describe("where to send someone who cannot open what they asked for", () => {
-  const staff = (allowedModules: string[] | null): ModuleAccess => ({
+  const staff = (allowedModules: string[]): ModuleAccess => ({
     authEnabled: true,
     isManager: false,
     allowedModules,
@@ -245,7 +262,7 @@ describe("where to send someone who cannot open what they asked for", () => {
 
   it("prefers the home page when the user has it", () => {
     expect(LANDING_CANDIDATES[0]).toBe("/")
-    expect(firstAccessiblePath(staff(null))).toBe("/")
+    expect(firstAccessiblePath(staff([ALL_MODULES]))).toBe("/")
     expect(firstAccessiblePath(staff(["dashboard", "cs"]))).toBe("/")
   })
 
@@ -260,16 +277,25 @@ describe("where to send someone who cannot open what they asked for", () => {
 
   it("returns null when nothing at all is granted", () => {
     // [] is the JIT default, i.e. every new colleague on their first login.
-    // null is what makes ModuleRoute render the no-access screen instead of
-    // redirecting somewhere.
+    // A null RETURN from firstAccessiblePath (not a null grant — grants are
+    // always lists now) is what makes ModuleRoute render the no-access screen
+    // instead of redirecting somewhere.
     expect(firstAccessiblePath(staff([]))).toBeNull()
   })
 
   it("never returns a path the user cannot open", () => {
     // The redirect target. A path that fails canAccessPath here is an infinite
     // redirect in the browser — a frozen white page with no error anywhere.
-    for (const grant of [null, [], ["cs"], ["data"], ["risk"], ["other"], ["dashboard"]]) {
-      const access = staff(grant as string[] | null)
+    for (const grant of [
+      [ALL_MODULES],
+      [],
+      ["cs"],
+      ["data"],
+      ["risk"],
+      ["other"],
+      ["dashboard"],
+    ]) {
+      const access = staff(grant)
       const landing = firstAccessiblePath(access)
       if (landing !== null) expect(canAccessPath(access, landing), String(grant)).toBe(true)
     }

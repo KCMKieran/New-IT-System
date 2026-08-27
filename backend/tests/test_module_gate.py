@@ -9,8 +9,14 @@ one of these rules has a failure mode that is invisible in the table:
     was thrown to undo;
   * 403 never 401 -> get it wrong and a permission error becomes an infinite
     login bounce (``lib/fetch.ts`` turns 401 into "log out and redirect");
-  * ``[]`` is not ``None`` -> get it wrong and revoking someone's access grants
-    them everything.
+  * ``[]`` is not ``["*"]`` -> get it wrong and revoking someone's access
+    grants them everything.
+
+Since 2026-08-27 "every module" is the value ``["*"]`` rather than the ABSENCE
+of a value (SQL NULL), so the two opposite grants are now two lists that no
+``??`` / ``||`` / falsy check can merge. NULL still has to be READ as "every
+module" forever — the live database outlives any migration — and there is a
+test below whose only job is to keep that one line honest.
 
 Harness follows test_admin_api.py: every AUTH_* switch pinned per test (config
 load_dotenv()s backend/.env, which carries production values) and users_db
@@ -112,9 +118,10 @@ def _bearer(sid: str) -> dict:
 def _mint(email: str, *, allowed_modules: str | None = "__unset__") -> str:
     """Log the user in and, unless told otherwise, set their module grant.
 
-    ``allowed_modules`` is the RAW column value, so a test can distinguish the
-    three states the way the database does: ``None`` is SQL NULL, ``"[]"`` is
-    an empty grant, ``'["cs"]'`` is a real one.
+    ``allowed_modules`` is the RAW column value, so a test can write exactly
+    what the database holds: ``'["*"]'`` is every module, ``"[]"`` is none,
+    ``'["cs"]'`` is a real grant — and Python ``None`` writes SQL NULL, which
+    only the legacy-tolerance tests should be using.
     """
     from app.core.users_db import get_users_db
     from app.services import auth_service
@@ -181,20 +188,59 @@ def test_a_refusal_is_recorded_in_auth_events(client):
     assert rows[0]["detail"].startswith("module_required:risk:")
 
 
-# ── T3: [] and NULL are opposite grants ──────────────────────────────────────
+# ── T3: [] and ["*"] are opposite grants ─────────────────────────────────────
 
-def test_null_means_every_module_including_future_ones(client):
-    """NULL is the shipping default for every existing account (P4b goes live
-    with nobody restricted), so this is the case that must not regress."""
+def test_the_all_sentinel_means_every_module_including_future_ones(client):
+    """``["*"]`` is what the three managers and any "full access" account hold.
+
+    Until 2026-08-27 this was SQL NULL — see the test below, which keeps that
+    reading alive for rows the migration never reached.
+    """
+    sid = _mint(STAFF, allowed_modules='["*"]')
+    for path in ("/risk-monitor/burst-open/alerts", "/login-ip/search", "/ib-financial/query"):
+        assert client.get(f"/api/v1{path}", headers=_bearer(sid)).status_code == 200, path
+
+
+def test_a_legacy_null_grant_still_means_every_module(client):
+    """The one line of permanent backwards compatibility, and its guardrail.
+
+    The sentinel migration is a script a human runs against the live database,
+    so "no row is NULL" is true of one moment, not forever: a restored backup,
+    a row inserted by hand during an incident, or a rolled-back image can all
+    put NULL back. NULL had exactly one meaning for its whole life — every
+    module — so reading it any other way would silently revoke precisely the
+    accounts the migration missed, and the symptom ("half the app vanished")
+    points nowhere near ``parse_allowed_modules``.
+
+    ⚠ Do not delete this test when the migration is confirmed. It is not about
+    the migration; it is about the row that arrives after it.
+    """
     sid = _mint(STAFF, allowed_modules=None)
     for path in ("/risk-monitor/burst-open/alerts", "/login-ip/search", "/ib-financial/query"):
         assert client.get(f"/api/v1{path}", headers=_bearer(sid)).status_code == 200, path
 
 
-def test_empty_list_means_no_module_at_all(client):
-    """The opposite of NULL, and the assertion that catches a falsy check.
+def test_the_sentinel_is_not_a_module_key(client):
+    """"*" is a grant, not a page group, and nothing may classify a path as it.
 
-    ``if not user.allowed_modules`` reads [] as None and passes everything —
+    Asserted at import time in auth_deps (two asserts), re-asserted here so the
+    failure has a test name attached rather than only a broken import: a "*"
+    inside MODULE_KEYS would give /cfg/managers a sixth checkbox for something
+    that is really the switch above them.
+    """
+    from app.core.auth_deps import ALL_MODULES, MODULE_KEYS, MODULE_MAP, module_names
+
+    assert ALL_MODULES == "*"
+    assert ALL_MODULES not in MODULE_KEYS
+    assert not any(
+        ALL_MODULES in module_names(policy) for policy in MODULE_MAP.values()
+    )
+
+
+def test_empty_list_means_no_module_at_all(client):
+    """The opposite of ["*"], and the assertion that catches a falsy check.
+
+    ``if not user.allowed_modules`` reads [] as "unset" and passes everything —
     i.e. "revoke this person's access" would grant them the whole application,
     silently, with the admin page still displaying zero ticked boxes.
     """
@@ -319,11 +365,15 @@ def test_a_refusal_on_a_shared_endpoint_names_both_modules(client):
 
 
 def test_corrupt_grant_fails_closed(client):
-    """Unparseable JSON decodes to [] (no modules), never to None (all of them).
+    """Unparseable JSON decodes to [] (no modules), never to ["*"] (all of them).
 
     An over-restricted account is a support ticket; an over-permitted one is an
     incident. The common layer still answers, so the person can reach the app
     and say something is wrong.
+
+    ⚠ Note the deliberate asymmetry with the legacy-NULL test above: NULL is a
+    value this system once wrote and knows the meaning of, garbage is a value
+    nobody ever wrote.
     """
     sid = _mint(STAFF, allowed_modules="{not json")
     assert client.get("/api/v1/login-ip/search", headers=_bearer(sid)).status_code == 403
@@ -394,7 +444,7 @@ def test_an_unclassified_path_fails_closed(client, caplog):
     An unclassified route is a bug, and one that silently works for the four
     people most likely to notice it is a bug that stays.
     """
-    staff = _mint(STAFF, allowed_modules=None)
+    staff = _mint(STAFF, allowed_modules='["*"]')
     manager = _mint(MANAGER)
     assert client.get("/api/v1/not-classified/at-all", headers=_bearer(staff)).status_code == 403
     assert client.get("/api/v1/not-classified/at-all", headers=_bearer(manager)).status_code == 403

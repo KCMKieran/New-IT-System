@@ -209,7 +209,7 @@ export function UsersTab() {
     void applyPatch(u, { status: next }, true);
   };
 
-  const handleModulesChange = (u: AdminUser, next: string[] | null) => {
+  const handleModulesChange = (u: AdminUser, next: string[]) => {
     // No confirm here: module grants take effect on the next request and do not
     // log anyone out, so a misclick is one click to undo.
     void applyPatch(u, { allowed_modules: next }, false);
