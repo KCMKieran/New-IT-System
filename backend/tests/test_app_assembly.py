@@ -333,6 +333,10 @@ def test_exempt_paths_is_the_reviewed_literal_set():
         "/api/v1/auth/callback",
         "/api/v1/auth/logout",
         "/api/v1/auth/dev-login",
+        # Break-glass local login (design §4.2.2 prerequisite 2): how a named
+        # operator gets a session when Entra is down, so it cannot require one.
+        # Inert unless AUTH_BREAK_GLASS_ACTIVE — the handler 404s otherwise.
+        "/api/v1/auth/break-glass",
         # Honeypot decoys (security honeytoken): unauthenticated ON PURPOSE. The
         # target is an outsider who holds the public key but has no session; the
         # handler (routes/honeypot.py) touches no DB and returns a fake 401. Not

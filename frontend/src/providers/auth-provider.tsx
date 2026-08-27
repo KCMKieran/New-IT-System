@@ -55,6 +55,14 @@ type AuthContextValue = {
   /** Mirrors the backend's AUTH_ENABLED. False means the kill switch is thrown. */
   authEnabled: boolean
   loginWithMicrosoft: (returnTo?: string) => void
+  /**
+   * Emergency sign-in that skips Microsoft (auth design §4.2.2). Resolves to
+   * an error code, or null when a session was minted — the caller then calls
+   * refresh() and lands normally. Only reachable from /login?break_glass=1 and
+   * only works when the backend has the mode armed; otherwise the endpoint
+   * 404s, which is deliberately indistinguishable from "no such route".
+   */
+  loginWithBreakGlass: (email: string, secret: string) => Promise<string | null>
   logout: () => Promise<void>
   refresh: () => Promise<void>
 }
@@ -74,6 +82,7 @@ const AuthContext = createContext<AuthContextValue | null>(null)
 const ME_URL = "/api/v1/auth/me"
 const LOGOUT_URL = "/api/v1/auth/logout"
 const LOGIN_URL = "/api/v1/auth/login"
+const BREAK_GLASS_URL = "/api/v1/auth/break-glass"
 
 function toUser(me: MeResponse): AuthUser | null {
   if (!me.email) return null
@@ -170,6 +179,30 @@ export function AuthProvider({ children }: AuthProviderProps) {
     window.location.assign(`${LOGIN_URL}${suffix}`)
   }, [])
 
+  const loginWithBreakGlass = useCallback(
+    async (email: string, secret: string) => {
+      let res: Response
+      try {
+        res = await apiFetch(BREAK_GLASS_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email, secret }),
+        })
+      } catch {
+        return "network"
+      }
+      // 404 = the mode is not armed on the server. Reported as its own code
+      // rather than folded into "denied": the operator needs to know whether
+      // to fix their input or to go and set the env, and those are two
+      // completely different next actions at 3am.
+      if (res.status === 404) return "unavailable"
+      if (!res.ok) return "denied"
+      await refresh()
+      return null
+    },
+    [refresh],
+  )
+
   const logout = useCallback(async () => {
     try {
       await apiFetch(LOGOUT_URL, { method: "POST" })
@@ -191,10 +224,19 @@ export function AuthProvider({ children }: AuthProviderProps) {
       user,
       authEnabled,
       loginWithMicrosoft,
+      loginWithBreakGlass,
       logout,
       refresh: () => refresh(),
     }),
-    [status, user, authEnabled, loginWithMicrosoft, logout, refresh],
+    [
+      status,
+      user,
+      authEnabled,
+      loginWithMicrosoft,
+      loginWithBreakGlass,
+      logout,
+      refresh,
+    ],
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>

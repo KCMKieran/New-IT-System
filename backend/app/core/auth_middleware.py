@@ -104,6 +104,10 @@ EXEMPT_PATHS: frozenset[str] = frozenset(
         "/api/v1/auth/callback",
         "/api/v1/auth/logout",
         "/api/v1/auth/dev-login",
+        # Break-glass local login (design §4.2.2 prerequisite 2). Like the two
+        # above, this is how you GET a session, so it cannot require one. It is
+        # inert unless AUTH_BREAK_GLASS_ACTIVE — the handler 404s otherwise.
+        "/api/v1/auth/break-glass",
         # Honeypot decoys (security honeytoken): reachable without a session on
         # purpose — the target is an outsider holding the public key but no
         # session. The handler (routes/honeypot.py) touches no DB and returns a

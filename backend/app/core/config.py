@@ -12,6 +12,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+# Minimum length for AUTH_BREAK_GLASS_SECRET. 32 characters is what
+# `secrets.token_urlsafe(24)` produces, which is what the runbook tells the
+# operator to paste; the floor exists so a hurried incident cannot install
+# "letmein" as the only credential in front of a session-minting endpoint.
+BREAK_GLASS_SECRET_MIN_LEN = 32
+
+
 def _env_flag(name: str, default: bool = False) -> bool:
     """Read a boolean env var tolerantly.
 
@@ -108,6 +115,12 @@ class Settings:
     AUTH_SESSION_RENEW_BELOW_HOURS: int
     AUTH_MANAGER_EMAILS: set[str]
     AUTH_FAILURE_EVENTS_PER_MINUTE: int
+    AUTH_BREAK_GLASS_ENABLED: bool
+    AUTH_BREAK_GLASS_EMAILS: set[str]
+    AUTH_BREAK_GLASS_SECRET: str
+    AUTH_BREAK_GLASS_SESSION_HOURS: int
+    AUTH_BREAK_GLASS_ACTIVE: bool
+    AUTH_BREAK_GLASS_REFUSAL: str
     AUTH_EVENTS_RETENTION_DAYS: int
     AUDIT_LOG_RETENTION_DAYS: int
     AUDIT_MISSING_ALERT_ENABLED: bool
@@ -487,6 +500,66 @@ class Settings:
         # which fires once per thing that happened to an account.
         self.AUTH_FAILURE_EVENTS_PER_MINUTE = int(
             (os.environ.get("AUTH_FAILURE_EVENTS_PER_MINUTE") or "10").strip()
+        )
+
+        # ── Break-glass local login (design §4.2.2, prerequisite 2) ──────────
+        # Replaces AUTH_ENABLED=false as the answer to "Entra is down / the
+        # client secret expired / the OIDC code is broken and nobody can sign
+        # in". That flag turns the ENTIRE authentication layer off, which since
+        # CF Access was retired means the only remaining lock on /api/* is the
+        # API key Vite compiles into the public JS bundle — i.e. it opens the
+        # whole API, including the four /api/v1/admin read endpoints, to the
+        # internet. What actually breaks in those incidents is the IdP hop, not
+        # the session layer, so this switch buys back exactly that hop and
+        # nothing else: sessions are still required, the module gate still
+        # applies, the audit trail still names a real person.
+        #
+        # It is OFF unless three separate things are set, and the route 404s
+        # (not 403s) whenever it is off — an unconfigured back door should be
+        # indistinguishable from a back door that does not exist.
+        self.AUTH_BREAK_GLASS_ENABLED = _env_flag("AUTH_BREAK_GLASS_ENABLED", False)
+        self.AUTH_BREAK_GLASS_EMAILS = {
+            e.strip().lower()
+            for e in os.environ.get("AUTH_BREAK_GLASS_EMAILS", "").split(",")
+            if e.strip()
+        }
+        # Never logged, never returned, compared with compare_digest. This is a
+        # real credential — unlike the API key, it is not in any bundle — so it
+        # has a length floor: a short shared secret on a public endpoint is a
+        # password nobody would accept anywhere else in this system.
+        self.AUTH_BREAK_GLASS_SECRET = (
+            os.environ.get("AUTH_BREAK_GLASS_SECRET") or ""
+        ).strip()
+        # Break-glass sessions are deliberately short-lived: the mode exists for
+        # the duration of an incident, and a session minted under it must not
+        # outlive the incident by the normal 7-day absolute window. Whoever is
+        # still working when it lapses signs in again — by then, usually through
+        # the IdP that has come back.
+        self.AUTH_BREAK_GLASS_SESSION_HOURS = int(
+            (os.environ.get("AUTH_BREAK_GLASS_SESSION_HOURS") or "12").strip()
+        )
+        # Fail closed, and say why. Three misconfigurations turn the mode into a
+        # hazard or a dud, and all three are silent: a secret that is missing or
+        # too weak, and an empty allowlist (which would otherwise read as "any
+        # address in an allowed DOMAIN can mint a session with the secret").
+        # AUTH_BREAK_GLASS_ACTIVE is the ONLY thing the route consults, so a
+        # misconfigured mode is an inactive mode; the reason string is what
+        # lifespan prints so the operator is not left guessing during an
+        # incident — the one moment when nobody has time to read source.
+        _bg_refusal = ""
+        if self.AUTH_BREAK_GLASS_ENABLED:
+            if not self.AUTH_BREAK_GLASS_SECRET:
+                _bg_refusal = "AUTH_BREAK_GLASS_SECRET is not set"
+            elif len(self.AUTH_BREAK_GLASS_SECRET) < BREAK_GLASS_SECRET_MIN_LEN:
+                _bg_refusal = (
+                    f"AUTH_BREAK_GLASS_SECRET is shorter than "
+                    f"{BREAK_GLASS_SECRET_MIN_LEN} characters"
+                )
+            elif not self.AUTH_BREAK_GLASS_EMAILS:
+                _bg_refusal = "AUTH_BREAK_GLASS_EMAILS is empty"
+        self.AUTH_BREAK_GLASS_REFUSAL = _bg_refusal
+        self.AUTH_BREAK_GLASS_ACTIVE = (
+            self.AUTH_BREAK_GLASS_ENABLED and not _bg_refusal
         )
         # Nothing has ever deleted from these two append-only tables. Retention
         # runs from lifespan on the scheduler-owning worker, next to the

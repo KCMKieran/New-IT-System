@@ -124,7 +124,42 @@ async def lifespan(app: FastAPI):
     if _auth_settings.AUTH_ENABLED:
         logger.info("AUTH_ENABLED=true — session enforcement is ON for /api/*")
     else:
-        logger.info("AUTH_ENABLED=false — session layer is present but NOT enforcing")
+        # CRITICAL, and itemised (cold review O3). This flag does not disable
+        # "login" — it disables three separate things at once, and since CF
+        # Access was retired (design §4.1) the only remaining lock on the first
+        # of them is the API key that Vite compiles into the public JS bundle.
+        # An INFO line saying "not enforcing" reads like a mode; this is an
+        # outage posture, and AUTH_BREAK_GLASS_ENABLED is what an IdP failure
+        # should be answered with instead (design §4.2.2).
+        logger.critical(
+            "AUTH_ENABLED=false — NOT enforcing sessions. This opens (1) every "
+            "/api/* endpoint incl. /api/v1/admin reads, (2) the SSE streams, "
+            "(3) the whole /docs/ portal, to anyone holding the public API key. "
+            "If the cause is an Entra/IdP failure, use AUTH_BREAK_GLASS_ENABLED "
+            "instead and turn this back on."
+        )
+
+    # Break-glass posture. Printed on every boot for the same reason as the
+    # line above: the mode is invisible from the outside (its route 404s when
+    # inactive), so the log is the only place an operator can read back whether
+    # the back door is currently open.
+    if _auth_settings.AUTH_BREAK_GLASS_ACTIVE:
+        logger.critical(
+            "AUTH_BREAK_GLASS_ENABLED=true — local login is OPEN for %s. "
+            "Sessions minted this way last %dh and bypass Entra MFA. Turn this "
+            "off once the IdP is back.",
+            ",".join(sorted(_auth_settings.AUTH_BREAK_GLASS_EMAILS)),
+            _auth_settings.AUTH_BREAK_GLASS_SESSION_HOURS,
+        )
+    elif _auth_settings.AUTH_BREAK_GLASS_ENABLED:
+        # Enabled but refused. Loud, because the operator believes they just
+        # armed the emergency exit and they have not — and they will find out
+        # by getting a 404 at the worst possible moment.
+        logger.error(
+            "AUTH_BREAK_GLASS_ENABLED=true but the mode is INACTIVE: %s. "
+            "POST /api/v1/auth/break-glass will answer 404.",
+            _auth_settings.AUTH_BREAK_GLASS_REFUSAL,
+        )
     # Which domains may sign in, and whether that answer was actually chosen.
     # Printed unconditionally because the value is a security boundary that
     # lives only in env — the log is the only place an operator can read back

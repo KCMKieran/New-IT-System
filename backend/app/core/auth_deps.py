@@ -67,9 +67,14 @@ def require_manager(request: Request) -> SessionUser | None:
          while auth was off SURVIVES turning auth back on, and the audit row it
          leaves names nobody because there is no subject to name. The recovery
          action would itself have to be an out-of-band ``sqlite3`` edit.
-       * ``config.py`` defaults ``AUTH_ENABLED`` to False when the variable is
-         missing, so a dropped env line produces this state silently rather
-         than as a visible outage.
+       * ⚠ Until 2026-08-19 ``config.py`` DEFAULTED ``AUTH_ENABLED`` to False,
+         so a dropped env line produced this state silently. The default is
+         True now (design §4.2.2 prerequisite 1) and disabling auth has to be
+         written down — but the asymmetry above is why this split survives the
+         fix: the state is now deliberate, and a deliberate incident window is
+         still a window. Since 2026-08-27 the IdP-outage case has its own
+         answer (``AUTH_BREAK_GLASS_ENABLED``, §5.5), so reaching this branch
+         at all should be rare.
 
        So reads pass and writes refuse. What the kill switch is for — getting
        the app usable again while the auth layer is off — needs the reads; the
