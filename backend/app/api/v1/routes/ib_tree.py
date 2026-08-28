@@ -56,7 +56,8 @@ def get_ib_tree(
         started = time.perf_counter()
         # ...and the OUTPUT half, which the input gate above cannot cover. The
         # gate checked the client the caller named; the response is that
-        # client's UPLINE, and 11 Global clients sit under a CN IB. Passing the
+        # client's UPLINE, and 11 tree edges (3 distinct clients) put a Global
+        # client under a CN IB. Passing the
         # scope down lets the service MASK those nodes (identity only — the
         # chain keeps its shape, because a chain with a hole in it is worse
         # than useless for CS work). `scope is None` for everyone else and the
