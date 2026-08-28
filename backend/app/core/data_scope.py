@@ -794,7 +794,10 @@ three IB routes: the id names one object but the RESPONSE fans out to the other
 side of the relationship — ``/ibid-lots/query`` and ``/ib-data/query`` return
 (or aggregate) the target's whole DOWNLINE, ``/ib-tree/{client_id}`` returns the
 client's UPLINE chain. A cold review confirmed on the replica that 11 Global IBs
-have at least one CN downline client and 11 Global clients sit under a CN IB, so
+have at least one CN downline client, and 11 tree EDGES put a Global client
+under a CN IB (3 distinct clients — the row count is 11 in BOTH directions,
+which is exactly how an earlier draft of this comment reported "11 clients";
+count DISTINCT, not rows, when you re-measure), so
 the input gate passed and CN data came back with a 200. Those three now filter
 on the way out as well (see the notes on their ROUTE_SCOPE entries).
 
@@ -838,8 +841,10 @@ ROUTE_SCOPE: dict[str, str] = {
     "/cs/fund-flow/config": OPEN,
 
     # ── /ib-tree ─────────────────────────────────────────────────────────────
-    # LOOKUP: one client id in the path, and the response is that client's
-    # whole downline — so the gate has to be on the way in.
+    # LOOKUP: one client id in the path. The response is that client's UPLINE
+    # chain (not downline — /ibid-lots and /ib-data are the downline ones), so
+    # the gate goes on the way in AND the service masks out-of-scope ancestors
+    # on the way out.
     "/ib-tree/{client_id}": LOOKUP,
 
     # ── /ibid-lots ───────────────────────────────────────────────────────────
@@ -916,7 +921,10 @@ every live route of that module has a ROUTE_SCOPE entry and that every "filter"
 route among them really filters (cache keys included). Adding `data` here
 before doing that work would not fail — it would just re-open the exact hole
 `enforce_data_scope_coverage` below exists to close, and re-open it silently.
-An anti-drift test asserts each key here has at least one classified route, so
+An anti-drift test asserts that EVERY live route of each key here is classified
+in ROUTE_SCOPE — not merely that one of them is, which would let somebody add
+"data" on the strength of the single shared /ib-data/query entry while
+region-query stayed unclassified. So
 the constant cannot claim coverage the table does not have; it cannot check the
 filtering is CORRECT, which is why this comment is here.
 """

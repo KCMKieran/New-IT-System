@@ -62,7 +62,10 @@ services:
         max-file: "10"
         compress: "true"
 
-  # Backend: FastAPI with Uvicorn (production mode, 2 workers, no --reload)
+  # Backend: FastAPI with Uvicorn (production mode, no --reload). The worker
+  # count lives in backend/Dockerfile's CMD (--workers 4), not here — this
+  # comment said "2 workers" until 2026-08-28 and was simply stale. It is not
+  # cosmetic: runbooks that check "one startup line per worker" count on 4.
   api:
     build:
       context: ./backend
