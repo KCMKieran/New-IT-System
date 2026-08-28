@@ -117,16 +117,21 @@ class TestNumeratorDenominatorSymmetry:
 
 
 class TestCacheVersionPinnedToTheFormula:
-    def test_cache_prefix_bumped_past_v5(self):
-        """A 口径 change MUST bump the Redis key prefix, otherwise v5 blobs holding
-        the old inflated formula keep being served for up to the 3h TTL."""
+    def test_cache_prefix_bumped_past_superseded_versions(self):
+        """A 口径 change MUST bump the Redis key prefix, otherwise blobs holding
+        the old formula keep being served for up to the 3h TTL.
+
+        v5 -> v6: net deposit dropped 'ib withdrawal' (2026-07-15).
+        v6 -> v7: profit_hist divides CEN legs by 100 (2026-08-28).
+        """
         import inspect
 
         from app.services import client_return_service
 
         src = inspect.getsource(client_return_service.get_client_return_rate_data)
-        assert "client_return_v5_usdt_" not in src, (
-            "cache prefix still v5 while the net-deposit formula changed — "
-            "stale cached rows would be served under the old 口径"
-        )
-        assert "client_return_v6_trading_nd_" in src
+        for stale in ("client_return_v5_usdt_", "client_return_v6_trading_nd_"):
+            assert stale not in src, (
+                f"cache prefix still {stale} while the result 口径 changed — "
+                f"stale cached rows would be served under the old formula"
+            )
+        assert "client_return_v7_cen_profit_hist_" in src

@@ -335,9 +335,18 @@ LEFT JOIN (
     GROUP BY st.userId
 ) AS dep90 ON tm.id = dep90.client_id
 
+-- All-time realized trade P&L. stats_trading_running_totals stores ONE ROW PER
+-- loginSid in the ACCOUNT'S OWN currency — it is NOT pre-normalized — so CEN
+-- (US-cent) accounts must be divided by 100 exactly like every other money
+-- column in this file. Summing it raw inflated every CEN leg by 100x (a -$7.59
+-- cent leg read as -$758.57). That also propagated into ROACE, whose denominator
+-- avg_daily_equity IS CEN-adjusted, so the ratio was inflated on exactly the
+-- mixed USD/CEN clients. See docs/features/client-return-rate.md §3.2.
 LEFT JOIN (
     SELECT userId AS client_id,
-           SUM(plClosedHavingActivityRunningTotal) AS profit_hist_trades
+           SUM(IF(currency = 'CEN',
+                  plClosedHavingActivityRunningTotal / 100.0,
+                  plClosedHavingActivityRunningTotal)) AS profit_hist_trades
     FROM stats_trading_running_totals
     WHERE userId IN ({id_list_str})
     GROUP BY userId
@@ -482,8 +491,11 @@ def get_client_return_rate_data(
     # changes every cache key, so v5 blobs holding the old formula become
     # unreachable and age out on their own TTL — no manual flush needed and no
     # window where a cached v5 row and a fresh v6 row are shown side by side.
+    # v7 (2026-08-28): profit_hist now divides CEN legs by 100 (the `rt` subquery
+    # was summing stats_trading_running_totals raw). Same reasoning as above —
+    # v6 blobs carry the 100x-inflated figure and must not be served alongside v7.
     cache_params = (
-        "client_return_v6_trading_nd_"
+        "client_return_v7_cen_profit_hist_"
         f"{month_start}_{month_end}_{search}_{deposit_bucket}_{sort_by}_{sort_order}_"
         f"{page}_{page_size}_{close_time_start}_{include_avg_equity}_"
         f"{country_filter}_{akcm_filter}_{usdt_filter}_{return_all}"
