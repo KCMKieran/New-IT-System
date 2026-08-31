@@ -39,4 +39,5 @@
 | [OPT-0004](./items/OPT-0004-risk-monitor-arch.md) | mixed | Risk-monitor 架构/框架重构 | 太宽，需要先拆 3~5 个子任务（路由分层 / service 抽象 / 配置集中 / 任务调度 …） |
 | [OPT-0018](./items/OPT-0018-cache-layer-audit.md) | mixed | 全链路缓存审计与硬化（HTTP / 应用 / Redis / DB） | 已扫描出 5 条真问题（Redis 无 maxmemory、匿名 volume、PnL/IB hit rate 异常等），audit 完成后拆 3-5 个子 OPT |
 | [OPT-0020](./items/OPT-0020-client-return-rate-risk-signals.md) | mixed | Client Return Rate 加 4 个风控判断列（过夜 / ~~USDT~~ / Sharpe / Consistency） | 剩余 7 列分两 Drop 上线（USDT 已拆到 OPT-0022），复用 OPT-0006 的夜间预计算 SQLite 模式；claim 前需用户审 AC、回答 4 个开放问题 + 先跑过夜 SQL 的预飞行实测 |
+| [OPT-0060](./items/OPT-0060-client-return-mdd.md) | mixed | Client Return Rate 加 Max Drawdown(MDD) 5 个窗口列 | 用户拍板开 OPT（按 README 规则「新列」本属 feat）；TWR 口径不能用裸 equity，夜间全量批处理实测 5.5 分钟；⚠ 已归零账户在短窗口 MDD=0 会排在「最稳健」榜首（30d 达标者 90% 是死账户），必须加「还活着」gate；与 [[OPT-0020]] 共用同一条 1,300 万行序列扫描，**分开做等于扫两遍**；claim 前需拍板 7 个开放问题（其中 3 个会改算法） |
 | [OPT-0052](./items/OPT-0052-ibdata-trading-net-deposit-split.md) | mixed | IBData / IB Report 净入金拆出「交易净入金」（不含 ib withdrawal） | 2026-07-15 口径审计剩余项（RiskMonitor/ClientReturn/IBData 三个高危已修）；全站 7/9 实现都含 ibw 且有业务确认背书，更像"更精细视角"而非修 bug —— 是否值得做待用户判断 |

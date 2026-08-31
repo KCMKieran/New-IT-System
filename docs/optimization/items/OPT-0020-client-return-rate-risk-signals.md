@@ -13,6 +13,12 @@ related: [[OPT-0006]]
 > 本 OPT 剩余 7 列：过夜比例 + Sharpe ×3 + Consistency ×3。
 > 下方涉及 USDT 的 AC 条目已 ~~strikethrough~~。
 
+> **Update 2026-08-28**: [OPT-0060](OPT-0060-client-return-mdd.md)（Client Return Rate 加 MDD 5 列）
+> 的数据序列与本 OPT **Drop 2**（Sharpe / Consistency）**完全相同**——都是按 `(userId, date)` 升序的
+> 每客户每日 equity / PnL 序列。**分开做 = 把 1,300 万行客户-日序列扫两遍**（OPT-0060 实测权益曲线腿
+> 201s filesort + 114s 流式读取）。**两者合并做一次扫描**是 OPT-0060 §待拍板第 6 题，
+> 若用户选合并，本 OPT 的 Drop 2 应并入 OPT-0060 一起实施。
+
 ## 问题
 
 Risk team 用 `/client-return-rate` 决定客户 A-book / B-book 归类,现有列不够支撑这个判断:
