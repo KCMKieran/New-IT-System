@@ -29,6 +29,7 @@
 | [OPT-0050](./items/OPT-0050-baseline-test-prod-pollution.md) | P1 | backend | S | 基线幂等测试污染 prod PG（940 行假快照）+ 随 roster 增长挂死（178→940 后 ≥3.6 分钟）；与 0041 关系待定 |
 | [OPT-0051](./items/OPT-0051-verify-gate-live-db-coupling.md) | P1 | backend | M | 后端测试直连云 DB：verify.sh 单轮 733s 且有 .env 会挂死，41 个既有失败掩盖真信号；建议排在 0041 之后 |
 | [OPT-0053](./items/OPT-0053-scheduler-tier-test-flake.md) | P1 | backend | S | verify.sh 硬闸有 flaky 测试：scheduler_tiers 的 fast_burst 保留槽位断言 clean HEAD 实测 1/8 轮随机红；疑 daemon 线程 + 模块级 `_latest_result` 竞态。与 0051 叠加后闸门实际已失效 |
+| [OPT-0061](./items/OPT-0061-client-return-floating-inclusive.md) | P1 | mixed | M | Client Return Rate 加「含浮动收益率 + 扛单率」两列（并列不替换 ROACE）；含一个连带的现存口径修正——`profit_hist` 补 sid/demo 过滤会改变现有 ROACE 数值（2,044 客户不同）；仅 low-equity gate 三个阈值未拍板，有默认值可直接开工
 
 ## 💡 想法（Ideas）—— 还不能直接 claim
 
@@ -41,4 +42,3 @@
 | [OPT-0020](./items/OPT-0020-client-return-rate-risk-signals.md) | mixed | Client Return Rate 加 4 个风控判断列（过夜 / ~~USDT~~ / Sharpe / Consistency） | 剩余 7 列分两 Drop 上线（USDT 已拆到 OPT-0022），复用 OPT-0006 的夜间预计算 SQLite 模式；claim 前需用户审 AC、回答 4 个开放问题 + 先跑过夜 SQL 的预飞行实测 |
 | [OPT-0060](./items/OPT-0060-client-return-mdd.md) | mixed | Client Return Rate 加 Max Drawdown(MDD) 5 个窗口列 | 用户拍板开 OPT（按 README 规则「新列」本属 feat）；TWR 口径不能用裸 equity，夜间全量批处理实测 5.5 分钟；⚠ 已归零账户在短窗口 MDD=0 会排在「最稳健」榜首（30d 达标者 90% 是死账户），必须加「还活着」gate；与 [[OPT-0020]] 共用同一条 1,300 万行序列扫描，**分开做等于扫两遍**；claim 前需拍板 7 个开放问题（其中 3 个会改算法） |
 | [OPT-0052](./items/OPT-0052-ibdata-trading-net-deposit-split.md) | mixed | IBData / IB Report 净入金拆出「交易净入金」（不含 ib withdrawal） | 2026-07-15 口径审计剩余项（RiskMonitor/ClientReturn/IBData 三个高危已修）；全站 7/9 实现都含 ibw 且有业务确认背书，更像"更精细视角"而非修 bug —— 是否值得做待用户判断 |
-| [OPT-0061](./items/OPT-0061-client-return-floating-inclusive.md) | mixed | Client Return Rate 加「含浮动收益率 + 扛单率」两列 | 用户拍板开 OPT（按 README 规则「新列」本属 feat）；ROACE 分子只含已平仓、分母含浮亏 = 双重放大，客户 128535 实测 +177.7% vs 真实 −0.4%；数据全现成（`stats_balances` 已在扫，只是没读 `endingBalance`/`endingCredit`），夜间作业 17.5s → 58.3s 实测可接受；⚠ 含一个**现存口径 bug**：`profit_hist` 无 sid/demo 过滤而 `avg_daily_equity` 有，2,044 客户不一致（540 个差 >$1000），新公式的恒等式忍不了必须统一 —— 但统一会改变现有 ROACE 数值；与 [[OPT-0060]]/[[OPT-0020]] 共用同一条序列；claim 前需拍板 7 个开放问题 |
