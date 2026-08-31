@@ -1,11 +1,14 @@
 """
 Nightly ROACE snapshot refresh.
 
-Runs the same SQL that used to live as a Phase 2 LEFT JOIN in
-`client_return_service.py`, but **without the per-request `WHERE userId IN (...)`
-filter** — instead we compute avg_daily_equity for ALL eligible clients in one
-shot and upsert to SQLite. Web requests then look up by user_id from SQLite,
-avoiding the 2-second join against stats_balances (19M rows) on every page hit.
+Computes per-client daily averages (equity / balance / credit), active-day
+count and first/last-active-day floating P&L for ALL eligible clients in one
+shot and upserts to SQLite. Web requests then look up by user_id from SQLite,
+avoiding a join against stats_balances (21M rows) on every page hit.
+
+Floating P&L per day = endingEquity − endingBalance − endingCredit. The
+first/last-day values feed the floating-inclusive return column (OPT-0061):
+Total PnL = Closed PnL + (last_float − first_float).
 """
 
 from __future__ import annotations
@@ -29,23 +32,54 @@ logger = get_logger(__name__)
 
 _HK_TZ = timezone(timedelta(hours=8))
 
+# Server-side statement kill switch, deliberately BELOW read_timeout so the
+# server gives up before the client does — a client-side read_timeout alone
+# abandons the socket while the server thread keeps scanning as a zombie
+# (see the 2026-08-09/08-15 replica incidents and skill `db-timeout-guard`).
+# Measured 58.3s on the replica (daytime, 2026-08-31); 300s leaves cold-cache
+# headroom while staying well under _READ_TIMEOUT_SEC.
+_MAX_EXECUTION_TIME_MS = 300_000
+_READ_TIMEOUT_SEC = 600
 
-# Same shape as the previous Phase 2 LEFT JOIN subquery in client_return_service.py.
-# Only difference: no `userId IN (...)` filter — compute for ALL eligible clients.
-_REFRESH_SQL = """
-SELECT
-    mu2.userId AS user_id,
-    SUM(IF(sb.currency = 'CEN', sb.endingEquity / 100.0, sb.endingEquity))
-        / COUNT(DISTINCT sb.date) AS avg_daily_equity,
-    COUNT(DISTINCT sb.date) AS active_days
-FROM mt4_users mu2
-INNER JOIN stats_balances sb ON sb.loginsid = mu2.loginsid
-INNER JOIN stats_trading  st2 ON st2.loginSid = mu2.loginsid AND st2.date = sb.date
-WHERE mu2.sid IN (1, 5, 6)
-  AND mu2.`GROUP` NOT LIKE '%demo%'
-  AND sb.endingEquity > 0
-  AND mu2.userId > 0
-GROUP BY mu2.userId
+# Two-level aggregation:
+#   innermost — collapse per (userId, date) across the client's accounts
+#               (CEN legs ÷100), keeping the same eligibility as the previous
+#               refresh (sid 1/5/6, non-demo, endingEquity > 0, active day =
+#               has a stats_trading row);
+#   window    — MIN/MAX date per userId so the outer MAX(IF(...)) can pick the
+#               first/last active day's floating P&L (eq − bal − cr).
+# The previous "SUM all rows / COUNT(DISTINCT date)" shortcut computes the same
+# averages but cannot recover per-day values, hence the restructure.
+# Measured 58.3s / 25,553 rows on the replica (2026-08-31) vs 17.5s before.
+_REFRESH_SQL = f"""
+SELECT /*+ MAX_EXECUTION_TIME({_MAX_EXECUTION_TIME_MS}) */
+  uid AS user_id,
+  COUNT(*) AS active_days,
+  SUM(eq) / COUNT(*)  AS avg_daily_equity,
+  SUM(bal) / COUNT(*) AS avg_daily_balance,
+  SUM(cr) / COUNT(*)  AS avg_daily_credit,
+  MAX(IF(d = mn, eq - bal - cr, NULL)) AS first_float,
+  MAX(IF(d = mx, eq - bal - cr, NULL)) AS last_float
+FROM (
+  SELECT uid, d, eq, bal, cr,
+         MIN(d) OVER (PARTITION BY uid) AS mn,
+         MAX(d) OVER (PARTITION BY uid) AS mx
+  FROM (
+    SELECT mu2.userId AS uid, sb.date AS d,
+      SUM(IF(sb.currency = 'CEN', sb.endingEquity / 100.0,  sb.endingEquity))  AS eq,
+      SUM(IF(sb.currency = 'CEN', sb.endingBalance / 100.0, sb.endingBalance)) AS bal,
+      SUM(IF(sb.currency = 'CEN', sb.endingCredit / 100.0,  sb.endingCredit))  AS cr
+    FROM mt4_users mu2
+    INNER JOIN stats_balances sb  ON sb.loginsid  = mu2.loginsid
+    INNER JOIN stats_trading  st2 ON st2.loginSid = mu2.loginsid AND st2.date = sb.date
+    WHERE mu2.sid IN (1, 5, 6)
+      AND mu2.`GROUP` NOT LIKE '%demo%'
+      AND sb.endingEquity > 0
+      AND mu2.userId > 0
+    GROUP BY mu2.userId, sb.date
+  ) AS per_day
+) AS w
+GROUP BY uid
 """
 
 
@@ -61,7 +95,7 @@ def _get_mysql_connection():
         charset="utf8mb4",
         cursorclass=pymysql.cursors.DictCursor,
         connect_timeout=15,
-        read_timeout=600,  # 10 min — generous; full-scan typically 1-3 min
+        read_timeout=_READ_TIMEOUT_SEC,  # full scan measured 58.3s; hint above kills at 300s
     )
 
 
@@ -82,7 +116,7 @@ def refresh_all_clients() -> dict[str, Any]:
         try:
             with conn.cursor() as cur:
                 cur.execute(_REFRESH_SQL)
-                batch: list[tuple[int, float, int]] = []
+                batch: list[tuple] = []
                 refreshed_at_iso = started_at.strftime("%Y-%m-%d %H:%M:%S")
                 while True:
                     row = cur.fetchone()
@@ -92,7 +126,17 @@ def refresh_all_clients() -> dict[str, Any]:
                     days = row.get("active_days")
                     if avg is None or days is None or float(avg) <= 0 or int(days) <= 0:
                         continue
-                    batch.append((int(row["user_id"]), float(avg), int(days)))
+                    batch.append(
+                        (
+                            int(row["user_id"]),
+                            float(avg),
+                            row.get("avg_daily_balance"),
+                            row.get("avg_daily_credit"),
+                            row.get("first_float"),
+                            row.get("last_float"),
+                            int(days),
+                        )
+                    )
                     if len(batch) >= 2000:
                         rows_written += upsert_roace_batch(batch, refreshed_at_iso)
                         batch.clear()

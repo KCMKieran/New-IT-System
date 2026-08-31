@@ -95,11 +95,16 @@ class TestProfitHistDividesCenByHundred:
         ), f"the /100 is not applied to plClosedHavingActivityRunningTotal: {leg!r}"
 
     def test_profit_hist_keeps_the_unconverted_fallback(self):
-        """USD/USDT rows must pass through untouched — the IF needs both branches."""
+        """USD/USDT rows must pass through untouched — the IF needs both branches.
+
+        Columns may carry a table qualifier (`srt.`) since OPT-0061 joined
+        mt4_users into the leg (mt4_users has its own CURRENCY column, so the
+        bare name became ambiguous).
+        """
         leg = _leg("profit_hist_trades")
         assert re.search(
-            r"IF\(\s*currency\s*=\s*'CEN'\s*,\s*plClosedHavingActivityRunningTotal\s*/\s*100\.0\s*,"
-            r"\s*plClosedHavingActivityRunningTotal\s*\)",
+            r"IF\(\s*(?:\w+\.)?currency\s*=\s*'CEN'\s*,\s*(?:\w+\.)?plClosedHavingActivityRunningTotal\s*/\s*100\.0\s*,"
+            r"\s*(?:\w+\.)?plClosedHavingActivityRunningTotal\s*\)",
             leg,
         ), f"CEN branch is not the canonical two-branch IF: {leg!r}"
 

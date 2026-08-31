@@ -47,7 +47,13 @@ class ClientReturnRateRow(BaseModel):
 
     # ROACE: profit_hist / avg_daily_equity (full-history, excludes IB Wallet sid=2)
     avg_daily_equity: Optional[float] = Field(None, description="Full-history average daily equity (from stats_balances, sid 1/5/6 only)")
-    return_on_avg_equity: Optional[float] = Field(None, description="profit_hist / avg_daily_equity × 100")
+    return_on_avg_equity: Optional[float] = Field(None, description="profit_hist / avg_daily_equity × 100 (realized only, excludes floating P&L)")
+
+    # OPT-0061: floating-inclusive return + floating burden ratio. Mark-to-market —
+    # both move with the market even if the client never trades.
+    return_with_floating: Optional[float] = Field(None, description="(profit_hist + (last_float − first_float)) / avg_daily_equity × 100; null when low-equity gated or snapshot missing")
+    floating_burden_ratio: Optional[float] = Field(None, description="Avg daily floating P&L / avg daily balance × 100; deeply negative = capital pinned under floating losses")
+    capital_locked: bool = Field(False, description="True when avg_daily_equity < 20% of avg_daily_balance — return_with_floating suppressed because the denominator is collapsing (strongest risk signal, not missing data)")
 
     # Frontend local-filter fields (not used for backend sorting/filtering)
     country: str = Field("Unknown", description="Client country: CN (cid=0) or Global (cid=1)")

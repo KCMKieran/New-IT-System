@@ -123,15 +123,21 @@ class TestCacheVersionPinnedToTheFormula:
 
         v5 -> v6: net deposit dropped 'ib withdrawal' (2026-07-15).
         v6 -> v7: profit_hist divides CEN legs by 100 (2026-08-28).
+        v7 -> v8: profit_hist scope narrowed to sid 1/5/6 non-demo + new
+                  floating-inclusive columns (OPT-0061).
         """
         import inspect
 
         from app.services import client_return_service
 
         src = inspect.getsource(client_return_service.get_client_return_rate_data)
-        for stale in ("client_return_v5_usdt_", "client_return_v6_trading_nd_"):
+        for stale in (
+            "client_return_v5_usdt_",
+            "client_return_v6_trading_nd_",
+            "client_return_v7_cen_profit_hist_",
+        ):
             assert stale not in src, (
                 f"cache prefix still {stale} while the result 口径 changed — "
                 f"stale cached rows would be served under the old formula"
             )
-        assert "client_return_v7_cen_profit_hist_" in src
+        assert "client_return_v8_floating_inclusive_" in src

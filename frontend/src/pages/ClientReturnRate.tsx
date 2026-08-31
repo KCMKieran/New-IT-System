@@ -16,7 +16,11 @@
  *   - 长期收益率 ROACE (return_on_avg_equity): profit_hist / avg_daily_equity × 100%
  *     - avg_daily_equity: mean daily ending equity on "active" days (stats_balances JOIN
  *       stats_trading), sid 1/5/6, no demo, no IB Wallet, endingEquity > 0, CEN ÷100
- *     - profit_hist: realized trade P&L from stats_trading_running_totals (excl. IB comm, bonus)
+ *     - profit_hist: realized trade P&L from stats_trading_running_totals (excl. IB comm,
+ *       bonus), scope sid 1/5/6 non-demo matching the denominator (OPT-0061)
+ *   - 含浮动收益率 (return_with_floating): (profit_hist + ΔFloating) / avg_daily_equity —
+ *     mark-to-market, moves daily; "资本已套牢" when avg equity < 20% of avg balance
+ *   - 扛单率 (floating_burden_ratio): avg daily floating P&L / avg daily balance × 100%
  *
  * Time range "过去6小时" uses precise CLOSE_TIME filtering (MT4 server time UTC+2/+3).
  * Other ranges use date-level closeDate filtering.
@@ -91,6 +95,16 @@ interface ClientReturnRateRow {
   return_neg_adjusted: number | null;
   avg_daily_equity: number | null;
   return_on_avg_equity: number | null;
+  /** OPT-0061: (profit_hist + ΔFloating) / avg_daily_equity × 100. Mark-to-market —
+   *  moves with the market daily even if the client never trades. Null when
+   *  low-equity gated (see capital_locked) or snapshot missing. */
+  return_with_floating: number | null;
+  /** OPT-0061: avg daily floating P&L / avg daily balance × 100. Deeply negative
+   *  = most of the capital is pinned under floating losses. */
+  floating_burden_ratio: number | null;
+  /** True when avg equity < 20% of avg balance — return_with_floating suppressed
+   *  because the denominator is collapsing. A risk signal, NOT missing data. */
+  capital_locked: boolean;
   country: string;
   /** CRM zipcode from mt4_users.ZIPCODE (same source as risk-monitor); null if empty. */
   zipcode?: string | null;
@@ -761,10 +775,66 @@ export default function ClientReturnRate() {
             "公式: 历史利润 / 日均净值 × 100%\n" +
             "历史利润 profit_hist: stats_trading_running_totals 已实现交易盈亏（不含 IB 佣金、奖金、浮动盈亏）\n" +
             "ROACE = Return on Average Capital Employed（平均占用资本回报率）\n\n" +
+            "⚠ 本列**不含浮动盈亏**——只平盈利单、长期扛亏损单的客户会被系统性高估；\n" +
+            "与右侧「含浮动收益率」的差值即扛单强度（差得越多，浮亏扛得越重）\n\n" +
             "Formula: profit_hist / avg_daily_equity × 100%\n" +
-            "profit_hist: realized closed-trade P&L (excl. IB commission, bonus, floating P&L)",
+            "profit_hist: realized closed-trade P&L (excl. IB commission, bonus, floating P&L).\n" +
+            "Excludes floating P&L — compare with the floating-inclusive column to the right.",
         },
         width: 180,
+        valueFormatter: (p) => formatPercent(p.value),
+        cellClass: (p) => getProfitColor(p.value),
+        cellStyle: { backgroundColor: "rgba(168, 85, 247, 0.08)" },
+      },
+      {
+        // OPT-0061. Value is suppressed (null) when the low-equity gate trips;
+        // capital_locked then distinguishes "gated = strongest signal" from
+        // "no snapshot data". Rendering must NOT show a blank for gated rows.
+        field: "return_with_floating",
+        headerName: "含浮动收益率%",
+        headerComponent: InfoHeader,
+        headerComponentParams: {
+          tooltip:
+            "公式: (历史利润 + (期末浮动盈亏 − 期初浮动盈亏)) / 日均净值 × 100%\n" +
+            "浮动盈亏 = 日终净值 − 余额 − 信用（stats_balances 日终快照，首/末个活跃日）\n\n" +
+            "⚠ 本列是 mark-to-market 数字，**随行情每天变**——客户不做任何交易它也会动，\n" +
+            "这不是 bug（实测同一客户 3 天内 −0.4% → +9.0%，因为浮亏收窄了）\n" +
+            "与左侧 ROACE 的差值即扛单强度：ROACE 删掉了浮亏、本列把它算回来\n\n" +
+            "「资本已套牢」= 日均净值不足日均余额的 20%，分母已失真不给数——\n" +
+            "该客户绝大部分资金押在浮亏里，恰恰是最需要看的（看右侧扛单率列）\n" +
+            "活跃天数 < 30 或日均净值 < $1,000 的客户不计算（样本太小），显示为空\n\n" +
+            "Formula: (profit_hist + ΔFloating) / avg_daily_equity × 100%.\n" +
+            "Mark-to-market — moves with the market daily even without trading.\n" +
+            "'Capital locked' = avg equity < 20% of avg balance (denominator collapsing).",
+        },
+        width: 160,
+        valueFormatter: (p) =>
+          p.data?.capital_locked ? "资本已套牢" : formatPercent(p.value),
+        cellClass: (p) =>
+          p.data?.capital_locked
+            ? "text-amber-600 dark:text-amber-400 font-medium"
+            : getProfitColor(p.value),
+        cellStyle: { backgroundColor: "rgba(168, 85, 247, 0.08)" },
+      },
+      {
+        // OPT-0061. Not gated — it is the "how locked is the capital" readout
+        // itself, so it must stay visible exactly when the gate above trips.
+        field: "floating_burden_ratio",
+        headerName: "扛单率%",
+        headerComponent: InfoHeader,
+        headerComponentParams: {
+          tooltip:
+            "公式: (日均净值 − 日均余额 − 日均信用) / 日均余额 × 100%\n" +
+            "= 日均浮动盈亏 / 日均余额（stats_balances 日终快照，全历史活跃日均值）\n\n" +
+            "负得越深 = 越多资金长期押在浮亏里：\n" +
+            "· −4% 左右是全体客户中位水平\n" +
+            "· −50% 以下已是最重的 5%\n" +
+            "· −98% ≈ 几乎全部资金套在浮亏中（实质是在等爆仓）\n\n" +
+            "基于日终快照的历史均值，随行情缓慢变动；当日开平仓不可见\n\n" +
+            "Formula: avg daily floating P&L / avg daily balance × 100%.\n" +
+            "Deeply negative = capital pinned under floating losses (holding-the-bag ratio).",
+        },
+        width: 130,
         valueFormatter: (p) => formatPercent(p.value),
         cellClass: (p) => getProfitColor(p.value),
         cellStyle: { backgroundColor: "rgba(168, 85, 247, 0.08)" },

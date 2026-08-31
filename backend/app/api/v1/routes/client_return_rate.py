@@ -134,7 +134,7 @@ def query_client_return_rate(
                     f"{', '.join(offending)} on this endpoint. Without it this "
                     f"query is limited to the home-page summary "
                     f"(page_size <= {COMMON_MAX_PAGE_SIZE}, no client search, "
-                    "no average-equity columns)."
+                    "no average-equity / floating-return columns)."
                 ),
             )
 
@@ -252,7 +252,8 @@ async def download_client_return_rate_export(task_id: str):
 
 # Deliberately sync (`def`, not `async def`): this handler runs the full ROACE
 # refresh inline on blocking pymysql (`read_timeout=600` in
-# client_roace_refresh_service.py) — typically 1-3 min, up to 10 min worst case.
+# client_roace_refresh_service.py) — measured ~60s on the replica (2026-08-31,
+# two-level aggregation), server-side MAX_EXECUTION_TIME kills it at 5 min.
 # As `async def` a single click would freeze the whole event loop for minutes;
 # FastAPI runs sync handlers in the threadpool, keeping every other endpoint live.
 @router.post("/roace/refresh")
@@ -261,8 +262,8 @@ def trigger_roace_refresh():
 
     Same job that the nightly scheduler runs (06:00 HKT). Useful for backfilling
     on first deployment, recomputing after a data fix, or debugging. Synchronous
-    — the request blocks until the refresh finishes (typically 1-3 min for a
-    full client base scan).
+    — the request blocks until the refresh finishes (measured ~60s for a full
+    client base scan).
     """
     from app.core.client_roace_scheduler import trigger_manual_refresh
 
