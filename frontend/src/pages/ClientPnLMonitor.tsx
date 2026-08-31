@@ -432,6 +432,9 @@ export default function ClientPnLMonitor() {
           if (data.status === 'error') {
             throw new Error(data.message || '刷新失败')
           }
+          if (data.status === 'skipped') {
+            return `${srv}: ${data.message || '已有刷新在进行中，本次跳过'}`
+          }
           const parts: string[] = []
           if (typeof data.new_trades_count === 'number') parts.push(`成交 ${data.new_trades_count}`)
           // 与 V2 页面一致：MT4Live2 不展示浮动更新数
@@ -465,6 +468,10 @@ export default function ClientPnLMonitor() {
         throw new Error(msg)
       }
       const data = await res.json()
+      if (data?.status === 'skipped') {
+        setRefreshBanner(data?.message || '已有刷新在进行中，本次跳过')
+        return
+      }
       // 汇总关键信息
       const steps: any[] = Array.isArray(data?.steps) ? data.steps : []
       const find = (name: string) => steps.find(s => s?.name === name) || {}

@@ -57,10 +57,17 @@ def refresh_pnl_user_summary(body: EtlRefreshRequest) -> EtlRefreshResponse:
         if not r.get("success"):
             error_msg = r.get("message") or "Refresh failed without specific error message"
             logger.warning(f"Refresh failed for {server}: {error_msg}")
+        elif r.get("skipped"):
+            logger.info(f"Refresh skipped for {server}: {r.get('message')}")
         else:
             logger.info(f"Refresh completed for {server}: processed_rows={r.get('processed_rows')}, duration={r.get('duration_seconds')}s")
 
-        status = "success" if r.get("success") else "error"
+        # "skipped" is its own status on purpose. Reporting a run that did no
+        # work as "success" is how a stuck advisory lock stays invisible.
+        if r.get("skipped"):
+            status = "skipped"
+        else:
+            status = "success" if r.get("success") else "error"
         log_refresh_event(
             "pnl_user_summary_refresh",
             {
@@ -120,7 +127,10 @@ def refresh_client_pnl() -> ClientPnlRefreshResponse:
     """
     try:
         r = run_client_pnl_incremental_refresh()
-        status = "success" if r.get("success") else "error"
+        if r.get("skipped"):
+            status = "skipped"
+        else:
+            status = "success" if r.get("success") else "error"
         steps_raw = r.get("steps") or []
         steps: List[ClientPnlRefreshStep] = [ClientPnlRefreshStep(**s) for s in steps_raw if isinstance(s, dict)]
         log_refresh_event(

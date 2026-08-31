@@ -6,6 +6,8 @@ from datetime import datetime, timedelta, timezone
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
+from app.core.pg_session import harden_dsn, pg_session
+
 
 def _pg_dsn() -> str:
 	"""Build PostgreSQL DSN from env (MT5_ETL)."""
@@ -14,7 +16,10 @@ def _pg_dsn() -> str:
 	db = os.getenv("POSTGRES_DBNAME_MT5", "MT5_ETL")
 	user = os.getenv("POSTGRES_USER", "postgres")
 	password = os.getenv("POSTGRES_PASSWORD", "")
-	return f"host={host} port={port} dbname={db} user={user} password={password}"
+	return harden_dsn(
+		f"host={host} port={port} dbname={db} user={user} password={password}",
+		application_name="zipcode",
+	)
 
 
 def get_zipcode_distribution() -> List[Dict[str, Any]]:
@@ -46,7 +51,7 @@ def get_zipcode_distribution() -> List[Dict[str, Any]]:
 	ORDER BY client_count DESC, zipcode ASC;
 	"""
 	dsn = _pg_dsn()
-	with psycopg2.connect(dsn) as conn:
+	with pg_session(dsn) as conn:
 		with conn.cursor(cursor_factory=RealDictCursor) as cur:
 			cur.execute(sql)
 			rows = cur.fetchall()
@@ -114,7 +119,7 @@ def get_zipcode_changes(
 	where_clause = " AND ".join(where_parts)
 
 	dsn = _pg_dsn()
-	with psycopg2.connect(dsn) as conn:
+	with pg_session(dsn) as conn:
 		with conn.cursor() as cur:
 			# Count total
 			cur.execute(
@@ -150,7 +155,7 @@ def get_exclusions(is_active: bool | None = None, limit: int = 100) -> List[Dict
 	Returns [{ id, client_id, reason_code, note, added_by, added_at, expires_at, is_active }]
 	"""
 	dsn = _pg_dsn()
-	with psycopg2.connect(dsn) as conn:
+	with pg_session(dsn) as conn:
 		with conn.cursor(cursor_factory=RealDictCursor) as cur:
 			if is_active is None:
 				cur.execute(
@@ -183,7 +188,7 @@ def add_manual_exclusion(client_id: int, note: str, added_by: str = "WebUser") -
 	Insert a manual exclusion with reason_code MANUAL, capturing UI note for audit.
 	"""
 	dsn = _pg_dsn()
-	with psycopg2.connect(dsn) as conn:
+	with pg_session(dsn) as conn:
 		with conn.cursor(cursor_factory=RealDictCursor) as cur:
 			# Step 1: deactivate active PERM_LOSS record if exists
 			cur.execute(
@@ -225,7 +230,7 @@ def get_change_frequency(window_days: int = 30, page: int = 1, page_size: int = 
 	"""
 	window_days = max(1, min(window_days, 365))
 	dsn = _pg_dsn()
-	with psycopg2.connect(dsn) as conn:
+	with pg_session(dsn) as conn:
 		with conn.cursor() as cur:
 			cur.execute(
 				"""
