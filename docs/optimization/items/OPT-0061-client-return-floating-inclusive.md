@@ -1,7 +1,7 @@
 ---
 id: OPT-0061
 title: Client Return Rate 加「含浮动收益率 + 扛单率」两列 —— 修正 ROACE 只含已平仓导致的收益率扭曲
-status: ready
+status: wip
 priority: P1
 area: mixed
 effort: M
