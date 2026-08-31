@@ -12,6 +12,14 @@ from psycopg2.extras import RealDictCursor
 import psycopg2.extras
 import pymysql
 
+from app.core.pg_session import (
+    DEFAULT_CONNECT_TIMEOUT_SEC,
+    DEFAULT_STATEMENT_TIMEOUT_MS,
+    LOCK_CLIENT_PNL_REFRESH,
+    harden_dsn,
+    pg_session,
+)
+
 
 def _pg_dsn() -> str:
     """获取 PostgreSQL 连接字符串"""
@@ -20,7 +28,10 @@ def _pg_dsn() -> str:
     db = os.getenv("POSTGRES_DBNAME_MT5", "MT5_ETL")
     user = os.getenv("POSTGRES_USER", "postgres")
     password = os.getenv("POSTGRES_PASSWORD", "")
-    return f"host={host} port={port} dbname={db} user={user} password={password}"
+    return harden_dsn(
+        f"host={host} port={port} dbname={db} user={user} password={password}",
+        application_name="client_pnl",
+    )
 
 
 def get_client_pnl_summary_paginated(
@@ -261,7 +272,7 @@ def get_client_pnl_summary_paginated(
     count_sql = f"SELECT COUNT(*) FROM public.pnl_client_summary" + where_clause
     
     dsn = _pg_dsn()
-    with psycopg2.connect(dsn) as conn:
+    with pg_session(dsn) as conn:
         # 查询总数
         with conn.cursor() as cur:
             cur.execute(count_sql, params)
@@ -293,7 +304,7 @@ def get_client_accounts(client_id: int) -> List[dict]:
         账户列表
     """
     dsn = _pg_dsn()
-    with psycopg2.connect(dsn) as conn:
+    with pg_session(dsn) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
@@ -338,7 +349,7 @@ def initialize_client_summary(force: bool = False) -> dict:
         统计信息字典
     """
     dsn = _pg_dsn()
-    with psycopg2.connect(dsn) as conn:
+    with pg_session(dsn) as conn:
         # 如果 force=True，先清空数据
         if force:
             with conn.cursor() as cur:
@@ -375,7 +386,7 @@ def compare_client_summary(auto_fix: bool = False) -> List[dict]:
         差异列表
     """
     dsn = _pg_dsn()
-    with psycopg2.connect(dsn) as conn:
+    with pg_session(dsn) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 "SELECT * FROM public.compare_client_summary(%s)",
@@ -393,7 +404,7 @@ def get_refresh_status() -> dict:
         状态信息字典
     """
     dsn = _pg_dsn()
-    with psycopg2.connect(dsn) as conn:
+    with pg_session(dsn) as conn:
         with conn.cursor() as cur:
             # 获取最后更新时间和统计信息
             cur.execute(
@@ -437,7 +448,17 @@ def run_client_pnl_incremental_refresh() -> dict:
         password = _get_env("POSTGRES_PASSWORD")
         port = int(_get_env("POSTGRES_PORT", "5432"))
         dbname = _get_env("POSTGRES_DBNAME_MT5", "MT5_ETL")
-        conn = psycopg2.connect(host=host, user=user, password=password, port=port, dbname=dbname)
+        conn = psycopg2.connect(
+            host=host,
+            user=user,
+            password=password,
+            port=port,
+            dbname=dbname,
+            connect_timeout=DEFAULT_CONNECT_TIMEOUT_SEC,
+            sslmode="require",
+            application_name="client_pnl_refresh",
+            options=f"-c statement_timeout={DEFAULT_STATEMENT_TIMEOUT_MS}",
+        )
         conn.autocommit = False
         return conn
 
@@ -462,8 +483,29 @@ def run_client_pnl_incremental_refresh() -> dict:
 
     pg = None
     mysql_fx = None
+    lock_held = False
     try:
         pg = _connect_postgres()
+
+        # This refresh rolls pnl_client_accounts up into pnl_client_summary. Two
+        # overlapping runs would have the summary aggregated from a half-written
+        # accounts table, so serialise them the same way the two pnl_user_summary
+        # refreshes already do.
+        with pg.cursor() as cur:
+            cur.execute("SELECT pg_try_advisory_lock(%s)", (LOCK_CLIENT_PNL_REFRESH,))
+            lock_held = bool(cur.fetchone()[0])
+            pg.commit()
+        if not lock_held:
+            return {
+                "success": True,
+                "skipped": True,
+                "message": "Another client PnL refresh is in progress",
+                "duration_seconds": time.perf_counter() - start_ts,
+                "steps": [],
+                "max_last_updated": None,
+                "raw_log": None,
+            }
+
         mysql_fx = _connect_mysql_fx(os.getenv("MYSQL_DATABASE_FXBACKOFFICE", "fxbackoffice"))
 
         # 1) 计算 watermark（供步骤展示，逻辑保持与原脚本一致：从 etl_watermarks 取多个 dataset 的 MAX(last_updated)）
@@ -906,6 +948,16 @@ def run_client_pnl_incremental_refresh() -> dict:
         try:
             if mysql_fx is not None:
                 mysql_fx.close()
+        except Exception:
+            pass
+        try:
+            if pg is not None and lock_held:
+                # An exception on the way out leaves the transaction aborted,
+                # which would make the unlock statement itself fail.
+                pg.rollback()
+                with pg.cursor() as cur:
+                    cur.execute("SELECT pg_advisory_unlock(%s)", (LOCK_CLIENT_PNL_REFRESH,))
+                    pg.commit()
         except Exception:
             pass
         try:

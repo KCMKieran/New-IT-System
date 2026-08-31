@@ -9,6 +9,13 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 import mysql.connector
 
+from app.core.pg_session import (
+    LOCK_PNL_USER_SUMMARY_MT4LIVE2,
+    LOCK_PNL_USER_SUMMARY_MT5,
+    harden_dsn,
+    pg_session,
+)
+
 
 def _pg_mt5_dsn() -> str:
     host = os.getenv("POSTGRES_HOST", "localhost")
@@ -16,7 +23,10 @@ def _pg_mt5_dsn() -> str:
     db = os.getenv("POSTGRES_DBNAME_MT5")
     user = os.getenv("POSTGRES_USER", "postgres")
     password = os.getenv("POSTGRES_PASSWORD", "")
-    return f"host={host} port={port} dbname={db} user={user} password={password}"
+    return harden_dsn(
+        f"host={host} port={port} dbname={db} user={user} password={password}",
+        application_name="etl_pnl",
+    )
 
 
 def resolve_table_and_dataset(server: str) -> Tuple[str, str]:
@@ -237,7 +247,7 @@ def get_pnl_user_summary_paginated(
     count_sql = f"SELECT COUNT(*) FROM {source_table}" + where_clause
 
     dsn = _pg_mt5_dsn()
-    with psycopg2.connect(dsn) as conn:
+    with pg_session(dsn) as conn:
         with conn.cursor() as cur:
             cur.execute(count_sql, params)
             total_count = cur.fetchone()[0]
@@ -257,7 +267,7 @@ def get_etl_watermark_last_updated(dataset: str = "pnl_user_summary") -> Optiona
     返回 None 表示不存在记录。
     """
     dsn = _pg_mt5_dsn()
-    with psycopg2.connect(dsn) as conn:
+    with pg_session(dsn) as conn:
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT last_updated FROM public.etl_watermarks WHERE dataset = %s LIMIT 1",
@@ -274,7 +284,7 @@ def get_user_groups_from_user_summary(source_table: str = "public.pnl_user_summa
         List[str]: 归一化后的组别列表，按字母排序（不区分大小写）。
     """
     dsn = _pg_mt5_dsn()
-    with psycopg2.connect(dsn) as conn:
+    with pg_session(dsn) as conn:
         with conn.cursor() as cur:
             cur.execute(
                 f"""
@@ -306,7 +316,10 @@ def _pg_mt5_dsn_forced_db(dbname: str) -> str:
     port = int(os.getenv("POSTGRES_PORT", "5432"))
     user = os.getenv("POSTGRES_USER", "postgres")
     password = os.getenv("POSTGRES_PASSWORD", "")
-    return f"host={host} port={port} dbname={dbname} user={user} password={password}"
+    return harden_dsn(
+        f"host={host} port={port} dbname={dbname} user={user} password={password}",
+        application_name="etl_pnl",
+    )
 
 
 def _mysql_mt5_cfg() -> Dict[str, Any]:
@@ -317,6 +330,29 @@ def _mysql_mt5_cfg() -> Dict[str, Any]:
         "database": os.getenv("MYSQL_DATABASE"),
         "ssl_ca": os.getenv("MYSQL_SSL_CA"),
     }
+
+
+# A client-side timeout only closes our own socket -- MySQL keeps executing and
+# keeps holding metadata locks. That is exactly how the 2026-08-09 slave
+# incident put 2,637 zombie threads on the replica. MAX_EXECUTION_TIME is the
+# only guard that actually stops the server, so it is set below the client
+# socket timeout, never above it.
+_MYSQL_CONNECT_TIMEOUT_SEC = 10
+_MYSQL_MAX_EXECUTION_TIME_MS = 15 * 60 * 1000  # matches the PG statement_timeout
+
+
+def _connect_mysql_guarded(cfg: Dict[str, Any]):
+    """Open a MySQL connection with the server-side execution cap armed."""
+    conn = mysql.connector.connect(
+        connection_timeout=_MYSQL_CONNECT_TIMEOUT_SEC, **cfg
+    )
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"SET SESSION MAX_EXECUTION_TIME={_MYSQL_MAX_EXECUTION_TIME_MS}")
+    except Exception:
+        conn.close()
+        raise
+    return conn
 
 
 def mt5_incremental_refresh() -> Dict[str, Any]:
@@ -345,6 +381,7 @@ def mt5_incremental_refresh() -> Dict[str, Any]:
         "new_trades_count": 0,
         "floating_only_count": 0,
         "message": None,
+        "skipped": False,
     }
 
     # cache for groupName -> currency mapping
@@ -367,7 +404,8 @@ def mt5_incremental_refresh() -> Dict[str, Any]:
 
         mapping: Dict[str, str] = {}
         try:
-            with mysql.connector.connect(**fx_mysql_cfg) as fx_conn:
+            fx_conn = _connect_mysql_guarded(fx_mysql_cfg)
+            try:
                 with fx_conn.cursor(dictionary=True) as cur:
                     cur.execute("SELECT groupName, currency FROM `groups`")
                     for r in cur.fetchall():
@@ -375,6 +413,11 @@ def mt5_incremental_refresh() -> Dict[str, Any]:
                         currency = r.get("currency")
                         if group_name and currency:
                             mapping[str(group_name)] = str(currency)
+            finally:
+                try:
+                    fx_conn.close()
+                except Exception:
+                    pass
             logger.info(
                 "Loaded %s group-to-currency mappings from fxbackoffice.groups",
                 len(mapping),
@@ -401,18 +444,21 @@ def mt5_incremental_refresh() -> Dict[str, Any]:
     ):
         raise RuntimeError("Missing required MySQL env vars for MT5 incremental refresh")
 
-    with psycopg2.connect(pg_dsn) as pg_conn:
+    with pg_session(pg_dsn) as pg_conn:
         pg_conn.autocommit = False
 
         with pg_conn.cursor() as cur:
             # advisory lock
-            cur.execute("SELECT pg_try_advisory_lock(%s)", (937_000_001,))
+            cur.execute("SELECT pg_try_advisory_lock(%s)", (LOCK_PNL_USER_SUMMARY_MT5,))
             locked = bool(cur.fetchone()[0])
             pg_conn.commit()
 
         if not locked:
             # another run is in progress
+            # A rejected lock is not a failure, but it is emphatically not a
+            # refresh either -- the caller must be able to tell the difference.
             result["success"] = True
+            result["skipped"] = True
             result["message"] = "Another incremental run is in progress"
             return result
 
@@ -454,7 +500,7 @@ def mt5_incremental_refresh() -> Dict[str, Any]:
                     last_deal_id = 0
 
             # connect to MySQL
-            mysql_conn = mysql.connector.connect(**mysql_cfg)
+            mysql_conn = _connect_mysql_guarded(mysql_cfg)
 
             try:
                 # ---------- Step 0: insert new logins skeleton rows (with currency) ----------
@@ -768,7 +814,7 @@ def mt5_incremental_refresh() -> Dict[str, Any]:
             raise
         finally:
             with pg_conn.cursor() as cur:
-                cur.execute("SELECT pg_advisory_unlock(%s)", (937_000_001,))
+                cur.execute("SELECT pg_advisory_unlock(%s)", (LOCK_PNL_USER_SUMMARY_MT5,))
                 pg_conn.commit()
 
     result["duration_seconds"] = round(time.time() - start_ts, 3)
@@ -803,6 +849,7 @@ def mt4live2_incremental_refresh() -> Dict[str, Any]:
         "new_trades_count": 0,
         "floating_only_count": 0,
         "message": None,
+        "skipped": False,
     }
 
     import time
@@ -815,9 +862,9 @@ def mt4live2_incremental_refresh() -> Dict[str, Any]:
     TARGET_TABLE = "public.pnl_user_summary_mt4live2"
     DATASET = "pnl_user_summary_mt4live2"
     PARTITION = "ALL"
-    LOCK_KEY = 937_000_002
+    LOCK_KEY = LOCK_PNL_USER_SUMMARY_MT4LIVE2
 
-    with psycopg2.connect(pg_dsn) as pg_conn:
+    with pg_session(pg_dsn) as pg_conn:
         pg_conn.autocommit = False
 
         # Acquire advisory lock
@@ -826,7 +873,10 @@ def mt4live2_incremental_refresh() -> Dict[str, Any]:
             locked = bool(cur.fetchone()[0])
             pg_conn.commit()
         if not locked:
+            # A rejected lock is not a failure, but it is emphatically not a
+            # refresh either -- the caller must be able to tell the difference.
             result["success"] = True
+            result["skipped"] = True
             result["message"] = "Another MT4Live2 incremental run is in progress"
             return result
 
@@ -960,7 +1010,7 @@ def mt4live2_incremental_refresh() -> Dict[str, Any]:
                     since_ticket = 0
 
             # Connect to MySQL
-            mysql_conn = mysql.connector.connect(**mysql_cfg)
+            mysql_conn = _connect_mysql_guarded(mysql_cfg)
             try:
                 # Ensure skeleton rows exist in target
                 users_sql = (
