@@ -489,12 +489,20 @@ def _attach_roace_columns(rows: list[dict[str, Any]], roace_map: dict[int, dict]
         row["capital_locked"] = False
         if first_float is None or last_float is None or avg_bal is None:
             continue  # pre-OPT-0061 snapshot row (v2 not refreshed yet)
+        # Order matters (2026-08-31 cold review F1): the noise filters must be
+        # able to veto the flag, or a $5-equity dust account lights up as
+        # "capital locked". Too-young always blanks (averages too noisy to make
+        # ANY claim); a failed ratio gate only earns the flag when meaningful
+        # money is involved (avg balance over the min-equity threshold) — that
+        # keeps the flag on the deep-locked whales it exists for and off the
+        # dust, without blanking a whale whose avg equity was dragged under
+        # the min-equity bar by the very locking we want to surface.
+        if active_days < _FLOAT_GATE_MIN_ACTIVE_DAYS:
+            continue
         if avg_eq < _FLOAT_GATE_MIN_EQ_TO_BAL_RATIO * float(avg_bal):
-            row["capital_locked"] = True
-        elif (
-            active_days >= _FLOAT_GATE_MIN_ACTIVE_DAYS
-            and avg_eq >= _FLOAT_GATE_MIN_AVG_EQUITY
-        ):
+            if float(avg_bal) >= _FLOAT_GATE_MIN_AVG_EQUITY:
+                row["capital_locked"] = True
+        elif avg_eq >= _FLOAT_GATE_MIN_AVG_EQUITY:
             total_pnl = profit_hist + (float(last_float) - float(first_float))
             row["return_with_floating"] = round(total_pnl / avg_eq * 100, 2)
 

@@ -800,9 +800,9 @@ export default function ClientReturnRate() {
             "⚠ 本列是 mark-to-market 数字，**随行情每天变**——客户不做任何交易它也会动，\n" +
             "这不是 bug（实测同一客户 3 天内 −0.4% → +9.0%，因为浮亏收窄了）\n" +
             "与左侧 ROACE 的差值即扛单强度：ROACE 删掉了浮亏、本列把它算回来\n\n" +
-            "「资本已套牢」= 日均净值不足日均余额的 20%，分母已失真不给数——\n" +
+            "「资本已套牢」= 日均净值不足日均余额的 20%（且日均余额 ≥ $1,000），分母已失真不给数——\n" +
             "该客户绝大部分资金押在浮亏里，恰恰是最需要看的（看右侧扛单率列）\n" +
-            "活跃天数 < 30 或日均净值 < $1,000 的客户不计算（样本太小），显示为空\n\n" +
+            "活跃天数 < 30 或资金规模太小（< $1,000）的客户不计算（样本太小），显示为空\n\n" +
             "Formula: (profit_hist + ΔFloating) / avg_daily_equity × 100%.\n" +
             "Mark-to-market — moves with the market daily even without trading.\n" +
             "'Capital locked' = avg equity < 20% of avg balance (denominator collapsing).",

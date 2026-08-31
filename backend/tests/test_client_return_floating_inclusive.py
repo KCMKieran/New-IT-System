@@ -92,6 +92,20 @@ class TestRefreshSqlGuards:
         'SUM everything / COUNT(DISTINCT date)' shortcut cannot produce them."""
         assert re.search(r"GROUP BY\s+mu2\.userId,\s*sb\.date", _REFRESH_SQL)
 
+    def test_refresh_invalidates_client_return_cache_on_success(self):
+        """Cold-review F2: a successful refresh must drop the cached /query
+        blobs — they embed the previous snapshot's columns and would otherwise
+        be served for up to their remaining 3h TTL."""
+        import inspect
+
+        from app.services import client_roace_refresh_service
+
+        src = inspect.getsource(client_roace_refresh_service.refresh_all_clients)
+        assert "app:client_return:cache:*" in src, (
+            "refresh_all_clients no longer invalidates the client-return Redis "
+            "cache after a successful run"
+        )
+
     def test_refresh_sql_normalizes_cen_on_all_three_columns(self):
         for col in ("endingEquity", "endingBalance", "endingCredit"):
             assert re.search(
@@ -159,6 +173,39 @@ class TestAttachRoaceColumns:
         _attach_roace_columns([row], {1: snap})
         assert row["capital_locked"] is False
         assert row["return_with_floating"] is not None
+
+    def test_dust_account_is_not_flagged_capital_locked(self):
+        """Cold-review F1: a $5-equity / $500-balance dust account fails the
+        ratio gate but must NOT light up as 'capital locked' — the flag is for
+        meaningful money (avg_bal >= min-equity threshold), dust blanks."""
+        snap = _snap(avg_daily_equity=5.0, avg_daily_balance=500.0)
+        row = _row()
+        _attach_roace_columns([row], {1: snap})
+        assert row["return_with_floating"] is None
+        assert row["capital_locked"] is False
+
+    def test_deep_locked_whale_below_min_equity_keeps_the_flag(self):
+        """A whale whose avg equity was dragged UNDER the min-equity bar by the
+        very locking we want to surface must still be flagged, not blanked —
+        the flag keys off avg_bal, not avg_eq."""
+        snap = _snap(avg_daily_equity=800.0, avg_daily_balance=76_000.0)
+        row = _row()
+        _attach_roace_columns([row], {1: snap})
+        assert row["capital_locked"] is True
+        assert row["return_with_floating"] is None
+
+    def test_young_locked_account_blanks_without_flag(self):
+        """Too-young vetoes the flag too: 10-day averages are too noisy to make
+        ANY claim, including 'capital locked'."""
+        snap = _snap(
+            avg_daily_equity=1_379.0,
+            avg_daily_balance=76_308.0,
+            active_days=10,
+        )
+        row = _row()
+        _attach_roace_columns([row], {1: snap})
+        assert row["return_with_floating"] is None
+        assert row["capital_locked"] is False
 
     def test_too_few_active_days_blanks_without_flag(self):
         """A 10-day-old account is not 'capital locked' — it is just too young

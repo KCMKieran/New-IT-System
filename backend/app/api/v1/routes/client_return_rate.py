@@ -78,7 +78,7 @@ def _get_client_ip(request: Request) -> str:
 
 
 # Deliberately sync (`def`, not `async def`): the service layer runs blocking
-# pymysql queries against the slave (`read_timeout=30`), and this is the busiest
+# pymysql queries against the slave (`read_timeout=60`), and this is the busiest
 # page in the app — normal requests take ~0.7-1.2s and a bad time range can sit
 # on the 30s read-timeout ceiling. FastAPI runs sync handlers in the threadpool,
 # so one slow query cannot freeze the event loop for every other endpoint.

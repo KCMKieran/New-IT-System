@@ -148,6 +148,22 @@ def refresh_all_clients() -> dict[str, Any]:
         error = f"{type(exc).__name__}: {exc}"
         logger.exception("ROACE refresh failed")
 
+    # A successful refresh makes every cached /query blob stale (they embed the
+    # previous snapshot's ROACE/floating columns and would otherwise be served
+    # for up to their remaining 3h TTL). Drop them so the first request after
+    # the refresh recomputes. Failure path keeps the cache — stale beats empty.
+    if error is None and rows_written > 0:
+        try:
+            from app.services.clickhouse_service import clickhouse_service
+
+            if clickhouse_service.redis_client:
+                keys = clickhouse_service.redis_client.keys("app:client_return:cache:*")
+                if keys:
+                    clickhouse_service.redis_client.delete(*keys)
+                logger.info("ROACE refresh: dropped %d stale client-return cache keys", len(keys))
+        except Exception:
+            logger.warning("ROACE refresh: cache invalidation failed", exc_info=True)
+
     duration_ms = int((time.monotonic() - t0) * 1000)
     finished_at = datetime.now(_HK_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
