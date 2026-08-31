@@ -15,7 +15,6 @@
 | [OPT-0028](./items/OPT-0028-risk-monitor-aggregator-hardening.md) | opt/aggregator-hardening | 2026-07-06 | 等 0041 merge 后开工（依赖测试转绿） |
 | [OPT-0057](./items/OPT-0057-risk-watchlist-copy-rewrite.md) | opt/risk-watchlist-copy-rewrite | 2026-07-25 | 阻塞：待用户在 items/OPT-0057-...-copy-review.md 填新文案后实施 |
 | [OPT-0059](./items/OPT-0059-fund-flow-blocking-async-routes.md) | opt/fund-flow-blocking-async-routes | 2026-08-19 | 8 个 async def → def；该模块零测试，验收靠手测 8 个端点 |
-| [OPT-0061](./items/OPT-0061-client-return-floating-inclusive.md) | opt/client-return-floating-inclusive | 2026-08-31 | 含浮动收益率 + 扛单率两列；连带 profit_hist 口径修正（改现有 ROACE 数值），merge 前跑改前/改后对账 |
 ## ✅ 待领取（Ready）
 
 > AC 已经在 item 文件里定义好了。按 priority + effort + 你的当前心智状态挑一个。

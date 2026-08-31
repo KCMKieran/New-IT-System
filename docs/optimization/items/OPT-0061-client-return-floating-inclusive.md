@@ -1,7 +1,7 @@
 ---
 id: OPT-0061
 title: Client Return Rate 加「含浮动收益率 + 扛单率」两列 —— 修正 ROACE 只含已平仓导致的收益率扭曲
-status: wip
+status: done
 priority: P1
 area: mixed
 effort: M
@@ -116,9 +116,9 @@ related: [[OPT-0006]], [[OPT-0020]], [[OPT-0060]]
 
 ## 假设 / 待验证
 
-- [ ] 扩展 SQL 在 **prod 时段**（06:00）跑仍在 60 秒量级 —— 58.3 秒是白天从库实测，夜间应更快但未验
-- [ ] `first_float` 取「首个活跃日」的语义是否符合业务预期（见开放问题 2）
-- [ ] 统一账户范围后，现有 ROACE 列数值变化是否可接受（见开放问题 1）
+- [x] 扩展 SQL 在 **prod 时段**（06:00）跑仍在 60 秒量级 —— ✅ 2026-08-31 17:37 白天从库经完整新代码路径实测 **48.3 秒 / 25,555 行**（夜间只会更快）
+- [x] `first_float` 取「首个活跃日」的语义是否符合业务预期 —— ✅ 三个案例客户全部命中 item 预期值（128535 含浮动 +9.46% vs 预期 ~+9.0%；110367 +136.25% vs 真实 +136.3%；125420 Total PnL −35,442.30 与记录的 −35,442 一致）
+- [x] 统一账户范围后，现有 ROACE 列数值变化是否可接受 —— ✅ 全量对账：2,240 变 / **540 个差 >$1,000（与预期一致）** / 54 符号翻转 / 另有 1,619 个只剩范围外账户的客户归 0；典型 125420 ROACE +531% → +22.7%（修正方向正确）。清单 `backend/data/opt0061_profit_hist_recon.csv`
 
 ---
 
@@ -341,4 +341,58 @@ GROUP BY uid
 
 ## 结果
 
-<待填>
+**2026-08-31 完成**（claim 同日），branch `opt/client-return-floating-inclusive`（`da37dc8` 实施 + `3a86817` 冷审修复）。
+
+### 实际交付 vs AC
+
+后端/前端/授权 AC **全部完成**，另加冷审两项修复。要点：
+
+- SQLite 走了 AC 推荐的**换表**路线：`roace_snapshot` → `roace_snapshot_v2`（v1 保留供回滚镜像读）。
+  **v2 已在 merge 前经共享 bind mount 预填**（25,555 行，2026-08-31 17:38），部署无空窗；
+  保险起见部署后仍可手动 `POST /roace/refresh`
+- 刷新 SQL 两级聚合 + `MAX_EXECUTION_TIME(300000)` hint，**经完整新代码路径实测 48.3 秒**
+  （比白天 ad-hoc 的 58.3s 还快）；docstring「1-3 min」已修
+- 缓存前缀 `v7_` → `v8_floating_inclusive_`；`TestCacheVersionPinnedToTheFormula` 同步；
+  OPT-0060 文档里 6 处 v6/v7 引用改成 v8/v9
+- 新护栏测试 `test_client_return_floating_inclusive.py`（21 用例）：rt 腿 sid/demo 过滤、
+  刷新 SQL hint/聚合形状/CEN 三列、gate 语义（含 128535/125420/尘埃/深套大户形状）、
+  刷新后清缓存
+- 文档：`client-return-rate.md` 新增 §3.3、`roace-return-rate.md` 加更新框、feature 列表同步
+
+### 验证（AC §验证 三项全过）
+
+- 三案例手算对账：128535 ROACE 186.9% vs 含浮动 **+9.46%**；110367 **+136.25%**（真实 +136.3%）；
+  125420 `capital_locked` + 扛单率 **−98.31%**、Total PnL **−35,442.30** 与独立核算一致
+- 恒等式：三客户 `Closed + ΔFloating` vs `ΔEquity − 净流入` 残差 2-6%（首活跃日日终锚点 +
+  credit 类操作不在 stats_transactions），方向量级全部吻合
+- 全量对账（AC 决策 1 连带要求）：**2,240 客户 profit_hist 有变 / 540 差 >$1,000（与预期一致）/
+  54 符号翻转 / 1,619 只剩范围外账户的客户归 0**；典型 125420 ROACE +531% → +22.7%。
+  清单 `backend/data/opt0061_profit_hist_recon.csv`（gitignore 区，容器内 root 写的）
+- 闸门：pytest 1667+（2 个 `test_xauusd_snapshot_service` 既有红除外）/ vitest 256 / tsc 0
+
+### Stage 1 冷审处理记录（reviewer 9 条 → curate 后 4 条问用户）
+
+- **F1 gate 判定顺序**（尘埃账户误标「资本已套牢」）：**当场修** `3a86817` —— 噪音过滤先行，
+  标记 keyed on `avg_bal ≥ $1,000`（深套大户即使 avg_eq 被拖到 $1,000 以下也保住标记）
+- **F2 刷新后不清 Redis 缓存**（旧 blob 最多再活 3h）：**当场修** `3a86817`
+- **F3 刷新失败无告警 / attach 不看快照年龄**：**live with** —— 既有行为，失败有 ERROR 日志；
+  将来接 alert-mail-center（见 follow-up）
+- **F4 「资本已套牢」不可用列筛选器直达**：**live with** —— 按扛单率列排序即达（−98% 在顶部），
+  tooltip 已指路；观察真实使用再决定加 0/1 列
+- reviewer #3「SQL 形状不适合增长」：**live with** —— 决策 7 已预判，与 [[OPT-0060]] 合并
+  流式骨架时整段替换；#4b bool→状态枚举：等第二个带 gate 指标（MDD）落地时引入；
+  #7 跨 worker 锁 / #8 SQLite WAL：既有模式，幂等无压力；
+  reviewer 确认 rt 腿**无 fan-out、无别名冲突**
+
+### Follow-ups
+
+1. 🔴 **上线前知会在用页面的人**（用户动作）：ROACE 数值会变——2,240 客户、540 个差 >$1,000、
+   54 个符号翻转，同 08-28 CEN 修复那次的知会方式
+2. **low-equity gate 三阈值**（20% / 30 天 / $1,000）按 item 默认实施，用户仍可终审改动
+   （`client_return_service.py` 顶部三个常量）
+3. F3：roace 刷新失败告警接 alert-mail-center；attach 可考虑透出 `refreshed_at` 到 statistics
+4. F4：观察「资本已套牢」cohort 的真实使用，需要时加可筛选 0/1 列（照 U入金 列模式）
+5. reviewer #6：新列 as-of 日期（「截至昨日日终」）属 polish；当日已平仓盈亏与隔夜浮动存在
+   最多一天口径错位（profit_hist 实时 vs 浮动隔夜），tooltip 已写日终快照口径
+6. [[OPT-0060]] 落地时：本 OPT 的刷新 SQL 被流式骨架替换（列定义/schema/前端/测试留用）；
+   届时引入 per-metric 状态枚举替代 `capital_locked` bool

@@ -34,7 +34,13 @@ Net deposit convention (2026-07-15 — numerator/denominator symmetry fix):
   lifting net deposit, so return is still mildly optimistic for IB-cum-traders.)
 
 Return rate columns:
-  - profit_hist:          realized trade P&L from stats_trading_running_totals (excludes IB commissions, bonuses)
+  - profit_hist:          realized trade P&L from stats_trading_running_totals
+                          (excludes IB commissions, bonuses). Scope: sid 1/5/6
+                          non-demo, matching the ROACE denominator (OPT-0061)
+  - return_with_floating: (profit_hist + ΔFloating) / avg_daily_equity × 100 —
+                          mark-to-market, moves with the market daily (OPT-0061)
+  - floating_burden_ratio: avg daily floating P&L / avg daily balance × 100 —
+                          how much of the capital is pinned under open positions
   - adj_xxx:              equity / bucket_base × 100 (when net_deposit ≤ 0, by deposit bucket)
   - return_non_adjusted:  (equity - net_deposit) / net_deposit × 100 (when net_deposit > 0)
   - return_neg_adjusted:  (equity - A) / A × 100, A = MAX(deposits_90d, |net_deposit|) (when net_deposit ≤ 0)
@@ -342,14 +348,23 @@ LEFT JOIN (
 -- cent leg read as -$758.57). That also propagated into ROACE, whose denominator
 -- avg_daily_equity IS CEN-adjusted, so the ratio was inflated on exactly the
 -- mixed USD/CEN clients. See docs/features/client-return-rate.md §3.2.
+--
+-- Account scope (OPT-0061 decision 1a): sid IN (1,5,6) + non-demo, matching the
+-- ROACE denominator (avg_daily_equity from client_roace_refresh_service) and the
+-- `eq` subquery above. Previously this leg summed EVERY account of the client
+-- (demo, wallet, other sids included) while the denominator did not — 2,044
+-- clients differed, 540 of them by >$1,000.
 LEFT JOIN (
-    SELECT userId AS client_id,
-           SUM(IF(currency = 'CEN',
-                  plClosedHavingActivityRunningTotal / 100.0,
-                  plClosedHavingActivityRunningTotal)) AS profit_hist_trades
-    FROM stats_trading_running_totals
-    WHERE userId IN ({id_list_str})
-    GROUP BY userId
+    SELECT srt.userId AS client_id,
+           SUM(IF(srt.currency = 'CEN',
+                  srt.plClosedHavingActivityRunningTotal / 100.0,
+                  srt.plClosedHavingActivityRunningTotal)) AS profit_hist_trades
+    FROM stats_trading_running_totals srt
+    INNER JOIN mt4_users mu ON srt.loginSid = mu.loginSid
+    WHERE srt.userId IN ({id_list_str})
+      AND mu.sid IN (1, 5, 6)
+      AND mu.`GROUP` NOT LIKE '%demo%'
+    GROUP BY srt.userId
 ) AS rt ON tm.id = rt.client_id
 
 LEFT JOIN (
@@ -405,6 +420,91 @@ WHERE tm.id IN ({id_list_str})
 
 ORDER BY tm.id
 """
+
+
+# ---------------------------------------------------------------------------
+# OPT-0061 — floating-inclusive return + floating burden ratio
+#
+# return_with_floating = (profit_hist + (last_float − first_float))
+#                        / avg_daily_equity × 100
+# floating_burden_ratio = (avg_eq − avg_bal − avg_cr) / avg_bal × 100
+#                       = avg daily floating P&L / avg daily balance
+#
+# Low-equity gate: when avg equity collapses relative to avg balance the
+# denominator explodes into unreadable figures (client 125420: real net
+# −35,442 / avg_eq 1,379 = −2,570%). Ratio-gated rows are flagged
+# `capital_locked` instead of silently blanked — that cohort is precisely the
+# strongest signal (99.5% of the money stuck in floating losses). The
+# active-days / min-equity conditions are plain noise filters (too young /
+# too small to rate), so failing THOSE renders null without the flag.
+# Thresholds are the analysis defaults from the OPT-0061 item — user has not
+# finalized them; keep them as module constants so a re-decision is one edit.
+# ---------------------------------------------------------------------------
+_FLOAT_GATE_MIN_EQ_TO_BAL_RATIO = 0.20
+_FLOAT_GATE_MIN_ACTIVE_DAYS = 30
+_FLOAT_GATE_MIN_AVG_EQUITY = 1000.0
+
+_ROACE_NULL_COLUMNS = (
+    "avg_daily_equity",
+    "return_on_avg_equity",
+    "return_with_floating",
+    "floating_burden_ratio",
+)
+
+
+def _attach_roace_columns(rows: list[dict[str, Any]], roace_map: dict[int, dict]) -> None:
+    """Attach ROACE + floating-inclusive columns (in place) from the nightly
+    SQLite snapshot. Split out of the request path so the gate logic is unit
+    testable without a MySQL round-trip.
+    """
+    for row in rows:
+        snap = roace_map.get(row["client_id"])
+        if not (snap and snap["avg_daily_equity"] and snap["avg_daily_equity"] > 0):
+            for col in _ROACE_NULL_COLUMNS:
+                row[col] = None
+            row["capital_locked"] = False
+            continue
+
+        avg_eq = float(snap["avg_daily_equity"])
+        profit_hist = float(row.get("profit_hist") or 0)
+        row["avg_daily_equity"] = round(avg_eq, 2)
+        row["return_on_avg_equity"] = round(profit_hist / avg_eq * 100, 2)
+
+        avg_bal = snap.get("avg_daily_balance")
+        avg_cr = float(snap.get("avg_daily_credit") or 0.0)
+        first_float = snap.get("first_float")
+        last_float = snap.get("last_float")
+        active_days = int(snap.get("active_days") or 0)
+
+        # Burden ratio is NOT gated — it stays readable exactly when the gate
+        # trips (it is the "how locked is the capital" readout itself).
+        if avg_bal is not None and float(avg_bal) > 0:
+            row["floating_burden_ratio"] = round(
+                (avg_eq - float(avg_bal) - avg_cr) / float(avg_bal) * 100, 2
+            )
+        else:
+            row["floating_burden_ratio"] = None
+
+        row["return_with_floating"] = None
+        row["capital_locked"] = False
+        if first_float is None or last_float is None or avg_bal is None:
+            continue  # pre-OPT-0061 snapshot row (v2 not refreshed yet)
+        # Order matters (2026-08-31 cold review F1): the noise filters must be
+        # able to veto the flag, or a $5-equity dust account lights up as
+        # "capital locked". Too-young always blanks (averages too noisy to make
+        # ANY claim); a failed ratio gate only earns the flag when meaningful
+        # money is involved (avg balance over the min-equity threshold) — that
+        # keeps the flag on the deep-locked whales it exists for and off the
+        # dust, without blanking a whale whose avg equity was dragged under
+        # the min-equity bar by the very locking we want to surface.
+        if active_days < _FLOAT_GATE_MIN_ACTIVE_DAYS:
+            continue
+        if avg_eq < _FLOAT_GATE_MIN_EQ_TO_BAL_RATIO * float(avg_bal):
+            if float(avg_bal) >= _FLOAT_GATE_MIN_AVG_EQUITY:
+                row["capital_locked"] = True
+        elif avg_eq >= _FLOAT_GATE_MIN_AVG_EQUITY:
+            total_pnl = profit_hist + (float(last_float) - float(first_float))
+            row["return_with_floating"] = round(total_pnl / avg_eq * 100, 2)
 
 
 def _sort_client_return_rows(
@@ -467,6 +567,7 @@ def get_client_return_rate_data(
         "adj_0_2000", "adj_2000_5000", "adj_5000_50000", "adj_50000_plus",
         "deposits_90d", "return_neg_adjusted",
         "avg_daily_equity", "return_on_avg_equity",
+        "return_with_floating", "floating_burden_ratio",
         "zipcode", "is_akcm", "has_usdt_tag",
     }
     if sort_by not in allowed_sort_columns:
@@ -494,8 +595,11 @@ def get_client_return_rate_data(
     # v7 (2026-08-28): profit_hist now divides CEN legs by 100 (the `rt` subquery
     # was summing stats_trading_running_totals raw). Same reasoning as above —
     # v6 blobs carry the 100x-inflated figure and must not be served alongside v7.
+    # v8 (OPT-0061): profit_hist scope narrowed to sid 1/5/6 non-demo (changes
+    # existing ROACE values) + new return_with_floating / floating_burden_ratio
+    # columns. v7 blobs lack the new columns and carry the old profit_hist.
     cache_params = (
-        "client_return_v7_cen_profit_hist_"
+        "client_return_v8_floating_inclusive_"
         f"{month_start}_{month_end}_{search}_{deposit_bucket}_{sort_by}_{sort_order}_"
         f"{page}_{page_size}_{close_time_start}_{include_avg_equity}_"
         f"{country_filter}_{akcm_filter}_{usdt_filter}_{return_all}"
@@ -605,16 +709,7 @@ def get_client_return_rate_data(
                 logger.exception("ROACE snapshot lookup failed; columns will be NULL")
                 roace_map = {}
 
-            for row in all_data:
-                snap = roace_map.get(row["client_id"])
-                if snap and snap["avg_daily_equity"] > 0:
-                    avg_eq = float(snap["avg_daily_equity"])
-                    profit_hist = float(row.get("profit_hist") or 0)
-                    row["avg_daily_equity"] = round(avg_eq, 2)
-                    row["return_on_avg_equity"] = round(profit_hist / avg_eq * 100, 2)
-                else:
-                    row["avg_daily_equity"] = None
-                    row["return_on_avg_equity"] = None
+            _attach_roace_columns(all_data, roace_map)
 
         # Convert Decimal to float; cast is_akcm from int (0/1) to bool;
         # normalize zipcode like risk-monitor account_enrichment (empty -> None).

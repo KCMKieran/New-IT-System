@@ -83,7 +83,7 @@ related: [[OPT-0020]], [[OPT-0006]]
 - 后端：`backend/app/services/client_return_service.py`（两阶段查询）
 - 现有列定义 / 净入金口径 SSOT：[`docs/features/client-return-rate.md`](../../features/client-return-rate.md) §3 / §3.1
 - ROACE 口径 SSOT：[`docs/features/roace-return-rate.md`](../../features/roace-return-rate.md)
-- 当前缓存版本前缀：`client_return_v6_trading_nd_`（`client_return_service.py:486`）
+- 当前缓存版本前缀：`client_return_v8_floating_inclusive_`（`client_return_service.py:486`）
 
 ---
 
@@ -456,7 +456,7 @@ MDD 需要**逐日峰谷**，**必须把 1,300 万行整条序列拉到 Python**
 
 | 文件 | 改动 |
 |---|---|
-| `backend/app/services/client_return_service.py` | ①函数签名加 `include_mdd`；②**`cache_params` 加 `include_mdd` 并 bump `client_return_v6_trading_nd_` → `v7_`**（`:486`，两件事**同一处**）；③`allowed_sort_columns`（`:453`）加新列——**不加则无法排序且静默 fallback**；④ROACE attach 那块后面加 MDD attach |
+| `backend/app/services/client_return_service.py` | ①函数签名加 `include_mdd`；②**`cache_params` 加 `include_mdd` 并 bump `client_return_v8_floating_inclusive_` → `v9_`**（`:486`，两件事**同一处**）；③`allowed_sort_columns`（`:453`）加新列——**不加则无法排序且静默 fallback**；④ROACE attach 那块后面加 MDD attach |
 | `backend/app/schemas/client_return_rate.py` | `ClientReturnRateRow` 加 5 个 `Optional[float] = None`（**默认 None 不是 0**）+ 2 个布尔列 + 导出请求 schema |
 | `backend/app/api/v1/routes/client_return_rate.py` | 加 Query 参数 + 透传；**决定是否加进 `refused` 元组**（`:117`，`caller_has_module(request, "risk")`，`COMMON_MAX_PAGE_SIZE = 5000`）—— **MDD 是重列，倾向加**（第 4 题）|
 | `backend/app/services/client_return_export_service.py` | `_CSV_FIELDS`（`:43`）。⚠ **无 anti-drift 测试，漏改是静默的** |
@@ -473,7 +473,7 @@ MDD 需要**逐日峰谷**，**必须把 1,300 万行整条序列拉到 Python**
 
 ### 测试
 
-- `backend/tests/test_client_return_trading_net_deposit.py` 的 **`TestCacheVersionPinnedToTheFormula`（`:119`）会因 bump 到 `v7_` 变红** —— **这是设计意图**，同 commit 更新
+- `backend/tests/test_client_return_trading_net_deposit.py` 的 **`TestCacheVersionPinnedToTheFormula`（`:119`）会因 bump 到 `v9_` 变红** —— **这是设计意图**，同 commit 更新
 - 若 `include_mdd` 进 refusal list，`backend/tests/test_client_return_rate_common_scope.py` 要加 case
 - 🆕 **建议新增单调性回归测试**：`MDD_30d ≤ MDD_90d ≤ MDD_180d ≤ MDD_365d ≤ MDD_all`（实测 3,918 人 0 违反，是构造保证的性质，正好适合当护栏）
 
@@ -490,7 +490,7 @@ MDD 需要**逐日峰谷**，**必须把 1,300 万行整条序列拉到 Python**
 - [ ] `stats_balances` 的 2021-07-13 起点在**将来**不会被上游清理再往后推（会静默缩短 `all` 窗口的含义）
 - [ ] `ib transfer to account` 在 `stats_transactions` 里的 **type 字面量**逐字确认（F2 依赖它，写错就是静默漏计）
 - [ ] 单客户端到端对账：挑 **uid 144501**（A 类、MDD_all 0.1%）+ 一个已归零账户 + 一个负权益穿仓账户，三个各手算一遍与 job 输出比对
-- [ ] 确认 `client_return_v6_` 前缀无外部脚本依赖，可安全 bump 到 `v7_`（同 OPT-0020 的同名假设）
+- [ ] 确认 `client_return_v8_` 前缀无外部脚本依赖，可安全 bump 到 `v9_`（同 OPT-0020 的同名假设）
 
 ---
 
@@ -515,7 +515,7 @@ MDD 需要**逐日峰谷**，**必须把 1,300 万行整条序列拉到 Python**
 
 ### Drop 2 — 页面接入（后端 web 层 + 前端）
 
-- [ ] `client_return_service.py`：`include_mdd` 参数 + **cache prefix bump `v6_` → `v7_`** + `allowed_sort_columns` 加 5 列 + attach
+- [ ] `client_return_service.py`：`include_mdd` 参数 + **cache prefix bump `v8_` → `v9_`** + `allowed_sort_columns` 加 5 列 + attach
 - [ ] `schemas/client_return_rate.py`：5 个 `Optional[float] = None` + `wipeout` / `negative_equity` 布尔
 - [ ] `routes/client_return_rate.py`：Query 参数 + 透传 + （按第 4 题结论）加进 `refused`
 - [ ] `client_return_export_service.py`：`_CSV_FIELDS` 加新列（**手动核对，无护栏**）
@@ -526,7 +526,7 @@ MDD 需要**逐日峰谷**，**必须把 1,300 万行整条序列拉到 Python**
 ### 冒烟 / 回归
 
 - [ ] **单调性回归测试**：随机抽 N 个客户断言 `MDD_30d ≤ 90d ≤ 180d ≤ 365d ≤ all`
-- [ ] `TestCacheVersionPinnedToTheFormula` 同 commit 更新为 `v7_`
+- [ ] `TestCacheVersionPinnedToTheFormula` 同 commit 更新为 `v9_`
 - [ ] 三个对账客户（uid 144501 / 一个已归零 / 一个负权益）手算比对，误差 < 0.1pp
 - [ ] 已归零账户在页面上**不出现在低 MDD 榜首**（G4 生效的直接验证）
 - [ ] 未设 gate 的客户返回 `—`，CSV 导出为空值而非 0
@@ -562,7 +562,7 @@ MDD 需要**逐日峰谷**，**必须把 1,300 万行整条序列拉到 Python**
                       └──────────────┬───────────────┘
                                      ▼
                     ┌────────────────────────────────────┐
-                    │ Web API Phase 2（cache v6_ → v7_） │
+                    │ Web API Phase 2（cache v8_ → v9_） │
                     │  Python 端拼接 ROACE + MDD 列      │
                     └────────────────────────────────────┘
 ```
