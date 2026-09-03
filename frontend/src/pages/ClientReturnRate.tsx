@@ -1034,11 +1034,11 @@ export default function ClientReturnRate() {
                   className={FILTER_CONTROL_CLASS}
                   aria-label="按国家筛选"
                 >
-                  {/* Closed state shows the category name while inactive and the
-                      chosen value once filtering — same convention as 入金渠道
-                      below and HoldBucketReport's filter row. */}
+                  {/* Trigger text must equal the selected item's text — "全部"
+                      when all is selected, never the category name as fallback
+                      (2026-09-03 ruling; category context lives in aria-label). */}
                   <SelectValue>
-                    {countryFilter === "all" ? "国家" : countryFilter}
+                    {countryFilter === "all" ? "全部" : countryFilter}
                   </SelectValue>
                 </SelectTrigger>
                 <SelectContent>
@@ -1069,10 +1069,8 @@ export default function ClientReturnRate() {
                 </SelectContent>
               </Select>
 
-              {/* 入金渠道 (USDT) Tag Filter — OPT-0022.
-                  Trigger 显示类目名「入金渠道」（非 "全部 X" 句式），点开是
-                  全部 / 仅U入金 / 非U入金。SelectValue children 覆盖默认展示，
-                  当选了具体值时显示该选项的文字，否则维持类目名。 */}
+              {/* USDT deposit-channel tag filter — OPT-0022. Trigger text
+                  always mirrors the selected item (see country filter note). */}
               <Select value={usdtFilter} onValueChange={setUsdtFilter}>
                 <SelectTrigger
                   className={FILTER_CONTROL_CLASS}
@@ -1083,7 +1081,7 @@ export default function ClientReturnRate() {
                       ? "仅 U入金"
                       : usdtFilter === "exclude"
                         ? "非 U入金"
-                        : "入金渠道"}
+                        : "全部"}
                   </SelectValue>
                 </SelectTrigger>
                 <SelectContent>
