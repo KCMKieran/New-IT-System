@@ -1059,7 +1059,7 @@ export default function ClientReturnRate() {
                       ? "仅 AKCM"
                       : akcmFilter === "exclude"
                         ? "排除 AKCM"
-                        : "AKCM 标签"}
+                        : "全部"}
                   </SelectValue>
                 </SelectTrigger>
                 <SelectContent>
