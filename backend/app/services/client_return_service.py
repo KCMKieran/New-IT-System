@@ -752,14 +752,28 @@ def get_client_return_rate_data(
                 _attach_mdd_columns(all_data, roace_map)
 
             # H2: surface snapshot freshness so a silently failing nightly job
-            # is visible on the page instead of only in the logs. All rows in
-            # one generation share the same timestamps (atomic swap).
+            # is visible on the page instead of only in the logs. One
+            # generation shares timestamps (atomic swap), but a single row can
+            # be one-sided (MDD-only wipeout rows have no refreshed_at; a
+            # carried-over row can lack mdd_refreshed_at) — keep scanning
+            # until each requested stamp is found.
             for snap in roace_map.values():
-                if include_avg_equity and snap.get("refreshed_at"):
+                if (
+                    include_avg_equity
+                    and "roace_refreshed_at" not in snapshot_freshness
+                    and snap.get("refreshed_at")
+                ):
                     snapshot_freshness["roace_refreshed_at"] = snap["refreshed_at"]
-                if include_mdd and snap.get("mdd_refreshed_at"):
+                if (
+                    include_mdd
+                    and "mdd_refreshed_at" not in snapshot_freshness
+                    and snap.get("mdd_refreshed_at")
+                ):
                     snapshot_freshness["mdd_refreshed_at"] = snap["mdd_refreshed_at"]
-                break
+                if ("roace_refreshed_at" in snapshot_freshness or not include_avg_equity) and (
+                    "mdd_refreshed_at" in snapshot_freshness or not include_mdd
+                ):
+                    break
 
         # Convert Decimal to float; cast is_akcm from int (0/1) to bool;
         # normalize zipcode like risk-monitor account_enrichment (empty -> None).

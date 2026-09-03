@@ -47,8 +47,10 @@ from app.core.client_roace_db import (
     carry_over_mdd_from_live,
     commit_metrics_staging,
     init_client_roace_db,
+    release_refresh_lock,
     set_meta,
     snapshot_size,
+    try_acquire_refresh_lock,
     upsert_mdd_batch,
     upsert_roace_batch,
 )
@@ -168,11 +170,17 @@ GROUP BY loginSid, date
 # day" notion the OPT-0061 gate (active_days) already uses. Requiring actual
 # trade days would gate out low-frequency position holders (uid 144501: 20
 # trades, 47 overnight days — the item's own poster-child stable client).
+# The mt4_users join keeps the gate's input in the SAME account universe as
+# the equity series it gates — without it, activity on demo/other-sid accounts
+# (which the MDD series never sees) would open G3 (cold review, finding 5).
 _MDD_ACTIVITY_SQL = """
-SELECT userId, COUNT(DISTINCT date) AS days_all
-FROM stats_trading
-WHERE userId > 0
-GROUP BY userId
+SELECT st.userId, COUNT(DISTINCT st.date) AS days_all
+FROM stats_trading st
+INNER JOIN mt4_users mu ON mu.loginSid = st.loginSid
+WHERE st.userId > 0
+  AND mu.sid IN (1, 5, 6)
+  AND mu.`GROUP` NOT LIKE '%demo%'
+GROUP BY st.userId
 """
 
 _MDD_DAY_COUNTS_SQL = """
@@ -377,6 +385,17 @@ def _run_mdd_leg(started_at: datetime) -> dict[str, Any]:
         sconn.close()
 
     stream_s = time.monotonic() - t0
+    # Early warning for the hard ceiling: the table grows ~10.6M rows/year, so
+    # the stream duration creeps toward the MAX_EXECUTION_TIME hint. Warn at
+    # half — a WARNING years before the nightly job starts dying beats a
+    # surprise (cold review, finding 4).
+    if stream_s * 1000 > _MDD_STREAM_MAX_EXECUTION_TIME_MS * 0.5:
+        logger.warning(
+            "MDD stream took %.0fs — over 50%% of the %.0fs MAX_EXECUTION_TIME "
+            "ceiling; raise the hint (and read_timeout above it) before the "
+            "nightly job starts getting killed",
+            stream_s, _MDD_STREAM_MAX_EXECUTION_TIME_MS / 1000,
+        )
 
     # Client-level rollup (MAX convention) and staging write.
     by_client: dict[int, list[mdd_math.AccountSeries]] = {}
@@ -426,6 +445,55 @@ def refresh_all_clients() -> dict[str, Any]:
     table and atomically swap it in. A failed leg 1 keeps the previous
     generation live; a failed leg 2 ships fresh ROACE + carried-over MDD."""
     init_client_roace_db()
+
+    # Cross-process/-container mutex (the scheduler's threading.Lock covers one
+    # process only; a manual refresh can land on any of the 4 prod workers or
+    # in the dev container, all writing this same bind-mounted file). Two
+    # concurrent runs would DROP each other's staging table and swap in a
+    # mixed-generation snapshot with no error.
+    import os as _os
+    import socket as _socket
+    import uuid as _uuid
+
+    holder = f"{_socket.gethostname()}:{_os.getpid()}:{_uuid.uuid4().hex[:6]}"
+    if not try_acquire_refresh_lock(holder):
+        logger.warning("Metrics refresh skipped: another run holds the refresh lock")
+        return {
+            "started_at": datetime.now(_HK_TZ).strftime("%Y-%m-%d %H:%M:%S"),
+            "finished_at": None,
+            "duration_ms": 0,
+            "rows_written": 0,
+            "total_in_snapshot": snapshot_size(),
+            "error": "another refresh is in progress (cross-process lock), retry later",
+        }
+
+    try:
+        result = _do_refresh()
+    finally:
+        release_refresh_lock(holder)
+
+    # A successful refresh makes every cached /query blob stale (they embed the
+    # previous snapshot's ROACE/floating/MDD columns and would otherwise be
+    # served for up to their remaining 3h TTL). Drop them so the first request
+    # after the refresh recomputes. Failure path keeps the cache — stale beats
+    # empty.
+    if result.get("error") is None and result.get("rows_written", 0) > 0:
+        try:
+            from app.services.clickhouse_service import clickhouse_service
+
+            if clickhouse_service.redis_client:
+                keys = clickhouse_service.redis_client.keys("app:client_return:cache:*")
+                if keys:
+                    clickhouse_service.redis_client.delete(*keys)
+                logger.info("ROACE refresh: dropped %d stale client-return cache keys", len(keys))
+        except Exception:
+            logger.warning("ROACE refresh: cache invalidation failed", exc_info=True)
+
+    return result
+
+
+def _do_refresh() -> dict[str, Any]:
+    """The actual two-leg refresh; only ever entered under the refresh lock."""
     started_at = datetime.now(_HK_TZ)
     t0 = time.monotonic()
     rows_written = 0
@@ -462,23 +530,9 @@ def refresh_all_clients() -> dict[str, Any]:
             logger.exception("Metrics staging swap failed")
             abort_metrics_staging()
 
-    # A successful refresh makes every cached /query blob stale (they embed the
-    # previous snapshot's ROACE/floating/MDD columns and would otherwise be
-    # served for up to their remaining 3h TTL). Drop them so the first request
-    # after the refresh recomputes. Failure path keeps the cache — stale beats
-    # empty.
-    if error is None and rows_written > 0:
-        try:
-            from app.services.clickhouse_service import clickhouse_service
-
-            if clickhouse_service.redis_client:
-                keys = clickhouse_service.redis_client.keys("app:client_return:cache:*")
-                if keys:
-                    clickhouse_service.redis_client.delete(*keys)
-                logger.info("ROACE refresh: dropped %d stale client-return cache keys", len(keys))
-        except Exception:
-            logger.warning("ROACE refresh: cache invalidation failed", exc_info=True)
-
+    # Cache invalidation happens in refresh_all_clients (the caller) off the
+    # returned error/rows_written fields — keeping it there keeps the
+    # invalidate-on-success contract in one place with the lock handling.
     duration_ms = int((time.monotonic() - t0) * 1000)
     finished_at = datetime.now(_HK_TZ).strftime("%Y-%m-%d %H:%M:%S")
 

@@ -133,6 +133,61 @@ def _get_conn():
         conn.close()
 
 
+# ── cross-process run lock ───────────────────────────────────────────────────
+# The scheduler's threading.Lock only covers one process. Prod runs 4 uvicorn
+# workers (manual POST /roace/refresh lands on any of them) and dev shares this
+# very file via the bind mount — two concurrent runs would DROP each other's
+# staging table mid-flight and the survivor would swap in a mixed-generation
+# snapshot with no error. The mutex therefore lives in the SQLite file itself:
+# every writer, in every process and container, contends on the same row.
+
+_REFRESH_LOCK_KEY = "refresh_lock"
+_REFRESH_LOCK_STALE_S = 3600  # run measured ~6 min; 1h covers a hung leg
+
+
+def try_acquire_refresh_lock(holder: str) -> bool:
+    """Atomically claim the refresh mutex. Returns False if another live run
+    holds it; a stale claim (holder died mid-run) is taken over."""
+    import time as _time
+
+    now = _time.time()
+    claim = f"{holder}|{now}"
+    with _get_conn() as conn:
+        conn.execute(
+            "INSERT INTO roace_meta (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO NOTHING",
+            (_REFRESH_LOCK_KEY, claim),
+        )
+        row = conn.execute(
+            "SELECT value FROM roace_meta WHERE key = ?", (_REFRESH_LOCK_KEY,)
+        ).fetchone()
+        current = row["value"]
+        if current == claim:
+            return True
+        try:
+            ts = float(current.rsplit("|", 1)[1])
+        except (IndexError, ValueError):
+            ts = 0.0
+        if now - ts > _REFRESH_LOCK_STALE_S:
+            # compare-and-swap on the exact stale value — if a third process
+            # raced us to the takeover, rowcount is 0 and we lose politely.
+            cur = conn.execute(
+                "UPDATE roace_meta SET value = ? WHERE key = ? AND value = ?",
+                (claim, _REFRESH_LOCK_KEY, current),
+            )
+            return cur.rowcount == 1
+        return False
+
+
+def release_refresh_lock(holder: str) -> None:
+    """Release only our own claim (guards against deleting a successor's)."""
+    with _get_conn() as conn:
+        conn.execute(
+            "DELETE FROM roace_meta WHERE key = ? AND value LIKE ?",
+            (_REFRESH_LOCK_KEY, f"{holder}|%"),
+        )
+
+
 # ── staging lifecycle (H1) ───────────────────────────────────────────────────
 
 def begin_metrics_staging() -> None:
@@ -155,17 +210,31 @@ def carry_over_mdd_from_live() -> int:
     """MDD leg failed: copy the previous generation's MDD block from the live
     table into staging so the swap ships fresh ROACE + last-known-good MDD
     (with its OLD mdd_refreshed_at, so the staleness is visible) instead of a
-    blank MDD day. Returns rows updated."""
+    blank MDD day. Returns rows carried (updated + inserted).
+
+    Two steps, both required: an UPDATE for user_ids the ROACE leg wrote, and
+    an INSERT for MDD-ONLY rows — the MDD universe is wider than the ROACE one
+    (a fully-wiped client has no endingEquity>0 day, so no ROACE row), and
+    those wipeout=1 rows are precisely the blow-ups this feature exists to
+    show. An UPDATE alone silently drops every one of them (2026-09-03 cold
+    review, finding 2)."""
+    mdd_cols = ", ".join(_MDD_FIELDS)
     set_clause = ", ".join(
         f"{c} = (SELECT {c} FROM {_TABLE} WHERE {_TABLE}.user_id = {_STAGING}.user_id)"
         for c in _MDD_FIELDS
     )
     with _get_conn() as conn:
-        cur = conn.execute(
+        updated = conn.execute(
             f"UPDATE {_STAGING} SET {set_clause} "
             f"WHERE EXISTS (SELECT 1 FROM {_TABLE} WHERE {_TABLE}.user_id = {_STAGING}.user_id)"
-        )
-        return cur.rowcount
+        ).rowcount
+        inserted = conn.execute(
+            f"INSERT INTO {_STAGING} (user_id, {mdd_cols}) "
+            f"SELECT user_id, {mdd_cols} FROM {_TABLE} "
+            f"WHERE user_id NOT IN (SELECT user_id FROM {_STAGING}) "
+            f"AND mdd_refreshed_at IS NOT NULL"
+        ).rowcount
+        return updated + inserted
 
 
 def commit_metrics_staging() -> None:

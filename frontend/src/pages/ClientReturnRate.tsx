@@ -203,6 +203,23 @@ function getMddColor(value: number | null | undefined): string {
   return "";
 }
 
+/** Gated rows ("—") sort LAST in both directions. Without this, AG-Grid's
+ *  default comparator floats nulls to the top on ascending sort — and
+ *  "sort by MDD ascending" is exactly the pick-the-stable gesture, so the
+ *  screen would lead with thousands of no-data rows. */
+function mddComparator(
+  a: number | null,
+  b: number | null,
+  _nodeA: unknown,
+  _nodeB: unknown,
+  isDescending: boolean,
+): number {
+  if (a == null && b == null) return 0;
+  if (a == null) return isDescending ? -1 : 1;
+  if (b == null) return isDescending ? 1 : -1;
+  return a - b;
+}
+
 function getProfitColor(value: number | null | undefined): string {
   if (value === null || value === undefined || value === 0) return "";
   return value > 0
@@ -927,6 +944,7 @@ export default function ClientReturnRate() {
           valueFormatter: (p) => formatMddPercent(p.value),
           cellClass: (p) => getMddColor(p.value),
           cellStyle: { backgroundColor: "rgba(20, 184, 166, 0.08)" },
+          comparator: mddComparator,
         }),
       ),
       {
