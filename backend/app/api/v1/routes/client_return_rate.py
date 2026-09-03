@@ -99,6 +99,7 @@ def query_client_return_rate(
     month_end: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$", description="Month end date (YYYY-MM-DD)"),
     close_time_start: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$", description="Precise CLOSE_TIME filter (YYYY-MM-DD HH:MM:SS in HK time)"),
     include_avg_equity: bool = Query(False, description="Include avg_daily_equity and return_on_avg_equity (heavier query)"),
+    include_mdd: bool = Query(False, description="Include the 5-window Max Drawdown block (OPT-0060, from the nightly snapshot)"),
 ):
     """
     Query client return rate data with pagination and filtering.
@@ -117,6 +118,9 @@ def query_client_return_rate(
         refused = (
             ("search", search is not None and search.strip() != ""),
             ("include_avg_equity", bool(include_avg_equity)),
+            # OPT-0060 (decided 2026-09-03): MDD is a risk-judgement signal
+            # computed by the nightly batch — outside the widget's envelope.
+            ("include_mdd", bool(include_mdd)),
             ("page_size", page_size > COMMON_MAX_PAGE_SIZE),
         )
         offending = [name for name, hit in refused if hit]
@@ -134,7 +138,7 @@ def query_client_return_rate(
                     f"{', '.join(offending)} on this endpoint. Without it this "
                     f"query is limited to the home-page summary "
                     f"(page_size <= {COMMON_MAX_PAGE_SIZE}, no client search, "
-                    "no average-equity / floating-return columns)."
+                    "no average-equity / floating-return / max-drawdown columns)."
                 ),
             )
 
@@ -150,6 +154,7 @@ def query_client_return_rate(
             month_end=month_end,
             close_time_start=close_time_start,
             include_avg_equity=include_avg_equity,
+            include_mdd=include_mdd,
         )
         return result
     except ValueError as e:
@@ -250,20 +255,22 @@ async def download_client_return_rate_export(task_id: str):
         raise HTTPException(status_code=500, detail="下载导出文件失败")
 
 
-# Deliberately sync (`def`, not `async def`): this handler runs the full ROACE
-# refresh inline on blocking pymysql (`read_timeout=600` in
-# client_roace_refresh_service.py) — measured ~60s on the replica (2026-08-31,
-# two-level aggregation), server-side MAX_EXECUTION_TIME kills it at 5 min.
-# As `async def` a single click would freeze the whole event loop for minutes;
-# FastAPI runs sync handlers in the threadpool, keeping every other endpoint live.
+# Deliberately sync (`def`, not `async def`): this handler runs the full
+# metrics refresh inline on blocking pymysql — leg 1 (ROACE aggregation)
+# measured ~60s, leg 2 (OPT-0060 MDD stream over 22.6M stats_balances rows)
+# measured ~2-4 min on the replica, so the request blocks for roughly 3-5 min
+# total. As `async def` a single click would freeze the whole event loop for
+# that long; FastAPI runs sync handlers in the threadpool, keeping every other
+# endpoint live.
 @router.post("/roace/refresh")
 def trigger_roace_refresh():
-    """Manually trigger the ROACE SQLite snapshot refresh.
+    """Manually trigger the client-metrics SQLite snapshot refresh (ROACE +
+    floating columns + OPT-0060 MDD block).
 
     Same job that the nightly scheduler runs (06:00 HKT). Useful for backfilling
     on first deployment, recomputing after a data fix, or debugging. Synchronous
-    — the request blocks until the refresh finishes (measured ~60s for a full
-    client base scan).
+    — the request blocks until the refresh finishes (roughly 3-5 minutes for
+    both legs; the old "~60s" figure predates the MDD leg).
     """
     from app.core.client_roace_scheduler import trigger_manual_refresh
 

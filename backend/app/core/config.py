@@ -94,6 +94,8 @@ class Settings:
     CLIENT_ROACE_SCHEDULER_ENABLED: bool
     CLIENT_ROACE_REFRESH_HOUR: int
     CLIENT_ROACE_REFRESH_MINUTE: int
+    # Nightly metrics refresh failure alert recipient(s) (OPT-0060 H2)
+    CLIENT_METRICS_REFRESH_ALERT_TO: str
 
     # Alert mail center (OPT-0042/0043): recipient domain allowlist
     ALERT_MAIL_ALLOWED_DOMAINS: set[str]
@@ -243,6 +245,11 @@ class Settings:
         self.CLIENT_ROACE_REFRESH_MINUTE = int(
             os.environ.get("CLIENT_ROACE_REFRESH_MINUTE", "0")
         )
+        # OPT-0060 H2: a failed nightly metrics refresh must not die in the
+        # logs alone — comma-separated recipients; empty = log-only (dev).
+        self.CLIENT_METRICS_REFRESH_ALERT_TO = os.environ.get(
+            "CLIENT_METRICS_REFRESH_ALERT_TO", ""
+        ).strip()
 
         # API Key for protecting /api/* endpoints (None = skip validation, for dev)
         self.API_KEY = os.environ.get("API_KEY")

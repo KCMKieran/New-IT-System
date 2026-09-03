@@ -125,6 +125,8 @@ class TestCacheVersionPinnedToTheFormula:
         v6 -> v7: profit_hist divides CEN legs by 100 (2026-08-28).
         v7 -> v8: profit_hist scope narrowed to sid 1/5/6 non-demo + new
                   floating-inclusive columns (OPT-0061).
+        v8 -> v9: 5 MDD window columns + wipeout/negative_equity flags,
+                  keyed on the new include_mdd parameter (OPT-0060).
         """
         import inspect
 
@@ -135,9 +137,13 @@ class TestCacheVersionPinnedToTheFormula:
             "client_return_v5_usdt_",
             "client_return_v6_trading_nd_",
             "client_return_v7_cen_profit_hist_",
+            "client_return_v8_floating_inclusive_",
         ):
             assert stale not in src, (
                 f"cache prefix still {stale} while the result 口径 changed — "
                 f"stale cached rows would be served under the old formula"
             )
-        assert "client_return_v8_floating_inclusive_" in src
+        assert "client_return_v9_mdd_" in src
+        # The new parameter must be IN the cache key, or two calls differing
+        # only in include_mdd would collide on one blob.
+        assert "{include_avg_equity}_{include_mdd}_" in src
