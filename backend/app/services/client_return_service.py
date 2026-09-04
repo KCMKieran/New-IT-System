@@ -2,7 +2,10 @@
 Service layer for Client Return Rate analysis.
 Docs: docs/features/client-return-rate.md
 
-Two-phase MySQL query against fxbackoffice (via MYSQL_HOST_PRIMARY):
+Two-phase MySQL query against fxbackoffice (via MYSQL_HOST_PRIMARY, which
+falls back to MYSQL_HOST — the slave — when unset; it IS unset in the current
+.env, so this page queries the slave like everything else. The old
+temp-primary-db test config was reverted long ago):
   Phase 1 – Get active client_ids with trading profit in the date range.
              Default path: stats_trading pre-aggregated table (fast, <1s).
              Fallback path: mt4_trades raw table for sub-day precision (6h/2h/1h).
