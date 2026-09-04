@@ -196,8 +196,11 @@ def test_the_real_widget_still_fits_under_the_ceiling():
         {"include_avg_equity": "true"},
         {"include_mdd": "true"},
         {"page_size": 20000},
+        # paginating past page 1 at the ceiling walks the full set the
+        # page_size refusal claims to prevent (2026-09-04 cold review)
+        {"page": 2},
     ],
-    ids=["client-lookup", "avg-equity-columns", "mdd-columns", "bulk-page-size"],
+    ids=["client-lookup", "avg-equity-columns", "mdd-columns", "bulk-page-size", "paginate-around-ceiling"],
 )
 def test_beyond_the_widget_needs_the_risk_module(client, extra):
     headers = _mint(client, STAFF, allowed_modules='["dashboard"]')
@@ -221,8 +224,9 @@ def test_a_grant_that_is_not_risk_does_not_buy_it_either(client):
         {"include_avg_equity": "true"},
         {"include_mdd": "true"},
         {"page_size": 20000},
+        {"page": 3},
     ],
-    ids=["client-lookup", "avg-equity-columns", "mdd-columns", "bulk-page-size"],
+    ids=["client-lookup", "avg-equity-columns", "mdd-columns", "bulk-page-size", "pagination"],
 )
 def test_the_risk_module_keeps_the_full_endpoint(client, extra):
     """The gated page is unchanged — this narrowing must cost its users nothing."""

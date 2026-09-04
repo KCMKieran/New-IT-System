@@ -122,6 +122,11 @@ def query_client_return_rate(
             # computed by the nightly batch — outside the widget's envelope.
             ("include_mdd", bool(include_mdd)),
             ("page_size", page_size > COMMON_MAX_PAGE_SIZE),
+            # 2026-09-04 (cold review): the page_size ceiling alone was
+            # paginate-around-able — page=1..4 × 5000 walks the full 20k-row
+            # set the ceiling claims to prevent. The widget only ever sends
+            # page=1, so anything past it is the bulk pull.
+            ("page", page > 1),
         )
         offending = [name for name, hit in refused if hit]
         if offending:
