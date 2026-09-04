@@ -105,6 +105,20 @@ interface ClientReturnRateRow {
   /** True when avg equity < 20% of avg balance — return_with_floating suppressed
    *  because the denominator is collapsing. A risk signal, NOT missing data. */
   capital_locked: boolean;
+  /** OPT-0060: Max Drawdown % (TWR-based, MAX over the client's accounts) on
+   *  5 fixed anchored windows. null = gated (insufficient data / wiped-out
+   *  window / dust) and MUST render as "—", never as 0% — 0% is the best
+   *  possible score in the pick-the-stable direction. */
+  mdd_30d: number | null;
+  mdd_90d: number | null;
+  mdd_180d: number | null;
+  mdd_365d: number | null;
+  mdd_all: number | null;
+  /** Every account currently at zero/negative own equity (blown, not refunded). */
+  wipeout: boolean;
+  /** Some account went through negative own equity (穿仓) at some point. */
+  negative_equity: boolean;
+  account_count?: number | null;
   country: string;
   /** CRM zipcode from mt4_users.ZIPCODE (same source as risk-monitor); null if empty. */
   zipcode?: string | null;
@@ -114,6 +128,10 @@ interface ClientReturnRateRow {
 }
 
 interface CachedState {
+  /** Explicit schema stamp — bump CACHE_SCHEMA_VERSION whenever the row shape
+   *  changes, or users restored from sessionStorage see the new columns blank
+   *  for up to 3h. (Explicit field, not new-field probing: probes rot.) */
+  schema_version: number;
   rows: ClientReturnRateRow[];
   total: number;
   queryTime: number | null;
@@ -125,6 +143,9 @@ interface CachedState {
   timestamp: number;
 }
 
+/** v2 = OPT-0060 MDD block (mdd_30d..mdd_all + wipeout/negative_equity). */
+const CACHE_SCHEMA_VERSION = 2;
+
 interface ExportTaskStatus {
   task_id: string;
   status: "queued" | "running" | "succeeded" | "failed" | "expired";
@@ -134,6 +155,22 @@ interface ExportTaskStatus {
   error_message: string | null;
   download_url: string | null;
 }
+
+/**
+ * Shared tooltip body for the 5 MDD columns (OPT-0060). Three statements are
+ * mandatory (item AC): data starts 2021-07, daily EOD sampling is a LOWER
+ * bound, and the windows are fixed — they do not follow the time selector.
+ */
+const MDD_TOOLTIP_CORE =
+  "口径: TWR 份额净值的最大峰谷回撤 —— 把出入金/转账剥离后「从任一时点买入持有」最糟会亏的百分比\n" +
+  "按账户(loginSid)建独立序列，客户级取名下账户的最大值；自有权益 = 日终净值 − 信用(赠金)\n\n" +
+  "⚠ 窗口固定为「最近 N 天」，**不随上方时间选择器变**（选择器只决定哪些客户出现在表里）\n" +
+  "⚠ 基于日频日终快照，**日内更深的回撤不可见**（本列是真实 MDD 的下界）——\n" +
+  "  低 MDD + 从不隔夜的客户需人工复核，别直接进白名单\n" +
+  "⚠ 数据自 **2021-07** 起（stats_balances 覆盖起点）\n\n" +
+  "「—」= 数据不足或被拦（新账户 / 峰值资金 < $500 / 活跃日 < 30 / 窗口内已归零）——\n" +
+  "**不是 0%**；0% 在「挑稳健」方向是最好分数，缺数据绝不冒充最稳健\n" +
+  "夜间 06:00 预计算，白天读快照";
 
 const SESSION_KEY = "client_return_rate_cache";
 const CACHE_MAX_AGE_MS = 3 * 60 * 60 * 1000; // 3 hours, matches Redis TTL
@@ -149,6 +186,40 @@ function formatPercent(value: number | null | undefined): string {
   return `${value.toFixed(2)}%`;
 }
 
+/** MDD columns render gated/missing as an explicit "—", NEVER 0% or blank:
+ *  0% is the best score in the pick-the-stable direction, and a blank cell
+ *  reads as "nothing to worry about" in a dense grid. */
+function formatMddPercent(value: number | null | undefined): string {
+  if (value === null || value === undefined) return "—";
+  return `${value.toFixed(1)}%`;
+}
+
+/** Higher MDD = worse. Green under the 15% "stable" screen, red once the
+ *  window lost half or more, neutral in between. */
+function getMddColor(value: number | null | undefined): string {
+  if (value === null || value === undefined) return "text-muted-foreground";
+  if (value < 15) return "text-green-600 dark:text-green-400";
+  if (value >= 50) return "text-red-600 dark:text-red-400";
+  return "";
+}
+
+/** Gated rows ("—") sort LAST in both directions. Without this, AG-Grid's
+ *  default comparator floats nulls to the top on ascending sort — and
+ *  "sort by MDD ascending" is exactly the pick-the-stable gesture, so the
+ *  screen would lead with thousands of no-data rows. */
+function mddComparator(
+  a: number | null,
+  b: number | null,
+  _nodeA: unknown,
+  _nodeB: unknown,
+  isDescending: boolean,
+): number {
+  if (a == null && b == null) return 0;
+  if (a == null) return isDescending ? -1 : 1;
+  if (b == null) return isDescending ? 1 : -1;
+  return a - b;
+}
+
 function getProfitColor(value: number | null | undefined): string {
   if (value === null || value === undefined || value === 0) return "";
   return value > 0
@@ -161,6 +232,12 @@ function loadCachedState(): CachedState | null {
     const raw = sessionStorage.getItem(SESSION_KEY);
     if (!raw) return null;
     const cached: CachedState = JSON.parse(raw);
+    if (cached.schema_version !== CACHE_SCHEMA_VERSION) {
+      // Rows saved by an older build lack the current columns — discard
+      // instead of showing a grid whose new columns are blank for 3 hours.
+      sessionStorage.removeItem(SESSION_KEY);
+      return null;
+    }
     if (Date.now() - cached.timestamp > CACHE_MAX_AGE_MS) {
       sessionStorage.removeItem(SESSION_KEY);
       return null;
@@ -373,6 +450,7 @@ export default function ClientReturnRate() {
         sort_by: "month_trade_profit",
         sort_order: "desc",
         include_avg_equity: "true",
+        include_mdd: "true",
       });
       if (searchInput.trim()) p.set("search", searchInput.trim());
       if (dr?.from) p.set("month_start", format(dr.from, "yyyy-MM-dd"));
@@ -406,6 +484,7 @@ export default function ClientReturnRate() {
 
       // Persist to sessionStorage for page navigation restore
       saveCachedState({
+        schema_version: CACHE_SCHEMA_VERSION,
         rows: newRows,
         total: newTotal,
         queryTime: newQueryTime,
@@ -498,6 +577,7 @@ export default function ClientReturnRate() {
             ? format(dr.from, "yyyy-MM-dd HH:mm:ss")
             : null,
         include_avg_equity: true,
+        include_mdd: true,
         country_filter: countryFilter,
         akcm_filter: akcmFilter,
         usdt_filter: usdtFilter,
@@ -838,6 +918,78 @@ export default function ClientReturnRate() {
         valueFormatter: (p) => formatPercent(p.value),
         cellClass: (p) => getProfitColor(p.value),
         cellStyle: { backgroundColor: "rgba(168, 85, 247, 0.08)" },
+      },
+      // ── OPT-0060: Max Drawdown, 5 fixed anchored windows ────────────────
+      // Backend-returned fields → plain `field` defs, no colId needed. Teal
+      // tint to read as one block, distinct from the purple OPT-0061 trio.
+      ...(["30d", "90d", "180d", "365d", "all"] as const).map(
+        (win): ColDef<ClientReturnRateRow> => ({
+          field: `mdd_${win}` as keyof ClientReturnRateRow & string,
+          headerName:
+            win === "all" ? "最大回撤(全历史)%" : `最大回撤(${win})%`,
+          headerComponent: InfoHeader,
+          headerComponentParams: {
+            tooltip:
+              (win === "all"
+                ? "⚠ 「全历史」的真实含义是 **2021-07-13 起**——快照表的覆盖起点，更老账户的早期历史被截断\n\n"
+                : `窗口 = 到今天为止的最近 ${win}\n\n`) +
+              MDD_TOOLTIP_CORE +
+              (win === "30d"
+                ? "\n\n⚠ 30d 判别力弱（假阳性高），只作剖面参考——筛稳健客户请用 365d 或全历史列"
+                : "") +
+              "\n\nMax Drawdown on the TWR unit-value series (deposits/withdrawals stripped).\n" +
+              "Fixed window, daily-EOD lower bound, data since 2021-07. '—' = gated, NOT 0%.",
+          },
+          width: 140,
+          valueFormatter: (p) => formatMddPercent(p.value),
+          cellClass: (p) => getMddColor(p.value),
+          cellStyle: { backgroundColor: "rgba(20, 184, 166, 0.08)" },
+          comparator: mddComparator,
+        }),
+      ),
+      {
+        // OPT-0060 companion flag. 0/1 valueGetter (number filter) like
+        // has_usdt_tag; colId required for the persist hook on getter columns.
+        colId: "wipeout",
+        field: "wipeout",
+        headerName: "已归零",
+        headerComponent: InfoHeader,
+        headerComponentParams: {
+          tooltip:
+            "该客户名下所有账户当前自有权益 ≤ 0（爆完且未再入金）\n" +
+            "已归零客户的全历史列显示 100%，爆仓之后的短窗口显示 —（一条零线没有回撤，\n" +
+            "不能让死账户排进「最稳健」）\n\n" +
+            "All accounts currently at zero/negative own equity (blown up, not refunded).",
+        },
+        width: 90,
+        valueGetter: (p) => (p.data?.wipeout ? 1 : 0),
+        valueFormatter: (p) => (p.value === 1 ? "是" : "否"),
+        cellClass: (p) =>
+          p.value === 1
+            ? "text-center text-red-600 dark:text-red-400 font-medium"
+            : "text-center text-muted-foreground",
+        filter: "agNumberColumnFilter",
+      },
+      {
+        colId: "negative_equity",
+        field: "negative_equity",
+        headerName: "曾穿仓",
+        headerComponent: InfoHeader,
+        headerComponentParams: {
+          tooltip:
+            "历史上出现过负自有权益（穿仓）的客户\n" +
+            "回撤在 100% 处截断，本列把「−99% 但还活着」和「穿到负数」区分开\n\n" +
+            "Own equity went negative at some point (drawdown is clamped at 100%;\n" +
+            "this flag preserves the distinction).",
+        },
+        width: 90,
+        valueGetter: (p) => (p.data?.negative_equity ? 1 : 0),
+        valueFormatter: (p) => (p.value === 1 ? "是" : "否"),
+        cellClass: (p) =>
+          p.value === 1
+            ? "text-center text-amber-600 dark:text-amber-400 font-medium"
+            : "text-center text-muted-foreground",
+        filter: "agNumberColumnFilter",
       },
       {
         field: "adj_0_2000",

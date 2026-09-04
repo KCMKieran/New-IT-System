@@ -10,6 +10,7 @@ Append-only 日志。最新的写在最上面。
 
 | 日期 | ID | Commit | 标题 |
 |------|----|--------|------|
+| 2026-09-04 | [OPT-0060](./items/OPT-0060-client-return-mdd.md) | — | Client Return Rate 加 MDD 5 窗口列：TWR（R1 修正递推+三条件 re-base+G1-G5）按 loginSid 建序列客户取 MAX；夜间作业形态 B（0061 老查询不动 + PK 序流式 22.6M 行 120s 零 filesort）；换表 client_metrics_snapshot + H1 staging 原子换名 + 跨进程刷新锁；三客户独立对账 <0.1pp；冷审 10 条修 7 |
 | 2026-08-31 | [OPT-0061](./items/OPT-0061-client-return-floating-inclusive.md) | — | Client Return Rate 加「含浮动收益率+扛单率」两列（修 ROACE 扛单盲区）+ profit_hist 口径收窄 sid 1/5/6 非 demo（540 客户差>$1,000）；SQLite v2 表 + 刷新 SQL 两级聚合 48s + timeout hint；冷审 F1/F2 当场修、F3/F4 live-with |
 | 2026-07-22 | [OPT-0054](./items/OPT-0054-open-positions-ttl-cache.md) | — | open-positions 加 30s Redis TTL 缓存 + singleflight（N viewer 不再 ×N 打 PG），含冷审 4 项硬化 |
 | 2026-07-24 | [OPT-0056](./items/OPT-0056-route-exception-detail-leak.md) | — | 全站路由 500/502 异常原文泄漏清理：60 处跨 13 文件 str(exc)→logger.exception+泛化 detail（多抓到 ib_report/etl/client_pnl_analysis 5 处 grep 漏网 f-string 泄漏）+ 补 5 文件 logger；4xx 校验全保留；alert_mail 502 泛化；Docker 实跑 45 测试绿 + 13 模块导入冒烟；Stage 1 用户选不 review |

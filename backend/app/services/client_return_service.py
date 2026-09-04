@@ -451,6 +451,37 @@ _ROACE_NULL_COLUMNS = (
     "floating_burden_ratio",
 )
 
+# ---------------------------------------------------------------------------
+# OPT-0060 — Max Drawdown (5 anchored windows) from the nightly snapshot.
+#
+# Values are precomputed percentages (0-100, already gated by the nightly job:
+# G1 peak own >= $500 / G2 window sample floors / G3 active days / G4 per-window
+# wiped_out / G5 segment-start floor). A gated window is NULL in the snapshot
+# and stays None here — NEVER coerce to 0: in the "pick the stable clients"
+# direction 0% is the BEST score, so rendering missing data as 0 would rank
+# dead/unknown accounts at the top of the stability list.
+# ---------------------------------------------------------------------------
+_MDD_VALUE_COLUMNS = ("mdd_30d", "mdd_90d", "mdd_180d", "mdd_365d", "mdd_all")
+
+
+def _attach_mdd_columns(rows: list[dict[str, Any]], roace_map: dict[int, dict]) -> None:
+    """Attach the MDD block (in place) from the nightly SQLite snapshot."""
+    for row in rows:
+        snap = roace_map.get(row["client_id"])
+        if not snap:
+            for col in _MDD_VALUE_COLUMNS:
+                row[col] = None
+            row["wipeout"] = False
+            row["negative_equity"] = False
+            row["account_count"] = None
+            continue
+        for col in _MDD_VALUE_COLUMNS:
+            v = snap.get(col)
+            row[col] = float(v) if v is not None else None
+        row["wipeout"] = bool(snap.get("wipeout"))
+        row["negative_equity"] = bool(snap.get("negative_equity"))
+        row["account_count"] = snap.get("account_count")
+
 
 def _attach_roace_columns(rows: list[dict[str, Any]], roace_map: dict[int, dict]) -> None:
     """Attach ROACE + floating-inclusive columns (in place) from the nightly
@@ -535,6 +566,7 @@ def get_client_return_rate_data(
     month_end: Optional[str] = None,
     close_time_start: Optional[str] = None,
     include_avg_equity: bool = False,
+    include_mdd: bool = False,
     country_filter: Optional[str] = None,
     akcm_filter: Optional[str] = None,
     usdt_filter: Optional[str] = None,
@@ -568,6 +600,7 @@ def get_client_return_rate_data(
         "deposits_90d", "return_neg_adjusted",
         "avg_daily_equity", "return_on_avg_equity",
         "return_with_floating", "floating_burden_ratio",
+        "mdd_30d", "mdd_90d", "mdd_180d", "mdd_365d", "mdd_all",
         "zipcode", "is_akcm", "has_usdt_tag",
     }
     if sort_by not in allowed_sort_columns:
@@ -598,10 +631,12 @@ def get_client_return_rate_data(
     # v8 (OPT-0061): profit_hist scope narrowed to sid 1/5/6 non-demo (changes
     # existing ROACE values) + new return_with_floating / floating_burden_ratio
     # columns. v7 blobs lack the new columns and carry the old profit_hist.
+    # v9 (OPT-0060): 5 MDD window columns + wipeout/negative_equity flags,
+    # keyed on the new include_mdd parameter. v8 blobs lack the columns.
     cache_params = (
-        "client_return_v8_floating_inclusive_"
+        "client_return_v9_mdd_"
         f"{month_start}_{month_end}_{search}_{deposit_bucket}_{sort_by}_{sort_order}_"
-        f"{page}_{page_size}_{close_time_start}_{include_avg_equity}_"
+        f"{page}_{page_size}_{close_time_start}_{include_avg_equity}_{include_mdd}_"
         f"{country_filter}_{akcm_filter}_{usdt_filter}_{return_all}"
     )
     cache_key = f"app:client_return:cache:{hashlib.md5(cache_params.encode()).hexdigest()}"
@@ -697,19 +732,48 @@ def get_client_return_rate_data(
         finally:
             conn.close()
 
-        # Attach avg_daily_equity / return_on_avg_equity from the nightly SQLite
-        # snapshot (OPT-0006). Previously a LEFT JOIN against stats_balances on
-        # every request — now a single dict lookup keyed by client_id.
-        if include_avg_equity and all_data:
+        # Attach avg_daily_equity / return_on_avg_equity (OPT-0006), the
+        # floating columns (OPT-0061) and the MDD block (OPT-0060) from the
+        # nightly SQLite snapshot. Previously a LEFT JOIN against stats_balances
+        # on every request — now a single dict lookup keyed by client_id.
+        snapshot_freshness: dict[str, Any] = {}
+        if (include_avg_equity or include_mdd) and all_data:
             from app.core.client_roace_db import bulk_get_roace
 
             try:
                 roace_map = bulk_get_roace(r["client_id"] for r in all_data)
             except Exception:
-                logger.exception("ROACE snapshot lookup failed; columns will be NULL")
+                logger.exception("Metrics snapshot lookup failed; columns will be NULL")
                 roace_map = {}
 
-            _attach_roace_columns(all_data, roace_map)
+            if include_avg_equity:
+                _attach_roace_columns(all_data, roace_map)
+            if include_mdd:
+                _attach_mdd_columns(all_data, roace_map)
+
+            # H2: surface snapshot freshness so a silently failing nightly job
+            # is visible on the page instead of only in the logs. One
+            # generation shares timestamps (atomic swap), but a single row can
+            # be one-sided (MDD-only wipeout rows have no refreshed_at; a
+            # carried-over row can lack mdd_refreshed_at) — keep scanning
+            # until each requested stamp is found.
+            for snap in roace_map.values():
+                if (
+                    include_avg_equity
+                    and "roace_refreshed_at" not in snapshot_freshness
+                    and snap.get("refreshed_at")
+                ):
+                    snapshot_freshness["roace_refreshed_at"] = snap["refreshed_at"]
+                if (
+                    include_mdd
+                    and "mdd_refreshed_at" not in snapshot_freshness
+                    and snap.get("mdd_refreshed_at")
+                ):
+                    snapshot_freshness["mdd_refreshed_at"] = snap["mdd_refreshed_at"]
+                if ("roace_refreshed_at" in snapshot_freshness or not include_avg_equity) and (
+                    "mdd_refreshed_at" in snapshot_freshness or not include_mdd
+                ):
+                    break
 
         # Convert Decimal to float; cast is_akcm from int (0/1) to bool;
         # normalize zipcode like risk-monitor account_enrichment (empty -> None).
@@ -768,6 +832,7 @@ def get_client_return_rate_data(
                 "from_cache": False,
                 "month_range": f"{month_start} ~ {month_end}",
                 "queried_at": datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %I:%M:%S %p"),
+                **snapshot_freshness,
             },
         }
 

@@ -55,6 +55,20 @@ class ClientReturnRateRow(BaseModel):
     floating_burden_ratio: Optional[float] = Field(None, description="Avg daily floating P&L / avg daily balance × 100; deeply negative = capital pinned under floating losses")
     capital_locked: bool = Field(False, description="True when avg_daily_equity < 20% of avg_daily_balance — return_with_floating suppressed because the denominator is collapsing (strongest risk signal, not missing data)")
 
+    # OPT-0060: Max Drawdown (TWR unit-value based, MAX over the client's
+    # accounts) on 5 anchored windows, precomputed nightly. Percent values
+    # 0-100. Default None, NEVER 0 — a gated window (G1-G5) means "no reliable
+    # value", and 0% would be the best possible score in the pick-the-stable
+    # direction, exactly the mistake this OPT exists to avoid.
+    mdd_30d: Optional[float] = Field(None, description="Max drawdown %, last 30 days (TWR-based; null when gated)")
+    mdd_90d: Optional[float] = Field(None, description="Max drawdown %, last 90 days (null when gated)")
+    mdd_180d: Optional[float] = Field(None, description="Max drawdown %, last 180 days (null when gated)")
+    mdd_365d: Optional[float] = Field(None, description="Max drawdown %, last 365 days (null when gated)")
+    mdd_all: Optional[float] = Field(None, description="Max drawdown %, full history — 2021-07 onwards, the stats_balances floor (null when gated)")
+    wipeout: bool = Field(False, description="Every account of the client currently sits at zero/negative own equity (blown up and not refunded)")
+    negative_equity: bool = Field(False, description="At least one account went through negative own equity (穿仓) at some point")
+    account_count: Optional[int] = Field(None, description="Number of live accounts folded into the MDD MAX (per-loginSid series)")
+
     # Frontend local-filter fields (not used for backend sorting/filtering)
     country: str = Field("Unknown", description="Client country: CN (cid=0) or Global (cid=1)")
     # Same CRM column as risk-monitor: fxbackoffice.mt4_users.ZIPCODE (per-login; here
@@ -119,6 +133,9 @@ class ClientReturnRateExportTaskCreateRequest(BaseModel):
     )
     include_avg_equity: bool = Field(
         True, description="Include avg_daily_equity and return_on_avg_equity"
+    )
+    include_mdd: bool = Field(
+        True, description="Include the 5-window Max Drawdown block (OPT-0060)"
     )
     country_filter: Literal["all", "CN", "Global"] = Field(
         "all", description="Country filter for export snapshot"

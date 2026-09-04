@@ -1,7 +1,7 @@
 ---
 id: OPT-0060
 title: Client Return Rate 加 Max Drawdown(MDD)5 个窗口列 —— TWR 口径 + 夜间全量批处理
-status: wip
+status: done
 priority: P2
 area: mixed
 effort: L
@@ -55,6 +55,34 @@ related: [[OPT-0020]], [[OPT-0006]], [[OPT-0061]]
 > | **6/7** | OPT-0020 **本期不并**（流式段纯函数预留多指标位）；Calmar **不加** | scope 收口；B 形态下将来加 0020 只扩纯函数、不再改写作业 |
 > | **8** | 合并形态选 **B**：同一作业**顺序两条查询** —— OPT-0061 的 48s 聚合查询**一字不动**，后接只算 MDD 的流式查询 | 「7 值挪 Python + 逐客户对账」的 AC **作废**（没动就无需对账）；R2 的条件聚合双列集**不再需要**（新查询直接不带毒过滤器，R2 保留作「为什么放弃方案 A」的论证）；§架构图 ③④ 按 B 理解 |
 
+> ## 🔬 2026-09-03 开工前置验证 + MAX 口径重跑（实施 session，claim 后第一步）
+>
+> **前置① ✅**：`stats_transactions` 的 PK 就是 `(date, type, loginSid)`，loginSid `NOT NULL`
+> 且全表零空值（665,858 行 / 48,952 账户）——账户粒度原生支持，MAX 口径不受阻。
+> type 字面量逐字确认：`'ib transfer to account'`（100,036 行，正数、90% 落在交易账户）/
+> `'transfer in'`/`'transfer out'` 存在；`'ib withdrawal'` 与 `'ib transfer to account out'`
+> **100% 落在 sid=2 钱包** → 在账户域 (1,5,6) 内自动排除，无需显式剔。
+>
+> **前置② ✅ 已重跑**（最终数字进 [`docs/features/client-return-mdd.md`](../../features/client-return-mdd.md) §7）：
+> 22.58M 行 / 36,678 账户 / 池 3,895 人；**all 窗口 MDD<15% = 78 人（2.9%）**、365d = 219 人（14.1%）、
+> A 类 25 人；uid 144501 五窗全 ok、MDD_all 0.1% 与 08-27 一致（单账户客户两口径应相等 ✓）；
+> 全库单调性 0 违反。365d 比旧口径（1.9%）松的三个原因见 feature doc §7。
+>
+> **实施期与本文档的 4 处有意偏离**（都写进了 feature doc + 代码注释）：
+> 1. 🔴 **F3 修正——credit 变动不进 F_t**：own = eq−cr 已剥离赠金，Δcredit 再进 F_t 会在
+>    「发放赠金」日制造假回撤、「出金没收赠金」日制造假盈利（数值反例见 feature doc §3）；
+>    唯一真缺口（赠金转真金）的 Δcredit 符号相反、单一项修不了。
+> 2. **H3 被「PK 序流式」取代**：`(date, loginSid)` 就是聚簇 PK，`ORDER BY date, loginSid`
+>    = 索引序扫描，实测首行 0.01s、零 filesort——目标（不在共享从库物化排序）达成且免掉本地
+>    spool；「emit 后丢弃、峰值内存与账户数无关」的 AC 字面不再成立（全账户状态驻内存 ~40MB），
+>    实质更优。H4 随之消失（流中零 SQLite 写）。
+> 3. **G3 活跃日不是「有成交的日子」**：用 stats_trading 有行的日子（含资金变动/持仓日，
+>    与 OPT-0061 `active_days` 同口径）——只算成交日会把本文档自己的样板客户 144501
+>    （20 笔交易 / 47 隔夜日）挡在 gate 外。
+> 4. **两个实现级算法补丁**（单测抓出，均有回归用例）：段开始日记录 u=1.0 观测（否则段内
+>    第二天开跌的第一腿消失）；re-base 时重置窗口局部 peak（否则 ③ 类 re-base 拿新段 u=1
+>    对旧段 peak 捏造假回撤）。`coverage_pct` 列随 MAX 口径作废未建。
+>
 > **归类说明（用户拍板）**：按 [`README.md` §什么进 tracker](../README.md#什么进-tracker--什么不进) 的规则，
 > 「新列」属于 net-new feature，本该走普通 `feat/<slug>` branch 而不进 tracker。
 > **本条是用户明确要求开 OPT 的例外**——记录在此以免未来 reader 误以为规则被推翻。
@@ -652,16 +680,16 @@ OPT-0061 的 7 个聚合值 + 本 OPT 的 5 个窗口 MDD。
 
 ## 假设 / 待验证
 
-- [ ] 5.5 分钟的实测（2026-08-27）在**部署时的从库负载**下仍成立 —— 上线前重跑一次，并确认与 06:00 ROACE 无重叠
+- [x] ~~5.5 分钟的实测~~ ✅ 2026-09-03 重测：PK 序流式 102s（热）；合并作业无撞车问题（同一作业顺序跑）
 - [ ] `stats_balances` 的 2021-07-13 起点在**将来**不会被上游清理再往后推（会静默缩短 `all` 窗口的含义）
-- [ ] `ib transfer to account` 在 `stats_transactions` 里的 **type 字面量**逐字确认（F2 依赖它，写错就是静默漏计）
-- [ ] 单客户端到端对账：挑 **uid 144501**（A 类、MDD_all 0.1%）+ 一个已归零账户 + 一个负权益穿仓账户，三个各手算一遍与 job 输出比对
-- [ ] 确认 `client_return_v8_` 前缀无外部脚本依赖，可安全 bump 到 `v9_`（同 OPT-0020 的同名假设）
+- [x] `ib transfer to account` type 字面量 ✅ 逐字确认（另确认它与 `'ib withdrawal'`/`'... out'` 的 sid 落点，见顶部前置验证节）
+- [x] 单客户端到端对账 ✅ 2026-09-03/04：uid 144501 + 已归零 + 负权益穿仓，独立暴力实现比对 <0.1pp（见 §结果）
+- [x] `client_return_v8_` 前缀无外部脚本依赖 ✅ 全仓 grep 只有护栏测试（同 commit 更新）与文档
 - [x] ~~🆕 把 OPT-0061 的 7 个聚合值从 SQL 挪到 Python 后数值不变~~ —— ✅ **随第 8 题拍板方案 B 作废**（老查询一字不动，不存在挪动）
-- [ ] 🆕 **两条查询顺序跑的总时长塞进 06:00 窗口，不与其它夜间任务撞车** —— MAX 口径 + H3 本地排序后重新实测（08-27 的 328s 是求和口径 + 服务端 filesort）
-- [ ] 🆕 🔴 **`stats_transactions` 能按 `(loginSid, date)` 聚合** —— MAX 口径要求 `F_t` 逐账户；若该表只有 userId 粒度，第 1 题的 MAX 实现受阻，要回头找账户级资金流源（08-27 实测是按 `(userId, date)` 聚合的，没验证过账户粒度）
-- [ ] 🆕 🔴 **按 MAX 口径重跑 08-27 实测分布** —— 文档内 49 人 / A 类 14 人 / 剖面四分类等全部数字是「客户级求和」口径，MAX 口径下会变（预期变严：任一账户爆仓即客户级 MDD=100%）
-- [ ] 🆕 `roace_snapshot_v2` → `_v3` 换表期间 **dev/prod 共享 bind mount** 不会互相踩（同 OPT-0061 的预填做法：merge 前先填好）
+- [x] 🆕 两条查询顺序跑总时长 ✅ 实测 leg1 ~60s + leg2 流式 ~2-4 分钟，合计 ≤ 5 分钟（同一作业顺序跑，无撞车）
+- [x] 🆕 🔴 `stats_transactions` 账户粒度 ✅ PK 就是 `(date, type, loginSid)`，零空值（见顶部前置验证节）
+- [x] 🆕 🔴 MAX 口径重跑 ✅ 最终数字在 [`client-return-mdd.md`](../../features/client-return-mdd.md) §7（all 窗口 <15% = 78 人 / 2.9%；A 类 25 人）
+- [x] 🆕 换表 bind mount ✅ 新表名 `client_metrics_snapshot`（非 `_v3`），沿用预填做法：merge 前在 dev 容器跑一次完整刷新，v2 表原样保留、prod 旧代码读不到新表
 
 ---
 
@@ -803,4 +831,50 @@ OPT-0061 的 7 个聚合值 + 本 OPT 的 5 个窗口 MDD。
 
 ## 结果
 
-（done/dropped 时填）
+**✅ done 2026-09-04**（实施 2026-09-03/04 单 session，branch `opt/client-return-mdd`，
+5 个 commit：claim / feat / docstring / 冷审加固 / 冷审#3）。口径 SSOT 落在
+[`docs/features/client-return-mdd.md`](../../features/client-return-mdd.md)（本地资产，不进 git）。
+
+### 交付 vs AC
+
+- **Drop 1** 全部达成：`client_metrics_snapshot` 换表（v2 留回滚镜像）、形态 B 两腿作业
+  （0061 SQL 一字未动、21 条护栏零改动全绿）、autocommit 补上、R1 修正递推 + 三条件
+  re-base + G1-G5 + 状态枚举×5窗口、H1/H2/H5/H6 落地；端到端实跑 **5.7-6.3 分钟**（AC ≤8min）。
+- **Drop 2** 全部达成：`include_mdd` + 进 refused、cache v9、sort 列、CSV、schema
+  Optional=None、前端 5 列 InfoHeader（三句必写文案）+ 已归零/曾穿仓标记、`—` 绝不 0%、
+  schema_version 守卫、grid key 未 bump。
+- **对账**：uid 144501 / 已归零 100241 / 穿仓 100131，独立暴力实现 15/15 窗口 <0.1pp；
+  单调性回归测试 + 全库 36,678 账户 0 违反；G4 直接验证（mdd 最低 15 行零死账户）。
+- **与 AC 的偏离**（4 处有意，见顶部「开工前置验证」节）：F3 credit 不进 F_t /
+  H3 由 PK 序流式取代（H4 随之消失）/ G3 用活动日口径 / `coverage_pct` 列作废未建。
+- **实测更新**：MAX 口径全量重跑，all 窗口 <15% = 78 人（2.9%）、A 类 25 人，
+  uid 144501 MDD_all 0.1% 与 08-27 吻合。数字见 feature doc §7。
+
+### 冷审（Hook 1，2026-09-04）处理记录
+
+- Finding 1（跨进程并发刷新互相 DROP staging）：**当场修** — 互斥锁进 SQLite 自身
+  （CAS + stale 接管），commit `998706c`
+- Finding 2（carry-over 丢 MDD-only 全爆仓行）：**当场修** — 补 INSERT + 护栏测试，同上
+- Finding 3（page>1 绕过 page_size 天花板，OPT-0060 之前既有）：**当场修**（用户拍板）—
+  非 risk 拒 page>1，commit `fb26cd8`
+- Finding 4（流式时长天花板 ~2-3 年后撞 hint）：**当场修** — >50% 打 WARNING 预警
+- Finding 5（G3 活跃日没过 sid/demo）：**当场修** — SQL 补 join；快照级 ok 6,343→6,314
+- Finding 7（前端 MDD 升序 null 浮顶）：**当场修** — nulls-last comparator
+- Finding 8（新鲜度取值 break 过早）：**当场修**
+- Finding 9（流式主循环零单测）：**live with / follow-up**（用户拍板）— 纯数学 44 条测试
+  + 独立对账验过；**将来 OPT-0020 Sharpe 并入同一折叠时把数据接线层抽成可测函数并补单测**
+- Finding 6（`mdd_status_*` 只存不出 API）：live with — AC 即如此，渲染都是 `—`；
+  将来要区分「已归零/数据不足」的 tooltip 时再暴露
+- Finding 10（minor 批）：live with — account_count 在 API/CSV 未做列；wipeout_date
+  只存快照；Redis `keys()` 阻塞为全站既有模式
+
+### Follow-up
+
+1. **F9**：OPT-0020 并入折叠时抽出流式接线层 + 单测（那时本来要动这段）。
+2. 客户级展示值可轻微非单调（37/6,343 行，G2 按窗口独立 gate 的代价）——已写进
+   feature doc §1，若用户观感有问题再议统一候选集方案。
+3. `REBASE_FLOW_MULT=10` 是校准旋钮：③ 类 re-base 会切段、弱化跨大额入金的回撤连乘，
+  上线观察分布后可调大收严。
+4. 部署后顺手：`.cursor/rules/temp-primary-db.mdc` 已过期（实际走从库），可删。
+5. verify.sh 的 2 个红 = `test_xauusd_snapshot_service` 硬编码 2026-06-29 日期腐烂
+  （干净 main 同样红），归 OPT-0041 类别。

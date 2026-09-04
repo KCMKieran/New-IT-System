@@ -1,10 +1,12 @@
 """
-APScheduler cron job for the ROACE snapshot refresh.
+APScheduler cron job for the client-metrics snapshot refresh (ROACE +
+OPT-0061 floating columns + OPT-0060 MDD).
 
-Runs once a day at 06:00 HKT, recomputing avg_daily_equity for all eligible
-clients (sid 1/5/6, non-demo, has stats_balances data) and upserting to
-backend/data/client_roace.db. The Client Return Rate web endpoint reads from
-that snapshot instead of joining stats_balances on every request.
+Runs once a day at 06:00 HKT: leg 1 recomputes the per-client daily averages,
+leg 2 streams stats_balances for the 5-window MDD block; both land in
+backend/data/client_roace.db via an atomically-swapped staging table. The
+Client Return Rate web endpoint reads from that snapshot instead of joining
+stats_balances on every request. Full run measured ~6 min (2026-09-03).
 
 ENV switches (config.py):
   CLIENT_ROACE_SCHEDULER_ENABLED  default false (dev), prod compose sets true
